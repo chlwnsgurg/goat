@@ -25,6 +25,7 @@ import { useCallback, useMemo, useRef } from "react";
 
 import { getFallbackThreadIdAfterDelete, pinOrderKeyBetween } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useGlobalAgentStore } from "../globalAgentStore";
 import { environmentSession, readEnvironmentScope } from "../state/session";
 import { terminalEnvironment } from "../state/terminal";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -407,6 +408,7 @@ export function useThreadActions() {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
       }
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      useGlobalAgentStore.getState().clearIfThread(threadRef);
       opts.onArchived?.();
       showThreadUndoNotice({
         action: "Archived",
@@ -450,6 +452,7 @@ export function useThreadActions() {
         });
         if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
+          useGlobalAgentStore.getState().clearIfThread(target);
           clearThreadPreviewState(target);
         }
         return result;
@@ -550,6 +553,7 @@ export function useThreadActions() {
         return deleteResult;
       }
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      useGlobalAgentStore.getState().clearIfThread(threadRef);
       releaseComposerDraftUploads(threadRef);
       clearComposerDraftForThread(threadRef);
       clearProjectDraftThreadById(
