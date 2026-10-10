@@ -44,7 +44,7 @@ describe("AcpMcpOverAcpBridge", () => {
         },
       });
 
-      const connected = yield* bridge.connect({ serverId: "t3-code" });
+      const connected = yield* bridge.connect({ serverId: "goat" });
       expect(connected).toEqual({ connectionId: "connection-1" });
       expect(
         yield* bridge.message({ connectionId: connected.connectionId, method: "initialize" }),
@@ -79,7 +79,7 @@ describe("AcpMcpOverAcpBridge", () => {
           return new Promise<Response>(() => {});
         },
       });
-      const connected = yield* bridge.connect({ serverId: "t3-code" });
+      const connected = yield* bridge.connect({ serverId: "goat" });
       const request = yield* bridge
         .message({ connectionId: connected.connectionId, method: "tools/list" })
         .pipe(Effect.forkChild);
@@ -98,14 +98,16 @@ describe("AcpMcpOverAcpBridge", () => {
         fetchImplementation: () => Promise.resolve(new Response(null, { status: 202 })),
       });
 
-      expect(yield* bridge.connect({ serverId: "other" }).pipe(Effect.flip)).toMatchObject({
-        _tag: "AcpMcpOverAcpError",
-      });
+      for (const serverId of ["other", "t3-code"]) {
+        expect(yield* bridge.connect({ serverId }).pipe(Effect.flip)).toMatchObject({
+          _tag: "AcpMcpOverAcpError",
+        });
+      }
       expect(
         yield* bridge.message({ connectionId: "missing", method: "tools/list" }).pipe(Effect.flip),
       ).toMatchObject({ _tag: "AcpMcpOverAcpError" });
 
-      const connected = yield* bridge.connect({ serverId: "t3-code" });
+      const connected = yield* bridge.connect({ serverId: "goat" });
       const failure = yield* bridge
         .message({
           connectionId: connected.connectionId,

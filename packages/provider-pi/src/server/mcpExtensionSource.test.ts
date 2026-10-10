@@ -60,6 +60,7 @@ interface RegisteredTool {
     signal?: AbortSignal,
   ) => Promise<{
     readonly content: ReadonlyArray<{ readonly type: string; readonly text: string }>;
+    readonly details: { readonly server: string; readonly tool: string };
   }>;
 }
 
@@ -74,10 +75,12 @@ async function loadMcpBridge(
     readonly toolSearchAvailable?: boolean;
     readonly toolSearchDisabled?: boolean;
     readonly allowsTool?: (name: string) => boolean;
+    readonly catalog?: ReadonlyArray<{ readonly name: string; readonly description?: string }>;
   } = {},
 ) {
   const handlers = new Map<string, AgentStartHook>();
   const tools: RegisteredTool[] = [];
+  const registrations: string[] = [];
   const requests: Array<{ readonly method: string; readonly params?: unknown }> = [];
   let activeTools = ["read"];
   const transports: Array<{
@@ -86,12 +89,17 @@ async function loadMcpBridge(
     readonly signal: AbortSignal | undefined;
   }> = [];
   const servers: Array<{ readonly name: string; readonly config: Record<string, unknown> }> = [];
-  const catalog = [
-    { name: "orchestrator_capabilities", description: "Discover available providers and models." },
-    { name: "delegate_task", description: "Delegate work to another agent." },
-    { name: "task_status", description: "Check delegated work." },
-    { name: "preview_snapshot", description: "Inspect the collaborative browser." },
-  ].map((tool) => ({ ...tool, inputSchema: { type: "object", properties: {} } }));
+  const catalog = (
+    options.catalog ?? [
+      {
+        name: "orchestrator_capabilities",
+        description: "Discover available providers and models.",
+      },
+      { name: "delegate_task", description: "Delegate work to another agent." },
+      { name: "task_status", description: "Check delegated work." },
+      { name: "preview_snapshot", description: "Inspect the collaborative browser." },
+    ]
+  ).map((tool) => ({ ...tool, inputSchema: { type: "object", properties: {} } }));
   const source = NodeModule.stripTypeScriptTypes(
     PI_T3_MCP_EXTENSION_SOURCE.replace(/^import .*;$/gm, "").replace(
       "export default async function",
@@ -128,6 +136,7 @@ async function loadMcpBridge(
     pi: {
       on: (name: string, handler: AgentStartHook) => handlers.set(name, handler),
       registerTool: (tool: RegisteredTool) => {
+        registrations.push(tool.name);
         if (options.allowsTool && !options.allowsTool(tool.name)) return;
         const index = tools.findIndex((current) => current.name === tool.name);
         if (index === -1) tools.push(tool);
@@ -155,6 +164,7 @@ async function loadMcpBridge(
   return {
     handlers,
     tools,
+    registrations,
     requests,
     servers,
     transports,
@@ -166,6 +176,27 @@ async function loadMcpBridge(
 }
 
 describe("Pi MCP tool exposure", () => {
+  it("calls a wp3-renamed tool through one goat namespace without rewriting its bare id", async () => {
+    const bridge = await loadMcpBridge({
+      modern: true,
+      toolSearchAvailable: true,
+      catalog: [{ name: "goat_thread_read", description: "Read a GOAT thread." }],
+    });
+    assert.deepEqual(bridge.registrations, ["mcp__goat__goat_thread_read"]);
+    const tool = bridge.tools.find((tool) => tool.name === "mcp__goat__goat_thread_read");
+    assert.isDefined(tool);
+    assert.equal(tool!.exposure, "deferred");
+    const result = await tool!.execute("goat-read", { threadId: "thread-goat" });
+    assert.deepEqual(JSON.parse(JSON.stringify(bridge.requests.at(-1)?.params)), {
+      name: "goat_thread_read",
+      arguments: { threadId: "thread-goat" },
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(result.details)), {
+      server: "goat",
+      tool: "goat_thread_read",
+    });
+  });
+
   it("keeps orchestration direct and optional bridge tools discoverable on modern Pi", async () => {
     const bridge = await loadMcpBridge({ modern: true, toolSearchAvailable: true });
     await bridge.handlers.get("session_start")!(
@@ -180,32 +211,37 @@ describe("Pi MCP tool exposure", () => {
     );
     assert.include(prompt.systemPrompt, "orchestrator_capabilities");
     assert.equal(bridge.servers.length, 0);
-    assert.equal(bridge.tools.length, 8);
+    assert.equal(bridge.tools.length, 4);
+    assert.equal(bridge.registrations.length, 4);
+    assert.equal(new Set(bridge.registrations).size, 4);
     assert.deepEqual(bridge.getActiveTools(), ["read", "tool_search"]);
     assert.deepEqual(
       bridge.tools
         .filter((tool) => tool.exposure !== "hidden")
         .map((tool) => [tool.name, tool.exposure]),
       [
-        ["mcp__t3-code__orchestrator_capabilities", "direct"],
-        ["mcp__t3-code__delegate_task", "direct"],
-        ["mcp__t3-code__task_status", "direct"],
-        ["mcp__t3-code__preview_snapshot", "deferred"],
+        ["mcp__goat__orchestrator_capabilities", "direct"],
+        ["mcp__goat__delegate_task", "direct"],
+        ["mcp__goat__task_status", "direct"],
+        ["mcp__goat__preview_snapshot", "deferred"],
       ],
     );
     assert.deepEqual(
-      bridge.tools.filter((tool) => tool.exposure === "hidden").map((tool) => tool.name),
-      [
-        "mcp__t3_code__orchestrator_capabilities",
-        "mcp__t3_code__delegate_task",
-        "mcp__t3_code__task_status",
-        "mcp__t3_code__preview_snapshot",
-      ],
+      bridge.tools.filter((tool) => tool.exposure === "hidden"),
+      [],
     );
     const result = await bridge.tools
-      .find((tool) => tool.name === "mcp__t3-code__preview_snapshot")!
+      .find((tool) => tool.name === "mcp__goat__preview_snapshot")!
       .execute("call-1", { depth: 2 });
     assert.equal(result.content[0]?.text, "browser snapshot");
+    assert.deepEqual(JSON.parse(JSON.stringify(result.details)), {
+      server: "goat",
+      tool: "preview_snapshot",
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(bridge.requests.at(-1)?.params)), {
+      name: "preview_snapshot",
+      arguments: { depth: 2 },
+    });
     assert.equal(bridge.requests.at(-1)?.method, "tools/call");
   });
 
@@ -227,7 +263,7 @@ describe("Pi MCP tool exposure", () => {
           .filter((tool) => tool.exposure !== "hidden")
           .every((tool) => tool.exposure === undefined || tool.exposure === "direct"),
       );
-      const tool = bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot");
+      const tool = bridge.tools.find((tool) => tool.name === "mcp__goat__preview_snapshot");
       assert.isDefined(tool);
       const controller = new AbortController();
       const result = await tool!.execute("call-1", { depth: 2 }, controller.signal);
@@ -246,12 +282,12 @@ describe("Pi MCP tool exposure", () => {
     },
   );
 
-  it("preserves legacy wildcard tool selection", async () => {
+  it("honors goat wildcard tool selection", async () => {
     const bridge = await loadMcpBridge({
       modern: true,
       toolSearchAvailable: true,
       allowsTool: (name) =>
-        name === "read" || name === "tool_search" || name.startsWith("mcp__t3-code__"),
+        name === "read" || name === "tool_search" || name.startsWith("mcp__goat__"),
     });
     await bridge.handlers.get("session_start")!(
       { systemPrompt: "" },
@@ -259,7 +295,7 @@ describe("Pi MCP tool exposure", () => {
     );
     assert.equal(bridge.tools.length, 4);
     assert.equal(bridge.tools.filter((tool) => tool.exposure === "direct").length, 3);
-    const tool = bridge.tools.find((tool) => tool.name === "mcp__t3-code__preview_snapshot");
+    const tool = bridge.tools.find((tool) => tool.name === "mcp__goat__preview_snapshot");
     assert.isDefined(tool);
     assert.equal((await tool!.execute("selected", {})).content[0]?.text, "browser snapshot");
   });
@@ -271,24 +307,20 @@ describe("Pi MCP tool exposure", () => {
         modern: true,
         toolSearchAvailable: true,
         allowsTool: (name) =>
-          name !== "mcp__t3-code__delegate_task" && (!excludeSearch || name !== "tool_search"),
+          name !== "mcp__goat__delegate_task" && (!excludeSearch || name !== "tool_search"),
       });
       await bridge.handlers.get("session_start")!(
         { systemPrompt: "" },
         { ui: { notify: () => undefined } },
       );
-      bridge.restoreActiveTools([
-        "read",
-        "mcp__t3-code__task_status",
-        "mcp__t3-code__preview_snapshot",
-      ]);
+      bridge.restoreActiveTools(["read", "mcp__goat__task_status", "mcp__goat__preview_snapshot"]);
       const tree = bridge.handlers.get("session_tree");
       assert.isDefined(tree);
       await tree!({ systemPrompt: "" }, { ui: { notify: () => undefined } });
       assert.deepEqual(bridge.getActiveTools(), [
         "read",
-        "mcp__t3-code__task_status",
-        "mcp__t3-code__preview_snapshot",
+        "mcp__goat__task_status",
+        "mcp__goat__preview_snapshot",
         ...(!excludeSearch ? ["tool_search"] : []),
       ]);
       assert.isFalse(
@@ -337,9 +369,9 @@ describe("Pi tool discovery permissions", () => {
       await toolCall!({ toolName: "tool_search", input: { query: "preview_snapshot" } }, ctx),
     );
     assert.equal(confirmations.length, 0);
-    const result = await toolCall!({ toolName: "mcp__t3-code__preview_snapshot", input: {} }, ctx);
+    const result = await toolCall!({ toolName: "mcp__goat__preview_snapshot", input: {} }, ctx);
     assert.equal(result?.block, true);
-    assert.deepEqual(confirmations, ["Allow mcp__t3-code__preview_snapshot?"]);
+    assert.deepEqual(confirmations, ["Allow mcp__goat__preview_snapshot?"]);
 
     // An extension that replaces the search builtin is not known to be read-only.
     searchPath = "/extensions/custom-search.ts";

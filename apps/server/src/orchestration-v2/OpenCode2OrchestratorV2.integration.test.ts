@@ -3,6 +3,8 @@
  * the transcript fixes the order of every request the adapter sends, so a
  * request the orchestrator never lets it make fails the run.
  */
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Synchronous transcript hashes independently check the adapter's Effect Crypto digest.
+import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -77,7 +79,12 @@ const labelled = (entry: ProviderReplayEntry, label: string): ProviderReplayEntr
  */
 const mcpRules = (name: string) => [
   { action: "t3-code-*", resource: "*", effect: "deny" },
-  { action: `t3-code-thread_${name}_*`, resource: "*", effect: "allow" },
+  { action: "goat-*", resource: "*", effect: "deny" },
+  {
+    action: `goat-${NodeCrypto.createHash("sha256").update(`thread:${name}`).digest("hex").slice(0, 16)}_*`,
+    resource: "*",
+    effect: "allow",
+  },
 ];
 const FULL_ACCESS = [{ action: "*", resource: "*", effect: "allow" }];
 /** Full access for the thread named `name`. */
@@ -166,7 +173,7 @@ const sessionInfo = (directory: string, permissions: ReadonlyArray<unknown>, tit
 });
 /** T3's instructions entry, written before a thread's first prompt and whenever it changes. */
 const instructionsWritten: ReadonlyArray<ProviderReplayEntry> = [
-  out("session.instructions.entry.put", { sessionID: SESSION, key: "t3-code", value: "<any>" }),
+  out("session.instructions.entry.put", { sessionID: SESSION, key: "goat", value: "<any>" }),
   reply("session.instructions.entry.put", null),
 ];
 /** One prompt the server accepts and answers with `text`. */

@@ -665,7 +665,7 @@ describe("CodexAdapterV2 process spawning", () => {
         config: {
           "tools.update_plan.enabled": true,
           mcp_servers: {
-            "t3-code": {
+            goat: {
               url: "http://127.0.0.1:43123/mcp",
               http_headers: {
                 Authorization: "Bearer secret-codex-token",
@@ -968,7 +968,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
       const projection = yield* CodexAdapterV2.projectCodexDynamicToolItem({
         type: "mcpToolCall",
         id: "call-create-threads",
-        server: "t3-code",
+        server: "goat",
         tool: "create_threads",
         status: "completed",
         arguments: {
@@ -983,7 +983,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
       });
 
       assert.deepEqual(projection, {
-        toolName: "t3-code.create_threads",
+        toolName: "goat.create_threads",
         input: {
           threads: [{ title: "Fixture child", prompt: "fixture child prompt" }],
         },
@@ -6856,7 +6856,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             item: {
               type: "mcpToolCall",
               id: COMPLETED_WAIT_ITEM,
-              server: "t3-code",
+              server: "goat",
               tool: "goat_thread_wait",
               status: "inProgress",
               arguments: { threadId: "thread:completed-wait", timeoutMs: 30000 },
@@ -6876,7 +6876,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             item: {
               type: "mcpToolCall",
               id: COMPLETED_WAIT_ITEM,
-              server: "t3-code",
+              server: "goat",
               tool: "goat_thread_wait",
               status: "completed",
               arguments: { threadId: "thread:completed-wait", timeoutMs: 30000 },
@@ -6897,7 +6897,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             item: {
               type: "mcpToolCall",
               id: ORPHAN_WAIT_ITEM,
-              server: "t3-code",
+              server: "goat",
               tool: "goat_thread_wait",
               status: "inProgress",
               arguments: {

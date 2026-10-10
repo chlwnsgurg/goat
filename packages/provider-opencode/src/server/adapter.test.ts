@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { OpencodeClient, ToolPart } from "@opencode-ai/sdk/v2";
 import {
   CheckpointId,
+  EnvironmentId,
   NodeId,
   ProjectId,
   ProviderInstanceId,
@@ -148,6 +149,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   suffix: string,
   nativeSessionId: string,
   client: object,
+  options: { readonly external?: boolean } = {},
 ) {
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
@@ -163,7 +165,12 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     environment: {},
   }).pipe(
     Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
-      connectToOpenCodeServer: () => Effect.succeed({ url: "http://test.invalid", external: true }),
+      connectToOpenCodeServer: () =>
+        Effect.succeed({
+          url: "http://test.invalid",
+          external: options.external ?? true,
+          exitCode: null,
+        }),
       createOpenCodeSdkClient: () => client,
     } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"]),
     Effect.provideService(ProviderHost.ProviderHost, {
@@ -241,6 +248,77 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect.each([
+    { external: false, withCredential: true },
+    { external: true, withCredential: true },
+    { external: false, withCredential: false },
+  ])(
+    "injects goat only into an owned server with a credential: %j",
+    ({ external, withCredential }) =>
+      Effect.gen(function* () {
+        const suffix = `goat-registration-${external}-${withCredential}`;
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        if (withCredential) {
+          yield* sessions.set({
+            environmentId: EnvironmentId.make("environment:goat-registration"),
+            threadId: ThreadId.make(`thread-opencode-${suffix}`),
+            providerSessionId: "mcp:goat-registration",
+            providerInstanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+            endpoint: "http://fixture.invalid/mcp",
+            authorizationHeader: "Bearer scoped-goat-token",
+            browserToolsAvailable: false,
+          });
+        }
+        const registrations: unknown[] = [];
+        const nativeEvents = asyncEventStream();
+        yield* makeOpenCodeRuntimeHarness(
+          suffix,
+          "goat-registration",
+          {
+            event: {
+              subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+                options.signal?.addEventListener("abort", () => nativeEvents.close(), {
+                  once: true,
+                });
+                return { stream: nativeEvents.stream };
+              },
+            },
+            session: {
+              create: async () => ({
+                data: { id: "goat-registration", time: { created: 1, updated: 1 } },
+              }),
+            },
+            mcp: {
+              add: async (input: unknown) => {
+                registrations.push(input);
+                return { data: true };
+              },
+            },
+          },
+          { external },
+        );
+        assert.deepEqual(
+          registrations,
+          !external && withCredential
+            ? [
+                {
+                  name: "goat",
+                  config: {
+                    type: "remote",
+                    url: "http://fixture.invalid/mcp",
+                    headers: { Authorization: "Bearer scoped-goat-token" },
+                    oauth: false,
+                  },
+                },
+              ]
+            : [],
+        );
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
+
   it.effect.each(["completed", "failed", "unresolved", "unavailable", "reconnect"] as const)(
     "normalizes OpenCode step usage for %s turns",
     (ending) =>

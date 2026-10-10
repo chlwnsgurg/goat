@@ -1413,14 +1413,14 @@ describe("extractMcpToolCallIdentity", () => {
       sessionUpdate: "tool_call",
       toolCallId: "exec-f4591587-0754-4bb4-990b-f2767894ba93",
       kind: "execute",
-      title: "mcp.t3-code.orchestrator_capabilities",
+      title: "mcp.goat.orchestrator_capabilities",
       status: "in_progress",
-      rawInput: { server: "t3-code", tool: "orchestrator_capabilities", arguments: {} },
+      rawInput: { server: "goat", tool: "orchestrator_capabilities", arguments: {} },
       _meta: { is_mcp_tool_call: true },
     });
 
     expect(extractMcpToolCallIdentity(toolCall)).toEqual({
-      server: "t3-code",
+      server: "goat",
       tool: "orchestrator_capabilities",
     });
   });
@@ -1440,7 +1440,7 @@ describe("extractMcpToolCallIdentity", () => {
           '/usr/bin/node /srv/t3/bin.ts acp-mcp-call delegate_task {"task":"x"}',
         ],
       }),
-    ).toEqual({ server: "t3-code", tool: "delegate_task", input: { task: "x" } });
+    ).toEqual({ server: "goat", tool: "delegate_task", input: { task: "x" } });
   });
 
   it("recovers T3 identity from pi-acp title-only fallback execs", () => {
@@ -1465,7 +1465,7 @@ describe("extractMcpToolCallIdentity", () => {
 
     expect(toolCall.title).toBe("Ran command");
     expect(extractMcpToolCallIdentity(toolCall)).toEqual({
-      server: "t3-code",
+      server: "goat",
       tool: "orchestrator_capabilities",
       input: {},
     });
@@ -1480,7 +1480,7 @@ describe("extractMcpToolCallIdentity", () => {
       sessionUpdate: "tool_call",
       toolCallId: "chatcmpl-tool-b2a6142ee1a510a5",
       kind: "other",
-      title: "t3-code_orchestrator_capabilities",
+      title: "goat_orchestrator_capabilities",
       status: "pending",
       locations: [],
       rawInput: {},
@@ -1494,7 +1494,7 @@ describe("extractMcpToolCallIdentity", () => {
     const merged = mergeToolCallState(created, completed);
 
     expect(extractMcpToolCallIdentity(merged)).toEqual({
-      server: "t3-code",
+      server: "goat",
       tool: "orchestrator_capabilities",
     });
   });
@@ -1506,23 +1506,23 @@ describe("extractMcpToolCallIdentity", () => {
       sessionUpdate: "tool_call",
       toolCallId: "gemini-1",
       kind: "other",
-      title: "delegate_task (t3-code MCP Server)",
+      title: "delegate_task (goat MCP Server)",
       status: "in_progress",
     });
     const qwen = toolCallFromUpdate({
       sessionUpdate: "tool_call",
       toolCallId: "qwen-1",
       kind: "other",
-      title: 'task_status (t3-code MCP Server): {"taskId":"node:delegated-task:1"}',
+      title: 'task_status (goat MCP Server): {"taskId":"node:delegated-task:1"}',
       status: "pending",
       rawInput: { taskId: "node:delegated-task:1" },
     });
 
     expect(extractMcpToolCallIdentity(gemini)).toEqual({
-      server: "t3-code",
+      server: "goat",
       tool: "delegate_task",
     });
-    expect(extractMcpToolCallIdentity(qwen)).toEqual({ server: "t3-code", tool: "task_status" });
+    expect(extractMcpToolCallIdentity(qwen)).toEqual({ server: "goat", tool: "task_status" });
   });
 
   it("recovers T3 identity across the registry agents' naming conventions", () => {
@@ -1534,12 +1534,12 @@ describe("extractMcpToolCallIdentity", () => {
     // tail, cline args tail, Auggie tool-first suffix, fast-agent slash,
     // Kimi bare name with args tail.
     for (const title of [
-      "t3-code___delegate_task",
-      "t3-code-delegate_task",
-      'mcp__t3_code__delegate_task: {"mode":"async"}',
-      't3-code__delegate_task: {"mode":"async"}',
-      "delegate_task_t3-code",
-      "t3-code/delegate_task",
+      "goat___delegate_task",
+      "goat-delegate_task",
+      'mcp__goat__delegate_task: {"mode":"async"}',
+      'goat__delegate_task: {"mode":"async"}',
+      "delegate_task_goat",
+      "goat/delegate_task",
       'delegate_task: {"mode":"async"}',
     ]) {
       const toolCall = toolCallFromUpdate({
@@ -1550,8 +1550,32 @@ describe("extractMcpToolCallIdentity", () => {
         status: "pending",
       });
       expect(extractMcpToolCallIdentity(toolCall), title).toEqual({
-        server: "t3-code",
+        server: "goat",
         tool: "delegate_task",
+      });
+    }
+  });
+
+  it("recovers goat_* tools whose names start with the server key", () => {
+    // "goat_thread_send" also parses as server "goat" + tool "thread_send";
+    // recovery must fall through to the conventions that name a known tool.
+    for (const title of [
+      "goat_thread_send",
+      'goat_thread_send: {"threadId":"x"}',
+      "goat_thread_send_goat",
+      "mcp__goat__goat_thread_send",
+      "goat___goat_thread_send",
+    ]) {
+      const toolCall = toolCallFromUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "goat-prefix-1",
+        kind: "other",
+        title,
+        status: "pending",
+      });
+      expect(extractMcpToolCallIdentity(toolCall), title).toEqual({
+        server: "goat",
+        tool: "goat_thread_send",
       });
     }
   });
@@ -1566,14 +1590,14 @@ describe("extractMcpToolCallIdentity", () => {
       status: "in_progress",
       _meta: {
         goose: {
-          toolCall: { toolName: "t3-code__task_status", extensionName: "t3-code" },
+          toolCall: { toolName: "goat__task_status", extensionName: "goat" },
           messageId: "message-1",
         },
       },
     });
 
     expect(extractMcpToolCallIdentity(toolCall)).toEqual({
-      server: "t3-code",
+      server: "goat",
       tool: "task_status",
     });
   });
@@ -1588,11 +1612,11 @@ describe("extractMcpToolCallIdentity", () => {
       kind: "other",
       title: "unrelated display title",
       status: "pending",
-      _meta: { toolName: "mcp::t3-code::goat_thread_send", serverId: "t3-code", provenance: "mcp" },
+      _meta: { toolName: "mcp::goat::goat_thread_send", serverId: "goat", provenance: "mcp" },
     });
 
     expect(extractMcpToolCallIdentity(toolCall)).toEqual({
-      server: "t3-code",
+      server: "goat",
       tool: "goat_thread_send",
     });
   });
@@ -1639,7 +1663,7 @@ describe("extractMcpToolCallIdentity", () => {
       sessionUpdate: "tool_call",
       toolCallId: "foreign-1",
       kind: "other",
-      title: "t3-code_delegate_task",
+      title: "goat_delegate_task",
       status: "pending",
       _meta: { toolName: "delegate_task", serverId: "other-orchestrator" },
     });
@@ -1650,8 +1674,52 @@ describe("extractMcpToolCallIdentity", () => {
     });
   });
 
+  it.each(["goat-house", "other-orchestrator"])(
+    "keeps an asserted foreign origin despite a goat title: %s",
+    (serverId) => {
+      const toolCall = toolCallFromUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "foreign-goat-title",
+        kind: "other",
+        title: "goat_delegate_task",
+        status: "pending",
+        _meta: { serverId, toolName: "delegate_task" },
+      });
+      expect(extractMcpToolCallIdentity(toolCall)).toEqual({
+        server: serverId,
+        tool: "delegate_task",
+      });
+    },
+  );
+
+  it("recognizes the trimmed goat origin while preserving foreign qualified names", () => {
+    const toolCall = toolCallFromUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "goat-origin",
+      kind: "other",
+      title: "Rewritten title",
+      status: "pending",
+      _meta: { serverId: " GOAT ", toolName: "mcp::goat::goat_thread_send" },
+    });
+    expect(extractMcpToolCallIdentity(toolCall)).toEqual({
+      server: "goat",
+      tool: "goat_thread_send",
+    });
+    const foreign = toolCallFromUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "foreign-qualified-goat-tool",
+      kind: "other",
+      title: "mcp__weather__delegate_task",
+      status: "pending",
+    });
+    expect(extractMcpToolCallIdentity(foreign)).toEqual({
+      server: "weather",
+      tool: "delegate_task",
+    });
+  });
+
   it("does not brand path-like or unknown-tool titles", () => {
-    for (const title of ["t3-code/README.md", "t3-code_not_a_real_tool"]) {
+    for (const title of ["goat/README.md", "goat_not_a_real_tool"]) {
       const toolCall = toolCallFromUpdate({
         sessionUpdate: "tool_call",
         toolCallId: "path-1",

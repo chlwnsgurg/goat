@@ -450,20 +450,24 @@ const rule = (action: string, effect: Rule["effect"]): Rule => ({ action, resour
  */
 /**
  * T3's MCP server is registered per directory, not per session, so each thread
- * gets its own `t3-code-<thread>` entry with its own credential. OpenCode names
+ * gets its own `goat-<thread>` entry with its own credential. OpenCode names
  * an MCP tool's permission `<server>_<tool>` (non-alphanumerics become `_`).
  * OpenCode skips every tool of a server whose name is over 64 characters (its
  * tool namespace limit), and its router rejects adding one over 100, so a
- * thread id that does not fit is replaced by a digest of it.
+ * thread id that does not fit, or whose sanitization is lossy, is replaced by
+ * a digest of the original id so shortening the prefix cannot merge names.
  */
 export const t3McpServerName = Effect.fn("t3McpServerName")(function* (threadId: string) {
-  const name = `t3-code-${threadId.replaceAll(/[^a-zA-Z0-9_-]/g, "_")}`;
-  if (name.length <= 64) return name;
+  const sanitized = threadId.replaceAll(/[^a-zA-Z0-9_-]/g, "_");
+  const name = `goat-${sanitized}`;
+  // Keep the readable-id ceiling the t3-code- prefix had (56), so a shorter
+  // prefix never makes more ids readable and widens own-thread wildcards.
+  if (sanitized === threadId && sanitized.length <= 56) return name;
   const crypto = yield* Crypto.Crypto;
   const digest = yield* crypto
     .digest("SHA-256", new TextEncoder().encode(threadId))
     .pipe(Effect.orDie);
-  return `t3-code-${Hex.encode(digest).slice(0, 16)}`;
+  return `goat-${Hex.encode(digest).slice(0, 16)}`;
 });
 
 /**
@@ -476,7 +480,9 @@ const mcpRules = (mcpServerName: string | null): ReadonlyArray<Rule> =>
   mcpServerName === null
     ? []
     : [
+        // A reused daemon can still carry registrations from before the rename.
         { action: "t3-code-*", resource: "*", effect: "deny" },
+        { action: "goat-*", resource: "*", effect: "deny" },
         { action: `${mcpServerName}_*`, resource: "*", effect: "allow" },
       ];
 
@@ -657,7 +663,7 @@ const isWakeTurn = (turn: OrchestrationV2ProviderTurn) =>
 
 const INTERRUPT_TIMEOUT = "10 seconds";
 /** The session instructions entry T3 writes its per-turn system prompt to. */
-const INSTRUCTIONS_KEY = "t3-code";
+const INSTRUCTIONS_KEY = "goat";
 /** A lost event stream is resubscribed this many times, this far apart, before the session breaks. */
 const RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = "2 seconds";

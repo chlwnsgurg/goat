@@ -8,7 +8,7 @@ import { runAcpMcpCliFastPath } from "../mcp/AcpMcpStdioBridge.ts";
  *
  * The T3 server injects this command (with per-session endpoint and
  * credential environment variables) into `session/new` so every ACP agent
- * reaches the t3-code toolkit through ACP's required stdio MCP transport.
+ * reaches the goat toolkit through ACP's required stdio MCP transport.
  * The credential stays in the environment, never on the command line.
  *
  * Real invocations dispatch through the bin.ts fast path before the CLI

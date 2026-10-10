@@ -79,6 +79,13 @@ describe("resolveT3McpToolPresentation", () => {
     for (const tool of T3_MCP_TOOL_NAMES) {
       const presentation = resolveT3McpToolPresentation(tool);
       for (const prefix of [
+        "mcp__goat__",
+        "goat.",
+        "goat/",
+        "goat:",
+        "goat · ",
+        "mcp_goat_",
+        "goat__",
         "mcp__t3-code__",
         "mcp__t3_code__",
         "mcp__t3code__",
@@ -157,6 +164,15 @@ describe("resolveT3McpToolPresentation", () => {
     ]) {
       expect(resolveT3McpToolPresentation(name)?.displayName).toBe("Delegate a child task");
     }
+  });
+
+  it("renders goat names while leaving unknown and foreign tools generic", () => {
+    expect(resolveT3McpToolPresentation("goat-thread_child_1_delegate_task")?.displayName).toBe(
+      "Delegate a child task",
+    );
+    expect(resolveT3McpToolPresentation("goat-thread_child_1_not_a_tool")).toBeNull();
+    expect(resolveT3McpToolPresentation("mcp__weather__delegate_task")).toBeNull();
+    expect(resolveT3McpToolPresentation("mcp__goat__not_a_tool")).toBeNull();
   });
 
   it("matches OpenCode 2's per-thread server names, whose thread ids hold underscores", () => {

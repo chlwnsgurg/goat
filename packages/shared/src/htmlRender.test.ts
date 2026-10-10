@@ -157,6 +157,9 @@ describe("htmlRenderFromToolItem", () => {
 
   it("reads the reference from each provider's result envelope", () => {
     for (const [toolName, output] of [
+      ["mcp__goat__html_render", result],
+      ["goat.html_render", result],
+      ["goat-thread_1_html_render", result],
       ["mcp__t3-code__html_render", [{ type: "text", text: JSON.stringify(result) }]],
       ["t3-code.html_render", { structuredContent: result, content: [] }],
       ["t3-code-thread_1_html_render", JSON.stringify(result)],
