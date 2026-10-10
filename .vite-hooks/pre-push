@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Every workflow in a pushed tip must be disabled on goat-si/goat or pass the goat CI guard.
-case "$2" in *goat-si/goat*) ;; *) exit 0 ;; esac
+remote_url=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+case "$remote_url" in *goat-si/goat*) ;; *) exit 0 ;; esac
 if [ "${GOAT_SKIP_WORKFLOW_GUARD:-}" = "1" ]; then
   echo "goat pre-push: workflow guard skipped; Actions must already be disabled" >&2
   exit 0

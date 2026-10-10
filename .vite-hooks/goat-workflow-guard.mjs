@@ -129,7 +129,7 @@ let paths;
 try {
   paths = NodeChildProcess.execFileSync(
     "git",
-    ["ls-tree", "-rz", "--name-only", sha, "--", ".github/workflows"],
+    ["--no-replace-objects", "ls-tree", "-rz", "--name-only", sha, "--", ".github/workflows"],
     { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   )
     .split("\0")
@@ -149,11 +149,15 @@ for (const path of paths) {
 if (paths.includes(workflowPath)) {
   let source;
   try {
-    source = NodeChildProcess.execFileSync("git", ["show", `${sha}:${workflowPath}`], {
-      cwd: root,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    source = NodeChildProcess.execFileSync(
+      "git",
+      ["--no-replace-objects", "show", `${sha}:${workflowPath}`],
+      {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
   } catch {
     refuse("cannot read pushed workflow");
     NodeProcess.exit(1);

@@ -78,7 +78,7 @@ function fixture(
   ]) {
     NodeFS.mkdirSync(directory, { recursive: true });
   }
-  for (const name of ["git", "sh", "basename", "dirname"]) {
+  for (const name of ["git", "sh", "basename", "dirname", "tr"]) {
     NodeFS.symlinkSync(executable(name), NodePath.join(bin, name));
   }
   if (options.node !== false) NodeFS.symlinkSync(NodeProcess.execPath, NodePath.join(bin, "node"));
@@ -244,6 +244,16 @@ describe("goat pre-push workflow guard", () => {
     expect(f.ghCalls()).toBe(0);
   });
 
+  it("rejects a committed hosted runner for a mixed-case Goat remote URL", () => {
+    const f = fixture({ workflow: workflow({ ...baseJob, "runs-on": "ubuntu-latest" }) });
+    const result = f.hook(f.record(f.sha), {}, ["origin", "git@github.com:Goat-Si/Goat.git"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      `goat pre-push: ${workflowPath} in refs/heads/test (${f.sha}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`,
+    );
+    expect(f.ghCalls()).toBe(1);
+  });
+
   it.each([
     ["reordered runner labels", workflow({ ...baseJob, "runs-on": runnerLabels.toReversed() })],
     [
@@ -262,6 +272,10 @@ describe("goat pre-push workflow guard", () => {
       workflow(baseJob, { push: null, pull_request: null, workflow_dispatch: null }),
     ],
     ["YAML 1.2 directive", `%YAML 1.2\n---\n${validWorkflow}`],
+    [
+      "quoted runs-on and tagged on keys",
+      validWorkflow.replace("on:", "!!str on:").replace("runs-on:", '"runs-on":'),
+    ],
     [
       "bounded aliases",
       `labels: &labels [self-hosted, linux, x64, goat, epyc]\n${validWorkflow.replace("[self-hosted, linux, x64, goat, epyc]", "*labels")}`,
@@ -300,7 +314,7 @@ describe("goat pre-push workflow guard", () => {
     expect(f.ghCalls()).toBe(1);
   });
 
-  it.each(["new.yml", "space name.yaml", "tab\tline\nend.yml"])(
+  it.each(["new.yml", "space name.yaml", "tab\tline\nend.yml", "sub/x.yml"])(
     "rejects an unregistered filename %j without whitespace splitting",
     (name) => {
       const f = fixture();
@@ -315,6 +329,16 @@ describe("goat pre-push workflow guard", () => {
       expect(f.ghCalls()).toBe(1);
     },
   );
+
+  it("rejects an unregistered upstream .yaml workflow", () => {
+    const f = fixture();
+    const result = f.hook(f.record(f.sha), { MOCK_DISABLED_WORKFLOWS: "" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      `goat pre-push: ${upstreamPath} in refs/heads/test is not disabled on goat-si/goat\n${advice}\n`,
+    );
+    expect(f.ghCalls()).toBe(1);
+  });
 
   it("ignores files without a workflow suffix and accepts registered paths", () => {
     const f = fixture();
@@ -365,6 +389,19 @@ describe("goat pre-push workflow guard", () => {
       "hosted runner",
       workflow({ ...baseJob, "runs-on": "ubuntu-latest" }),
       "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "hosted runner with quoted runs-on and tagged on keys",
+      validWorkflow
+        .replace("on:", "!!str on:")
+        .replace("runs-on:", '"runs-on":')
+        .replace("[self-hosted, linux, x64, goat, epyc]", "ubuntu-latest"),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "disallowed trigger with tagged on key",
+      validWorkflow.replace("on:", "!!str on:").replace("  push:", "  schedule:"),
+      "on must be a nonempty mapping containing only push, pull_request, workflow_dispatch",
     ],
     [
       "reusable job",
@@ -546,6 +583,30 @@ describe("goat pre-push workflow guard", () => {
     expect(f.ghCalls()).toBe(0);
   });
 
+  it.each(["hosted runner", "unregistered workflow"])(
+    "rejects a bad tip containing a %s despite a replacement with a safe commit",
+    (mode) => {
+      const f = fixture();
+      const extraPath = ".github/workflows/replaced.yml";
+      if (mode === "hosted runner") {
+        f.write(workflowPath, workflow({ ...baseJob, "runs-on": "ubuntu-latest" }));
+      } else {
+        f.write(extraPath, "on: push\njobs: {}\n");
+      }
+      const bad = f.commit();
+      f.git("replace", bad, f.sha);
+      expect(f.git("show", `${bad}:${workflowPath}`)).toBe(validWorkflow.trim());
+      const result = f.hook(f.record(bad));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(
+        mode === "hosted runner"
+          ? `goat pre-push: ${workflowPath} in refs/heads/test (${bad}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`
+          : `goat pre-push: ${extraPath} in refs/heads/test is not disabled on goat-si/goat\n${advice}\n`,
+      );
+      expect(f.ghCalls()).toBe(1);
+    },
+  );
+
   it.each(["missing", "wrong-version", "unloadable"] as const)(
     "refuses %s repository yaml without falling back",
     (yaml) => {
@@ -575,6 +636,7 @@ describe("goat pre-push workflow guard", () => {
     NodeFS.writeFileSync(
       gitPath,
       `#!/bin/sh
+if [ "$1" = "--no-replace-objects" ]; then shift; fi
 if [ "$1" = "ls-tree" ]; then printf '.github/workflows/goat-ci.yml\\000'; exit 0; fi
 if [ "$1" = "rev-parse" ]; then printf '%s\\n' "$MOCK_GIT_ROOT"; exit 0; fi
 exit 1
