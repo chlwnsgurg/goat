@@ -9,7 +9,7 @@ export function showBootError(error: unknown) {
   content.setAttribute("role", "alert");
 
   const message = document.createElement("p");
-  message.textContent = "T3 Code could not load.";
+  message.textContent = "goat could not load.";
   content.append(message);
 
   if (import.meta.env.DEV && error instanceof Error) {

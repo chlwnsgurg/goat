@@ -93,7 +93,13 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
+/** Shown to people: About panel, app menu, branding injected into the web UI. */
+const APP_BASE_NAME = "goat";
+/**
+ * Electron's runtime name (app.setName). It keys the macOS Keychain "Safe Storage" entry and
+ * the Linux secret store that encrypt saved connections, so it must stay the upstream value.
+ */
+export const DESKTOP_RUNTIME_APP_BASE_NAME = "T3 Code";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
