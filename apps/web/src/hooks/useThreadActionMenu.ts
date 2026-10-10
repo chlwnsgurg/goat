@@ -73,8 +73,10 @@ export function useThreadActionMenu(input: {
   /** Fallback for "Copy path" when the thread has no worktree. */
   readonly projectCwd: string | null;
   readonly onStartRename: () => void;
+  /** The thread is the global agent: project actions and title edits are left out. */
+  readonly globalAgent?: boolean | undefined;
 }) {
-  const { threadRef, projectCwd, onStartRename } = input;
+  const { threadRef, projectCwd, onStartRename, globalAgent = false } = input;
   const router = useRouter();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -160,6 +162,7 @@ export function useThreadActionMenu(input: {
           isRunning: !threadRuntimeCanArchive(thread.runtime),
           supports,
           snoozePresets,
+          globalAgent,
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
         if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -349,6 +352,7 @@ export function useThreadActionMenu(input: {
       copyPathToClipboard,
       copyThreadIdToClipboard,
       deleteThread,
+      globalAgent,
       handleNewThread,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,

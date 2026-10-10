@@ -138,6 +138,23 @@ describe("buildThreadActionMenuItems", () => {
     expect(items[filterIndex + 1]?.id).toBe("auto-settle");
   });
 
+  it("leaves project actions and title edits out of the global agent's menu", () => {
+    const global = allIds({ ...baseState, branch: "main", globalAgent: true });
+    for (const hidden of [
+      "new-thread-on-branch",
+      "project-settings",
+      "rename",
+      "regenerate-title",
+    ]) {
+      expect(global).not.toContain(hidden);
+    }
+    expect(global).toEqual(expect.arrayContaining(["pin", "copy-path", "archive", "delete"]));
+    const ordinary = allIds({ ...baseState, branch: "main" });
+    expect(ordinary).toEqual(
+      expect.arrayContaining(["new-thread-on-branch", "project-settings", "rename"]),
+    );
+  });
+
   it("includes branch items only for threads with a branch", () => {
     const withBranch = allIds({ ...baseState, branch: "feat/menu" });
     expect(withBranch).toContain("new-thread-on-branch");

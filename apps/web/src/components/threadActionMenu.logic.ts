@@ -99,7 +99,21 @@ export interface ThreadActionMenuState {
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+  /**
+   * The thread is the global agent. Its project is the machine's hidden
+   * no-project folder and its header shows a fixed label, so project actions
+   * and title edits would act on things the user never sees.
+   */
+  readonly globalAgent?: boolean | undefined;
 }
+
+const GLOBAL_AGENT_HIDDEN_ACTIONS: ReadonlySet<ThreadActionMenuId> = new Set([
+  "new-thread-on-branch",
+  "filter-by-project",
+  "project-settings",
+  "rename",
+  "regenerate-title",
+]);
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
@@ -122,7 +136,7 @@ export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean
 export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
-  const items: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
+  const allItems: ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> = [
     ...(state.branch
       ? [
           {
@@ -249,6 +263,9 @@ export function buildThreadActionMenuItems(
       icon: "trash",
     },
   ];
+  const items = state.globalAgent
+    ? allItems.filter((item) => !GLOBAL_AGENT_HIDDEN_ACTIONS.has(item.id))
+    : allItems;
   return state.canOperate
     ? items
     : items.map((item) =>
