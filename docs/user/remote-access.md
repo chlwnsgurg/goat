@@ -164,10 +164,16 @@ In the desktop app, open **Settings → Connections → Add environment**, choos
 or reuses a server there and opens the port forward for you. Projects, provider
 credentials, and agent work stay on the remote machine.
 
-The remote host must be Linux or an Apple Silicon Mac with `curl` or `wget`,
-`tar`, `sha256sum` or `shasum`, and [provider setup](./install.md#providers).
-The first launch downloads T3 Code's server to `~/.t3/runtime` on the host, so
-it takes longer than later ones.
+The remote host must be Linux or an Apple Silicon Mac with `tar`, `sha256sum`
+or `shasum`, and [provider setup](./install.md#providers). GOAT keeps its
+server, launch state, and data on the host under `~/.goat`, apart from any T3
+Code install in `~/.t3`.
+
+The first launch uploads GOAT's server from this computer, so it takes longer
+than later ones. When this computer does not already have the server for your
+GOAT version, it downloads it with the GitHub CLI, so sign in with
+`gh auth login` on this computer first. If the download is not available, the
+connection fails with an error that names the release it looked for.
 Provider CLIs must be on the `PATH` of a non-interactive login shell there;
 check with:
 
