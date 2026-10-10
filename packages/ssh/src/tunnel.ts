@@ -6,7 +6,12 @@ import {
   describeReadinessCause,
   waitForHttpReady as waitForHttpReadyShared,
 } from "@t3tools/shared/httpReadiness";
-import { cliArchivePlatformKey, cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
+import {
+  CLI_RELEASE_REPOSITORY,
+  cliArchiveFileName,
+  cliArchivePlatformKey,
+  cliReleaseDownloadBaseUrl,
+} from "@t3tools/shared/cliRelease";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -26,6 +31,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
 import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
+import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
 import {
   baseSshArgs,
   buildSshHostSpecEffect,
@@ -81,6 +87,8 @@ export interface RemoteT3RunnerOptions {
   readonly archiveVersion?: string | null;
   readonly releaseBaseUrl?: string | null;
   readonly archiveDirectory?: string | null;
+  /** Local gh executable used for authenticated acquisition; defaults to PATH lookup. */
+  readonly ghCommand?: string | undefined;
   /**
    * Reuse the remote's existing `run-t3.sh` for this target instead of
    * replacing it. A second client of the same host (the server's own SSH
@@ -1048,9 +1056,35 @@ sh -c ${shellSingleQuote(installer)} -- --version
 `;
 }
 
-export function buildRemoteRuntimeProbeScript(version: string): string {
+export function buildRemoteRuntimeProbeScript(
+  version: string,
+  stateKey?: string,
+  keepExistingRunner = false,
+): string {
   return `set -eu
 V=${shellSingleQuote(version)}
+state_key=${shellSingleQuote(stateKey ?? "")}
+retained_fields=
+runner="$HOME/.t3/ssh-launch/$state_key/run-t3.sh"
+if [ "${keepExistingRunner ? "1" : "0"}" = 1 ] && [ -n "$state_key" ] && [ -f "$runner" ]; then
+  node_script_path="$(sed -n "s/^T3_NODE_SCRIPT_PATH='\\(.*\\)'$/\\1/p" "$runner")"
+  retained_version=
+  retained=ready
+  if [ -z "$node_script_path" ]; then
+    retained_version="$(sed -n "s/^T3_ARCHIVE_VERSION='\\([^']*\\)'$/\\1/p" "$runner")"
+    case "$retained_version" in
+      ''|*[!0-9A-Za-z.-]*) printf 'The retained runner has an invalid exact archive version.\\n' >&2; exit 1 ;;
+    esac
+    if ! printf '%s\\n' "$retained_version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$'; then
+      printf 'The retained runner has an invalid exact archive version.\\n' >&2; exit 1
+    fi
+    retained_runtime="$HOME/.t3/runtime/versions/$retained_version"
+    if [ ! -x "$retained_runtime/t3" ] || [ "$(cat "$retained_runtime/.install-complete" 2>/dev/null)" != "$retained_version" ]; then
+      retained=missing
+    fi
+  fi
+  retained_fields="$(printf ',\"retained\":\"%s\",\"retainedVersion\":\"%s\"' "$retained" "$retained_version")"
+fi
 case "$(uname -s)" in
   Darwin) platform=darwin ;;
   Linux) platform=linux ;;
@@ -1066,7 +1100,7 @@ ready=false
 if [ -x "$runtime/t3" ] && [ "$(cat "$runtime/.install-complete" 2>/dev/null)" = "$V" ]; then
   ready=true
 fi
-printf '{"platform":"%s","arch":"%s","ready":%s}\\n' "$platform" "$arch" "$ready"
+printf '{"platform":"%s","arch":"%s","ready":%s%s}\\n' "$platform" "$arch" "$ready" "$retained_fields"
 `;
 }
 
@@ -1076,6 +1110,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       platform: Schema.Literals(["darwin", "linux"]),
       arch: Schema.Literals(["arm64", "x64"]),
       ready: Schema.Boolean,
+      retained: Schema.optionalKey(Schema.Literals(["ready", "missing"])),
+      retainedVersion: Schema.optionalKey(Schema.String),
     }),
   ),
 );
@@ -1093,10 +1129,16 @@ export const prepareRemoteRuntime = (
   target: DesktopSshEnvironmentTarget,
   authOptions: SshAuth.SshAuthOptions,
   runner?: RemoteT3RunnerOptions,
+  stateKey?: string,
 ) =>
   Effect.gen(function* () {
-    if (isNodeScriptRunner(runner) || !runner?.archiveDirectory?.trim()) return;
-    const version = runner.archiveVersion?.trim() ?? "";
+    const mayRetainRunner = runner?.keepExistingRunner && stateKey !== undefined;
+    if (isNodeScriptRunner(runner) && !mayRetainRunner) return;
+    const directory = runner?.archiveDirectory?.trim() ?? "";
+    const mirror = runner?.releaseBaseUrl?.trim() ?? "";
+    // Explicit mirrors retain the existing path without a local cache.
+    if (directory === "" && mirror !== "" && !mayRetainRunner) return;
+    const version = runner?.archiveVersion?.trim() ?? "";
     yield* Effect.annotateCurrentSpan({
       "ssh.target": target.alias,
       "t3.runtime.version": version,
@@ -1108,26 +1150,51 @@ export const prepareRemoteRuntime = (
     const result = yield* runSshCommand(target, {
       ...authOptions,
       remoteCommandArgs: ["sh", "-l", "-s"],
-      stdin: buildRemoteRuntimeProbeScript(version),
-    });
+      stdin: buildRemoteRuntimeProbeScript(version, stateKey, runner?.keepExistingRunner ?? false),
+    }).pipe(Effect.mapError(runtimePreparationError));
     const probe = yield* decodeRemoteJsonOutput(result.stdout, decodeRemoteRuntimeProbe).pipe(
       Effect.mapError(runtimePreparationError),
     );
+    if (probe.retained === "ready") {
+      yield* Effect.annotateCurrentSpan("t3.runtime.source", "retained-runner");
+      return;
+    }
+    if (probe.retained === "missing") {
+      return yield* new SshLaunchError({
+        message: `The retained runner ~/.t3/ssh-launch/${stateKey}/run-t3.sh selects t3 ${probe.retainedVersion}, which is not installed on ${target.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
+        stdout: "",
+      });
+    }
+    if (isNodeScriptRunner(runner)) return;
     if (probe.ready) {
       yield* Effect.annotateCurrentSpan("t3.runtime.source", "ready");
       return;
     }
     const platformKey = cliArchivePlatformKey(probe.platform, probe.arch);
-    const archive =
-      platformKey === undefined
-        ? null
-        : yield* readLocalRuntimeArchive(runner.archiveDirectory.trim(), version, platformKey).pipe(
-            Effect.mapError(runtimePreparationError),
-          );
-    if (archive === null) {
+    if (platformKey === undefined || directory === "") {
+      if (mirror !== "") {
+        yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
+        return;
+      }
+      const asset =
+        platformKey === undefined
+          ? `unsupported-${probe.platform}-${probe.arch}`
+          : cliArchiveFileName(version, platformKey);
+      return yield* new SshLaunchError({
+        message: `Cannot acquire the SSH runtime archive (repo=${CLI_RELEASE_REPOSITORY}, tag=v${version}, asset=${asset}, archive directory=${directory || "<not configured>"}). Configure a local archive directory and use a supported SSH platform, or an explicit release mirror.`,
+        stdout: "",
+      });
+    }
+    const localArchive = yield* readLocalRuntimeArchive(directory, version, platformKey).pipe(
+      Effect.mapError(runtimePreparationError),
+    );
+    if (localArchive === null && mirror !== "") {
       yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
       return;
     }
+    const archive =
+      localArchive ??
+      (yield* downloadRuntimeArchiveWithGh(directory, version, platformKey, runner?.ghCommand));
     yield* Effect.annotateCurrentSpan({
       "t3.runtime.source": "upload",
       "t3.runtime.upload.bytes": archive.bytes.byteLength,
@@ -1135,7 +1202,7 @@ export const prepareRemoteRuntime = (
       "t3.runtime.upload.installComplete": false,
     });
     const script = yield* Effect.try({
-      try: () => buildRemoteUploadScript(runner, archive.sha256),
+      try: () => buildRemoteUploadScript({ ...runner, archiveVersion: version }, archive.sha256),
       catch: runtimePreparationError,
     });
     yield* runSshCommand(target, {
@@ -1175,7 +1242,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshRunnerLogFields(runner),
       stateKey,
     });
-    yield* prepareRemoteRuntime(target, input ?? {}, runner);
+    yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey);
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
       stdin: buildRemoteLaunchScript(runner),
@@ -1287,10 +1354,11 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
     runner?: RemoteT3RunnerOptions,
   ): Effect.fn.Return<
     RemoteMcpClientSession,
-    SshCommandError | SshInvalidTargetError | SshPairingError,
+    SshCommandError | SshInvalidTargetError | SshPairingError | SshLaunchError,
     ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
   > {
     const stateKey = yield* remoteStateKey(target);
+    yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey);
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-s"],
       stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, runner),

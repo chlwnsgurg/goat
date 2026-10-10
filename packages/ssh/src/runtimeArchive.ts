@@ -1,4 +1,8 @@
-import { cliArchiveFileName, type CliArchivePlatformKey } from "@t3tools/shared/cliRelease";
+import {
+  cliArchiveFileName,
+  parseChecksums,
+  type CliArchivePlatformKey,
+} from "@t3tools/shared/cliRelease";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -39,5 +43,16 @@ export const readLocalRuntimeArchive = Effect.fn("ssh.runtimeArchive.read")(func
     });
   }
   const sha256 = Hex.encode(yield* crypto.digest("SHA-256", bytes));
+  const sidecarPath = `${filePath}.sha256`;
+  if (yield* fs.exists(sidecarPath)) {
+    const expected = parseChecksums(yield* fs.readFileString(sidecarPath)).get(fileName);
+    if (expected === undefined || sha256 !== expected) {
+      return yield* new SshLaunchError({
+        message: `Cached SSH runtime archive SHA-256 mismatch or malformed sidecar (${filePath}). Remove or replace the invalid cache entry before retrying.`,
+        stdout: "",
+      });
+    }
+  }
+  // An archive without a sidecar remains a trusted user-supplied local build.
   return { fileName, bytes, sha256 };
 });

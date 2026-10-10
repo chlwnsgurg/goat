@@ -598,22 +598,34 @@ const make = Effect.gen(function* () {
   return SshRemoteDispatch.of({ listHosts, browse, launchThread });
 });
 
+/** Resolve local archive/mirror configuration before building the remote runner. */
+export const resolveSshCliRunner = (baseDir: string) =>
+  Effect.gen(function* () {
+    const archiveDirectory = yield* Config.String("T3CODE_SSH_RUNTIME_ARCHIVE_DIR").pipe(
+      Config.withDefault(baseDir + "/runtime/archives"),
+    );
+    const releaseBaseUrl = yield* Config.String("T3CODE_RELEASE_BASE_URL").pipe(
+      Config.withDefault(""),
+      Effect.map((value) => value.trim() || undefined),
+    );
+    return {
+      archiveVersion: packageJson.version,
+      archiveDirectory,
+      ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
+      keepExistingRunner: true,
+    } satisfies SshTunnel.RemoteT3RunnerOptions;
+  });
+
 const layerManager = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-    const archiveDirectory = yield* Config.String("T3CODE_SSH_RUNTIME_ARCHIVE_DIR").pipe(
-      Config.withDefault(config.baseDir + "/runtime/archives"),
-    );
+    const runner = yield* resolveSshCliRunner(config.baseDir);
     return SshTunnel.SshEnvironmentManager.layer({
       // Reuse whatever runner a desktop already left for the host, so this
       // never restarts a remote server another client is using. A host with
       // none gets this server's own release, uploaded from a local archive
       // when the build is unpublished, as the desktop does.
-      resolveCliRunner: Effect.succeed({
-        archiveVersion: packageJson.version,
-        archiveDirectory,
-        keepExistingRunner: true,
-      }),
+      resolveCliRunner: Effect.succeed(runner),
       leaveRemoteServerRunning: true,
     });
   }),

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { matchRemoteProject, readRemoteToolResult } from "./SshRemoteDispatch.ts";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
+
+import {
+  matchRemoteProject,
+  readRemoteToolResult,
+  resolveSshCliRunner,
+} from "./SshRemoteDispatch.ts";
 
 describe("matchRemoteProject", () => {
   const project = { id: "project-1", workspaceRoot: "/home/agent/repo/" };
@@ -147,4 +155,46 @@ describe("readRemoteToolResult", () => {
       message: "The remote tool refused: no details",
     });
   });
+});
+
+describe("SSH dispatch release mirror", () => {
+  it.effect("server runner downloads from the configured mirror", () =>
+    Effect.gen(function* () {
+      const runner = yield* resolveSshCliRunner("/fixture/home").pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnvRecord({
+            T3CODE_RELEASE_BASE_URL: "  https://mirror.example/goat/  ",
+          }),
+        ),
+      );
+      const script = buildRemoteT3RunnerScript(runner);
+      expect(script).toContain("T3_RELEASE_BASE_URL='https://mirror.example/goat'");
+      expect(script).not.toContain("github.com/goat-si/goat/releases/download");
+      expect(runner.archiveDirectory).toBe("/fixture/home/runtime/archives");
+      expect(runner.keepExistingRunner).toBe(true);
+    }),
+  );
+
+  it.effect.each([undefined, "", "  "])(
+    "empty mirror %s keeps the authenticated default",
+    (value) =>
+      Effect.gen(function* () {
+        const runner = yield* resolveSshCliRunner("/fixture/home").pipe(
+          Effect.provideService(
+            ConfigProvider.ConfigProvider,
+            ConfigProvider.fromEnvRecord(
+              { T3CODE_RELEASE_BASE_URL: value },
+              { preserveEmptyStrings: true },
+            ),
+          ),
+        );
+        expect("releaseBaseUrl" in runner).toBe(false);
+        expect(buildRemoteT3RunnerScript(runner)).toContain(
+          "T3_RELEASE_BASE_URL='https://github.com/goat-si/goat/releases/download'",
+        );
+        // The library's blank-mirror behavior test separately proves gh acquisition,
+        // since running the generated shell directly is outside the guarded path.
+      }),
+  );
 });
