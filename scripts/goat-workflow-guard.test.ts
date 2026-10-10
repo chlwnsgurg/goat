@@ -1,0 +1,620 @@
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeProcess from "node:process";
+import * as NodeURL from "node:url";
+
+import { afterEach, describe, expect, it } from "vite-plus/test";
+
+const sourceRoot = NodeURL.fileURLToPath(new URL("../", import.meta.url));
+const zero = "0".repeat(40);
+const workflowPath = ".github/workflows/goat-ci.yml";
+const upstreamPath = ".github/workflows/upstream.yaml";
+const runnerLabels = ["self-hosted", "linux", "x64", "goat", "epyc"];
+const baseJob = { "runs-on": runnerLabels, steps: [{ run: "echo ok" }] };
+const validWorkflow = `on:
+  push:
+jobs:
+  ci:
+    runs-on: [self-hosted, linux, x64, goat, epyc]
+    steps:
+      - run: echo ok
+`;
+const yamlRefusal =
+  "goat pre-push: repository yaml@2.* is unavailable or unloadable; run vp i; refusing to push";
+const advice =
+  "goat pre-push: disable Actions (gh api -X PUT repos/goat-si/goat/actions/permissions -F enabled=false), push, disable the new workflows, then re-enable Actions.";
+const temporaryRoots: string[] = [];
+
+function executable(name: string) {
+  for (const directory of (NodeProcess.env.PATH ?? "").split(NodePath.delimiter)) {
+    const candidate = NodePath.join(directory, name);
+    try {
+      NodeFS.accessSync(candidate, NodeFS.constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue looking for the executable in the host's PATH.
+    }
+  }
+  throw new Error(`test prerequisite unavailable: ${name}`);
+}
+
+const gitExecutable = executable("git");
+const yamlStore = NodePath.join(sourceRoot, "node_modules/.pnpm");
+const yamlName = NodeFS.readdirSync(yamlStore)
+  .filter((name) => name.startsWith("yaml@2."))
+  .sort()[0];
+if (!yamlName) throw new Error("tests require repository yaml@2.*; run vp i");
+const yamlSource = NodePath.join(yamlStore, yamlName, "node_modules/yaml");
+
+function workflow(job: unknown = baseJob, on: unknown = { push: null }) {
+  return JSON.stringify({ on, jobs: { ci: job } });
+}
+
+function fixture(
+  options: {
+    node?: boolean;
+    gh?: boolean;
+    yaml?: "real" | "missing" | "wrong-version" | "unloadable";
+    workflow?: string | null;
+  } = {},
+) {
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-workflow-guard-"));
+  temporaryRoots.push(root);
+  const repo = NodePath.join(root, "repo");
+  const bare = NodePath.join(root, "goat-si/goat.git");
+  const bin = NodePath.join(root, "bin");
+  const home = NodePath.join(root, "home");
+  const calls = NodePath.join(root, "gh-calls");
+  const ghArgs = NodePath.join(root, "gh-args");
+  const parser = NodePath.join(repo, "node_modules/.pnpm", yamlName, "node_modules/yaml");
+  for (const directory of [
+    repo,
+    bin,
+    home,
+    NodePath.dirname(bare),
+    NodePath.join(repo, ".vite-hooks/_"),
+  ]) {
+    NodeFS.mkdirSync(directory, { recursive: true });
+  }
+  for (const name of ["git", "sh", "basename", "dirname"]) {
+    NodeFS.symlinkSync(executable(name), NodePath.join(bin, name));
+  }
+  if (options.node !== false) NodeFS.symlinkSync(NodeProcess.execPath, NodePath.join(bin, "node"));
+  if (options.gh !== false) {
+    const mock = NodePath.join(bin, "gh");
+    NodeFS.writeFileSync(
+      mock,
+      `#!/bin/sh
+printf 'call\n' >> "$MOCK_GH_CALLS"
+printf '%s\n' "$@" > "$MOCK_GH_ARGS"
+if [ "\${MOCK_GH_FAIL:-}" = "1" ]; then exit 1; fi
+printf '%s\n' "$MOCK_DISABLED_WORKFLOWS"
+`,
+    );
+    NodeFS.chmodSync(mock, 0o755);
+  }
+  const yamlMode = options.yaml ?? "real";
+  if (yamlMode !== "missing") {
+    NodeFS.mkdirSync(NodePath.dirname(parser), { recursive: true });
+    if (yamlMode === "real") {
+      NodeFS.symlinkSync(yamlSource, parser, "dir");
+    } else {
+      NodeFS.mkdirSync(parser);
+      NodeFS.writeFileSync(
+        NodePath.join(parser, "package.json"),
+        JSON.stringify({
+          name: "yaml",
+          version: yamlMode === "wrong-version" ? "1.10.0" : "2.9.0",
+          main: "missing.cjs",
+        }),
+      );
+    }
+  }
+  for (const path of ["pre-push", "goat-workflow-guard.mjs", "_/h", "_/pre-push"]) {
+    const target = NodePath.join(repo, ".vite-hooks", path);
+    NodeFS.copyFileSync(NodePath.join(sourceRoot, ".vite-hooks", path), target);
+    NodeFS.chmodSync(target, 0o755);
+  }
+  const env = { ...NodeProcess.env };
+  for (const key of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+  ]) {
+    delete env[key];
+  }
+  Object.assign(env, {
+    PATH: bin,
+    HOME: home,
+    XDG_CONFIG_HOME: NodePath.join(home, ".config"),
+    VP_HOME: home,
+    HUSKY: "1",
+    VP_GIT_HOOKS: "1",
+    VITE_GIT_HOOKS: "1",
+    GOAT_SKIP_WORKFLOW_GUARD: "",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_AUTHOR_NAME: "Guard fixture",
+    GIT_AUTHOR_EMAIL: "guard@example.invalid",
+    GIT_COMMITTER_NAME: "Guard fixture",
+    GIT_COMMITTER_EMAIL: "guard@example.invalid",
+    MOCK_GH_CALLS: calls,
+    MOCK_GH_ARGS: ghArgs,
+    MOCK_GH_FAIL: "",
+    MOCK_DISABLED_WORKFLOWS: upstreamPath,
+  });
+  function git(...args: string[]) {
+    return NodeChildProcess.execFileSync(gitExecutable, args, {
+      cwd: repo,
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  }
+  function write(path: string, content: string) {
+    const target = NodePath.join(repo, path);
+    NodeFS.mkdirSync(NodePath.dirname(target), { recursive: true });
+    NodeFS.writeFileSync(target, content);
+  }
+  function commit() {
+    git("add", ".github", ".vite-hooks");
+    git("-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-m", "workflow fixture");
+    return git("rev-parse", "HEAD");
+  }
+  function record(sha: string, ref = "refs/heads/test", remoteSha = zero) {
+    return `${ref} ${sha} ${ref} ${remoteSha}\n`;
+  }
+  function hook(records: string, extraEnv: Record<string, string> = {}, remote = ["origin", bare]) {
+    return NodeChildProcess.spawnSync("/bin/sh", ["-e", ".vite-hooks/pre-push", ...remote], {
+      cwd: repo,
+      env: { ...env, ...extraEnv },
+      input: records,
+      encoding: "utf8",
+    });
+  }
+  function ghCalls() {
+    return NodeFS.existsSync(calls)
+      ? NodeFS.readFileSync(calls, "utf8").trim().split("\n").length
+      : 0;
+  }
+  git("init", "--initial-branch=main");
+  write(".git/info/exclude", "node_modules/\n");
+  git("init", "--bare", bare);
+  git("remote", "add", "origin", bare);
+  git("config", "core.hooksPath", ".vite-hooks/_");
+  write(upstreamPath, "on: push\njobs: {}\n");
+  if (options.workflow !== null) write(workflowPath, options.workflow ?? validWorkflow);
+  const sha = commit();
+  return { repo, bare, bin, parser, env, sha, git, write, commit, record, hook, ghCalls, ghArgs };
+}
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0))
+    NodeFS.rmSync(root, { recursive: true, force: true });
+});
+
+describe("goat pre-push workflow guard", () => {
+  it("allows the shipped goat workflow with disabled upstream workflows and the audited lookup", () => {
+    const f = fixture({
+      workflow: NodeFS.readFileSync(NodePath.join(sourceRoot, workflowPath), "utf8"),
+    });
+    const result = f.hook(f.record(f.sha));
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(f.ghCalls()).toBe(1);
+    expect(NodeFS.readFileSync(f.ghArgs, "utf8").split("\n")).toEqual([
+      "api",
+      "--paginate",
+      "repos/goat-si/goat/actions/workflows?per_page=100",
+      "--jq",
+      '.workflows[] | select(.state=="disabled_manually") | .path',
+      "",
+    ]);
+  });
+
+  it("allows deletion-only pushes without node, yaml or gh", () => {
+    const f = fixture({ node: false, gh: false, yaml: "missing" });
+    const result = f.hook(f.record(zero, "(delete)", f.sha));
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(f.ghCalls()).toBe(0);
+  });
+
+  it("allows unrelated remotes without dependencies or checking the tip", () => {
+    const f = fixture({ node: false, gh: false, yaml: "missing" });
+    const result = f.hook(f.record("bad-tip"), {}, ["origin", "git@github.com:other/repo.git"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(f.ghCalls()).toBe(0);
+  });
+
+  it("allows the explicit bypass and preserves its warning without dependencies", () => {
+    const f = fixture({ node: false, gh: false, yaml: "missing" });
+    const result = f.hook(f.record("bad-tip"), { GOAT_SKIP_WORKFLOW_GUARD: "1" });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe(
+      "goat pre-push: workflow guard skipped; Actions must already be disabled\n",
+    );
+    expect(f.ghCalls()).toBe(0);
+  });
+
+  it.each([
+    ["reordered runner labels", workflow({ ...baseJob, "runs-on": runnerLabels.toReversed() })],
+    [
+      "all allowed actions",
+      workflow({
+        ...baseJob,
+        steps: [
+          { uses: "actions/checkout@v6" },
+          { uses: "voidzero-dev/setup-vp@v1" },
+          { uses: "actions/upload-artifact@v4" },
+        ],
+      }),
+    ],
+    [
+      "all allowed triggers",
+      workflow(baseJob, { push: null, pull_request: null, workflow_dispatch: null }),
+    ],
+    ["YAML 1.2 directive", `%YAML 1.2\n---\n${validWorkflow}`],
+    [
+      "bounded aliases",
+      `labels: &labels [self-hosted, linux, x64, goat, epyc]\n${validWorkflow.replace("[self-hosted, linux, x64, goat, epyc]", "*labels")}`,
+    ],
+  ])("allows %s", (_name, content) => {
+    const f = fixture({ workflow: content });
+    expect(f.hook(f.record(f.sha)).status).toBe(0);
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it("skips deletion before a new branch and looks up gh once across several valid tips", () => {
+    const f = fixture();
+    const first = f.sha;
+    f.write(workflowPath, workflow({ ...baseJob, "runs-on": runnerLabels.toReversed() }));
+    const second = f.commit();
+    const result = f.hook(
+      f.record(zero, "(delete)", first) +
+        f.record(first, "refs/heads/new") +
+        f.record(second, "refs/heads/second", first),
+    );
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it.each(["named", "direct URL"])("accepts the %s remote argument form", (form) => {
+    const f = fixture();
+    const remote = form === "named" ? ["origin", f.bare] : [f.bare, f.bare];
+    expect(f.hook(f.record(f.sha), {}, remote).status).toBe(0);
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it("allows disabled workflows when goat-ci is absent without loading yaml", () => {
+    const f = fixture({ workflow: null, yaml: "missing" });
+    expect(f.hook(f.record(f.sha)).status).toBe(0);
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it.each(["new.yml", "space name.yaml", "tab\tline\nend.yml"])(
+    "rejects an unregistered filename %j without whitespace splitting",
+    (name) => {
+      const f = fixture();
+      const path = `.github/workflows/${name}`;
+      f.write(path, "on: push\njobs: {}\n");
+      const sha = f.commit();
+      const result = f.hook(f.record(sha));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(
+        `goat pre-push: ${path} in refs/heads/test is not disabled on goat-si/goat\n${advice}\n`,
+      );
+      expect(f.ghCalls()).toBe(1);
+    },
+  );
+
+  it("ignores files without a workflow suffix and accepts registered paths", () => {
+    const f = fixture();
+    f.write(".github/workflows/notes.txt", "not a workflow");
+    f.write(".github/workflows/registered.yml", "on: push\njobs: {}\n");
+    const sha = f.commit();
+    expect(
+      f.hook(f.record(sha), {
+        MOCK_DISABLED_WORKFLOWS: `${upstreamPath}\n.github/workflows/registered.yml`,
+      }).status,
+    ).toBe(0);
+  });
+
+  it.each(["failure", "missing gh"])("refuses a GitHub lookup %s", (mode) => {
+    const f = fixture({ gh: mode !== "missing gh" });
+    const result = f.hook(f.record(f.sha), { MOCK_GH_FAIL: "1" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "goat pre-push: could not read workflow states from GitHub; refusing to push\n",
+    );
+    expect(f.ghCalls()).toBe(mode === "failure" ? 1 : 0);
+  });
+
+  it("rejects one bad tip among valid tips, including an unchanged workflow in a clean working tree", () => {
+    const f = fixture();
+    f.write(workflowPath, workflow({ ...baseJob, "runs-on": "ubuntu-latest" }));
+    const bad = f.commit();
+    f.write(".github/workflows/notes.txt", "workflow unchanged in this tip");
+    const unchangedBad = f.commit();
+    f.write(workflowPath, validWorkflow);
+    const good = f.commit();
+    expect(f.git("status", "--porcelain")).toBe("");
+    const result = f.hook(
+      f.record(f.sha, "refs/heads/good-first") +
+        f.record(unchangedBad, "refs/heads/bad") +
+        f.record(good, "refs/heads/good-last"),
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      `goat pre-push: ${workflowPath} in refs/heads/bad (${unchangedBad}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push\n${advice}\n`,
+    );
+    expect(bad).not.toBe(unchangedBad);
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it.each([
+    [
+      "hosted runner",
+      workflow({ ...baseJob, "runs-on": "ubuntu-latest" }),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "reusable job",
+      workflow({ ...baseJob, uses: "org/repo/.github/workflows/ci.yml@main" }),
+      "jobs.ci.uses is forbidden",
+    ],
+    ["null job uses", workflow({ ...baseJob, uses: null }), "jobs.ci.uses is forbidden"],
+    [
+      "disallowed action",
+      workflow({ ...baseJob, steps: [{ uses: "actions/checkout@v5" }] }),
+      "step 0.uses is not an allowed action",
+    ],
+    [
+      "nonliteral action",
+      workflow({ ...baseJob, steps: [{ uses: "${{ inputs.action }}" }] }),
+      "step 0.uses is not an allowed action",
+    ],
+    [
+      "extra job",
+      JSON.stringify({ on: { push: null }, jobs: { ci: baseJob, extra: baseJob } }),
+      "jobs must contain exactly ci",
+    ],
+    ["missing jobs", JSON.stringify({ on: { push: null } }), "jobs must contain exactly ci"],
+    [
+      "jobs array",
+      JSON.stringify({ on: { push: null }, jobs: [] }),
+      "jobs must contain exactly ci",
+    ],
+    ["nonmapping ci", workflow(null), "jobs.ci must be a mapping"],
+    [
+      "schedule",
+      workflow(baseJob, { push: null, schedule: [] }),
+      "on must be a nonempty mapping containing only push, pull_request, workflow_dispatch",
+    ],
+    [
+      "empty on",
+      workflow(baseJob, {}),
+      "on must be a nonempty mapping containing only push, pull_request, workflow_dispatch",
+    ],
+    [
+      "scalar on",
+      workflow(baseJob, "push"),
+      "on must be a nonempty mapping containing only push, pull_request, workflow_dispatch",
+    ],
+    [
+      "array on",
+      workflow(baseJob, ["push"]),
+      "on must be a nonempty mapping containing only push, pull_request, workflow_dispatch",
+    ],
+    [
+      "missing on",
+      JSON.stringify({ jobs: { ci: baseJob } }),
+      "on must be a nonempty mapping containing only push, pull_request, workflow_dispatch",
+    ],
+    [
+      "container",
+      workflow({ ...baseJob, container: "node:24" }),
+      "jobs.ci.container and jobs.ci.services are forbidden",
+    ],
+    [
+      "null container",
+      workflow({ ...baseJob, container: null }),
+      "jobs.ci.container and jobs.ci.services are forbidden",
+    ],
+    [
+      "services",
+      workflow({ ...baseJob, services: {} }),
+      "jobs.ci.container and jobs.ci.services are forbidden",
+    ],
+    [
+      "null services",
+      workflow({ ...baseJob, services: null }),
+      "jobs.ci.container and jobs.ci.services are forbidden",
+    ],
+    [
+      "duplicate labels",
+      workflow({ ...baseJob, "runs-on": ["self-hosted", "linux", "x64", "goat", "goat"] }),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "missing labels",
+      workflow({ ...baseJob, "runs-on": runnerLabels.slice(1) }),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "extra label",
+      workflow({ ...baseJob, "runs-on": [...runnerLabels, "ubuntu-latest"] }),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "nonliteral label",
+      workflow({
+        ...baseJob,
+        "runs-on": ["self-hosted", "linux", "x64", "goat", "${{ inputs.runner }}"],
+      }),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "nonstring label",
+      workflow({ ...baseJob, "runs-on": ["self-hosted", "linux", "x64", "goat", 42] }),
+      "jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc",
+    ],
+    [
+      "empty steps",
+      workflow({ ...baseJob, steps: [] }),
+      "jobs.ci.steps must be a nonempty array of mappings",
+    ],
+    [
+      "nonarray steps",
+      workflow({ ...baseJob, steps: {} }),
+      "jobs.ci.steps must be a nonempty array of mappings",
+    ],
+    [
+      "nonmapping step",
+      workflow({ ...baseJob, steps: ["echo ok"] }),
+      "jobs.ci.steps must be a nonempty array of mappings",
+    ],
+    [
+      "both run and uses",
+      workflow({ ...baseJob, steps: [{ run: "echo ok", uses: "actions/checkout@v6" }] }),
+      "step 0 must contain exactly one of run or uses",
+    ],
+    [
+      "neither run nor uses",
+      workflow({ ...baseJob, steps: [{ name: "empty" }] }),
+      "step 0 must contain exactly one of run or uses",
+    ],
+    [
+      "null action",
+      workflow({ ...baseJob, steps: [{ uses: null }] }),
+      "step 0.uses is not an allowed action",
+    ],
+    ["root sequence", "[]", "root must be a mapping"],
+    ["root scalar", "plain text", "root must be a mapping"],
+    ["empty document", "", "root must be a mapping"],
+    ["malformed YAML", "on: [", "invalid YAML"],
+    ["duplicate-key YAML", `${validWorkflow}\non: {push: null}\n`, "invalid YAML"],
+    [
+      "nested duplicate keys",
+      validWorkflow.replace(
+        "      - run: echo ok",
+        "      - run: echo ok\n        run: echo twice",
+      ),
+      "invalid YAML",
+    ],
+    ["multiple YAML documents", `${validWorkflow}\n---\n${validWorkflow}`, "invalid YAML"],
+    ["merge key", `${validWorkflow}\nextra:\n  <<: {hello: world}\n`, "invalid YAML"],
+    [
+      "quoted merge key in sequence",
+      `${validWorkflow}\nextra:\n  - nested:\n      '<<': null\n`,
+      "invalid YAML",
+    ],
+    [
+      "aliased merge key",
+      `${validWorkflow}\nkey: &key '<<'\nextra:\n  *key: null\n`,
+      "invalid YAML",
+    ],
+    ["YAML 1.1 directive", `%YAML 1.1\n---\n${validWorkflow}`, "invalid YAML"],
+    [
+      "excessive alias expansion",
+      `${validWorkflow}\na: &a [a, b, c, d, e, f, g, h, i, j]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nd: *c\n`,
+      "invalid YAML",
+    ],
+  ])("rejects %s with the exact structural diagnostic", (_name, content, reason) => {
+    const f = fixture({ workflow: content });
+    const result = f.hook(f.record(f.sha));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      `goat pre-push: ${workflowPath} in refs/heads/test (${f.sha}): ${reason}; refusing to push\n${advice}\n`,
+    );
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it("refuses missing node before contacting GitHub", () => {
+    const f = fixture({ node: false });
+    const result = f.hook(f.record(f.sha));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe("goat pre-push: node is unavailable; refusing to push\n");
+    expect(f.ghCalls()).toBe(0);
+  });
+
+  it.each(["missing", "wrong-version", "unloadable"] as const)(
+    "refuses %s repository yaml without falling back",
+    (yaml) => {
+      const f = fixture({ yaml });
+      const result = f.hook(f.record(f.sha));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(`${yamlRefusal}\n${advice}\n`);
+      expect(f.ghCalls()).toBe(1);
+    },
+  );
+
+  it("rejects an unreadable tip instead of hiding a git traversal failure", () => {
+    const f = fixture();
+    const sha = "f".repeat(40);
+    const result = f.hook(f.record(sha));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      `goat pre-push: cannot enumerate pushed workflows in refs/heads/test (${sha}); refusing to push\n${advice}\n`,
+    );
+    expect(f.ghCalls()).toBe(1);
+  });
+
+  it("explicitly refuses when enumeration succeeds but git show fails", () => {
+    const f = fixture();
+    const gitPath = NodePath.join(f.bin, "git");
+    NodeFS.unlinkSync(gitPath);
+    NodeFS.writeFileSync(
+      gitPath,
+      `#!/bin/sh
+if [ "$1" = "ls-tree" ]; then printf '.github/workflows/goat-ci.yml\\000'; exit 0; fi
+if [ "$1" = "rev-parse" ]; then printf '%s\\n' "$MOCK_GIT_ROOT"; exit 0; fi
+exit 1
+`,
+    );
+    NodeFS.chmodSync(gitPath, 0o755);
+    const result = f.hook(f.record(f.sha), { MOCK_GIT_ROOT: f.repo });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(
+      `goat pre-push: ${workflowPath} in refs/heads/test (${f.sha}): cannot read pushed workflow; refusing to push\n${advice}\n`,
+    );
+  });
+
+  it("accepts and rejects real pushes through the installed Vite+ shim", () => {
+    const f = fixture();
+    const allowed = NodeChildProcess.spawnSync(
+      gitExecutable,
+      ["push", "origin", "HEAD:refs/heads/accepted"],
+      { cwd: f.repo, env: f.env, encoding: "utf8" },
+    );
+    expect(allowed.status, allowed.stderr).toBe(0);
+    expect(f.git("--git-dir", f.bare, "rev-parse", "refs/heads/accepted")).toBe(f.sha);
+    expect(f.ghCalls()).toBe(1);
+    f.write(workflowPath, workflow({ ...baseJob, "runs-on": "ubuntu-latest" }));
+    const bad = f.commit();
+    const rejected = NodeChildProcess.spawnSync(
+      gitExecutable,
+      ["push", f.bare, "HEAD:refs/heads/rejected"],
+      { cwd: f.repo, env: f.env, encoding: "utf8" },
+    );
+    expect(rejected.status).not.toBe(0);
+    expect(rejected.stderr).toContain(
+      `goat pre-push: ${workflowPath} in HEAD (${bad}): jobs.ci.runs-on must contain exactly self-hosted, linux, x64, goat, epyc; refusing to push`,
+    );
+    const absent = NodeChildProcess.spawnSync(
+      gitExecutable,
+      ["--git-dir", f.bare, "show-ref", "--verify", "refs/heads/rejected"],
+      { cwd: f.repo, env: f.env, encoding: "utf8" },
+    );
+    expect(absent.status).not.toBe(0);
+    expect(f.ghCalls()).toBe(2);
+  });
+});
