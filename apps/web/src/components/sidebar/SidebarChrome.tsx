@@ -102,7 +102,7 @@ export function SidebarBrandWidthProbe({
       className="pointer-events-none invisible fixed top-0 left-0 flex w-max border-r border-transparent pr-3"
       ref={observeWidth}
     >
-      <div className="ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
+      <div className="-mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
         <SidebarBrandMark onBackdrop={false} />
       </div>
     </div>
@@ -120,7 +120,9 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
       aria-current={active ? "page" : undefined}
       data-active={active}
       className={cn(
-        "relative z-10 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
+        // Padding holds the selected fill off the letters; the matching negative margins keep
+        // the brand's outer box (and the width probe above) exactly as upstream.
+        "relative z-10 -mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
         onBackdrop ? "text-white" : "text-foreground",
         active && !onBackdrop ? "bg-sidebar-row-selected" : null,
         active && onBackdrop ? "bg-white/15" : null,
