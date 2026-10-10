@@ -50,6 +50,9 @@ export type T3McpToolSummaryAction =
   | "project-clone"
   | "environment-read"
   | "environment-update"
+  | "ssh-host-list"
+  | "ssh-browse"
+  | "ssh-thread-launch"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -298,6 +301,12 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "environment-update",
   ),
   t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
+  t3_ssh_host_list: tool(["List", "Listing", "Listed", "SSH hosts"], "ssh-host-list"),
+  t3_ssh_browse: tool(["Browse", "Browsing", "Browsed", "folders over SSH"], "ssh-browse"),
+  t3_ssh_thread_launch: tool(
+    ["Start", "Starting", "Started", "a thread on another machine"],
+    "ssh-thread-launch",
+  ),
   t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),
   t3_project_read: tool(["Read", "Reading", "Read", "a project"], "project-read"),
   t3_project_create: tool(["Register", "Registering", "Registered", "a project"], "project-create"),

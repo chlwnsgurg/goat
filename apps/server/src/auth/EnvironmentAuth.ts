@@ -22,6 +22,7 @@ import {
   type AuthWebSocketTicketResult,
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as Context from "effect/Context";
@@ -512,6 +513,8 @@ export class EnvironmentAuth extends Context.Service<
       readonly subject?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly label?: string;
+      /** Caps the threads an `mcp-client` session may start or change; see `authenticateMcpClient`. */
+      readonly runtimeModeCeiling?: RuntimeMode;
     }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
@@ -1037,6 +1040,7 @@ export const make = Effect.gen(function* () {
           deviceType: "bot",
         },
         ...(input?.ttl ? { ttl: input.ttl } : {}),
+        ...(input?.runtimeModeCeiling ? { runtimeModeCeiling: input.runtimeModeCeiling } : {}),
       })
       .pipe(
         Effect.map(

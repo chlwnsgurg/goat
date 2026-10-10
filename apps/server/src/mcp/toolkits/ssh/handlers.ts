@@ -1,0 +1,85 @@
+import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+
+import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
+import { SshToolkit } from "./tools.ts";
+
+const toMcpFailure = (error: SshRemoteDispatch.SshRemoteDispatchError) =>
+  new OrchestratorMcpFailure({
+    code:
+      error.reason === "invalid_request" || error.reason === "host_unknown"
+        ? "invalid_request"
+        : "orchestration_error",
+    message: Array.from(error.message).slice(0, 2000).join(""),
+  });
+
+/** SSH reaches other machines with this machine's keys, so it is an orchestration capability. */
+const requireOrchestration = McpInvocationContext.McpInvocationContext.pipe(
+  Effect.flatMap((scope) =>
+    scope.capabilities.has("orchestration")
+      ? Effect.void
+      : Effect.fail(
+          new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "This credential cannot reach other machines.",
+          }),
+        ),
+  ),
+);
+
+export const layer = McpToolAccess.toLayer(SshToolkit, {
+  // Reading ~/.ssh/config changes nothing; probing logs in but runs only `true`.
+  t3_ssh_host_list: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      yield* requireOrchestration;
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const hosts = yield* dispatch
+        .listHosts({ probe: input.probe === true })
+        .pipe(Effect.mapError(toMcpFailure));
+      return { hosts: [...hosts] };
+    }),
+  ),
+  // Browsing changes nothing remote, but it runs commands there with this
+  // machine's SSH keys, so read-only clients may not.
+  t3_ssh_browse: McpToolAccess.writes((input) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const result = yield* dispatch.browse(input).pipe(Effect.mapError(toMcpFailure));
+      return { ...result, worktrees: [...result.worktrees], entries: [...result.entries] };
+    }),
+  ),
+  t3_ssh_thread_launch: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const caller = yield* check;
+      const runtimeMode = yield* resolveRuntimeMode(caller.limits.runtimeMode, input.runtimeMode);
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const result = yield* dispatch
+        .launchThread(
+          {
+            host: input.host,
+            cwd: input.cwd,
+            workspace: input.workspace ?? { type: "cwd" },
+            title: input.title,
+            message: input.message,
+            projectTitle: input.projectTitle,
+            // The remote project usually has no default model, so a thread caller's own
+            // model is the sensible default; an outside client must pass one.
+            modelSelection: input.modelSelection ?? caller.caller?.modelSelection,
+            runtimeMode,
+            callerRuntimeMode: caller.limits.runtimeMode,
+            interactionMode: input.interactionMode,
+          },
+          check.pipe(Effect.asVoid),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            error instanceof SshRemoteDispatch.SshRemoteDispatchError ? toMcpFailure(error) : error,
+          ),
+        );
+      return { ...result, notes: [...result.notes] };
+    }),
+  ),
+});

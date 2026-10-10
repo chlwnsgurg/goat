@@ -2,6 +2,7 @@ import {
   AuthAdministrativeScopes,
   AuthSessionId,
   AuthStandardClientScopes,
+  RuntimeMode,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -80,6 +81,13 @@ const baseUrlFlag = Flag.String("base-url").pipe(
 const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDescription("Print only the issued bearer token."),
   Flag.withDefault(false),
+);
+
+const runtimeModeCeilingFlag = Flag.Literals("runtime-mode-ceiling", RuntimeMode.literals).pipe(
+  Flag.withDescription(
+    "Most an mcp-client session may run the threads it starts or changes with. Defaults to approval-required.",
+  ),
+  Flag.optional,
 );
 
 const pairingCreateCommand = Command.make("create", {
@@ -169,6 +177,7 @@ const sessionIssueCommand = Command.make("issue", {
   subject: subjectFlag,
   tokenOnly: tokenOnlyFlag,
   json: jsonFlag,
+  runtimeModeCeiling: runtimeModeCeilingFlag,
 }).pipe(
   Command.withDescription("Issue a scoped bearer access token for headless or remote clients."),
   Command.withHandler((flags) =>
@@ -181,6 +190,9 @@ const sessionIssueCommand = Command.make("issue", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
             ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),
+            ...(Option.isSome(flags.runtimeModeCeiling)
+              ? { runtimeModeCeiling: flags.runtimeModeCeiling.value }
+              : {}),
           });
           yield* Console.log(
             formatIssuedSession(issued, {

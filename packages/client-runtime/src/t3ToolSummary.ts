@@ -329,6 +329,22 @@ export function summarizeT3ToolCalls(
     case "environment-update":
       label = phrase("Updated", "update", `environment preferences ${times}`);
       break;
+    case "ssh-host-list":
+      label = phrase("Listed", "list", `SSH hosts ${times}`);
+      break;
+    case "ssh-browse":
+      label = phrase("Browsed", "browse", `folders over SSH ${times}`);
+      break;
+    case "ssh-thread-launch": {
+      // The threads live on other machines, so they are counted, never linked here.
+      const hosts = new Set(selected.map((call) => id(call.input?.host)).filter(Boolean));
+      label = phrase(
+        "Started",
+        "start",
+        `${quantity(selected.length, "thread")} on ${hosts.size === 1 ? [...hosts][0] : quantity(hosts.size, "machine")}`,
+      );
+      break;
+    }
     case "attachment-prepare":
       label = phrase(
         "Prepared",

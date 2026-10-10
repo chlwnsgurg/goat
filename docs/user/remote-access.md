@@ -182,6 +182,23 @@ running is left alone.
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
+### Let an agent start work on another machine
+
+An agent can also start a thread on another computer over SSH. Ask it, for
+example, to "run this in ~/work/api on mini". It lists the hosts in this
+machine's `~/.ssh/config` and `known_hosts`, browses folders and Git worktrees on
+the one you name, and starts a thread there in that folder or in a new worktree.
+The folder becomes a project on that machine, and the thread runs in that
+machine's own T3 Code, which is started the same way as above if needed.
+
+Only SSH keys or a running ssh-agent are used; a host that asks for a password
+is refused. Starting a thread needs a full-access thread or a full-access
+outside agent. To watch the new thread, add the same host under
+**Settings → Connections**. Each start issues a 12-hour sign-in on that
+machine, listed with its other clients. A machine running an older T3 Code
+only accepts approval-required threads in folders that are already projects
+there.
+
 ## Browser on a remote environment
 
 Browser tabs belong to the environment, so you and your agents see the same

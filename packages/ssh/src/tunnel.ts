@@ -81,10 +81,25 @@ export interface RemoteT3RunnerOptions {
   readonly archiveVersion?: string | null;
   readonly releaseBaseUrl?: string | null;
   readonly archiveDirectory?: string | null;
+  /**
+   * Reuse the remote's existing `run-t3.sh` for this target instead of
+   * replacing it. A second client of the same host (the server's own SSH
+   * dispatch, next to a desktop that already launched the remote) must not
+   * swap the runner: a changed runner restarts a managed remote server, which
+   * would cut off the client that started it. Reusing it also runs remote CLI
+   * commands with the binary that matches the running server.
+   */
+  readonly keepExistingRunner?: boolean | null;
 }
 
 export interface SshEnvironmentManagerOptions {
   readonly resolveCliRunner?: Effect.Effect<RemoteT3RunnerOptions>;
+  /**
+   * Close only the local forward when a tunnel ends. A second client of a
+   * host (the server's own SSH dispatch) shares the remote server with the
+   * client that started it, so it must never stop that server.
+   */
+  readonly leaveRemoteServerRunning?: boolean;
 }
 
 interface SshTunnelEntry {
@@ -165,6 +180,42 @@ export interface SshEnvironmentManagerShape {
   readonly disconnectEnvironment: (
     target: DesktopSshEnvironmentTarget,
   ) => Effect.Effect<void, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
+  /**
+   * Issues a short-lived `mcp-client` session on the remote environment so
+   * this process can call the remote's `/mcp` like an outside agent.
+   */
+  readonly issueMcpClientSession: (
+    target: DesktopSshEnvironmentTarget,
+    options: RemoteMcpClientSessionOptions,
+  ) => Effect.Effect<
+    RemoteMcpClientSession,
+    SshEnvironmentEffectError,
+    SshEnvironmentEffectContext
+  >;
+  /** Runs a POSIX `sh` script on the remote host with this manager's SSH auth. */
+  readonly runRemoteScript: (
+    target: DesktopSshEnvironmentTarget,
+    input: { readonly script: string; readonly timeoutMs?: number },
+  ) => Effect.Effect<
+    { readonly stdout: string; readonly stderr: string },
+    SshEnvironmentEffectError,
+    SshEnvironmentEffectContext
+  >;
+}
+
+export interface RemoteMcpClientSessionOptions {
+  readonly label: string;
+  /** A duration the remote CLI accepts, such as `12h`. */
+  readonly ttl: string;
+  /** Most a thread started through this session may run with; null keeps the remote default. */
+  readonly runtimeModeCeiling: string | null;
+}
+
+export interface RemoteMcpClientSession {
+  readonly token: string;
+  readonly expiresAt: string | null;
+  /** False when the remote CLI predates `--runtime-mode-ceiling` and kept its default. */
+  readonly runtimeModeCeilingApplied: boolean;
 }
 
 const RemoteLaunchResult = Schema.Struct({
@@ -176,8 +227,14 @@ const RemotePairingResult = Schema.Struct({
   credential: Schema.String,
 });
 
+const RemoteMcpSessionResult = Schema.Struct({
+  token: Schema.String,
+  expiresAt: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
 const decodeRemoteLaunchResult = Schema.decodeEffect(fromLenientJson(RemoteLaunchResult));
 const decodeRemotePairingResult = Schema.decodeEffect(fromLenientJson(RemotePairingResult));
+const decodeRemoteMcpSessionResult = Schema.decodeEffect(fromLenientJson(RemoteMcpSessionResult));
 
 const decodeRemoteJsonOutput = <A, E>(
   stdout: string,
@@ -562,10 +619,7 @@ cat >"$RUNNER_NEXT" <<'SH'
 @@T3_RUNNER_SCRIPT@@
 SH
 RUNNER_CHANGED=0
-if [ ! -f "$RUNNER_FILE" ] || ! cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
-  RUNNER_CHANGED=1
-fi
-mv "$RUNNER_NEXT" "$RUNNER_FILE"
+@@T3_RUNNER_INSTALL@@
 chmod 700 "$RUNNER_FILE"
 T3_ARCHIVE_MODE=@@T3_ARCHIVE_MODE@@
 if [ "$T3_ARCHIVE_MODE" = "1" ]; then
@@ -642,7 +696,7 @@ fi
 if [ -n "$DEFAULT_REMOTE_PORT" ]; then
   REMOTE_PORT="$DEFAULT_REMOTE_PORT"
   if wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    if [ "$REMOTE_MANAGED" = "managed" ]; then
+    @@T3_OWN_RUNTIME_CHECK@@if [ "$REMOTE_MANAGED" = "managed" ]; then
       PID_TO_STOP="\${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"
       if [ -n "$PID_TO_STOP" ] && kill -0 "$PID_TO_STOP" 2>/dev/null; then
         kill "$PID_TO_STOP" 2>/dev/null || true
@@ -680,7 +734,7 @@ elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/d
     REMOTE_PORT=""
     REMOTE_MANAGED=""
   elif ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    kill "$REMOTE_PID" 2>/dev/null || true
+    @@T3_BUSY_SERVER_GUARD@@kill "$REMOTE_PID" 2>/dev/null || true
     wait_for_pid_exit "$REMOTE_PID"
     REMOTE_PID=""
     REMOTE_PORT=""
@@ -733,6 +787,66 @@ SH
 chmod 700 "$RUNNER_FILE"
 PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 "$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json
+`;
+
+// How the launch script installs the runner it just wrote to RUNNER_NEXT.
+// The default replaces a changed runner and flags RUNNER_CHANGED, which
+// restarts a managed server; its bytes are part of the frozen launch baseline.
+const REPLACE_RUNNER_INSTALL = `if [ ! -f "$RUNNER_FILE" ] || ! cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
+  RUNNER_CHANGED=1
+fi
+mv "$RUNNER_NEXT" "$RUNNER_FILE"`;
+// A second client of the host keeps whatever runner is already there, so it
+// never restarts a server another client launched.
+const KEEP_EXISTING_RUNNER_INSTALL = `if [ -f "$RUNNER_FILE" ]; then
+  rm -f "$RUNNER_NEXT"
+else
+  mv "$RUNNER_NEXT" "$RUNNER_FILE"
+fi`;
+
+// A managed server started with the default base dir records itself as the
+// default runtime, so a later launch would read its own server as a separate
+// default one, stop it and start another. That cuts off every client already
+// connected. The second-client path never takes the stopping branch: it keeps
+// a live managed server, or else uses the answering default one as it is
+// without touching the state files. The "el" prefix turns the stopping "if"
+// into an unreachable "elif".
+const KEEP_OWN_RUNTIME_CHECK = `if [ "$REMOTE_MANAGED" = "managed" ]; then
+      if [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
+        REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+      else
+        REMOTE_PID=""
+        REMOTE_MANAGED="external"
+      fi
+    el`;
+// The second-client path never stops a server another client may be using:
+// an unresponsive one fails this launch instead.
+const KEEP_BUSY_SERVER_GUARD = `echo "The T3 server on this host did not answer in time; leaving it running for its clients." >&2
+    exit 1
+    `;
+
+// Issues an `mcp-client` bearer session, the only kind the remote's `/mcp`
+// admits from outside a thread. `--runtime-mode-ceiling` is newer than some
+// remotes, so an older CLI is retried without it and reports the default.
+const REMOTE_MCP_SESSION_SCRIPT = `set -eu
+STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+DEFAULT_SERVER_HOME="$HOME/.t3"
+RUNNER_FILE="$STATE_DIR/run-t3.sh"
+mkdir -p "$STATE_DIR"
+if [ "@@T3_KEEP_EXISTING_RUNNER@@" != "1" ] || [ ! -f "$RUNNER_FILE" ]; then
+  cat >"$RUNNER_FILE" <<'SH'
+@@T3_RUNNER_SCRIPT@@
+SH
+  chmod 700 "$RUNNER_FILE"
+fi
+set -- auth session issue --base-dir "$DEFAULT_SERVER_HOME" --subject mcp-client --scope orchestration:read --scope orchestration:operate --ttl @@T3_TTL@@ --label @@T3_LABEL@@ --json
+CEILING=@@T3_CEILING@@
+if [ -n "$CEILING" ] && OUTPUT="$("$RUNNER_FILE" "$@" --runtime-mode-ceiling "$CEILING" 2>/dev/null)"; then
+  printf 'T3_CEILING=applied\\n%s\\n' "$OUTPUT"
+else
+  OUTPUT="$("$RUNNER_FILE" "$@")"
+  printf 'T3_CEILING=default\\n%s\\n' "$OUTPUT"
+fi
 `;
 
 const REMOTE_STOP_SCRIPT = `set -eu
@@ -838,8 +952,44 @@ export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
     T3_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     T3_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     T3_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
+    T3_RUNNER_INSTALL: input?.keepExistingRunner
+      ? KEEP_EXISTING_RUNNER_INSTALL
+      : REPLACE_RUNNER_INSTALL,
+    T3_OWN_RUNTIME_CHECK: input?.keepExistingRunner ? KEEP_OWN_RUNTIME_CHECK : "",
+    T3_BUSY_SERVER_GUARD: input?.keepExistingRunner ? KEEP_BUSY_SERVER_GUARD : "",
   });
 }
+
+export function buildRemoteMcpSessionScript(
+  stateKey: string,
+  options: RemoteMcpClientSessionOptions,
+  input?: RemoteT3RunnerOptions,
+): string {
+  return applyScriptPlaceholders(REMOTE_MCP_SESSION_SCRIPT, {
+    T3_STATE_KEY: stateKey,
+    T3_KEEP_EXISTING_RUNNER: input?.keepExistingRunner ? "1" : "0",
+    T3_TTL: shellSingleQuote(options.ttl),
+    T3_LABEL: shellSingleQuote(options.label),
+    T3_CEILING: shellSingleQuote(options.runtimeModeCeiling ?? ""),
+    T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
+  });
+}
+
+/** Reads the remote session script's output: a ceiling marker line, then the CLI's JSON. */
+export const decodeRemoteMcpSessionOutput = Effect.fn("ssh/tunnel.decodeRemoteMcpSessionOutput")(
+  function* (stdout: string) {
+    const marker = /^T3_CEILING=(applied|default)$/mu.exec(stdout);
+    const session = yield* decodeRemoteJsonOutput(
+      marker === null ? stdout : stdout.slice(marker.index + marker[0].length),
+      decodeRemoteMcpSessionResult,
+    );
+    return {
+      token: session.token,
+      expiresAt: session.expiresAt ?? null,
+      runtimeModeCeilingApplied: marker?.[1] === "applied",
+    } satisfies RemoteMcpClientSession;
+  },
+);
 
 export function buildRemotePairingScript(stateKey: string, input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_PAIRING_SCRIPT, {
@@ -1128,6 +1278,52 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     credential: parsed.credential,
   };
 });
+
+export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpClientSession")(
+  function* (
+    target: DesktopSshEnvironmentTarget,
+    sessionOptions: RemoteMcpClientSessionOptions,
+    input?: SshAuth.SshAuthOptions,
+    runner?: RemoteT3RunnerOptions,
+  ): Effect.fn.Return<
+    RemoteMcpClientSession,
+    SshCommandError | SshInvalidTargetError | SshPairingError,
+    ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+  > {
+    const stateKey = yield* remoteStateKey(target);
+    const result = yield* runSshCommand(target, {
+      remoteCommandArgs: ["sh", "-s"],
+      stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, runner),
+      // Like pairing, this may be the first command on a cold remote.
+      ...(isNodeScriptRunner(runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
+      ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
+      ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
+      ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
+    });
+    const session = yield* decodeRemoteMcpSessionOutput(result.stdout).pipe(
+      Effect.mapError(
+        (cause) =>
+          new SshPairingError({
+            message: "The remote T3 CLI did not return an MCP session.",
+            stdout: result.stdout,
+            cause,
+          }),
+      ),
+    );
+    if (session.token.trim().length === 0) {
+      return yield* new SshPairingError({
+        message: "The remote T3 CLI returned an empty MCP session token.",
+        stdout: result.stdout,
+      });
+    }
+    yield* Effect.logInfo("ssh.remoteServer.mcpSession.issued", {
+      ...sshTargetLogFields(target),
+      stateKey,
+      runtimeModeCeilingApplied: session.runtimeModeCeilingApplied,
+    });
+    return session;
+  },
+);
 
 const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
   target: DesktopSshEnvironmentTarget,
@@ -1710,7 +1906,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
             forceKillAfter: TUNNEL_SHUTDOWN_TIMEOUT_MS,
           })
           .pipe(Effect.ignore);
-        if (!stopRemote) {
+        if (!stopRemote || options.leaveRemoteServerRunning === true) {
           return;
         }
         yield* Effect.logDebug("ssh.environment.tunnel.finalizer.start", {
@@ -1911,7 +2107,73 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     );
   });
 
-  return SshEnvironmentManager.of({ ensureEnvironment, disconnectEnvironment });
+  const resolveManagedTarget = Effect.fn("ssh/tunnel.resolveManagedTarget")(function* (
+    target: DesktopSshEnvironmentTarget,
+  ) {
+    const baseResolved = yield* resolveSshTarget(target.alias || target.hostname);
+    const resolvedTarget: DesktopSshEnvironmentTarget = {
+      ...baseResolved,
+      ...(target.username !== null ? { username: target.username } : {}),
+      ...(target.port !== null ? { port: target.port } : {}),
+    };
+    return { resolvedTarget, key: targetConnectionKey(resolvedTarget) };
+  });
+
+  const issueMcpClientSession = Effect.fn("ssh/tunnel.issueMcpClientSession")(function* (
+    target: DesktopSshEnvironmentTarget,
+    sessionOptions: RemoteMcpClientSessionOptions,
+  ): Effect.fn.Return<
+    RemoteMcpClientSession,
+    SshEnvironmentEffectError,
+    SshEnvironmentEffectContext
+  > {
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    const runner =
+      options.resolveCliRunner === undefined ? undefined : yield* options.resolveCliRunner;
+    // The session script may write the runner, so it waits for a launch in flight.
+    return yield* withTargetLock(
+      key,
+      runWithSshAuth({
+        key,
+        target: resolvedTarget,
+        operation: (authOptions) =>
+          issueRemoteMcpClientSession(resolvedTarget, sessionOptions, authOptions, runner),
+      }),
+    );
+  });
+
+  const runRemoteScript = Effect.fn("ssh/tunnel.runRemoteScript")(function* (
+    target: DesktopSshEnvironmentTarget,
+    input: { readonly script: string; readonly timeoutMs?: number },
+  ): Effect.fn.Return<
+    { readonly stdout: string; readonly stderr: string },
+    SshEnvironmentEffectError,
+    SshEnvironmentEffectContext
+  > {
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    return yield* runWithSshAuth({
+      key,
+      target: resolvedTarget,
+      operation: (authOptions) =>
+        runSshCommand(resolvedTarget, {
+          remoteCommandArgs: ["sh", "-s"],
+          stdin: input.script,
+          ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+          ...(authOptions.authSecret === undefined ? {} : { authSecret: authOptions.authSecret }),
+          ...(authOptions.batchMode === undefined ? {} : { batchMode: authOptions.batchMode }),
+          ...(authOptions.interactiveAuth === undefined
+            ? {}
+            : { interactiveAuth: authOptions.interactiveAuth }),
+        }),
+    });
+  });
+
+  return SshEnvironmentManager.of({
+    ensureEnvironment,
+    disconnectEnvironment,
+    issueMcpClientSession,
+    runRemoteScript,
+  });
 });
 
 /**
