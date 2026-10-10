@@ -1,6 +1,13 @@
 {
   "customNotices": [
     {
+      "bundles": ["desktop", "web"],
+      "license": "OFL-1.1",
+      "name": "Pretendard",
+      "sourceUrl": "https://github.com/orioncactus/pretendard",
+      "noticeFiles": ["apps/web/src/assets/fonts/Pretendard-LICENSE.txt"]
+    },
+    {
       "bundles": ["assets", "desktop", "web"],
       "license": "CC0-1.0",
       "name": "Notification Sound 1 by deadrobotmusic",

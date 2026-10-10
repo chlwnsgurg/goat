@@ -109,7 +109,13 @@ export function SidebarBrandWidthProbe({
   );
 }
 
-function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+function SidebarBrand({
+  onBackdrop,
+  placement = "header",
+}: {
+  onBackdrop: boolean;
+  placement?: "header" | "collapsed";
+}) {
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const pathname = useLocation({ select: (location) => location.pathname });
   const params = useParams({ strict: false });
@@ -122,7 +128,10 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
       className={cn(
         // Padding holds the selected fill off the letters; the matching negative margins keep
         // the brand's outer box (and the width probe above) exactly as upstream.
-        "relative z-10 -mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
+        "relative z-10 h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset",
+        placement === "header"
+          ? "-mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden md:flex"
+          : "pointer-events-auto flex [-webkit-app-region:no-drag]",
         onBackdrop ? "text-white" : "text-foreground",
         active && !onBackdrop ? "bg-sidebar-row-selected" : null,
         active && onBackdrop ? "bg-white/15" : null,
@@ -134,19 +143,59 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
   );
 }
 
+export function SidebarCollapsedBrand({
+  visible,
+  onWidthChange,
+}: {
+  visible: boolean;
+  onWidthChange: (width: number) => void;
+}) {
+  const observeWidth = useCallback(
+    (probe: HTMLDivElement) => {
+      return observeResize(probe, ([entry]) => {
+        if (entry) onWidthChange(entry.borderBoxSize[0]?.inlineSize ?? probe.offsetWidth);
+      });
+    },
+    [onWidthChange],
+  );
+
+  return (
+    <div
+      ref={observeWidth}
+      data-collapsed-brand=""
+      aria-hidden={!visible}
+      className={cn(
+        // oxlint-disable-next-line shadcn/no-arbitrary-values -- Match the measured titlebar control gap.
+        "hidden shrink-0 items-center pl-[var(--workspace-titlebar-control-gap)] md:flex",
+        visible ? "pointer-events-auto" : "invisible pointer-events-none",
+      )}
+    >
+      {visible ? (
+        <SidebarBrand placement="collapsed" onBackdrop={false} />
+      ) : (
+        // Keep the measured width without adding a focus target or a no-drag region.
+        <span className="flex h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5">
+          <SidebarBrandMark onBackdrop={false} />
+        </span>
+      )}
+    </div>
+  );
+}
+
 function SidebarBrandMark({ onBackdrop }: { onBackdrop: boolean }) {
   return (
     // Center the visible capitals, without the font's ascender/descender space.
     // Padding keeps ascenders and round-letter overshoot inside the truncation clip.
-    <span className="inline-flex min-w-0 items-center gap-1.5 text-sm font-medium tracking-tight">
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-sm">
       <T3Wordmark aria-hidden className="size-4 shrink-0" />
       <span
         className={cn(
-          "truncate [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
+          // oxlint-disable-next-line shadcn/no-arbitrary-values -- Brand letter spacing follows the approved wordmark.
+          "font-brand truncate font-bold tracking-[0.04em] [text-box:trim-both_cap_alphabetic] supports-[text-box:trim-both_cap_alphabetic]:py-1",
           onBackdrop ? "text-white" : "text-foreground",
         )}
       >
-        goat
+        GOAT
       </span>
     </span>
   );
