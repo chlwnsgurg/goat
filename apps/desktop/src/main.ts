@@ -47,6 +47,7 @@ import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
 import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopNetworkInterfaces from "./backend/DesktopNetworkInterfaces.ts";
 import * as DesktopEnvironment from "./app/DesktopEnvironment.ts";
+import * as DesktopConfig from "./app/DesktopConfig.ts";
 import * as DesktopLifecycle from "./app/DesktopLifecycle.ts";
 import * as DesktopLinuxUrlHandler from "./app/DesktopLinuxUrlHandler.ts";
 import * as DesktopShutdown from "./app/DesktopShutdown.ts";
@@ -108,6 +109,7 @@ const layerDesktopEnvironment = Layer.unwrap(
 // a source checkout instead so the two sides can be iterated together.
 const resolveDesktopSshCliRunner = (
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
+  archiveOptions: Pick<RemoteT3RunnerOptions, "archiveDirectory" | "releaseBaseUrl">,
 ): RemoteT3RunnerOptions => {
   const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteT3ServerEntryPath);
   if (environment.isDevelopment && devRemoteEntryPath !== undefined) {
@@ -116,14 +118,23 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  return { archiveVersion: environment.appVersion, ...archiveOptions };
 };
 
 const layerDesktopSshEnvironment = Layer.unwrap(
   Effect.gen(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const config = yield* DesktopConfig.DesktopConfig;
+    const releaseBaseUrl = Option.getOrUndefined(config.cliReleaseBaseUrl);
     return DesktopSshEnvironment.layer({
-      resolveCliRunner: Effect.succeed(resolveDesktopSshCliRunner(environment)),
+      resolveCliRunner: Effect.succeed(
+        resolveDesktopSshCliRunner(environment, {
+          archiveDirectory: Option.getOrElse(config.sshRuntimeArchiveDir, () =>
+            environment.path.join(environment.baseDir, "runtime", "archives"),
+          ),
+          ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
+        }),
+      ),
     });
   }),
 );

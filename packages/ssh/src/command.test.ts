@@ -65,6 +65,46 @@ const makeNeverFinishingProcess = () => {
 };
 
 describe("ssh command", () => {
+  it.effect("preserves binary stdin bytes", () => {
+    const bytes = new Uint8Array([0, 128, 255]);
+    const captured: number[] = [];
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        assert.equal(command._tag, "StandardCommand");
+        if (command._tag === "StandardCommand") {
+          const stdin = command.options.stdin;
+          assert.isDefined(stdin);
+          if (
+            stdin !== undefined &&
+            typeof stdin === "object" &&
+            "stream" in stdin &&
+            Stream.isStream(stdin.stream)
+          ) {
+            yield* stdin.stream.pipe(
+              Stream.runForEach((chunk) => Effect.sync(() => captured.push(...chunk))),
+            );
+            assert.isTrue(stdin.endOnDone);
+          }
+        }
+        return {
+          ...makeFailedProcess({ stdout: "ok" }),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+        };
+      }),
+    );
+    return runSshCommand(
+      { alias: "fixture", hostname: "fixture", username: null, port: null },
+      { stdin: bytes },
+    ).pipe(
+      Effect.provide(
+        Layer.merge(
+          NodeServices.layer,
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        ),
+      ),
+      Effect.andThen(Effect.sync(() => assert.deepEqual(captured, [0, 128, 255]))),
+    );
+  });
   it.effect("parses resolved ssh config output into a target", () =>
     Effect.sync(() => {
       assert.deepEqual(

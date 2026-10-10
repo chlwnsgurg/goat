@@ -3,11 +3,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
+import * as Crypto from "effect/Crypto";
+import * as Hex from "effect/encoding/Hex";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Tracer from "effect/Tracer";
 import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -16,8 +19,9 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
-import { SshCommandError } from "./errors.ts";
+import { SshCommandError, SshLaunchError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
+import baseline from "./fixtures/remote-runner-baseline.json" with { type: "json" };
 
 const TEST_NODE_ENGINE_RANGE = "^22.16 || ^23.11 || >=24.10";
 
@@ -97,7 +101,123 @@ const NODE_SCRIPT = {
   nodeScriptPath: "/Users/julius/Development/Work/codething-mvp/apps/server/dist/bin.mjs",
 } as const;
 
+const uploadTarget = {
+  alias: "devbox",
+  hostname: "devbox.example.com",
+  username: "julius",
+  port: 2222,
+} as const;
+const platform = HostProcess.Platform.defaultValue() === "darwin" ? "darwin" : "linux";
+const arch = HostProcess.Architecture.defaultValue() === "arm64" ? "arm64" : "x64";
+const encoder = new TextEncoder();
+
+const makeUploadFixture = Effect.fn("test.makeUploadFixture")(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preparation-" });
+  const stem = `t3-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
+  const stage = `${root}/stage/${stem}`;
+  const directory = `${root}/mirror/v${ARCHIVE.archiveVersion}`;
+  yield* fs.makeDirectory(stage, { recursive: true });
+  yield* fs.makeDirectory(directory, { recursive: true });
+  yield* fs.writeFileString(`${stage}/t3`, `#!/bin/sh\necho t3 v${ARCHIVE.archiveVersion}\n`);
+  yield* fs.chmod(`${stage}/t3`, 0o700);
+  const child = yield* spawner.spawn(
+    ChildProcess.make("tar", ["-czf", `${directory}/${stem}.tar.gz`, "-C", `${root}/stage`, stem]),
+  );
+  assert.equal(yield* child.exitCode, 0);
+  const bytes = yield* fs.readFile(`${directory}/${stem}.tar.gz`);
+  const crypto = yield* Crypto.Crypto;
+  const sha256 = Hex.encode(yield* crypto.digest("SHA-256", bytes));
+  yield* fs.writeFileString(`${directory}/SHA256SUMS`, `${sha256}  ${stem}.tar.gz\n`);
+  return { root, directory, bytes, sha256, spawner, fs };
+});
+
+const recordSpans = (spans: Tracer.Span[]) =>
+  Tracer.make({
+    span: (options) => {
+      const span = new Tracer.NativeSpan(options);
+      spans.push(span);
+      return span;
+    },
+  });
+
+// Vite reformats Function.toString(); persistent script bytes use native Node.
+const nativeScripts = Effect.fn("test.nativeScripts")(function* (
+  input: SshTunnel.RemoteT3RunnerOptions,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const moduleUrl = new URL("./tunnel.ts", import.meta.url).href;
+  const script = `import * as t from ${JSON.stringify(moduleUrl)};
+const input = ${JSON.stringify(input)};
+console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input), pairing: t.buildRemotePairingScript("711bc738002d72fd", input), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }));`;
+  const child = yield* spawner.spawn(
+    ChildProcess.make(process.execPath, ["--input-type=module", "-e", script]),
+  );
+  const result = yield* Effect.all(
+    {
+      stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+      stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+      code: child.exitCode,
+    },
+    { concurrency: "unbounded" },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  return JSON.parse(result.stdout) as {
+    runner: string;
+    launch: string;
+    pairing: string;
+    upload: string | null;
+  };
+});
+
 describe("ssh tunnel scripts", () => {
+  it.effect("preserves ordinary runner, launch and pairing script bytes", () =>
+    Effect.gen(function* () {
+      const inputs = {
+        archive: ARCHIVE,
+        mirror: { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
+        node: { nodeScriptPath: "/fixture/cli entry.mjs", nodeEngineRange: TEST_NODE_ENGINE_RANGE },
+      };
+      for (const key of ["archive", "mirror", "node"] as const) {
+        for (const input of [
+          inputs[key],
+          { ...inputs[key], archiveDirectory: "/fixture/archives" },
+        ]) {
+          const actual = yield* nativeScripts(input);
+          assert.equal(actual.runner, baseline[key].runner);
+          assert.equal(actual.launch, baseline[key].launch);
+          assert.equal(actual.pairing, baseline[key].pairing);
+        }
+        if (key === "node") continue;
+        const ordinary = baseline[key].runner;
+        const start = ordinary.indexOf(
+          '  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/SHA256SUMS"',
+        );
+        const end = ordinary.indexOf("  if command -v sha256sum >/dev/null 2>&1; then");
+        const upload = (yield* nativeScripts(inputs[key])).upload!;
+        assert.equal(upload.slice(0, start), ordinary.slice(0, start));
+        assert.equal(
+          upload.slice(upload.indexOf("  if command -v sha256sum >/dev/null 2>&1; then")),
+          ordinary.slice(end),
+        );
+        assert.include(upload, `T3_EXPECTED='${"a".repeat(64)}'`);
+        assert.equal((yield* nativeScripts(inputs[key])).runner, ordinary);
+      }
+      assert.throws(
+        () => SshTunnel.buildRemoteT3UploadInstallerScript(inputs.node, "a".repeat(64)),
+        SshLaunchError,
+      );
+      assert.throws(
+        () => SshTunnel.buildRemoteT3UploadInstallerScript({}, "a".repeat(64)),
+        SshLaunchError,
+      );
+      assert.throws(
+        () => SshTunnel.buildRemoteT3UploadInstallerScript(ARCHIVE, "no"),
+        SshLaunchError,
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   it("installs and runs the release archive without Node, npm, or npx", () => {
     const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
 
@@ -687,6 +807,346 @@ describe("ssh tunnel scripts", () => {
   );
 });
 
+describe("runtime preparation", () => {
+  it.live("does not restart an existing managed server after runtime preparation", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-preparation-" });
+      const runtime = `${root}/.t3/runtime/versions/${ARCHIVE.archiveVersion}`;
+      const state = `${root}/.t3/ssh-launch/711bc738002d72fd`;
+      yield* fs.makeDirectory(runtime, { recursive: true });
+      yield* fs.makeDirectory(state, { recursive: true });
+      const cli = `${runtime}/t3`;
+      yield* fs.writeFileString(
+        cli,
+        `#!${process.execPath}
+import * as fs from "node:fs";
+import * as net from "node:net";
+const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("t3 v${ARCHIVE.archiveVersion}"); }
+else if (args[0] === "__ssh-helper") {
+  if (args[1] === "runtime-port") process.exit(1);
+  if (args[1] === "pick-port") console.log(3773);
+  if (args[1] === "wait-ready") {
+    const socket = net.connect(Number(args[2]), "127.0.0.1");
+    socket.on("connect", () => { socket.destroy(); process.exit(0); });
+    socket.on("error", () => process.exit(1));
+  }
+} else if (args[0] === "auth") { console.log(JSON.stringify({ credential: "fixture-pairing" })); }
+else {
+  fs.appendFileSync("${root}/starts", "start\\n");
+  const server = net.createServer(socket => socket.end());
+  process.on("SIGTERM", () => { fs.appendFileSync("${root}/stops", "stop\\n"); server.close(); });
+  server.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ pid: process.pid, port: server.address().port })));
+}
+`,
+      );
+      yield* fs.chmod(cli, 0o700);
+      yield* fs.writeFileString(`${runtime}/.install-complete`, ARCHIVE.archiveVersion);
+      const child = yield* realSpawner.spawn(
+        ChildProcess.make(cli, ["serve"], { detached: false }),
+      );
+      yield* Effect.addFinalizer(() => child.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore));
+      const started = JSON.parse(
+        yield* child.stdout.pipe(
+          Stream.decodeText(),
+          Stream.splitLines,
+          Stream.take(1),
+          Stream.mkString,
+        ),
+      ) as { pid: number; port: number };
+      assert.equal(started.pid, child.pid);
+      yield* fs.writeFileString(`${state}/pid`, `${started.pid}\n`);
+      yield* fs.writeFileString(`${state}/port`, `${started.port}\n`);
+      yield* fs.writeFileString(`${state}/managed`, "managed\n");
+      // Use the persisted heredoc bytes, including existing placeholder escaping.
+      const persistedRunner =
+        baseline.archive.launch.split("<<'SH'\n")[1]!.split("\nSH\n")[0]! + "\n";
+      yield* fs.writeFileString(`${state}/run-t3.sh`, persistedRunner);
+      const scripts = yield* nativeScripts(ARCHIVE);
+      let uploads = 0;
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (command._tag !== "StandardCommand") return Effect.succeed(makeSuccessfulProcess(""));
+        const args = command.args;
+        if (args.includes("-c")) uploads++;
+        const remoteArgs = args.slice(args.indexOf("sh") + 1).filter((arg) => arg !== "-l");
+        const stdin = args.includes("--")
+          ? Stream.make(encoder.encode(scripts.launch))
+          : args.includes("-l")
+            ? command.options.stdin
+            : Stream.make(encoder.encode(scripts.pairing));
+        return realSpawner.spawn(
+          ChildProcess.make("sh", remoteArgs, { env: { HOME: root }, stdin }),
+        );
+      });
+      const runner = { ...ARCHIVE, archiveDirectory: `${root}/missing` };
+      yield* Effect.gen(function* () {
+        const first = yield* SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, runner);
+        assert.equal(first.remotePort, started.port);
+        assert.equal(first.remoteServerKind, "managed");
+        const pairing = yield* SshTunnel.issueRemotePairingToken(uploadTarget, {}, runner);
+        assert.equal(pairing.credential, "fixture-pairing");
+        assert.equal(
+          (yield* SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, runner)).remotePort,
+          started.port,
+        );
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      assert.equal(uploads, 0);
+      assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), persistedRunner);
+      assert.equal((yield* fs.readFileString(`${state}/pid`)).trim(), String(started.pid));
+      assert.equal((yield* fs.readFileString(`${state}/port`)).trim(), String(started.port));
+      assert.equal(yield* fs.readFileString(`${root}/starts`), "start\n");
+      assert.isFalse(yield* fs.exists(`${root}/stops`));
+      assert.isFalse(yield* fs.exists(`${root}/.t3/userdata/server-runtime.json`));
+      assert.isTrue(yield* child.isRunning);
+      yield* child.kill({ killSignal: "SIGTERM" });
+      assert.equal(yield* child.exitCode, 0);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.live.each([
+    "uploads the local archive to a cold remote",
+    "downloads when no local archive exists",
+    "skips upload when the remote runtime is ready",
+    "passes the same auth options to probe, upload and launch",
+  ] as const)("%s", (name) =>
+    Effect.gen(function* () {
+      const fixture = yield* makeUploadFixture();
+      const { root, directory, bytes, fs, spawner: realSpawner } = fixture;
+      const ready = name === "skips upload when the remote runtime is ready";
+      const missing = name === "downloads when no local archive exists";
+      const archiveDirectory = missing || ready ? `${root}/missing` : directory;
+      const runner = {
+        ...ARCHIVE,
+        archiveDirectory,
+        releaseBaseUrl: missing ? `file://${root}/mirror` : "file:///unavailable",
+      };
+      const calls: string[] = [];
+      const auth: Array<{
+        secret: string | undefined;
+        batch: string | undefined;
+        askpass: string | undefined;
+      }> = [];
+      const spans: Tracer.Span[] = [];
+      let reads = 0;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          assert.equal(command._tag, "StandardCommand");
+          if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
+          const args = command.args;
+          const kind = args.includes("-c") ? "upload" : args.includes("--") ? "launch" : "probe";
+          calls.push(kind);
+          auth.push({
+            secret: command.options.env?.T3_SSH_AUTH_SECRET,
+            batch: args.find((arg) => arg.startsWith("BatchMode=")),
+            askpass: command.options.env?.SSH_ASKPASS_REQUIRE,
+          });
+          if (kind === "probe")
+            return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready }));
+          if (kind === "upload") {
+            const input = command.options.stdin;
+            assert.isDefined(input);
+            if (
+              input !== undefined &&
+              typeof input === "object" &&
+              "stream" in input &&
+              Stream.isStream(input.stream)
+            ) {
+              const chunks = yield* input.stream.pipe(Stream.runCollect);
+              assert.deepEqual(new Uint8Array(chunks.flatMap((chunk) => Array.from(chunk))), bytes);
+            }
+            const remoteArgs = args.slice(args.indexOf("sh"));
+            return yield* realSpawner.spawn(
+              ChildProcess.make("sh", ["-c", remoteArgs.join(" ")], {
+                env: { HOME: root },
+                stdin: command.options.stdin,
+              }),
+            );
+          }
+          if (missing) {
+            const installer = yield* realSpawner.spawn(
+              ChildProcess.make(
+                "sh",
+                ["-c", SshTunnel.buildRemoteT3RunnerScript(runner), "--", "--version"],
+                { env: { HOME: root } },
+              ),
+            );
+            assert.equal(yield* installer.exitCode, 0);
+          }
+          return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
+        }),
+      );
+      const checkedFs = FileSystem.FileSystem.of({
+        ...fs,
+        readFile: (file) => {
+          if (file.startsWith(archiveDirectory)) reads++;
+          return fs.readFile(file);
+        },
+      });
+      yield* SshTunnel.launchOrReuseRemoteServer(
+        uploadTarget,
+        { authSecret: "fixture-password", batchMode: "no", interactiveAuth: true },
+        runner,
+      ).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(FileSystem.FileSystem, checkedFs),
+        Effect.withTracer(recordSpans(spans)),
+      );
+      assert.deepEqual(
+        calls,
+        ready || missing ? ["probe", "launch"] : ["probe", "upload", "launch"],
+      );
+      assert.equal(reads, ready || missing ? 0 : 1);
+      for (const options of auth)
+        assert.deepEqual(options, {
+          secret: "fixture-password",
+          batch: "BatchMode=no",
+          askpass: "force",
+        });
+      const span = spans.find((span) => span.name === "ssh.prepareRemoteRuntime");
+      assert.equal(span?.attributes.get("ssh.target"), "devbox");
+      assert.equal(
+        span?.attributes.get("t3.runtime.source"),
+        ready ? "ready" : missing ? "download" : "upload",
+      );
+      if (!ready && !missing) {
+        assert.equal(span?.attributes.get("t3.runtime.upload.installComplete"), true);
+        assert.equal(span?.attributes.get("t3.runtime.upload.sha256"), fixture.sha256);
+        assert.equal(span?.attributes.get("t3.runtime.upload.bytes"), bytes.byteLength);
+      }
+      if (!ready)
+        assert.equal(
+          (yield* fs.readFileString(
+            `${root}/.t3/runtime/versions/${ARCHIVE.archiveVersion}/.install-complete`,
+          )).trim(),
+          ARCHIVE.archiveVersion,
+        );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("surfaces local archive preparation errors during pairing", () =>
+    Effect.gen(function* () {
+      const { directory, fs } = yield* makeUploadFixture();
+      yield* fs.truncate(
+        `${directory}/t3-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`,
+        268435457,
+      );
+      let calls = 0;
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.sync(() => {
+          calls++;
+          return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: false }));
+        }),
+      );
+      const result = yield* Effect.result(
+        SshTunnel.issueRemotePairingToken(
+          uploadTarget,
+          {},
+          { ...ARCHIVE, archiveDirectory: directory },
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+      );
+      assert.isTrue(Result.isFailure(result));
+      if (Result.isFailure(result)) assert.instanceOf(result.failure, SshLaunchError);
+      assert.equal(calls, 1);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("retries upload authentication through SshEnvironmentManager", () =>
+    Effect.gen(function* () {
+      const { directory } = yield* makeUploadFixture();
+      let uploads = 0;
+      let prompts = 0;
+      const calls: Array<{
+        kind: string;
+        batch: string | undefined;
+        secret: string | undefined;
+        askpass: string | undefined;
+      }> = [];
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.sync(() => {
+          const args = commandArgs(command);
+          if (args.includes("-G"))
+            return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
+          if (args.includes("-N")) return makeRunningProcess(() => undefined);
+          if (
+            args.includes("-s") &&
+            !args.includes("-l") &&
+            calls.some((call) => call.kind === "pairing")
+          )
+            return makeSuccessfulProcess('{"stopped":true}');
+          const kind = args.includes("-c")
+            ? "upload"
+            : args.includes("--")
+              ? "launch"
+              : args.includes("-l")
+                ? "probe"
+                : "pairing";
+          if (command._tag === "StandardCommand")
+            calls.push({
+              kind,
+              batch: args.find((arg) => arg.startsWith("BatchMode=")),
+              secret: command.options.env?.T3_SSH_AUTH_SECRET,
+              askpass: command.options.env?.SSH_ASKPASS_REQUIRE,
+            });
+          if (kind === "probe")
+            return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: uploads > 1 }));
+          if (kind === "upload" && ++uploads === 1)
+            return {
+              ...makeSuccessfulProcess(""),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
+              stderr: Stream.make(encoder.encode("Permission denied (publickey,password).")),
+            };
+          return makeSuccessfulProcess(
+            kind === "launch" ? '{"remotePort":3773}' : '{"credential":"fixture-pairing"}',
+          );
+        }),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, testHttpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        Layer.succeed(
+          SshAuth.SshPasswordPrompt,
+          SshAuth.SshPasswordPrompt.of({
+            isAvailable: true,
+            request: () =>
+              Effect.sync(() => {
+                prompts++;
+                return "fixture-password";
+              }),
+          }),
+        ),
+        SshTunnel.SshEnvironmentManager.layer({
+          resolveCliRunner: Effect.succeed({ ...ARCHIVE, archiveDirectory: directory }),
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const result = yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
+        assert.equal(result.pairingToken, "fixture-pairing");
+      }).pipe(Effect.provide(layer), Effect.scoped);
+      assert.equal(prompts, 1);
+      assert.equal(uploads, 2);
+      assert.deepEqual(
+        calls.map((call) => call.kind),
+        ["probe", "upload", "probe", "upload", "launch", "probe", "pairing"],
+      );
+      for (const call of calls.slice(0, 2))
+        assert.deepEqual(
+          { batch: call.batch, secret: call.secret, askpass: call.askpass },
+          { batch: "BatchMode=yes", secret: undefined, askpass: undefined },
+        );
+      for (const call of calls.slice(2))
+        assert.deepEqual(
+          { batch: call.batch, secret: call.secret, askpass: call.askpass },
+          { batch: "BatchMode=no", secret: "fixture-password", askpass: "force" },
+        );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+});
+
 // The archive runner is generated shell; string assertions cannot prove the
 // lock excludes concurrent installers. Run the real script against a tiny
 // fake archive served from a file:// mirror.
@@ -696,13 +1156,16 @@ describe("archive runner script", () => {
   const windowsHost = hostPlatform === "win32";
   const archiveVersion = "1.2.3-preview.20260911.4";
 
-  const runRunner = (home: string, runner: string) =>
+  const runShell = (home: string, args: string[], bytes?: Uint8Array) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
-        ChildProcess.make("sh", [runner, "--version"], {
+        ChildProcess.make("sh", args, {
           env: { PATH: process.env.PATH ?? "", HOME: home },
           extendEnv: false,
+          ...(bytes === undefined
+            ? {}
+            : { stdin: { stream: Stream.make(bytes), endOnDone: true } }),
         }),
       );
       const [stdout, stderr, exitCode] = yield* Effect.all(
@@ -728,6 +1191,10 @@ describe("archive runner script", () => {
       return { stdout, stderr, exitCode };
     });
 
+  const runRunner = (home: string, runner: string) => runShell(home, [runner, "--version"]);
+  const runUpload = (home: string, script: string, bytes: Uint8Array) =>
+    runShell(home, ["-c", script], bytes);
+
   // A fake "executable" that answers --version, packed the way the release
   // workflow packs the real archive: one top-level directory named after the
   // stem, checksummed in SHA256SUMS.
@@ -750,6 +1217,65 @@ describe("archive runner script", () => {
     assert.equal(Number(yield* child.exitCode), 0);
     return `file://${root}/mirror`;
   });
+
+  it.effect.skipIf(windowsHost)("fails on an uploaded archive checksum mismatch", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-upload-bad-" });
+      yield* makeMirror(root);
+      const platform = hostPlatform === "darwin" ? "darwin" : "linux";
+      const arch = hostArch === "arm64" ? "arm64" : "x64";
+      const bytes = yield* fs.readFile(
+        `${root}/mirror/v${archiveVersion}/t3-${archiveVersion}-${platform}-${arch}.tar.gz`,
+      );
+      const result = yield* runUpload(
+        root,
+        SshTunnel.buildRemoteUploadScript(
+          { ...ARCHIVE, releaseBaseUrl: "file:///unavailable" },
+          "0".repeat(64),
+        ),
+        bytes,
+      );
+      assert.equal(result.exitCode, 1);
+      assert.include(result.stderr, "Checksum mismatch");
+      assert.isFalse(
+        yield* fs.exists(`${root}/.t3/runtime/versions/${archiveVersion}/.install-complete`),
+      );
+      assert.deepEqual(yield* fs.readDirectory(`${root}/.t3/runtime/versions`), []);
+      assert.notInclude(result.stderr, "curl");
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect.skipIf(windowsHost)("installs once when two uploads race", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-upload-race-" });
+      yield* makeMirror(root);
+      const platform = hostPlatform === "darwin" ? "darwin" : "linux";
+      const arch = hostArch === "arm64" ? "arm64" : "x64";
+      const file = `${root}/mirror/v${archiveVersion}/t3-${archiveVersion}-${platform}-${arch}.tar.gz`;
+      const bytes = yield* fs.readFile(file);
+      const checksums = yield* fs.readFileString(`${root}/mirror/v${archiveVersion}/SHA256SUMS`);
+      const script = SshTunnel.buildRemoteUploadScript(
+        { ...ARCHIVE, releaseBaseUrl: "file:///unavailable" },
+        checksums.slice(0, 64),
+      );
+      const results = yield* Effect.all(
+        [runUpload(root, script, bytes), runUpload(root, script, bytes)],
+        { concurrency: "unbounded" },
+      );
+      for (const result of results) {
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.include(result.stdout, `t3 v${archiveVersion}`);
+      }
+      const versions = `${root}/.t3/runtime/versions`;
+      assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+      assert.equal(
+        (yield* fs.readFileString(`${versions}/${archiveVersion}/.install-complete`)).trim(),
+        archiveVersion,
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   it.effect.skipIf(windowsHost)(
     "installs once when several launches race, and reclaims stale locks",

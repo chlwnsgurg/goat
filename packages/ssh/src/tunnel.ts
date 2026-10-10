@@ -6,7 +6,7 @@ import {
   describeReadinessCause,
   waitForHttpReady as waitForHttpReadyShared,
 } from "@t3tools/shared/httpReadiness";
-import { cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
+import { cliArchivePlatformKey, cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -25,6 +25,7 @@ import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
+import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
 import {
   baseSshArgs,
   buildSshHostSpecEffect,
@@ -79,6 +80,7 @@ export interface RemoteT3RunnerOptions {
    */
   readonly archiveVersion?: string | null;
   readonly releaseBaseUrl?: string | null;
+  readonly archiveDirectory?: string | null;
 }
 
 export interface SshEnvironmentManagerOptions {
@@ -846,6 +848,155 @@ export function buildRemotePairingScript(stateKey: string, input?: RemoteT3Runne
   });
 }
 
+export function buildRemoteT3UploadInstallerScript(
+  input: RemoteT3RunnerOptions,
+  sha256: string,
+): string {
+  if (
+    isNodeScriptRunner(input) ||
+    !input.archiveVersion?.trim() ||
+    !/^[0-9a-f]{64}$/iu.test(sha256)
+  ) {
+    throw new SshLaunchError({
+      message: "Upload requires an archive version and SHA256 digest.",
+      stdout: "",
+    });
+  }
+  const script = buildRemoteT3RunnerScript(input);
+  const startAnchor = '  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/SHA256SUMS"';
+  const endAnchor = "  if command -v sha256sum >/dev/null 2>&1; then";
+  const start = script.indexOf(startAnchor);
+  const end = script.indexOf(endAnchor);
+  if (
+    start < 0 ||
+    end <= start ||
+    script.indexOf(startAnchor, start + 1) !== -1 ||
+    script.indexOf(endAnchor, end + 1) !== -1
+  ) {
+    throw new SshLaunchError({ message: "acquisition block no longer matches", stdout: "" });
+  }
+  // Patch a transient copy so preparation never changes the managed runner.
+  return (
+    script.slice(0, start) +
+    '  cp "$T3_SSH_UPLOADED_ARCHIVE" "$T3_STAGING/$T3_ARCHIVE"\n' +
+    `  T3_EXPECTED='${sha256.toLowerCase()}'\n` +
+    script.slice(end)
+  );
+}
+
+export function buildRemoteUploadScript(input: RemoteT3RunnerOptions, sha256: string): string {
+  const installer = buildRemoteT3UploadInstallerScript(input, sha256);
+  return `set -eu
+umask 077
+mkdir -p "$HOME/.t3/runtime/versions"
+upload_dir="$(mktemp -d "$HOME/.t3/runtime/versions/.upload-XXXXXX")"
+trap 'rm -rf "$upload_dir"' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$upload_dir/archive.tar.gz"
+export T3_SSH_UPLOADED_ARCHIVE="$upload_dir/archive.tar.gz"
+sh -c ${shellSingleQuote(installer)} -- --version
+`;
+}
+
+export function buildRemoteRuntimeProbeScript(version: string): string {
+  return `set -eu
+V=${shellSingleQuote(version)}
+case "$(uname -s)" in
+  Darwin) platform=darwin ;;
+  Linux) platform=linux ;;
+  *) printf 'Unsupported SSH runtime OS.\\n' >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) arch=arm64 ;;
+  x86_64|amd64) arch=x64 ;;
+  *) printf 'Unsupported SSH runtime architecture.\\n' >&2; exit 1 ;;
+esac
+runtime="$HOME/.t3/runtime/versions/$V"
+ready=false
+if [ -x "$runtime/t3" ] && [ "$(cat "$runtime/.install-complete" 2>/dev/null)" = "$V" ]; then
+  ready=true
+fi
+printf '{"platform":"%s","arch":"%s","ready":%s}\\n' "$platform" "$arch" "$ready"
+`;
+}
+
+const decodeRemoteRuntimeProbe = Schema.decodeEffect(
+  fromLenientJson(
+    Schema.Struct({
+      platform: Schema.Literals(["darwin", "linux"]),
+      arch: Schema.Literals(["arm64", "x64"]),
+      ready: Schema.Boolean,
+    }),
+  ),
+);
+
+const runtimePreparationError = (cause: unknown) =>
+  cause instanceof SshLaunchError
+    ? cause
+    : new SshLaunchError({
+        message: "Failed to prepare the SSH runtime archive.",
+        stdout: "",
+        cause,
+      });
+
+export const prepareRemoteRuntime = (
+  target: DesktopSshEnvironmentTarget,
+  authOptions: SshAuth.SshAuthOptions,
+  runner?: RemoteT3RunnerOptions,
+) =>
+  Effect.gen(function* () {
+    if (isNodeScriptRunner(runner) || !runner?.archiveDirectory?.trim()) return;
+    const version = runner.archiveVersion?.trim() ?? "";
+    yield* Effect.annotateCurrentSpan({
+      "ssh.target": target.alias,
+      "t3.runtime.version": version,
+    });
+    yield* Effect.try({
+      try: () => buildRemoteT3RunnerScript(runner),
+      catch: runtimePreparationError,
+    });
+    const result = yield* runSshCommand(target, {
+      ...authOptions,
+      remoteCommandArgs: ["sh", "-l", "-s"],
+      stdin: buildRemoteRuntimeProbeScript(version),
+    });
+    const probe = yield* decodeRemoteJsonOutput(result.stdout, decodeRemoteRuntimeProbe).pipe(
+      Effect.mapError(runtimePreparationError),
+    );
+    if (probe.ready) {
+      yield* Effect.annotateCurrentSpan("t3.runtime.source", "ready");
+      return;
+    }
+    const platformKey = cliArchivePlatformKey(probe.platform, probe.arch);
+    const archive =
+      platformKey === undefined
+        ? null
+        : yield* readLocalRuntimeArchive(runner.archiveDirectory.trim(), version, platformKey).pipe(
+            Effect.mapError(runtimePreparationError),
+          );
+    if (archive === null) {
+      yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
+      return;
+    }
+    yield* Effect.annotateCurrentSpan({
+      "t3.runtime.source": "upload",
+      "t3.runtime.upload.bytes": archive.bytes.byteLength,
+      "t3.runtime.upload.sha256": archive.sha256,
+      "t3.runtime.upload.installComplete": false,
+    });
+    const script = yield* Effect.try({
+      try: () => buildRemoteUploadScript(runner, archive.sha256),
+      catch: runtimePreparationError,
+    });
+    yield* runSshCommand(target, {
+      ...authOptions,
+      remoteCommandArgs: ["sh", "-c", shellSingleQuote(script)],
+      stdin: archive.bytes,
+      timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
+    });
+    yield* Effect.annotateCurrentSpan("t3.runtime.upload.installComplete", true);
+  }).pipe(Effect.withSpan("ssh.prepareRemoteRuntime"));
+
 export function buildRemoteStopScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
     T3_STATE_KEY: stateKey,
@@ -874,6 +1025,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshRunnerLogFields(runner),
       stateKey,
     });
+    yield* prepareRemoteRuntime(target, input ?? {}, runner);
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
       stdin: buildRemoteLaunchScript(runner),
@@ -927,7 +1079,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
   {
     readonly credential: string;
   },
-  SshCommandError | SshInvalidTargetError | SshPairingError,
+  SshCommandError | SshInvalidTargetError | SshPairingError | SshLaunchError,
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
 > {
   const stateKey = yield* remoteStateKey(target);
@@ -935,6 +1087,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     ...sshTargetLogFields(target),
     stateKey,
   });
+  yield* prepareRemoteRuntime(target, input ?? {}, runner);
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
     stdin: buildRemotePairingScript(stateKey, runner),
