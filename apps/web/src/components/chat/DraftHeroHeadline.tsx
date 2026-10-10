@@ -55,12 +55,18 @@ interface DraftHeroHeadlineProps {
   readonly draftId: DraftId | null;
   readonly activeProjectRef: ScopedProjectRef | null;
   readonly activeProjectTitle: string | null;
+  /**
+   * The draft is the global agent's. It is not a thread of the no-project
+   * folder, so the picker under the headline offers moving into a project.
+   */
+  readonly globalAgent?: boolean | undefined;
 }
 
 export function DraftHeroHeadline({
   draftId,
   activeProjectRef,
   activeProjectTitle,
+  globalAgent = false,
 }: DraftHeroHeadlineProps) {
   const projects = useProjects();
   const threads = useThreadShells();
@@ -223,7 +229,9 @@ export function DraftHeroHeadline({
       scratchTargetEnvironmentId: project.environmentId,
     };
     const currentDraft = getComposerDraft(draftId);
-    if (!composerDraftHasUserContent(currentDraft)) {
+    // The global agent's draft never moves: a project always gets its own
+    // draft, and anything typed here stays with the global agent.
+    if (globalAgent || !composerDraftHasUserContent(currentDraft)) {
       void openProjectDraft(scopeProjectRef(project.environmentId, project.id));
       return;
     }
@@ -309,7 +317,11 @@ export function DraftHeroHeadline({
           }
         >
           <span className="min-w-0 truncate">
-            {isScratchDraft ? "No project" : (activeProjectDisplayName ?? "Choose a project")}
+            {globalAgent
+              ? "Work in a project"
+              : isScratchDraft
+                ? "No project"
+                : (activeProjectDisplayName ?? "Choose a project")}
           </span>
         </TooltipTrigger>
         {activeProjectDisplayName && !isScratchDraft ? (

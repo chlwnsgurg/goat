@@ -9,7 +9,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, GlobeIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -46,6 +46,12 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   /** Presentation-only title; renames still compare against activeThreadTitle. */
   displayTitle?: string | undefined;
+  /**
+   * The thread is the global agent. Its project is the machine's hidden
+   * no-project folder, so the header shows the agent itself instead of a
+   * project crumb. activeProject still feeds menu actions such as Copy path.
+   */
+  globalAgent?: boolean | undefined;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
@@ -82,6 +88,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
   displayTitle,
+  globalAgent = false,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -91,7 +98,11 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenProjectSettings,
 }: ChatHeaderProps) {
   const shownTitle = displayTitle ?? activeThreadTitle;
+  // A fixed label is not the thread's own title, so editing it inline would
+  // rename something the header never shows.
+  const canRenameInline = displayTitle === undefined;
   const activeProjectName = activeProject?.title;
+  const showProjectCrumb = activeProject !== null && !globalAgent;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
   const breadcrumbContainerRef = useRef<HTMLDivElement>(null);
@@ -165,7 +176,14 @@ export const ChatHeader = memo(function ChatHeader({
       document.fonts.removeEventListener("loadingdone", measure);
       stopObserving();
     };
-  }, [activeProjectName, shownTitle, parentThreadLink, interfaceFont, isRenamingTitle]);
+  }, [
+    activeProjectName,
+    showProjectCrumb,
+    shownTitle,
+    parentThreadLink,
+    interfaceFont,
+    isRenamingTitle,
+  ]);
   const renameCommittedRef = useRef(false);
   const startRename = useCallback(() => {
     if (
@@ -317,7 +335,7 @@ export const ChatHeader = memo(function ChatHeader({
         {/* The project always leads the header: knowing which project a
             thread lives in is priority zero, and the thread title alone
             doesn't answer it. */}
-        {activeProject ? (
+        {showProjectCrumb && activeProject ? (
           <>
             <WorkspaceBreadcrumbItem className="shrink">
               <Tooltip>
@@ -379,6 +397,13 @@ export const ChatHeader = memo(function ChatHeader({
           </>
         ) : null}
         <WorkspaceBreadcrumbItem current className="min-w-10 flex-1">
+          {globalAgent && renamingTitle === null ? (
+            <GlobeIcon
+              aria-hidden
+              data-global-agent-mark=""
+              className="mr-1.5 size-3.5 shrink-0 text-muted-foreground"
+            />
+          ) : null}
           {renamingTitle !== null ? (
             <input
               autoFocus
@@ -411,7 +436,9 @@ export const ChatHeader = memo(function ChatHeader({
                     aria-label={`Thread actions for ${shownTitle}`}
                     aria-haspopup="menu"
                     onClick={openMenuFromTitle}
-                    onDoubleClick={canOperateThread ? handleTitleDoubleClick : undefined}
+                    onDoubleClick={
+                      canOperateThread && canRenameInline ? handleTitleDoubleClick : undefined
+                    }
                     onBlur={cancelPendingTitleMenu}
                     className="group/thread-title inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   />

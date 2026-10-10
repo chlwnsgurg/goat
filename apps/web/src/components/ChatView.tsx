@@ -2113,6 +2113,14 @@ export default function ChatView(props: ChatViewProps) {
   const isServerThread = serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
+  // The global agent lives in a machine's no-project folder, but it is shown as
+  // one agent rather than a thread of that folder.
+  const isGlobalAgentActive =
+    activeThread != null &&
+    isGlobalAgentThread(
+      { environmentId: activeThread.environmentId, id: activeThread.id },
+      globalAgentRef,
+    );
   const serverLatestRun = useMemo(
     () => (serverProjection === null ? null : deriveLatestThreadRun(serverProjection)),
     [serverProjection],
@@ -3030,7 +3038,11 @@ export default function ChatView(props: ChatViewProps) {
     advertisedFileAttachmentBytes === null
       ? null
       : clampFileAttachmentUploadBytes(advertisedFileAttachmentBytes);
-  const envLocked = Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null));
+  // The global agent stays on the machine it was opened on: moving its draft to
+  // another machine would leave the remembered global agent behind.
+  const envLocked =
+    isGlobalAgentActive ||
+    Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null));
 
   const loadBalancingSettings = useClientSettings();
   const automaticEnvironment = Boolean(
@@ -11172,15 +11184,18 @@ export default function ChatView(props: ChatViewProps) {
     threadId: activeThread.id,
     ...(draftId ? { draftId } : {}),
     activeProjectName: activeProject?.title,
-    activeProjectScripts: activeProject ? activeProjectScripts : undefined,
+    // The global agent's folder is an internal no-project folder: editor,
+    // script and Git rows would act on that folder, not on anything the user
+    // chose to work in.
+    activeProjectScripts: activeProject && !isGlobalAgentActive ? activeProjectScripts : undefined,
     preferredScriptId: activeProject
       ? (lastInvokedScriptByProjectId[activeProject.id] ?? null)
       : null,
     keybindings,
     availableEditors,
-    showOpenInPicker,
-    gitCwd,
-    isGitRepo,
+    showOpenInPicker: showOpenInPicker && !isGlobalAgentActive,
+    gitCwd: isGlobalAgentActive ? null : gitCwd,
+    isGitRepo: isGitRepo && !isGlobalAgentActive,
     envLocked,
     availableEnvironments: logicalProjectEnvironments,
     autoEnvironmentLabel,
@@ -11351,20 +11366,14 @@ export default function ChatView(props: ChatViewProps) {
             activeThreadId={activeThread.id}
             isServerThread={isServerThread}
             activeThreadTitle={activeThread.title}
-            displayTitle={
-              isGlobalAgentThread(
-                { environmentId: activeThread.environmentId, id: activeThread.id },
-                globalAgentRef,
-              )
-                ? GLOBAL_AGENT_TITLE
-                : undefined
-            }
+            displayTitle={isGlobalAgentActive ? GLOBAL_AGENT_TITLE : undefined}
+            globalAgent={isGlobalAgentActive}
             activeProject={activeProject ?? null}
             parentThreadLink={parentThreadLink}
             onOpenThread={onOpenRelatedThread}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
             onNewThreadInProject={handleNewThreadInActiveProject}
-            {...(activeDraftLogicalProjectKey
+            {...(activeDraftLogicalProjectKey && !isGlobalAgentActive
               ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
               : {})}
           />
@@ -11590,6 +11599,7 @@ export default function ChatView(props: ChatViewProps) {
                           draftId={draftId}
                           activeProjectRef={activeProjectRef}
                           activeProjectTitle={activeProject?.title ?? null}
+                          globalAgent={isGlobalAgentActive}
                         />
                       </div>
                     </div>
