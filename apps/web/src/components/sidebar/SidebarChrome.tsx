@@ -1,8 +1,11 @@
 import { ArrowLeftIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback } from "react";
-import { Link, useLocation, useNavigate } from "@tanstack/react-router";
+import { Link, useLocation, useNavigate, useParams } from "@tanstack/react-router";
 
+import { useGlobalAgentStore } from "../../globalAgentStore";
+import { isGlobalAgentRoute } from "../../globalAgentRoute";
+import { resolveThreadRouteTarget } from "../../threadRoutes";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { usePullRequestsSupported } from "../../state/environments";
@@ -99,7 +102,7 @@ export function SidebarBrandWidthProbe({
       className="pointer-events-none invisible fixed top-0 left-0 flex w-max border-r border-transparent pr-3"
       ref={observeWidth}
     >
-      <div className="ml-[var(--workspace-titlebar-content-left)] flex">
+      <div className="ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
         <SidebarBrandMark onBackdrop={false} />
       </div>
     </div>
@@ -107,12 +110,20 @@ export function SidebarBrandWidthProbe({
 }
 
 function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
+  const globalAgentRef = useGlobalAgentStore((state) => state.ref);
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const params = useParams({ strict: false });
+  const active = isGlobalAgentRoute(pathname, resolveThreadRouteTarget(params), globalAgentRef);
   return (
     <Link
-      aria-label="Go to threads"
+      aria-label="Open global agent"
+      aria-current={active ? "page" : undefined}
+      data-active={active}
       className={cn(
-        "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
+        "relative z-10 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
         onBackdrop ? "text-white" : "text-foreground",
+        active && !onBackdrop ? "bg-sidebar-row-selected" : null,
+        active && onBackdrop ? "bg-white/15" : null,
       )}
       to="/"
     >

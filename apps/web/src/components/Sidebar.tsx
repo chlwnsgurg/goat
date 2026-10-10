@@ -101,6 +101,8 @@ import {
 import { useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
+import { useGlobalAgentStore } from "../globalAgentStore";
+import { excludeGlobalAgentThreads } from "../globalAgentRoute";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -970,6 +972,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
 }) {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
   const draftsByThreadKey = useComposerDraftStore((store) => store.draftsByThreadKey);
+  const globalDraftId = useGlobalAgentStore((state) => state.ref?.draftId ?? null);
   // The open draft's row is FROZEN at the moment the draft became the route:
   // it stays visible (like a thread row) but never repaints while the user
   // types. A draft that was never navigated away from has no snapshot to
@@ -1003,6 +1006,10 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
       if (session.promotedTo != null) {
         continue;
       }
+      // The global agent opens from the logo, not from the draft rows.
+      if (draftKey === globalDraftId) {
+        continue;
+      }
       if (
         props.scopedProjectKeys !== null &&
         !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
@@ -1030,6 +1037,7 @@ const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
     draftThreadsByThreadKey,
     draftsByThreadKey,
     frozenActive,
+    globalDraftId,
     props.routeDraftId,
     props.scopedProjectKeys,
   ]);
@@ -2689,10 +2697,14 @@ export default function Sidebar() {
   // (every non-promoted session with content); it can overcount by one for
   // an open never-left draft, which only softens the empty state.
   const routeDraftIdForRows = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
+  const globalAgentDraftId = useGlobalAgentStore((state) => state.ref?.draftId ?? null);
   const visibleDraftSessionCount = useComposerDraftStore((store) => {
     let count = 0;
     for (const [draftKey, session] of Object.entries(store.draftThreadsByThreadKey)) {
       if (session.promotedTo != null) {
+        continue;
+      }
+      if (draftKey === globalAgentDraftId) {
         continue;
       }
       if (!composerDraftHasUserContent(store.draftsByThreadKey[draftKey])) {
@@ -2763,6 +2775,7 @@ export default function Sidebar() {
         override holds until all of them appear in canonical state. */
     readonly assignedKeys: ReadonlyMap<string, string>;
   } | null>(null);
+  const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const {
     pinnedThreads,
     draggableThreadKeys,
@@ -2781,7 +2794,10 @@ export default function Sidebar() {
     const preciseNow = new Date().toISOString();
     // Subagent child threads live in the parent's Agents surface, not the
     // sidebar roster (v2 models them as real threads with lineage).
-    const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys);
+    const visible = excludeGlobalAgentThreads(
+      filterSidebarV2VisibleThreads(threads, scopedProjectKeys),
+      globalAgentRef,
+    );
     inboxReturns.observe(workingShelfEnabled ? threads : null);
     const pinned: EnvironmentThreadShell[] = [];
     const active: EnvironmentThreadShell[] = [];
@@ -2882,6 +2898,7 @@ export default function Sidebar() {
       snoozeNow: preciseNow,
     };
   }, [
+    globalAgentRef,
     nowMinute,
     optimisticDrop,
     scopedProjectKeys,

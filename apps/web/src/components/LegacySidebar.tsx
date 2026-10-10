@@ -122,6 +122,8 @@ import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { ensureLocalApi, readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useGlobalAgentStore } from "../globalAgentStore";
+import { excludeGlobalAgentThreads } from "../globalAgentRoute";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
 
@@ -1281,6 +1283,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   });
   const openPrLink = useOpenPrLink();
   const sidebarThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
@@ -1375,7 +1378,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       });
     };
     const visibleProjectThreads = sortThreads(
-      projectThreads.filter((thread) => thread.archivedAt === null),
+      excludeGlobalAgentThreads(
+        projectThreads.filter((thread) => thread.archivedAt === null),
+        globalAgentRef,
+      ),
       threadSortOrder,
     );
     const projectStatus = resolveProjectStatusIndicator(
@@ -1388,7 +1394,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       projectStatus,
       visibleProjectThreads,
     };
-  }, [projectThreads, threadLastVisitedAts, threadSortOrder]);
+  }, [globalAgentRef, projectThreads, threadLastVisitedAts, threadSortOrder]);
   const pinnedCollapsedThread = useMemo(() => {
     const activeThreadKey = activeRouteThreadKey ?? undefined;
     if (!activeThreadKey || projectExpanded) {
@@ -3228,7 +3234,13 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
 export default function LegacySidebar() {
   const projects = useProjects();
-  const sidebarThreads = useThreadShells();
+  const globalAgentRef = useGlobalAgentStore((state) => state.ref);
+  const allThreadShells = useThreadShells();
+  // The global agent opens from the logo; keep it out of rows, shortcuts and keyboard order.
+  const sidebarThreads = useMemo(
+    () => excludeGlobalAgentThreads(allThreadShells, globalAgentRef),
+    [allThreadShells, globalAgentRef],
+  );
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);

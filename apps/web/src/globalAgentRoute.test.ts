@@ -1,0 +1,71 @@
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { describe, expect, it } from "vite-plus/test";
+
+import type { DraftId } from "./composerDraftStore";
+import {
+  excludeGlobalAgentThreads,
+  isGlobalAgentRoute,
+  isGlobalAgentThread,
+} from "./globalAgentRoute";
+
+const ENV = "env-1" as EnvironmentId;
+const OTHER_ENV = "env-2" as EnvironmentId;
+const REF = { environmentId: ENV, threadId: "thread-1" as ThreadId, draftId: "draft-1" as DraftId };
+const serverTarget = (environmentId: EnvironmentId, threadId: string) => ({
+  kind: "server" as const,
+  threadRef: scopeThreadRef(environmentId, threadId as ThreadId),
+});
+const draftTarget = (draftId: string) => ({ kind: "draft" as const, draftId: draftId as DraftId });
+
+describe("isGlobalAgentThread", () => {
+  it("matches the saved thread", () => {
+    expect(isGlobalAgentThread({ environmentId: ENV, id: "thread-1" }, REF)).toBe(true);
+  });
+  it("ignores the same id on another machine", () => {
+    expect(isGlobalAgentThread({ environmentId: OTHER_ENV, id: "thread-1" }, REF)).toBe(false);
+  });
+  it("matches nothing without a saved ref", () => {
+    expect(isGlobalAgentThread({ environmentId: ENV, id: "thread-1" }, null)).toBe(false);
+  });
+});
+
+describe("excludeGlobalAgentThreads", () => {
+  const threads = [
+    { environmentId: ENV, id: "thread-1" },
+    { environmentId: ENV, id: "thread-2" },
+    { environmentId: OTHER_ENV, id: "thread-1" },
+  ];
+  it("removes only the global agent", () => {
+    expect(excludeGlobalAgentThreads(threads, REF)).toEqual([threads[1], threads[2]]);
+  });
+  it("keeps every thread without a saved ref", () => {
+    expect(excludeGlobalAgentThreads(threads, null)).toEqual(threads);
+  });
+});
+
+describe("isGlobalAgentRoute", () => {
+  it('is never active on "/"', () => {
+    expect(isGlobalAgentRoute("/", null, REF)).toBe(false);
+  });
+  it("is active on the global draft", () => {
+    expect(isGlobalAgentRoute("/draft/draft-1", draftTarget("draft-1"), REF)).toBe(true);
+  });
+  it("is inactive on another draft", () => {
+    expect(isGlobalAgentRoute("/draft/draft-2", draftTarget("draft-2"), REF)).toBe(false);
+  });
+  it("is active on the global thread", () => {
+    expect(isGlobalAgentRoute("/env-1/thread-1", serverTarget(ENV, "thread-1"), REF)).toBe(true);
+  });
+  it("is inactive on another thread", () => {
+    expect(isGlobalAgentRoute("/env-1/thread-2", serverTarget(ENV, "thread-2"), REF)).toBe(false);
+  });
+  it("is inactive on the same thread id on another machine", () => {
+    expect(isGlobalAgentRoute("/env-2/thread-1", serverTarget(OTHER_ENV, "thread-1"), REF)).toBe(
+      false,
+    );
+  });
+  it("is inactive without a saved ref", () => {
+    expect(isGlobalAgentRoute("/env-1/thread-1", serverTarget(ENV, "thread-1"), null)).toBe(false);
+  });
+});

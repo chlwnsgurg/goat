@@ -361,6 +361,8 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
+import { useGlobalAgentStore } from "../globalAgentStore";
+import { GLOBAL_AGENT_TITLE, isGlobalAgentThread } from "../globalAgentRoute";
 import {
   isSameSidebarThreadRef,
   useSidebarPendingFileDropStore,
@@ -2110,6 +2112,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const isServerThread = serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
+  const globalAgentRef = useGlobalAgentStore((state) => state.ref);
   const serverLatestRun = useMemo(
     () => (serverProjection === null ? null : deriveLatestThreadRun(serverProjection)),
     [serverProjection],
@@ -11348,6 +11351,14 @@ export default function ChatView(props: ChatViewProps) {
             activeThreadId={activeThread.id}
             isServerThread={isServerThread}
             activeThreadTitle={activeThread.title}
+            displayTitle={
+              isGlobalAgentThread(
+                { environmentId: activeThread.environmentId, id: activeThread.id },
+                globalAgentRef,
+              )
+                ? GLOBAL_AGENT_TITLE
+                : undefined
+            }
             activeProject={activeProject ?? null}
             parentThreadLink={parentThreadLink}
             onOpenThread={onOpenRelatedThread}
