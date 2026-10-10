@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - builds real git repositories and hook layouts on disk.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -42,10 +43,11 @@ function executable(name: string) {
 
 const gitExecutable = executable("git");
 const yamlStore = NodePath.join(sourceRoot, "node_modules/.pnpm");
-const yamlName = NodeFS.readdirSync(yamlStore)
+const yamlPackageName = NodeFS.readdirSync(yamlStore)
   .filter((name) => name.startsWith("yaml@2."))
   .sort()[0];
-if (!yamlName) throw new Error("tests require repository yaml@2.*; run vp i");
+if (!yamlPackageName) throw new Error("tests require repository yaml@2.*; run vp i");
+const yamlName = yamlPackageName;
 const yamlSource = NodePath.join(yamlStore, yamlName, "node_modules/yaml");
 
 function workflow(job: unknown = baseJob, on: unknown = { push: null }) {
