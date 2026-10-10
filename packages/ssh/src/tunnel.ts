@@ -507,22 +507,22 @@ if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
 fi
 T3_ARCHIVE_VERSION=@@T3_ARCHIVE_VERSION@@
 if [ -z "$T3_ARCHIVE_VERSION" ]; then
-  printf 'No t3 release version was provided for the remote runtime.\\n' >&2
+  printf 'No GOAT release version was provided for the remote runtime.\\n' >&2
   exit 1
 fi
 # Self-contained release archive: no Node, npm, or compiler on the remote.
-# Unpacked into the pinned-runtime layout so \`t3 service install\` reuses it.
+# Unpacked into the pinned-runtime layout so \`goat service install\` reuses it.
 T3_RELEASE_BASE_URL=@@T3_RELEASE_BASE_URL@@
-T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"
+T3_RUNTIME_DIR="$HOME/.goat/runtime/goat/versions/$T3_ARCHIVE_VERSION"
 t3_runtime_ready() {
-  [ -x "$T3_RUNTIME_DIR/t3" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
+  [ -x "$T3_RUNTIME_DIR/goat" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
 }
 if ! t3_runtime_ready; then
-  mkdir -p "$HOME/.t3/runtime/versions"
+  mkdir -p "$HOME/.goat/runtime/goat/versions"
   # Concurrent launches (two clients, a retry racing a slow first run) must
   # not both install: mkdir is the atomic lock and the ready check repeats
   # under it.
-  T3_LOCK="$HOME/.t3/runtime/versions/.$T3_ARCHIVE_VERSION.install.lock"
+  T3_LOCK="$HOME/.goat/runtime/goat/versions/.$T3_ARCHIVE_VERSION.install.lock"
   # mkdir is the only portable atomic exclusive create (mv would silently
   # nest a candidate inside an existing lock). The owner publishes its pid
   # right after, so a lock with a live owner is never reclaimed however
@@ -548,7 +548,7 @@ if ! t3_runtime_ready; then
       fi
     fi
     if [ "$T3_LOCK_WAITED" -ge @@T3_ARCHIVE_LOCK_WAIT_SECONDS@@ ]; then
-      printf 'Another t3 %s installation has held %s for too long.\\n' "$T3_ARCHIVE_VERSION" "$T3_LOCK" >&2
+      printf 'Another GOAT %s installation has held %s for too long.\\n' "$T3_ARCHIVE_VERSION" "$T3_LOCK" >&2
       exit 1
     fi
     sleep 1
@@ -561,15 +561,15 @@ if ! t3_runtime_ready; then
   case "$(uname -s)" in
     Darwin) T3_PLATFORM="darwin" ;;
     Linux) T3_PLATFORM="linux" ;;
-    *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -s)" >&2; exit 1 ;;
+    *) printf 'Remote host %s has no GOAT release archive.\\n' "$(uname -s)" >&2; exit 1 ;;
   esac
   case "$(uname -m)" in
     arm64 | aarch64) T3_ARCH="arm64" ;;
     x86_64 | amd64) T3_ARCH="x64" ;;
-    *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
+    *) printf 'Remote host %s has no GOAT release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
   esac
-  T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
-  T3_STAGING="$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")"
+  T3_ARCHIVE="goat-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
+  T3_STAGING="$(mktemp -d "$HOME/.goat/runtime/goat/versions/.staging-XXXXXX")"
   trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
   t3_fetch() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 30 --max-time "$3" "$1" -o "$2"
@@ -592,8 +592,8 @@ if ! t3_runtime_ready; then
   rm -f "$T3_STAGING/$T3_ARCHIVE" "$T3_STAGING/SHA256SUMS"
   # Prove the binary runs here (libc, arch) before marking it ready, or every
   # later launch would exec a broken install instead of retrying.
-  if ! "$T3_STAGING/t3" --version >/dev/null 2>&1; then
-    printf 'The t3 %s executable does not run on this host.\\n' "$T3_ARCHIVE_VERSION" >&2; exit 1
+  if ! "$T3_STAGING/goat" --version >/dev/null 2>&1; then
+    printf 'The goat %s executable does not run on this host.\\n' "$T3_ARCHIVE_VERSION" >&2; exit 1
   fi
   printf '%s\\n' "$T3_ARCHIVE_VERSION" > "$T3_STAGING/.install-complete"
   rm -rf "$T3_RUNTIME_DIR"
@@ -603,14 +603,14 @@ if [ -n "\${T3_LOCK:-}" ]; then
   rm -rf "$T3_LOCK"
   trap - EXIT
 fi
-exec "$T3_RUNTIME_DIR/t3" "$@"
+exec "$T3_RUNTIME_DIR/goat" "$@"
 `;
 
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
-STATE_DIR="$HOME/.t3/ssh-launch/$STATE_KEY"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+STATE_DIR="$HOME/.goat/ssh-launch/$STATE_KEY"
+DEFAULT_SERVER_HOME="$HOME/.goat"
 DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
 PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
@@ -785,8 +785,8 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 `;
 
 const REMOTE_PAIRING_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
+DEFAULT_SERVER_HOME="$HOME/.goat"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
 mkdir -p "$STATE_DIR"
 cat >"$RUNNER_FILE" <<'SH'
@@ -837,8 +837,8 @@ const KEEP_BUSY_SERVER_GUARD = `echo "The T3 server on this host did not answer 
 // admits from outside a thread. `--runtime-mode-ceiling` is newer than some
 // remotes, so an older CLI is retried without it and reports the default.
 const REMOTE_MCP_SESSION_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
+DEFAULT_SERVER_HOME="$HOME/.goat"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
 mkdir -p "$STATE_DIR"
 if [ "@@T3_KEEP_EXISTING_RUNNER@@" != "1" ] || [ ! -f "$RUNNER_FILE" ]; then
@@ -858,7 +858,7 @@ fi
 `;
 
 const REMOTE_STOP_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
 MANAGED_FILE="$STATE_DIR/managed"
@@ -881,7 +881,7 @@ printf '{"stopped":true}\\n'
 `;
 
 const REMOTE_LOG_TAIL_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
 LOG_FILE="$STATE_DIR/server.log"
 if [ -f "$LOG_FILE" ]; then
   tail -n 80 "$LOG_FILE" 2>/dev/null || true
@@ -893,7 +893,7 @@ export class SshInvalidArchiveVersionError extends Schema.TaggedError<SshInvalid
   { archiveVersion: Schema.String },
 ) {
   override get message(): string {
-    return `'${this.archiveVersion}' is not an exact t3 version and cannot name a runtime directory.`;
+    return `'${this.archiveVersion}' is not an exact GOAT version and cannot name a runtime directory.`;
   }
 }
 
@@ -908,7 +908,7 @@ export class SshMissingRunnerError extends Schema.TaggedError<SshMissingRunnerEr
   {},
 ) {
   override get message(): string {
-    return "A remote t3 runner needs an archive version or a node script path.";
+    return "A remote goat runner needs an archive version or a node script path.";
   }
 }
 
@@ -1046,8 +1046,8 @@ export function buildRemoteUploadScript(input: RemoteT3RunnerOptions, sha256: st
   const installer = buildRemoteT3UploadInstallerScript(input, sha256);
   return `set -eu
 umask 077
-mkdir -p "$HOME/.t3/runtime/versions"
-upload_dir="$(mktemp -d "$HOME/.t3/runtime/versions/.upload-XXXXXX")"
+mkdir -p "$HOME/.goat/runtime/goat/versions"
+upload_dir="$(mktemp -d "$HOME/.goat/runtime/goat/versions/.upload-XXXXXX")"
 trap 'rm -rf "$upload_dir"' EXIT
 trap 'exit 1' HUP INT TERM
 cat > "$upload_dir/archive.tar.gz"
@@ -1065,7 +1065,7 @@ export function buildRemoteRuntimeProbeScript(
 V=${shellSingleQuote(version)}
 state_key=${shellSingleQuote(stateKey ?? "")}
 retained_fields=
-runner="$HOME/.t3/ssh-launch/$state_key/run-t3.sh"
+runner="$HOME/.goat/ssh-launch/$state_key/run-t3.sh"
 if [ "${keepExistingRunner ? "1" : "0"}" = 1 ] && [ -n "$state_key" ] && [ -f "$runner" ]; then
   node_script_path="$(sed -n "s/^T3_NODE_SCRIPT_PATH='\\(.*\\)'$/\\1/p" "$runner")"
   retained_version=
@@ -1078,8 +1078,8 @@ if [ "${keepExistingRunner ? "1" : "0"}" = 1 ] && [ -n "$state_key" ] && [ -f "$
     if ! printf '%s\\n' "$retained_version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$'; then
       printf 'The retained runner has an invalid exact archive version.\\n' >&2; exit 1
     fi
-    retained_runtime="$HOME/.t3/runtime/versions/$retained_version"
-    if [ ! -x "$retained_runtime/t3" ] || [ "$(cat "$retained_runtime/.install-complete" 2>/dev/null)" != "$retained_version" ]; then
+    retained_runtime="$HOME/.goat/runtime/goat/versions/$retained_version"
+    if [ ! -x "$retained_runtime/goat" ] || [ "$(cat "$retained_runtime/.install-complete" 2>/dev/null)" != "$retained_version" ]; then
       retained=missing
     fi
   fi
@@ -1095,9 +1095,9 @@ case "$(uname -m)" in
   x86_64|amd64) arch=x64 ;;
   *) printf 'Unsupported SSH runtime architecture.\\n' >&2; exit 1 ;;
 esac
-runtime="$HOME/.t3/runtime/versions/$V"
+runtime="$HOME/.goat/runtime/goat/versions/$V"
 ready=false
-if [ -x "$runtime/t3" ] && [ "$(cat "$runtime/.install-complete" 2>/dev/null)" = "$V" ]; then
+if [ -x "$runtime/goat" ] && [ "$(cat "$runtime/.install-complete" 2>/dev/null)" = "$V" ]; then
   ready=true
 fi
 printf '{"platform":"%s","arch":"%s","ready":%s%s}\\n' "$platform" "$arch" "$ready" "$retained_fields"
@@ -1161,7 +1161,7 @@ export const prepareRemoteRuntime = (
     }
     if (probe.retained === "missing") {
       return yield* new SshLaunchError({
-        message: `The retained runner ~/.t3/ssh-launch/${stateKey}/run-t3.sh selects t3 ${probe.retainedVersion}, which is not installed on ${target.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
+        message: `The retained runner ~/.goat/ssh-launch/${stateKey}/run-t3.sh selects goat ${probe.retainedVersion}, which is not installed on ${target.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
         stdout: "",
       });
     }

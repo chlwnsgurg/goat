@@ -624,10 +624,10 @@ const layerManager = Layer.unwrap(
     const config = yield* ServerConfig.ServerConfig;
     const runner = yield* resolveSshCliRunner(config.baseDir);
     return SshTunnel.SshEnvironmentManager.layer({
-      // Reuse whatever runner a desktop already left for the host, so this
-      // never restarts a remote server another client is using. A host with
-      // none gets this server's own release, uploaded from a local archive
-      // when the build is unpublished, as the desktop does.
+      // Share only the GOAT runner under the tunnel's ~/.goat/ssh-launch.
+      // Keep run-t3.sh there so a second GOAT client cannot restart a managed
+      // server. Do not import/reuse an upstream ~/.t3 runner or server home.
+      // Local archiveDirectory still belongs to this local config.baseDir.
       resolveCliRunner: Effect.succeed(runner),
       leaveRemoteServerRunning: true,
     });

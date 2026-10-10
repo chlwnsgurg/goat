@@ -22,7 +22,7 @@ export type CliRunner = "npx" | "pnpm dlx" | "bunx";
  *   bunx     ~/.bun/install/cache/... or $TMPDIR/bunx-<uid>-<spec>/...
  *
  * Global installs and repo checkouts match none of these and return null.
- * Detection is best-effort; callers must fail closed to a plain `t3` command.
+ * Detection is best-effort; callers must fail closed to a plain `goat` command.
  */
 function detectCliRunner(entryPath: string): CliRunner | null {
   const path = entryPath.replaceAll("\\", "/");
@@ -45,7 +45,9 @@ function detectCliRunner(entryPath: string): CliRunner | null {
 const InstallManifest = Schema.Struct({
   name: Schema.String,
   version: Schema.String,
-  bin: Schema.optionalKey(Schema.Struct({ t3: Schema.String })),
+  bin: Schema.optionalKey(
+    Schema.Struct({ goat: Schema.optionalKey(Schema.String), t3: Schema.String }),
+  ),
   optionalDependencies: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
 });
 const decodeInstallManifest = Schema.decodeUnknownEffect(Schema.fromJsonString(InstallManifest));
@@ -60,7 +62,7 @@ export const resolveServerInstallation = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   const entry = yield* fs.realPath(executable ? executablePath : (args[1] ?? ""));
   const match =
-    /^(.*)\/lib\/node_modules\/t3\/(?:dist\/bin\.mjs|bin\/t3\.js|node_modules\/@t3code\/t3-[^/]+\/t3)$/.exec(
+    /^(.*)\/lib\/node_modules\/t3\/(?:dist\/bin\.mjs|bin\/t3\.js|node_modules\/@t3code\/t3-[^/]+\/(?:goat|t3))$/.exec(
       entry,
     );
   if (!match) {
@@ -85,15 +87,17 @@ export const resolveServerInstallation = Effect.gen(function* () {
     .readFileString(path.join(packageRoot, "package.json"))
     .pipe(Effect.flatMap(decodeInstallManifest));
   if (manifest.name !== "t3" || !manifest.bin) return null;
-  const bin = yield* fs.realPath(path.join(packageRoot, manifest.bin.t3));
-  const globalBin = yield* fs.realPath(path.join(prefix, "bin/t3"));
+  const binName = manifest.bin.goat === undefined ? "t3" : "goat";
+  const binScript = manifest.bin.goat ?? manifest.bin.t3;
+  const bin = yield* fs.realPath(path.join(packageRoot, binScript));
+  const globalBin = yield* fs.realPath(path.join(prefix, "bin", binName));
   if (globalBin !== bin) return null;
   if (executable) {
     const nativeManifest = yield* fs
       .readFileString(path.join(path.dirname(entry), "package.json"))
       .pipe(Effect.flatMap(decodeInstallManifest));
     if (
-      manifest.bin.t3 !== "./bin/t3.js" ||
+      binScript !== "./bin/t3.js" ||
       manifest.optionalDependencies?.[nativeManifest.name] !== nativeManifest.version ||
       nativeManifest.version !== manifest.version
     )
@@ -116,9 +120,9 @@ function suggestedPackageSpec(version: string): string {
 }
 
 /**
- * Render a `t3 <subcommand>` suggestion that matches how this process was
+ * Render a `goat <subcommand>` suggestion that matches how this process was
  * launched, so copy/pasting it actually works: `npx t3 connect` suggests
- * `npx t3 serve`, a global install suggests `t3 serve`, and a nightly build
+ * `npx t3 serve`, a global install suggests `goat serve`, and a nightly build
  * keeps the `@nightly` tag.
  */
 export function formatCliCommand(input: {
@@ -128,7 +132,7 @@ export function formatCliCommand(input: {
 }): string {
   const runner = detectCliRunner(input.entryPath);
   if (runner === null) {
-    return `t3 ${input.subcommand}`;
+    return `goat ${input.subcommand}`;
   }
   return `${runner} ${suggestedPackageSpec(input.version)} ${input.subcommand}`;
 }
@@ -148,10 +152,10 @@ const shellWord = (value: string) =>
   /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
 
 /**
- * The launcher a person can type to run this install when `t3` is not on
- * PATH: the desktop app's `t3` shim, which the app and the shim itself name in
+ * The launcher a person can type to run this install when `goat` is not on
+ * PATH: the desktop app's `goat` shim, which the app and the shim itself name in
  * `T3CODE_CLI_PATH`, or a standalone binary's own path. Script installs (a
- * repo checkout) have no single launcher and keep plain `t3`.
+ * repo checkout) have no single launcher and keep plain `goat`.
  */
 const resolveInstallLauncher = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -165,15 +169,15 @@ const resolveInstallLauncher = Effect.gen(function* () {
 });
 
 /**
- * `t3 <subcommand>` for a person to run on this host: `t3` when it is on PATH,
+ * `goat <subcommand>` for a person to run on this host: `goat` when it is on PATH,
  * the package runner this process came from, or else the absolute path of the
  * launcher for this install, such as the one the desktop app installs.
  */
 const resolveHostCliCommand = (subcommand: string) =>
   Effect.gen(function* () {
     const command = yield* resolveCliCommand(subcommand);
-    if (command !== `t3 ${subcommand}`) return { command, launcher: false };
-    if (yield* isCommandAvailable("t3")) return { command, launcher: false };
+    if (command !== `goat ${subcommand}`) return { command, launcher: false };
+    if (yield* isCommandAvailable("goat")) return { command, launcher: false };
     const launcher = yield* resolveInstallLauncher;
     return Option.isSome(launcher)
       ? { command: `${shellWord(launcher.value)} ${subcommand}`, launcher: true }
@@ -181,9 +185,9 @@ const resolveHostCliCommand = (subcommand: string) =>
   });
 
 /**
- * `t3 <subcommand>` as root, for setup a person runs once on the host. `sudo`
+ * `goat <subcommand>` as root, for setup a person runs once on the host. `sudo`
  * resets PATH on most distributions, which drops a user-installed Node (nvm,
- * fnm, a tarball) and with it `npx` or a global `t3`, so the command carries
+ * fnm, a tarball) and with it `npx` or a global `goat`, so the command carries
  * PATH through unless Node is on root's PATH too. An absolute launcher needs
  * neither.
  */

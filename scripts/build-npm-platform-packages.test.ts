@@ -52,7 +52,7 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
   const archivesDir = path.join(root, "archives");
   yield* fs.makeDirectory(archivesDir);
   for (const key of KEYS) {
-    const stem = `t3-${VERSION}-${key}`;
+    const stem = `goat-${VERSION}-${key}`;
     const stage = path.join(root, "stage", key);
     const contentDir = path.join(stage, stem);
     for (const dir of [
@@ -73,10 +73,10 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
     );
     yield* fs.writeFileString(path.join(contentDir, "client/index.html"), "<html></html>\n");
     yield* fs.writeFileString(
-      path.join(contentDir, "t3"),
+      path.join(contentDir, "goat"),
       `#!/bin/sh\necho "stub ${key} $*"\nexit 7\n`,
     );
-    yield* fs.chmod(path.join(contentDir, "t3"), 0o755);
+    yield* fs.chmod(path.join(contentDir, "goat"), 0o755);
     const exit = yield* run("tar", ["-czf", path.join(archivesDir, `${stem}.tar.gz`), stem], {
       cwd: stage,
     });
@@ -132,8 +132,8 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
       assert.deepStrictEqual(linuxManifest.os, ["linux"]);
       assert.deepStrictEqual(linuxManifest.cpu, ["x64"]);
       assert.deepStrictEqual(linuxManifest.files, [
-        "t3",
-        "t3.exe",
+        "goat",
+        "goat.exe",
         "client",
         "resource-monitor",
         "node_modules",
@@ -155,7 +155,7 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
         "# @t3code/t3-linux-x64",
       );
       assert.isTrue(yield* fs.exists(path.join(linuxDir, "node_modules/node-pty")));
-      assert.equal(Number((yield* fs.stat(path.join(linuxDir, "t3"))).mode) & 0o111, 0o111);
+      assert.equal(Number((yield* fs.stat(path.join(linuxDir, "goat"))).mode) & 0o111, 0o111);
 
       const darwinManifest = yield* decodeManifest(
         yield* fs.readFileString(
@@ -171,7 +171,7 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
       );
       assert.equal(launcherManifest.name, "t3");
       assert.equal(launcherManifest.version, VERSION);
-      assert.deepStrictEqual(launcherManifest.bin, { t3: "./bin/t3.js" });
+      assert.deepStrictEqual(launcherManifest.bin, { goat: "./bin/t3.js", t3: "./bin/t3.js" });
       assert.deepStrictEqual(launcherManifest.files, ["bin", "dist"]);
       assert.deepStrictEqual(launcherManifest.optionalDependencies, {
         "@t3code/t3-darwin-arm64": VERSION,
@@ -197,7 +197,7 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
       assert.isTrue(lines.some((line) => line.endsWith(" package/node_modules/node-pty/")));
       assert.isTrue(lines.some((line) => line.endsWith(" package/package.json")));
       assert.isTrue(
-        lines.some((line) => /^-rwxr-xr-x .* package\/t3$/.test(line)),
+        lines.some((line) => /^-rwxr-xr-x .* package\/goat$/.test(line)),
         listing.stdout,
       );
 

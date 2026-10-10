@@ -14,9 +14,9 @@ import {
 describe("cliRelease", () => {
   it("names archives by version and platform, zip only on Windows", () => {
     expect(cliArchiveFileName("1.2.3-preview.20260911.4", "linux-x64")).toBe(
-      "t3-1.2.3-preview.20260911.4-linux-x64.tar.gz",
+      "goat-1.2.3-preview.20260911.4-linux-x64.tar.gz",
     );
-    expect(cliArchiveFileName("1.2.3", "win32-x64")).toBe("t3-1.2.3-win32-x64.zip");
+    expect(cliArchiveFileName("1.2.3", "win32-x64")).toBe("goat-1.2.3-win32-x64.zip");
   });
 
   it("only maps platforms and architectures that have a release archive", () => {
@@ -35,22 +35,22 @@ describe("cliRelease", () => {
     expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
       "https://github.com/goat-si/goat/releases/download/v1.2.3",
     );
-    expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
-      "https://mirror.example/t3/v1.2.3",
+    expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/goat/")).toBe(
+      "https://mirror.example/goat/v1.2.3",
     );
   });
 
   it("parses sha256sum output including binary-mode markers", () => {
     const checksums = parseChecksums(
       [
-        `${"a".repeat(64)}  t3-1.2.3-linux-x64.tar.gz`,
-        `${"B".repeat(64)} *t3-1.2.3-win32-x64.zip`,
+        `${"a".repeat(64)}  goat-1.2.3-linux-x64.tar.gz`,
+        `${"B".repeat(64)} *goat-1.2.3-win32-x64.zip`,
         "not a checksum line",
         "",
       ].join("\n"),
     );
-    expect(checksums.get("t3-1.2.3-linux-x64.tar.gz")).toBe("a".repeat(64));
-    expect(checksums.get("t3-1.2.3-win32-x64.zip")).toBe("b".repeat(64));
+    expect(checksums.get("goat-1.2.3-linux-x64.tar.gz")).toBe("a".repeat(64));
+    expect(checksums.get("goat-1.2.3-win32-x64.zip")).toBe("b".repeat(64));
     expect(checksums.size).toBe(2);
   });
 

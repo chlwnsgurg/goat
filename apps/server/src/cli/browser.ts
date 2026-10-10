@@ -1,5 +1,5 @@
 /**
- * `t3 browser setup` - prepares a Linux host for T3's headless browser, which
+ * `goat browser setup` - prepares a Linux host for T3's headless browser, which
  * server browser tabs and HTML render previews share. It is the fix every
  * browser host error names, so it does the whole job in one run:
  *

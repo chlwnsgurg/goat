@@ -118,13 +118,13 @@ const makeUploadFixture = Effect.fn("test.makeUploadFixture")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-preparation-" });
-  const stem = `t3-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
+  const stem = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
   const stage = `${root}/stage/${stem}`;
   const directory = `${root}/mirror/v${ARCHIVE.archiveVersion}`;
   yield* fs.makeDirectory(stage, { recursive: true });
   yield* fs.makeDirectory(directory, { recursive: true });
-  yield* fs.writeFileString(`${stage}/t3`, `#!/bin/sh\necho t3 v${ARCHIVE.archiveVersion}\n`);
-  yield* fs.chmod(`${stage}/t3`, 0o700);
+  yield* fs.writeFileString(`${stage}/goat`, `#!/bin/sh\necho t3 v${ARCHIVE.archiveVersion}\n`);
+  yield* fs.chmod(`${stage}/goat`, 0o700);
   const child = yield* spawner.spawn(
     ChildProcess.make("tar", ["-czf", `${directory}/${stem}.tar.gz`, "-C", `${root}/stage`, stem]),
   );
@@ -230,10 +230,13 @@ describe("ssh tunnel scripts", () => {
       script,
       "T3_RELEASE_BASE_URL='https://github.com/goat-si/goat/releases/download'",
     );
-    assert.include(script, 'T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"');
-    assert.include(script, 'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
+    assert.include(
+      script,
+      'T3_RUNTIME_DIR="$HOME/.goat/runtime/goat/versions/$T3_ARCHIVE_VERSION"',
+    );
+    assert.include(script, 'T3_ARCHIVE="goat-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
     assert.include(script, "SHA256SUMS");
-    assert.include(script, 'exec "$T3_RUNTIME_DIR/t3" "$@"');
+    assert.include(script, 'exec "$T3_RUNTIME_DIR/goat" "$@"');
     assert.notInclude(script, "npx");
     assert.notInclude(script, "npm exec");
     assert.notInclude(script, "t3@latest");
@@ -242,7 +245,7 @@ describe("ssh tunnel scripts", () => {
     // the completion marker after acquiring it.
     assert.include(
       script,
-      'T3_LOCK="$HOME/.t3/runtime/versions/.$T3_ARCHIVE_VERSION.install.lock"',
+      'T3_LOCK="$HOME/.goat/runtime/goat/versions/.$T3_ARCHIVE_VERSION.install.lock"',
     );
     // mkdir is the exclusive create; the pid follows atomically. A dead owner
     // is reclaimed at once, a never-published owner after a short grace.
@@ -257,7 +260,7 @@ describe("ssh tunnel scripts", () => {
     assert.notInclude(script, "-mmin");
     assert.equal(script.split("if ! t3_runtime_ready; then").length - 1, 2);
     assert.isBelow(
-      script.indexOf('"$T3_STAGING/t3" --version'),
+      script.indexOf('"$T3_STAGING/goat" --version'),
       script.indexOf('> "$T3_STAGING/.install-complete"'),
     );
     // Node discovery is defined for the dev path but only ever invoked inside
@@ -274,10 +277,10 @@ describe("ssh tunnel scripts", () => {
 
     const launch = SshTunnel.buildRemoteLaunchScript({
       ...ARCHIVE,
-      releaseBaseUrl: "https://mirror.example/t3/",
+      releaseBaseUrl: "https://mirror.example/goat/",
     });
     assert.include(launch, "T3_ARCHIVE_MODE=1");
-    assert.include(launch, "T3_RELEASE_BASE_URL='https://mirror.example/t3'");
+    assert.include(launch, "T3_RELEASE_BASE_URL='https://mirror.example/goat'");
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper pick-port "$PORT_FILE"');
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT"');
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper runtime-port "$DEFAULT_RUNTIME_FILE"');
@@ -831,13 +834,21 @@ describe("runtime preparation", () => {
     { entry: "launch", mode: "invalid" },
     { entry: "mcp", mode: "invalid" },
     { entry: "pairing", mode: "ready" },
+    { entry: "launch", mode: "upstream-only" },
+    { entry: "mcp", mode: "upstream-only" },
+    { entry: "launch", mode: "marker-only" },
+    { entry: "mcp", mode: "marker-only" },
+    { entry: "launch", mode: "non-executable" },
+    { entry: "mcp", mode: "non-executable" },
+    { entry: "launch", mode: "wrong-marker" },
+    { entry: "mcp", mode: "wrong-marker" },
   ] as const)("$entry preparation with retained runtime=$mode", ({ entry, mode }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-retained-preparation-" });
       const stateKey = yield* remoteStateKey(uploadTarget);
-      const state = `${root}/.t3/ssh-launch/${stateKey}`;
+      const state = `${root}/.goat/ssh-launch/${stateKey}`;
       const retainedVersion = mode === "invalid" ? "01.2.3" : "1.2.2-preview.20260910.1";
       const retainedScript =
         mode === "dev"
@@ -848,18 +859,42 @@ describe("runtime preparation", () => {
         yield* fs.writeFileString(`${state}/run-t3.sh`, retainedScript);
         yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
       }
-      if (mode === "ready") {
-        const runtime = `${root}/.t3/runtime/versions/${retainedVersion}`;
+      const retainedMissing = [
+        "missing",
+        "upstream-only",
+        "marker-only",
+        "non-executable",
+        "wrong-marker",
+      ].some((value) => value === mode);
+      const upstream = `${root}/.t3/runtime/versions/${retainedVersion}`;
+      if (mode === "upstream-only") {
+        yield* fs.makeDirectory(upstream, { recursive: true });
+        yield* fs.writeFileString(`${upstream}/t3`, "#!/bin/sh\nexit 97\n");
+        yield* fs.chmod(`${upstream}/t3`, 0o700);
+        yield* fs.writeFileString(`${upstream}/.install-complete`, retainedVersion);
+      }
+      if (
+        mode === "ready" ||
+        mode === "marker-only" ||
+        mode === "non-executable" ||
+        mode === "wrong-marker"
+      ) {
+        const runtime = `${root}/.goat/runtime/goat/versions/${retainedVersion}`;
         yield* fs.makeDirectory(runtime, { recursive: true });
-        yield* fs.writeFileString(`${runtime}/t3`, "#!/bin/sh\nexit 0\n");
-        yield* fs.chmod(`${runtime}/t3`, 0o700);
-        yield* fs.writeFileString(`${runtime}/.install-complete`, retainedVersion);
+        if (mode !== "marker-only") {
+          yield* fs.writeFileString(`${runtime}/goat`, "#!/bin/sh\nexit 0\n");
+          yield* fs.chmod(`${runtime}/goat`, mode === "non-executable" ? 0o600 : 0o700);
+        }
+        yield* fs.writeFileString(
+          `${runtime}/.install-complete`,
+          mode === "wrong-marker" ? ARCHIVE.archiveVersion : retainedVersion,
+        );
       }
       const archiveDirectory = `${root}/missing-cache`;
       const bytes = new Uint8Array([0, 128, 255]);
       const crypto = yield* Crypto.Crypto;
       const sha256 = Hex.encode(yield* crypto.digest("SHA-256", bytes));
-      const asset = `t3-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`;
+      const asset = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`;
       const calls: string[] = [];
       const spans: Tracer.Span[] = [];
       let cacheReads = 0;
@@ -935,7 +970,7 @@ describe("runtime preparation", () => {
         ...ARCHIVE,
         archiveDirectory,
         keepExistingRunner: true,
-        ...(mode === "missing" ? { releaseBaseUrl: "https://mirror.example/goat" } : {}),
+        ...(retainedMissing ? { releaseBaseUrl: "https://mirror.example/goat" } : {}),
       };
       const invocation =
         entry === "launch"
@@ -976,14 +1011,14 @@ describe("runtime preparation", () => {
         );
         assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), retainedScript);
         assert.isFalse(yield* fs.exists(archiveDirectory));
-      } else if (mode === "missing" || mode === "invalid") {
+      } else if (retainedMissing || mode === "invalid") {
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result)) {
           assert.instanceOf(result.failure, SshLaunchError);
-          if (mode === "missing") {
+          if (retainedMissing) {
             assert.equal(
               result.failure.message,
-              `The retained runner ~/.t3/ssh-launch/${stateKey}/run-t3.sh selects t3 ${retainedVersion}, which is not installed on ${uploadTarget.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
+              `The retained runner ~/.goat/ssh-launch/${stateKey}/run-t3.sh selects goat ${retainedVersion}, which is not installed on ${uploadTarget.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
             );
           }
         }
@@ -991,6 +1026,10 @@ describe("runtime preparation", () => {
         assert.equal(cacheReads, 0);
         assert.isFalse(yield* fs.exists(archiveDirectory));
         assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), retainedScript);
+        if (mode === "upstream-only") {
+          assert.equal(yield* fs.readFileString(`${upstream}/t3`), "#!/bin/sh\nexit 97\n");
+          assert.equal(yield* fs.readFileString(`${upstream}/.install-complete`), retainedVersion);
+        }
       } else {
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result)) {
@@ -1008,11 +1047,11 @@ describe("runtime preparation", () => {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-preparation-" });
-      const runtime = `${root}/.t3/runtime/versions/${ARCHIVE.archiveVersion}`;
-      const state = `${root}/.t3/ssh-launch/711bc738002d72fd`;
+      const runtime = `${root}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}`;
+      const state = `${root}/.goat/ssh-launch/711bc738002d72fd`;
       yield* fs.makeDirectory(runtime, { recursive: true });
       yield* fs.makeDirectory(state, { recursive: true });
-      const cli = `${runtime}/t3`;
+      const cli = `${runtime}/goat`;
       yield* fs.writeFileString(
         cli,
         `#!${process.execPath}
@@ -1093,7 +1132,7 @@ else {
       assert.equal((yield* fs.readFileString(`${state}/port`)).trim(), String(started.port));
       assert.equal(yield* fs.readFileString(`${root}/starts`), "start\n");
       assert.isFalse(yield* fs.exists(`${root}/stops`));
-      assert.isFalse(yield* fs.exists(`${root}/.t3/userdata/server-runtime.json`));
+      assert.isFalse(yield* fs.exists(`${root}/.goat/userdata/server-runtime.json`));
       assert.isTrue(yield* child.isRunning);
       yield* child.kill({ killSignal: "SIGTERM" });
       assert.equal(yield* child.exitCode, 0);
@@ -1213,7 +1252,7 @@ else {
       if (!ready)
         assert.equal(
           (yield* fs.readFileString(
-            `${root}/.t3/runtime/versions/${ARCHIVE.archiveVersion}/.install-complete`,
+            `${root}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}/.install-complete`,
           )).trim(),
           ARCHIVE.archiveVersion,
         );
@@ -1224,7 +1263,7 @@ else {
     Effect.gen(function* () {
       const { directory, fs } = yield* makeUploadFixture();
       yield* fs.truncate(
-        `${directory}/t3-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`,
+        `${directory}/goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`,
         268435457,
       );
       let calls = 0;
@@ -1397,14 +1436,14 @@ describe("archive runner script", () => {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const platform = hostPlatform === "darwin" ? "darwin" : "linux";
     const arch = hostArch === "arm64" ? "arm64" : "x64";
-    const stem = `t3-${archiveVersion}-${platform}-${arch}`;
+    const stem = `goat-${archiveVersion}-${platform}-${arch}`;
     const stage = `${root}/stage/${stem}`;
     const release = `${root}/mirror/v${archiveVersion}`;
     const script = [
       "set -eu",
       `mkdir -p '${stage}' '${release}'`,
-      `printf '#!/bin/sh\\necho t3 v${archiveVersion}\\n' > '${stage}/t3'`,
-      `chmod +x '${stage}/t3'`,
+      `printf '#!/bin/sh\\necho t3 v${archiveVersion}\\n' > '${stage}/goat'`,
+      `chmod +x '${stage}/goat'`,
       `tar -czf '${release}/${stem}.tar.gz' -C '${root}/stage' '${stem}'`,
       `cd '${release}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
     ].join("\n");
@@ -1412,6 +1451,60 @@ describe("archive runner script", () => {
     assert.equal(Number(yield* child.exitCode), 0);
     return `file://${root}/mirror`;
   });
+
+  it.effect.skipIf(windowsHost)(
+    "uploads GOAT beside same-version upstream and repairs a marker-only cache",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        for (const markerOnly of [false, true]) {
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-runtime-collision-" });
+          yield* makeMirror(root);
+          const platform = hostPlatform === "darwin" ? "darwin" : "linux";
+          const arch = hostArch === "arm64" ? "arm64" : "x64";
+          const bytes = yield* fs.readFile(
+            `${root}/mirror/v${archiveVersion}/goat-${archiveVersion}-${platform}-${arch}.tar.gz`,
+          );
+          const checksum = (yield* fs.readFileString(
+            `${root}/mirror/v${archiveVersion}/SHA256SUMS`,
+          )).slice(0, 64);
+          const upstream = `${root}/.t3/runtime/versions/${archiveVersion}`;
+          yield* fs.makeDirectory(upstream, { recursive: true });
+          yield* fs.writeFileString(`${upstream}/t3`, "#!/bin/sh\nexit 97\n", { mode: 0o755 });
+          yield* fs.writeFileString(`${upstream}/.install-complete`, archiveVersion);
+          const runtime = `${root}/.goat/runtime/goat/versions/${archiveVersion}`;
+          if (markerOnly) {
+            yield* fs.makeDirectory(runtime, { recursive: true });
+            yield* fs.writeFileString(`${runtime}/.install-complete`, archiveVersion);
+          }
+          const probe = yield* runShell(root, [
+            "-c",
+            SshTunnel.buildRemoteRuntimeProbeScript(archiveVersion),
+          ]);
+          assert.equal(probe.exitCode, 0, probe.stderr);
+          assert.equal(JSON.parse(probe.stdout).ready, false);
+          const result = yield* runUpload(
+            root,
+            SshTunnel.buildRemoteUploadScript(ARCHIVE, checksum),
+            bytes,
+          );
+          assert.equal(result.exitCode, 0, result.stderr);
+          assert.isTrue(yield* fs.exists(`${runtime}/goat`));
+          assert.equal(
+            (yield* fs.readFileString(`${runtime}/.install-complete`)).trim(),
+            archiveVersion,
+          );
+          assert.equal(yield* fs.readFileString(`${upstream}/t3`), "#!/bin/sh\nexit 97\n");
+          assert.equal(yield* fs.readFileString(`${upstream}/.install-complete`), archiveVersion);
+          const after = yield* runShell(root, [
+            "-c",
+            SshTunnel.buildRemoteRuntimeProbeScript(archiveVersion),
+          ]);
+          assert.equal(after.exitCode, 0, after.stderr);
+          assert.equal(JSON.parse(after.stdout).ready, true);
+        }
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   it.effect.skipIf(windowsHost)("fails on an uploaded archive checksum mismatch", () =>
     Effect.gen(function* () {
@@ -1421,7 +1514,7 @@ describe("archive runner script", () => {
       const platform = hostPlatform === "darwin" ? "darwin" : "linux";
       const arch = hostArch === "arm64" ? "arm64" : "x64";
       const bytes = yield* fs.readFile(
-        `${root}/mirror/v${archiveVersion}/t3-${archiveVersion}-${platform}-${arch}.tar.gz`,
+        `${root}/mirror/v${archiveVersion}/goat-${archiveVersion}-${platform}-${arch}.tar.gz`,
       );
       const result = yield* runUpload(
         root,
@@ -1434,9 +1527,9 @@ describe("archive runner script", () => {
       assert.equal(result.exitCode, 1);
       assert.include(result.stderr, "Checksum mismatch");
       assert.isFalse(
-        yield* fs.exists(`${root}/.t3/runtime/versions/${archiveVersion}/.install-complete`),
+        yield* fs.exists(`${root}/.goat/runtime/goat/versions/${archiveVersion}/.install-complete`),
       );
-      assert.deepEqual(yield* fs.readDirectory(`${root}/.t3/runtime/versions`), []);
+      assert.deepEqual(yield* fs.readDirectory(`${root}/.goat/runtime/goat/versions`), []);
       assert.notInclude(result.stderr, "curl");
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -1448,7 +1541,7 @@ describe("archive runner script", () => {
       yield* makeMirror(root);
       const platform = hostPlatform === "darwin" ? "darwin" : "linux";
       const arch = hostArch === "arm64" ? "arm64" : "x64";
-      const file = `${root}/mirror/v${archiveVersion}/t3-${archiveVersion}-${platform}-${arch}.tar.gz`;
+      const file = `${root}/mirror/v${archiveVersion}/goat-${archiveVersion}-${platform}-${arch}.tar.gz`;
       const bytes = yield* fs.readFile(file);
       const checksums = yield* fs.readFileString(`${root}/mirror/v${archiveVersion}/SHA256SUMS`);
       const script = SshTunnel.buildRemoteUploadScript(
@@ -1463,7 +1556,7 @@ describe("archive runner script", () => {
         assert.equal(result.exitCode, 0, result.stderr);
         assert.include(result.stdout, `t3 v${archiveVersion}`);
       }
-      const versions = `${root}/.t3/runtime/versions`;
+      const versions = `${root}/.goat/runtime/goat/versions`;
       assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
       assert.equal(
         (yield* fs.readFileString(`${versions}/${archiveVersion}/.install-complete`)).trim(),
@@ -1495,7 +1588,7 @@ describe("archive runner script", () => {
           assert.equal(result.exitCode, 0, result.stderr);
           assert.include(result.stdout, `t3 v${archiveVersion}`);
         }
-        const versionsDir = `${home}/.t3/runtime/versions`;
+        const versionsDir = `${home}/.goat/runtime/goat/versions`;
         assert.deepEqual(yield* fs.readDirectory(versionsDir), [archiveVersion]);
         assert.equal(
           (yield* fs.readFileString(`${versionsDir}/${archiveVersion}/.install-complete`)).trim(),

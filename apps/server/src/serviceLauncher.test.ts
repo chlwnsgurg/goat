@@ -86,7 +86,7 @@ const writeFakeRuntime = (
   childSource: string,
 ) =>
   Effect.gen(function* () {
-    const entryPath = path.join(versionDir, "t3");
+    const entryPath = path.join(versionDir, "goat");
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
     yield* fs.chmod(entryPath, 0o755);
@@ -124,7 +124,7 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       yield* writeFakeRuntime(
         fs,
         path,
-        path.join(root, "runtime", "versions", "1.0.0"),
+        path.join(root, "runtime", "goat", "versions", "1.0.0"),
         "setInterval(() => {}, 1_000);\n",
       );
       yield* Effect.promise(() =>
@@ -167,7 +167,7 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       yield* writeFakeRuntime(
         fs,
         path,
-        path.join(root, "runtime", "versions", "1.0.0"),
+        path.join(root, "runtime", "goat", "versions", "1.0.0"),
         "setInterval(() => {}, 1_000);\n",
       );
       yield* Effect.promise(() =>
@@ -217,7 +217,7 @@ if (context.update?.status === "pending") {
         yield* writeFakeRuntime(
           fs,
           path,
-          path.join(root, "runtime", "versions", version),
+          path.join(root, "runtime", "goat", "versions", version),
           childSource,
         );
       }
@@ -267,7 +267,7 @@ if (context.update?.status === "pending") {
         yield* writeFakeRuntime(
           fs,
           path,
-          path.join(root, "runtime", "versions", version),
+          path.join(root, "runtime", "goat", "versions", version),
           childSource,
         );
       }
@@ -326,7 +326,7 @@ if (context.update?.status === "pending") {
         yield* writeFakeRuntime(
           fs,
           path,
-          path.join(root, "runtime", "versions", version),
+          path.join(root, "runtime", "goat", "versions", version),
           childSource,
         );
       }

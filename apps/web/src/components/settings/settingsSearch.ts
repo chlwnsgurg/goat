@@ -539,9 +539,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "cli-command",
-    title: "t3 command",
+    title: "goat command",
     to: "/settings/general",
-    searchTerms: ["cli terminal shell path install command line"],
+    searchTerms: ["goat t3 cli terminal shell path install command line"],
     desktopOnly: true,
   },
   {
@@ -908,7 +908,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Hold webhooks while offline",
     to: "/settings/connections",
     targetId: "connections-environment",
-    searchTerms: ["webhook automations offline queue mailbox t3 connect"],
+    searchTerms: ["webhook automations offline queue mailbox goat connect"],
     cloudOnly: true,
     managedTunnelOnly: true,
   },
@@ -933,7 +933,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Environments",
     to: "/settings/connections",
-    searchTerms: ["add pair backend host code ssh config agent tunnel saved t3 connect"],
+    searchTerms: ["add pair backend host code ssh config agent tunnel saved goat connect"],
   },
   {
     id: "load-balancing",

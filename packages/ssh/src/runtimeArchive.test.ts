@@ -13,7 +13,7 @@ describe("local runtime archive", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const root = yield* fs.makeTempDirectoryScoped();
-      yield* fs.writeFile(`${root}/t3-1.2.3-linux-x64.tar.gz`, new Uint8Array([0, 128, 255]));
+      yield* fs.writeFile(`${root}/goat-1.2.3-linux-x64.tar.gz`, new Uint8Array([0, 128, 255]));
       const archive = yield* readLocalRuntimeArchive(root, "1.2.3", "linux-x64");
       assert.isNotNull(archive);
       assert.deepEqual(archive?.bytes, new Uint8Array([0, 128, 255]));
@@ -38,7 +38,7 @@ describe("local runtime archive", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const root = yield* fs.makeTempDirectoryScoped();
-        const file = `${root}/t3-1.2.3-linux-x64.tar.gz`;
+        const file = `${root}/goat-1.2.3-linux-x64.tar.gz`;
         yield* fs.writeFile(file, new Uint8Array([0]));
         const info = yield* fs.stat(file);
         let reads = 0;

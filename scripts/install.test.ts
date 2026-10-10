@@ -15,15 +15,19 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("installer term
     async (fail) => {
       const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-install-progress-"));
       const version = "1.2.3";
-      const stem = `t3-${version}-linux-${HostProcess.Architecture.defaultValue()}`;
+      const stem = `goat-${version}-linux-${HostProcess.Architecture.defaultValue()}`;
       const archiveName = `${stem}.tar.gz`;
       let resumeDownload: (() => void) | undefined;
       let sawPartialProgress = false;
       let output = "";
       await NodeFSP.mkdir(NodePath.join(root, stem));
-      await NodeFSP.writeFile(NodePath.join(root, stem, "t3"), "#!/bin/sh\necho 't3 v1.2.3'\n", {
-        mode: 0o755,
-      });
+      await NodeFSP.writeFile(
+        NodePath.join(root, stem, "goat"),
+        "#!/bin/sh\necho 'goat v1.2.3'\n",
+        {
+          mode: 0o755,
+        },
+      );
       await NodeFSP.writeFile(
         NodePath.join(root, stem, "payload"),
         NodeCrypto.randomBytes(64 * 1024),
@@ -55,6 +59,15 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("installer term
         "'",
         "'\\''",
       );
+      const upstream = NodePath.join(root, "home/runtime/versions", version);
+      if (!fail) {
+        await NodeFSP.mkdir(upstream, { recursive: true });
+        await NodeFSP.writeFile(NodePath.join(upstream, "t3"), "upstream runtime\n");
+        await NodeFSP.writeFile(NodePath.join(upstream, ".install-complete"), version);
+        const incomplete = NodePath.join(root, "home/runtime/goat/versions", version);
+        await NodeFSP.mkdir(incomplete, { recursive: true });
+        await NodeFSP.writeFile(NodePath.join(incomplete, ".install-complete"), version);
+      }
       const child = NodeChildProcess.spawn("script", ["-qec", `sh '${installer}'`, "/dev/null"], {
         env: {
           ...process.env,
@@ -81,28 +94,34 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")("installer term
           child.on("error", reject);
           child.on("close", resolve);
         });
-        const versions = NodePath.join(root, "home/runtime/versions");
+        const versions = NodePath.join(root, "home/runtime/goat/versions");
         if (fail) {
           expect(code).not.toBe(0);
           expect(output).toContain("500");
           expect(output).not.toContain("100%");
-          expect(output).not.toContain("Installed T3 Code");
+          expect(output).not.toContain("Installed GOAT");
           expect(await NodeFSP.readdir(versions)).toEqual([]);
         } else {
           expect(code).toBe(0);
           expect(sawPartialProgress).toBe(true);
           expect(output).toContain("100%");
           expect(output).toContain("0.1 / 0.1 MB");
-          expect(output).toContain("Installed T3 Code 1.2.3");
+          expect(output).toContain("Installed GOAT 1.2.3");
           expect(
             await NodeFSP.readFile(NodePath.join(versions, version, ".install-complete"), "utf8"),
           ).toBe("1.2.3\n");
           expect(
-            NodeChildProcess.execFileSync(NodePath.join(root, "bin/t3"), ["--version"], {
+            NodeChildProcess.execFileSync(NodePath.join(root, "bin/goat"), ["--version"], {
               encoding: "utf8",
             }).trim(),
-          ).toBe("t3 v1.2.3");
+          ).toBe("goat v1.2.3");
           expect(await NodeFSP.readdir(versions)).toEqual([version]);
+          expect(await NodeFSP.readFile(NodePath.join(upstream, "t3"), "utf8")).toBe(
+            "upstream runtime\n",
+          );
+          expect(await NodeFSP.readFile(NodePath.join(upstream, ".install-complete"), "utf8")).toBe(
+            version,
+          );
         }
       } finally {
         if (child.exitCode === null) child.kill();

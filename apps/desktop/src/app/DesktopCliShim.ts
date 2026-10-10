@@ -6,15 +6,15 @@ import * as Option from "effect/Option";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
 
-// A desktop install puts no `t3` on PATH, so commands the server asks a person
-// to run (`sudo t3 browser setup`) had nothing to call. The app keeps a small
+// A desktop install puts no `goat` on PATH, so commands the server asks a person
+// to run (`sudo goat browser setup`) had nothing to call. The app keeps a small
 // launcher for its bundled CLI in the T3 home, which is never on PATH and so
-// never shadows another `t3`, and the server names it by absolute path in those
+// never shadows another `goat`, and the server names it by absolute path in those
 // commands through T3CODE_CLI_PATH. An AppImage mounts somewhere new each run,
 // so its launcher mounts the AppImage itself instead of pointing into it.
 const { logInfo, logWarning } = makeComponentLogger("desktop-cli-shim");
 
-export const MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
+export const MARKER = "Written by GOAT: runs the desktop app's bundled goat CLI.";
 
 /** Server entry inside the app, relative to its server root (an asar archive when packaged). */
 const SERVER_ENTRY = "apps/server/dist/bin.mjs";
@@ -125,12 +125,12 @@ export const renderCliShim = (input: {
   ].join("\n");
 };
 
-/** Where the packaged app keeps its launcher: `<T3 home>/bin/t3`, `t3.cmd` on Windows. */
+/** Where the packaged app keeps its launcher: `<T3 home>/bin/goat`, `goat.cmd` on Windows. */
 export const launcherPath = (environment: DesktopEnvironment.DesktopEnvironment["Service"]) =>
   environment.path.join(
     environment.baseDir,
     "bin",
-    environment.platform === "win32" ? "t3.cmd" : "t3",
+    environment.platform === "win32" ? "goat.cmd" : "goat",
   );
 
 /**
@@ -162,23 +162,23 @@ export const install = Effect.gen(function* () {
   return yield* Effect.gen(function* () {
     const existing = yield* fs.readFileString(shimPath).pipe(Effect.option);
     if (Option.isSome(existing) && !existing.value.includes(MARKER)) {
-      // Someone else's file; leave it, and let commands fall back to plain `t3`.
-      yield* logWarning("leaving a t3 launcher the app did not write", { shimPath });
+      // Someone else's file; leave it, and let commands fall back to plain `goat`.
+      yield* logWarning("leaving a goat launcher the app did not write", { shimPath });
       return Option.none<string>();
     }
     if (Option.getOrUndefined(existing) !== content) {
       yield* fs.makeDirectory(path.dirname(shimPath), { recursive: true });
-      // Written beside the launcher and renamed over it, so a running `t3` never reads half a file.
+      // Written beside the launcher and renamed over it, so a running `goat` never reads half a file.
       const staging = `${shimPath}.${process.pid}.tmp`;
       yield* fs.writeFileString(staging, content, { mode: 0o755 });
       yield* fs.rename(staging, shimPath);
-      yield* logInfo("installed t3 launcher", { shimPath });
+      yield* logInfo("installed goat launcher", { shimPath });
     }
     return Option.some(shimPath);
   }).pipe(
-    // Best-effort: nothing here may block the backend's start; commands then fall back to plain `t3`.
+    // Best-effort: nothing here may block the backend's start; commands then fall back to plain `goat`.
     Effect.catchCause((cause) =>
-      logWarning("could not install t3 launcher", { shimPath, cause: Cause.pretty(cause) }).pipe(
+      logWarning("could not install goat launcher", { shimPath, cause: Cause.pretty(cause) }).pipe(
         Effect.as(Option.none<string>()),
       ),
     ),
