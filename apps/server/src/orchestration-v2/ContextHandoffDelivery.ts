@@ -12,6 +12,12 @@ import {
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
 
+// Coverage saved before the MCP rename tells the provider to call t3_thread_read,
+// which no longer exists. The recovery instruction is app-generated, so point it
+// at the current tool when delivering; the stored record stays unchanged.
+const refreshRecoveryToolName = (coverage: string) =>
+  coverage.replace(/\bt3_thread_read\b/gu, "goat_thread_read");
+
 /**
  * Persist before/after injection: an ambiguous pending delivery requires a fresh native thread.
  * Run `unsent` when the provider refused the turn before reading the prompt, so that
@@ -43,8 +49,10 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
       .map(
         (handoff) =>
           `Context handoff (${handoff.strategy === "fork_delta_summary" ? "merge_back / fork_delta_summary" : handoff.strategy}):\n${
-            handoff.history?.coverage ??
-            `From thread ${handoff.threadId}, runs ${handoff.coveredRunOrdinals.from}-${handoff.coveredRunOrdinals.to}. Recover history with t3_thread_read, view=activity; paginate with afterPosition, and use itemId/textOffset for long items.`
+            (handoff.history?.coverage === undefined
+              ? undefined
+              : refreshRecoveryToolName(handoff.history.coverage)) ??
+            `From thread ${handoff.threadId}, runs ${handoff.coveredRunOrdinals.from}-${handoff.coveredRunOrdinals.to}. Recover history with goat_thread_read, view=activity; paginate with afterPosition, and use itemId/textOffset for long items.`
           }`,
       )
       .join("\n");
@@ -53,7 +61,7 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     // its activity includes the original handoff/fork source references.
     if (historyCost([], coverage) > Math.min(4_000, budget / 2)) {
       const strategies = Array.from(new Set(pending.map((handoff) => handoff.strategy)));
-      coverage = `Context handoff (${strategies.join(", ")}). ${pending.length} handoff records; detailed coverage references omitted. Recover history with t3_thread_read({threadId:"${input.providerThread.appThreadId ?? pending[0]!.threadId}",view:"activity",limit:20,maxCharsPerItem:4000}); paginate with afterPosition=nextPosition. Follow fork/handoff source references in activity. For long items use itemId and textOffset=nextTextOffset until null.`;
+      coverage = `Context handoff (${strategies.join(", ")}). ${pending.length} handoff records; detailed coverage references omitted. Recover history with goat_thread_read({threadId:"${input.providerThread.appThreadId ?? pending[0]!.threadId}",view:"activity",limit:20,maxCharsPerItem:4000}); paginate with afterPosition=nextPosition. Follow fork/handoff source references in activity. For long items use itemId and textOffset=nextTextOffset until null.`;
     }
     const seen = new Set(input.alreadyDeliveredItemIds);
     const messages = pending

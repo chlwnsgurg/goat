@@ -47,13 +47,13 @@ const RemoteEntry = Schema.Struct({
 
 const HostAlias = TrimmedNonEmptyString.annotate({
   description:
-    "An SSH host alias from t3_ssh_host_list (this machine's ~/.ssh/config or known_hosts).",
+    "An SSH host alias from goat_ssh_host_list (this machine's ~/.ssh/config or known_hosts).",
 });
 
-const SshHostListTool = Tool.make("t3_ssh_host_list", {
+const SshHostListTool = Tool.make("goat_ssh_host_list", {
   ...shared,
   description:
-    "List the SSH hosts this environment's machine knows from ~/.ssh/config and known_hosts. These are other machines you can browse with t3_ssh_browse and start threads on with t3_ssh_thread_launch. Set probe:true to try a key-based SSH login to each host (a few seconds; reports reachable and the error).",
+    "List the SSH hosts this environment's machine knows from ~/.ssh/config and known_hosts. These are other machines you can browse with goat_ssh_browse and start threads on with goat_ssh_thread_launch. Set probe:true to try a key-based SSH login to each host (a few seconds; reports reachable and the error).",
   parameters: Schema.Struct({ probe: Schema.optional(Schema.Boolean) }),
   success: Schema.Struct({ hosts: Schema.Array(SshHost) }),
 })
@@ -61,7 +61,7 @@ const SshHostListTool = Tool.make("t3_ssh_host_list", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 
-const SshBrowseTool = Tool.make("t3_ssh_browse", {
+const SshBrowseTool = Tool.make("goat_ssh_browse", {
   ...shared,
   description:
     "List the folders in a directory on another machine over SSH, to pick where a remote thread should run. Omit path for the remote home directory; ~ and ~/sub are expanded there. Reports whether the directory is in a Git repository, its checked-out branch and its Git worktrees, and marks child folders that are repositories. Only SSH keys or a running ssh-agent are used; a host that needs a password fails.",
@@ -104,13 +104,13 @@ export const SshLaunchWorkspace = Schema.Union([
   }),
 ]).annotate({
   description:
-    "cwd runs in the folder itself. worktree creates a new Git worktree of the folder's repository on the remote, on a new branch from baseRef (default: the folder's checked-out branch). existing_worktree reuses one of the worktrees t3_ssh_browse reported. Default cwd.",
+    "cwd runs in the folder itself. worktree creates a new Git worktree of the folder's repository on the remote, on a new branch from baseRef (default: the folder's checked-out branch). existing_worktree reuses one of the worktrees goat_ssh_browse reported. Default cwd.",
 });
 
-const SshThreadLaunchTool = Tool.make("t3_ssh_thread_launch", {
+const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
   ...shared,
   description:
-    "Start a thread on ANOTHER machine, in that machine's own T3 environment, over SSH. Use it when the user asks to run work on a different computer. Pick host from t3_ssh_host_list and cwd from t3_ssh_browse. The folder becomes (or reuses) a project on the remote, then the thread starts in the folder or in a worktree per workspace, and its agent gets message. T3 is launched on the remote if it is not running. Omitted modelSelection uses the calling thread's model, which the remote must also offer. Needs a full-access caller. The thread lives on the remote: this environment's t3_thread_read cannot see it; the user follows it by connecting to that host in Settings → Connections. Each call creates a new thread; after a lost response, check on the remote before retrying.",
+    "Start a thread on ANOTHER machine, in that machine's own T3 environment, over SSH. Use it when the user asks to run work on a different computer. Pick host from goat_ssh_host_list and cwd from goat_ssh_browse. The folder becomes (or reuses) a project on the remote, then the thread starts in the folder or in a worktree per workspace, and its agent gets message. T3 is launched on the remote if it is not running. Omitted modelSelection uses the calling thread's model, which the remote must also offer. Needs a full-access caller. The thread lives on the remote: this environment's goat_thread_read cannot see it; the user follows it by connecting to that host in Settings → Connections. Each call creates a new thread; after a lost response, check on the remote before retrying.",
   parameters: Schema.Struct({
     host: HostAlias,
     cwd: TrimmedNonEmptyString.annotate({

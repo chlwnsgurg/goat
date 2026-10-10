@@ -794,6 +794,11 @@ it.effect("terminates HTTP MCP sessions with DELETE", () =>
       });
       const sessionId = initializeResponse.headers["mcp-session-id"];
       expect(initializeResponse.status).toBe(200);
+      const initializeText = yield* initializeResponse.text;
+      const initializeData = initializeText.split(/\r?\n/).find((line) => line.startsWith("data:"));
+      expect(
+        decodeJsonText(initializeData === undefined ? initializeText : initializeData.slice(5)),
+      ).toMatchObject({ result: { serverInfo: { name: "GOAT" } } });
       expect(sessionId).not.toBeNull();
 
       const missingSessionResponse = yield* httpClient.del("/mcp");

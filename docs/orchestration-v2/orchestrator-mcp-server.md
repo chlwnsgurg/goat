@@ -241,7 +241,7 @@ Each delegated review round uses a new `delegate_task` call with the original br
 prior findings, responses, and unresolved objections. Track each round by its own `taskId` and use
 a distinct `clientRequestId` per round, stable across retries of that round.
 `childThreadId` is backing storage, not a target for another review round through
-`t3_thread_send`. Ordinary thread messaging remains available for user-requested
+`goat_thread_send`. Ordinary thread messaging remains available for user-requested
 conversations; it does not reopen a completed task. There is no task-level follow-up
 API for preserving the same reviewer session.
 
@@ -322,7 +322,7 @@ inherit the parent's project, branch, and worktree path, but they have no
 sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
 without a prompt remain idle.
 
-### `t3_thread_launch`
+### `goat_thread_launch`
 
 Launches one ordinary top-level thread through the app's launch service. Use an
 explicit `workspaceStrategy` to create a new worktree (`worktree` with `baseRef`),
@@ -338,14 +338,14 @@ its own under the environment's Scratch project. For stacked PRs, use the parent
 interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
 launching again. `create_threads` remains the batch option for a shared checkout.
 
-### `t3_thread_list`
+### `goat_thread_list`
 
 Lists durable thread shells in one project, newest first: `projectId` when
 given, else the calling thread's project. Callers can filter by title, run
 status, and whether app-owned sub-agent threads are included. Results are
 bounded and offset-paginated. Deleted threads are never listed.
 
-### `t3_thread_read`
+### `goat_thread_read`
 
 Reads the durable state, recent runs, and visible timeline of any thread in
 the environment by thread ID. A deleted thread returns `thread_not_found`. The
@@ -367,11 +367,11 @@ holds it. Clients show the thread's current title rather than the label, so a
 rename never leaves a stale link.
 
 List and read results report `snoozed` and `snoozedUntil`, and
-`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
+`goat_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
 wakes early when it has a pending request, fails, or completes after the snooze.
 
-### `t3_thread_update`
+### `goat_thread_update`
 
 Updates metadata for the calling thread or any other thread in the environment.
 The typed actions are `rename`, `regenerate_title`, `link_pull_request`, and
@@ -385,7 +385,7 @@ resultant title, title-regeneration marker, and linked pull request. Reusing a
 receipt. Thread list and read results expose the linked pull request, and thread
 detail also exposes an in-flight title regeneration.
 
-### `t3_thread_send`
+### `goat_thread_send`
 
 Sends a message to any ordinary or delegated thread in the environment:
 
@@ -400,14 +400,14 @@ The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries.
 
-### `t3_thread_wait`
+### `goat_thread_wait`
 
 Waits for a selected run to become `completed`, `failed`, `cancelled`,
 `interrupted`, or `rolled_back`. Without `runId`, it pins the latest run at call
 time; an idle thread returns immediately. A timeout reports the latest durable
 status and does not cancel work.
 
-### `t3_thread_interrupt`
+### `goat_thread_interrupt`
 
 Interrupts a selected active run through the normal V2 `run.interrupt` command.
 Without `runId`, it selects the newest interruptible run. A terminal run is

@@ -32,7 +32,7 @@ const requireOrchestration = McpInvocationContext.McpInvocationContext.pipe(
 
 export const layer = McpToolAccess.toLayer(SshToolkit, {
   // Reading ~/.ssh/config changes nothing; probing logs in but runs only `true`.
-  t3_ssh_host_list: McpToolAccess.reads((input) =>
+  goat_ssh_host_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* requireOrchestration;
       const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
@@ -44,14 +44,14 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
   ),
   // Browsing changes nothing remote, but it runs commands there with this
   // machine's SSH keys, so read-only clients may not.
-  t3_ssh_browse: McpToolAccess.writes((input) =>
+  goat_ssh_browse: McpToolAccess.writes((input) =>
     Effect.gen(function* () {
       const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
       const result = yield* dispatch.browse(input).pipe(Effect.mapError(toMcpFailure));
       return { ...result, worktrees: [...result.worktrees], entries: [...result.entries] };
     }),
   ),
-  t3_ssh_thread_launch: McpToolAccess.writesEnvironment((input, check) =>
+  goat_ssh_thread_launch: McpToolAccess.writesEnvironment((input, check) =>
     Effect.gen(function* () {
       const caller = yield* check;
       const runtimeMode = yield* resolveRuntimeMode(caller.limits.runtimeMode, input.runtimeMode);

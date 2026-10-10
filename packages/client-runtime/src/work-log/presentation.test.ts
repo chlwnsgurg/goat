@@ -298,15 +298,15 @@ describe("resolveWorkEntryToolPresentation", () => {
   });
 
   it.each([
-    ["t3_project_list", "Listing projects", "Listed projects"],
-    ["t3_project_clone", "Cloning a repository", "Cloned a repository"],
-    ["t3_project_create", "Registering a project", "Registered a project"],
-    ["t3_thread_launch", "Launching a project thread", "Launched a project thread"],
-    ["t3_queue_edit", "Editing a queued message", "Edited a queued message"],
-    ["t3_pending_request_respond", "Answering pending questions", "Answered pending questions"],
-    ["t3_thread_configure", "Setting thread model", "Set thread model"],
-    ["t3_thread_fork", "Forking this thread", "Requested a fork of this thread"],
-    ["t3_thread_send_attachments", "Sending attachments", "Sent attachments"],
+    ["goat_project_list", "Listing projects", "Listed projects"],
+    ["goat_project_clone", "Cloning a repository", "Cloned a repository"],
+    ["goat_project_create", "Registering a project", "Registered a project"],
+    ["goat_thread_launch", "Launching a project thread", "Launched a project thread"],
+    ["goat_queue_edit", "Editing a queued message", "Edited a queued message"],
+    ["goat_pending_request_respond", "Answering pending questions", "Answered pending questions"],
+    ["goat_thread_configure", "Setting thread model", "Set thread model"],
+    ["goat_thread_fork", "Forking this thread", "Requested a fork of this thread"],
+    ["goat_thread_send_attachments", "Sending attachments", "Sent attachments"],
     ["run_scheduled_task_now", "Running a scheduled task", "Requested a run of a scheduled task"],
   ])("labels %s through its lifecycle", (tool, running, completed) => {
     expect(resolveWorkEntryToolPresentation({ label: `T3-code.${tool}` })?.displayName).toBe(
@@ -330,19 +330,19 @@ describe("resolveWorkEntryToolPresentation", () => {
       toolLifecycleStatus: "completed",
       toolData: {
         server: "t3-code",
-        tool: "t3_project_clone",
+        tool: "goat_project_clone",
         arguments: { url: "https://github.com/acme/repo" },
         result: { cwd: "/tmp/repo" },
       },
     };
-    const list = { ...entry, toolData: { server: "t3-code", tool: "t3_project_list" } };
+    const list = { ...entry, toolData: { server: "t3-code", tool: "goat_project_list" } };
     expect(summarizeToolGroup([list, entry])).toEqual({
       summary: "Listed projects 1 time and cloned 1 repository",
       hasFailure: false,
     });
     const failed = {
       ...entry,
-      toolData: { toolName: "T3-code.t3_project_clone", rawOutput: { isError: true } },
+      toolData: { toolName: "T3-code.goat_project_clone", rawOutput: { isError: true } },
     };
     expect(summarizeToolGroup([entry, failed])).toEqual({
       summary: "Cloned 1 repository",
@@ -355,9 +355,9 @@ describe("resolveWorkEntryToolPresentation", () => {
       id: "foreign",
       createdAt: "2026-09-19T00:00:00.000Z",
       tone: "tool",
-      label: "t3_project_clone",
+      label: "goat_project_clone",
       toolLifecycleStatus: "completed",
-      toolData: { server: "another-server", tool: "t3_project_clone" },
+      toolData: { server: "another-server", tool: "goat_project_clone" },
     };
     expect(summarizeToolGroup([entry]).summary).toBe("Used 1 tool");
   });
@@ -367,7 +367,7 @@ describe("resolveWorkEntryToolPresentation", () => {
       id: "clone",
       createdAt: "2026-09-19T00:00:00.000Z",
       tone: "tool",
-      label: "T3-code.t3_project_clone",
+      label: "T3-code.goat_project_clone",
       toolLifecycleStatus: "inProgress",
       itemType: "dynamic_tool",
       toolData: { output: { isError: true } },
@@ -475,10 +475,10 @@ describe("resolveWorkEntryToolPresentation", () => {
       "Stopping recording the preview browser",
       "Stopped recording the preview browser",
     ],
-    ["t3_thread_read", "Reading a T3 thread", "Read a T3 thread"],
-    ["t3_thread_send", "Sending to a T3 thread", "Sent to a T3 thread"],
+    ["goat_thread_read", "Reading a T3 thread", "Read a T3 thread"],
+    ["goat_thread_send", "Sending to a T3 thread", "Sent to a T3 thread"],
     [
-      "t3_worktree_handoff",
+      "goat_worktree_handoff",
       "Handing off thread to a git worktree",
       "Handed off thread to a git worktree",
     ],

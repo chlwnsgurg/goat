@@ -388,7 +388,7 @@ const runStatus = (harness: ReturnType<typeof makeHarness>) =>
     return yield* service.status(harness.scope);
   }).pipe(Effect.provide(harness.layer));
 
-describe("t3_worktree_handoff", () => {
+describe("goat_worktree_handoff", () => {
   it.effect("creates a worktree from the current branch and re-points the thread", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -974,7 +974,7 @@ describe("t3_worktree_handoff", () => {
   });
 });
 
-describe("t3_worktree_status", () => {
+describe("goat_worktree_status", () => {
   it.effect("reports an unattached thread", () => {
     const harness = makeHarness({ newWorktreesStartFromOrigin: true });
     return Effect.gen(function* () {

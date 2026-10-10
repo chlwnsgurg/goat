@@ -133,7 +133,7 @@ describe("summarizeT3ToolCalls", () => {
     const calls = outputs.map((output) =>
       completed(
         {
-          toolName: "t3_thread_send",
+          toolName: "goat_thread_send",
           args: { threadId: "input-thread", message: '{"threadId":"fake"}' },
         },
         output,
@@ -142,7 +142,7 @@ describe("summarizeT3ToolCalls", () => {
     expect(summarizeT3ToolCalls("thread-send", calls).label).toBe("Sent 1 message to 1 thread");
     expect(
       summarizeT3ToolCalls("thread-send", [
-        completed({ toolName: "t3_thread_send", args: { threadId: "input-thread" } }),
+        completed({ toolName: "goat_thread_send", args: { threadId: "input-thread" } }),
         completed({ threadId: "input-thread" }),
       ]).label,
     ).toBe("Sent 2 messages to 1 thread");

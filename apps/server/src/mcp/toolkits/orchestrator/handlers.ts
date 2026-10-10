@@ -80,7 +80,7 @@ const handlers = {
       return yield* service.createThreads(scope, input);
     }),
   ),
-  t3_thread_list: McpToolAccess.reads((input) =>
+  goat_thread_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
@@ -90,14 +90,14 @@ const handlers = {
   // Reading a child's finished result also acknowledges its delivery to the
   // reader's own thread. That is bookkeeping on the caller's own subagent, not
   // a change to anything it reads, so this stays a read.
-  t3_thread_read: McpToolAccess.reads((input) =>
+  goat_thread_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.readThread(scope, input);
     }),
   ),
-  t3_thread_update: McpToolAccess.writesThreads(
+  goat_thread_update: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
@@ -106,7 +106,7 @@ const handlers = {
         return yield* service.update(scope, input);
       }),
   ),
-  t3_thread_send: McpToolAccess.writesThreads(
+  goat_thread_send: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
@@ -115,14 +115,14 @@ const handlers = {
         return yield* service.sendToThread(scope, input);
       }),
   ),
-  t3_thread_wait: McpToolAccess.reads((input) =>
+  goat_thread_wait: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.waitForThread(scope, input);
     }),
   ),
-  t3_thread_interrupt: McpToolAccess.writesThreads(
+  goat_thread_interrupt: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {

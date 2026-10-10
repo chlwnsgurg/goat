@@ -137,19 +137,22 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   request_secret: tool(["Ask for", "Asking for", "Asked for", "a secret"], "secret-request"),
   create_threads: tool(["Create", "Creating", "Created", "T3 threads"], "thread-create"),
   t3_thread_start: tool(["Start", "Starting", "Started", "a T3 thread"], "thread-create"),
-  t3_thread_list: tool(["List", "Listing", "Listed", "T3 threads"], "thread-list"),
-  t3_thread_read: tool(["Read", "Reading", "Read", "a T3 thread"], "thread-read"),
-  t3_thread_send: tool(["Send", "Sending", "Sent", "to a T3 thread"], "thread-send"),
-  t3_thread_wait: tool(["Wait", "Waiting", "Waited", "for a T3 thread"], "thread-wait"),
-  t3_thread_interrupt: tool(
+  goat_thread_list: tool(["List", "Listing", "Listed", "T3 threads"], "thread-list"),
+  goat_thread_read: tool(["Read", "Reading", "Read", "a T3 thread"], "thread-read"),
+  goat_thread_send: tool(["Send", "Sending", "Sent", "to a T3 thread"], "thread-send"),
+  goat_thread_wait: tool(["Wait", "Waiting", "Waited", "for a T3 thread"], "thread-wait"),
+  goat_thread_interrupt: tool(
     ["Interrupt", "Interrupting", "Requested an interrupt of", "a T3 thread"],
     "thread-interrupt",
   ),
-  t3_worktree_handoff: tool(
+  goat_worktree_handoff: tool(
     ["Hand off", "Handing off", "Handed off", "thread to a git worktree"],
     "worktree-handoff",
   ),
-  t3_worktree_status: tool(["Get", "Getting", "Got", "thread worktree status"], "worktree-status"),
+  goat_worktree_status: tool(
+    ["Get", "Getting", "Got", "thread worktree status"],
+    "worktree-status",
+  ),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
   preview_open: tool(
     ["Open", "Opening", "Opened", "a page in the preview browser"],
@@ -254,74 +257,89 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Run", "Running", "Requested a run of", "a scheduled task"],
     "schedule-run",
   ),
-  t3_queue_list: tool(["List", "Listing", "Listed", "queued messages"], "queue-list"),
-  t3_queue_read: tool(["Read", "Reading", "Read", "a queued message"], "queue-read"),
-  t3_queue_edit: tool(["Edit", "Editing", "Edited", "a queued message"], "queue-edit"),
-  t3_queue_cancel: tool(
+  goat_queue_list: tool(["List", "Listing", "Listed", "queued messages"], "queue-list"),
+  goat_queue_read: tool(["Read", "Reading", "Read", "a queued message"], "queue-read"),
+  goat_queue_edit: tool(["Edit", "Editing", "Edited", "a queued message"], "queue-edit"),
+  goat_queue_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "a queued run"],
     "queue-cancel",
   ),
-  t3_queue_reorder: tool(["Reorder", "Reordering", "Reordered", "a queued run"], "queue-reorder"),
-  t3_queue_promote_to_steer: tool(
+  goat_queue_reorder: tool(["Reorder", "Reordering", "Reordered", "a queued run"], "queue-reorder"),
+  goat_queue_promote_to_steer: tool(
     ["Steer with", "Steering with", "Requested steering with", "a queued message"],
     "queue-steer",
   ),
-  t3_pending_request_list: tool(
+  goat_pending_request_list: tool(
     ["List", "Listing", "Listed", "pending questions"],
     "question-list",
   ),
-  t3_pending_request_read: tool(["Read", "Reading", "Read", "pending questions"], "question-read"),
-  t3_pending_request_respond: tool(
+  goat_pending_request_read: tool(
+    ["Read", "Reading", "Read", "pending questions"],
+    "question-read",
+  ),
+  goat_pending_request_respond: tool(
     ["Answer", "Answering", "Answered", "pending questions"],
     "question-respond",
   ),
-  t3_thread_configuration: tool(
+  goat_thread_configuration: tool(
     ["Read", "Reading", "Read", "thread configuration"],
     "thread-configuration",
   ),
-  t3_thread_configure: tool(["Set", "Setting", "Set", "thread model"], "thread-configure"),
-  t3_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),
-  t3_thread_merge_back: tool(
+  goat_thread_configure: tool(["Set", "Setting", "Set", "thread model"], "thread-configure"),
+  goat_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),
+  goat_thread_merge_back: tool(
     ["Merge", "Merging", "Requested a merge of", "thread context"],
     "thread-merge",
   ),
-  t3_thread_search: tool(["Search", "Searching", "Searched", "thread content"], "thread-search"),
-  t3_thread_transfers: tool(["Read", "Reading", "Read", "thread transfers"], "thread-transfers"),
-  t3_thread_organize: tool(["Organize", "Organizing", "Organized", "a thread"], "thread-organize"),
-  t3_thread_update: tool(["Update", "Updating", "Updated", "T3 thread metadata"], "thread-update"),
-  t3_worktree_list: tool(["List", "Listing", "Listed", "workspace branches"], "worktree-list"),
-  t3_preview_list: tool(["List", "Listing", "Listed", "preview tabs"], "browser", "browser"),
-  t3_preview_close: tool(["Close", "Closing", "Closed", "a preview tab"], "browser", "browser"),
-  t3_environment_read: tool(
+  goat_thread_search: tool(["Search", "Searching", "Searched", "thread content"], "thread-search"),
+  goat_thread_transfers: tool(["Read", "Reading", "Read", "thread transfers"], "thread-transfers"),
+  goat_thread_organize: tool(
+    ["Organize", "Organizing", "Organized", "a thread"],
+    "thread-organize",
+  ),
+  goat_thread_update: tool(
+    ["Update", "Updating", "Updated", "T3 thread metadata"],
+    "thread-update",
+  ),
+  goat_worktree_list: tool(["List", "Listing", "Listed", "workspace branches"], "worktree-list"),
+  goat_preview_list: tool(["List", "Listing", "Listed", "preview tabs"], "browser", "browser"),
+  goat_preview_close: tool(["Close", "Closing", "Closed", "a preview tab"], "browser", "browser"),
+  goat_environment_read: tool(
     ["Read", "Reading", "Read", "environment preferences"],
     "environment-read",
   ),
-  t3_environment_preferences_update: tool(
+  goat_environment_preferences_update: tool(
     ["Update", "Updating", "Updated", "environment preferences"],
     "environment-update",
   ),
-  t3_thread_launch: tool(["Launch", "Launching", "Launched", "a project thread"], "thread-create"),
-  t3_ssh_host_list: tool(["List", "Listing", "Listed", "SSH hosts"], "ssh-host-list"),
-  t3_ssh_browse: tool(["Browse", "Browsing", "Browsed", "folders over SSH"], "ssh-browse"),
-  t3_ssh_thread_launch: tool(
+  goat_thread_launch: tool(
+    ["Launch", "Launching", "Launched", "a project thread"],
+    "thread-create",
+  ),
+  goat_ssh_host_list: tool(["List", "Listing", "Listed", "SSH hosts"], "ssh-host-list"),
+  goat_ssh_browse: tool(["Browse", "Browsing", "Browsed", "folders over SSH"], "ssh-browse"),
+  goat_ssh_thread_launch: tool(
     ["Start", "Starting", "Started", "a thread on another machine"],
     "ssh-thread-launch",
   ),
-  t3_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),
-  t3_project_read: tool(["Read", "Reading", "Read", "a project"], "project-read"),
-  t3_project_create: tool(["Register", "Registering", "Registered", "a project"], "project-create"),
-  t3_project_update: tool(["Update", "Updating", "Updated", "a project"], "project-update"),
-  t3_project_delete: tool(["Delete", "Deleting", "Deleted", "a project"], "project-delete"),
-  t3_project_clone: tool(["Clone", "Cloning", "Cloned", "a repository"], "project-clone"),
-  t3_attachment_prepare_upload: tool(
+  goat_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),
+  goat_project_read: tool(["Read", "Reading", "Read", "a project"], "project-read"),
+  goat_project_create: tool(
+    ["Register", "Registering", "Registered", "a project"],
+    "project-create",
+  ),
+  goat_project_update: tool(["Update", "Updating", "Updated", "a project"], "project-update"),
+  goat_project_delete: tool(["Delete", "Deleting", "Deleted", "a project"], "project-delete"),
+  goat_project_clone: tool(["Clone", "Cloning", "Cloned", "a repository"], "project-clone"),
+  goat_attachment_prepare_upload: tool(
     ["Prepare", "Preparing", "Prepared", "an attachment upload"],
     "attachment-prepare",
   ),
-  t3_attachment_discard: tool(
+  goat_attachment_discard: tool(
     ["Discard", "Discarding", "Discarded", "a pending attachment"],
     "attachment-discard",
   ),
-  t3_thread_send_attachments: tool(["Send", "Sending", "Sent", "attachments"], "attachment-send"),
+  goat_thread_send_attachments: tool(["Send", "Sending", "Sent", "attachments"], "attachment-send"),
   html_preview: tool(["Preview", "Previewing", "Previewed", "an HTML page"], "html-preview"),
   html_render: tool(["Render", "Rendering", "Rendered", "an HTML page"], "html-render"),
 };
@@ -330,7 +348,57 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
  * The T3 orchestration tool inventory, used to gate loose name matching on
  * both the server (ACP MCP identity recovery) and the client (logo branding).
  */
-export const T3_MCP_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(T3_MCP_TOOLS));
+// Read-side only: persisted activity can retain names from before the GOAT rename.
+// Never use this alias table to register or dispatch a live MCP call.
+const T3_MCP_LEGACY_TOOL_ALIASES: Readonly<Record<string, string>> = {
+  t3_attachment_discard: "goat_attachment_discard",
+  t3_attachment_prepare_upload: "goat_attachment_prepare_upload",
+  t3_environment_preferences_update: "goat_environment_preferences_update",
+  t3_environment_read: "goat_environment_read",
+  t3_pending_request_list: "goat_pending_request_list",
+  t3_pending_request_read: "goat_pending_request_read",
+  t3_pending_request_respond: "goat_pending_request_respond",
+  t3_preview_close: "goat_preview_close",
+  t3_preview_list: "goat_preview_list",
+  t3_project_clone: "goat_project_clone",
+  t3_project_create: "goat_project_create",
+  t3_project_delete: "goat_project_delete",
+  t3_project_list: "goat_project_list",
+  t3_project_read: "goat_project_read",
+  t3_project_update: "goat_project_update",
+  t3_queue_cancel: "goat_queue_cancel",
+  t3_queue_edit: "goat_queue_edit",
+  t3_queue_list: "goat_queue_list",
+  t3_queue_promote_to_steer: "goat_queue_promote_to_steer",
+  t3_queue_read: "goat_queue_read",
+  t3_queue_reorder: "goat_queue_reorder",
+  t3_ssh_browse: "goat_ssh_browse",
+  t3_ssh_host_list: "goat_ssh_host_list",
+  t3_ssh_thread_launch: "goat_ssh_thread_launch",
+  t3_thread_configuration: "goat_thread_configuration",
+  t3_thread_configure: "goat_thread_configure",
+  t3_thread_fork: "goat_thread_fork",
+  t3_thread_interrupt: "goat_thread_interrupt",
+  t3_thread_launch: "goat_thread_launch",
+  t3_thread_list: "goat_thread_list",
+  t3_thread_merge_back: "goat_thread_merge_back",
+  t3_thread_organize: "goat_thread_organize",
+  t3_thread_read: "goat_thread_read",
+  t3_thread_search: "goat_thread_search",
+  t3_thread_send: "goat_thread_send",
+  t3_thread_send_attachments: "goat_thread_send_attachments",
+  t3_thread_transfers: "goat_thread_transfers",
+  t3_thread_update: "goat_thread_update",
+  t3_thread_wait: "goat_thread_wait",
+  t3_worktree_handoff: "goat_worktree_handoff",
+  t3_worktree_list: "goat_worktree_list",
+  t3_worktree_status: "goat_worktree_status",
+};
+
+export const T3_MCP_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ...Object.keys(T3_MCP_TOOLS),
+  ...Object.keys(T3_MCP_LEGACY_TOOL_ALIASES),
+]);
 
 function normalizeT3McpToolLabel(value: string): string {
   return value.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
@@ -364,13 +432,13 @@ function resolveT3McpToolName(value: string): string | null {
 
   const prefixed = /^(?:mcp[-_]{1,2})?t3[-_ ]?code(?:__|[-_.:/ ])(?<tool>.+)$/i.exec(label);
   const candidate = prefixed?.groups?.tool ?? label;
-  if (Object.hasOwn(T3_MCP_TOOLS, candidate)) return candidate;
+  if (T3_MCP_TOOL_NAMES.has(candidate)) return candidate;
   // OpenCode 2 registers one server per thread, `t3-code-<thread>`, and joins
   // it to the tool with `_`. Thread ids can hold `_` too, so take the longest
   // known tool name that ends the label.
   if (!/^t3-code-/i.test(label)) return null;
   let longest: string | null = null;
-  for (const tool of Object.keys(T3_MCP_TOOLS)) {
+  for (const tool of T3_MCP_TOOL_NAMES) {
     if (label.endsWith(`_${tool}`) && tool.length > (longest?.length ?? 0)) longest = tool;
   }
   return longest;
@@ -379,14 +447,17 @@ function resolveT3McpToolName(value: string): string | null {
 /** The bare T3 tool name (`html_render`) for any provider's spelling of it. */
 export function resolveT3McpToolId(toolName: string | null | undefined): string | null {
   const name = toolName == null ? null : resolveT3McpToolName(toolName);
-  return name !== null && Object.hasOwn(T3_MCP_TOOLS, name) ? name : null;
+  return name !== null && T3_MCP_TOOL_NAMES.has(name) ? name : null;
 }
 
 export function resolveT3McpToolDefinition(
   toolName: string | null | undefined,
 ): T3McpToolDefinition | null {
   const name = toolName == null ? null : resolveT3McpToolName(toolName);
-  return name !== null && Object.hasOwn(T3_MCP_TOOLS, name) ? T3_MCP_TOOLS[name]! : null;
+  const canonicalName = name === null ? null : (T3_MCP_LEGACY_TOOL_ALIASES[name] ?? name);
+  return canonicalName !== null && Object.hasOwn(T3_MCP_TOOLS, canonicalName)
+    ? T3_MCP_TOOLS[canonicalName]!
+    : null;
 }
 
 export function resolveT3McpToolPresentation(

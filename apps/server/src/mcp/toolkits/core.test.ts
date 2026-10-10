@@ -50,6 +50,7 @@ import { ProjectToolkit } from "./project/tools.ts";
 import { AttachmentToolkit } from "./attachment/tools.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
+import { SshToolkit } from "./ssh/tools.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
 import { DeviceToolkit } from "./device/tools.ts";
 
@@ -90,6 +91,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     DeviceToolkit,
     PullRequestsToolkit,
     HtmlToolkit,
+    SshToolkit,
   ]) {
     for (const tool of Object.values(toolkit.tools)) {
       expect(names.has(tool.name)).toBe(false);
@@ -111,7 +113,54 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
       }
     }
   }
-  expect(names.has("t3_thread_launch")).toBe(true);
+  // Public catalog contract: exactly the renamed tools, with no callable legacy aliases.
+  expect([...names].filter((name) => name.startsWith("goat_")).sort()).toEqual([
+    "goat_attachment_discard",
+    "goat_attachment_prepare_upload",
+    "goat_environment_preferences_update",
+    "goat_environment_read",
+    "goat_pending_request_list",
+    "goat_pending_request_read",
+    "goat_pending_request_respond",
+    "goat_preview_close",
+    "goat_preview_list",
+    "goat_project_clone",
+    "goat_project_create",
+    "goat_project_delete",
+    "goat_project_list",
+    "goat_project_read",
+    "goat_project_update",
+    "goat_queue_cancel",
+    "goat_queue_edit",
+    "goat_queue_list",
+    "goat_queue_promote_to_steer",
+    "goat_queue_read",
+    "goat_queue_reorder",
+    "goat_ssh_browse",
+    "goat_ssh_host_list",
+    "goat_ssh_thread_launch",
+    "goat_thread_configuration",
+    "goat_thread_configure",
+    "goat_thread_fork",
+    "goat_thread_interrupt",
+    "goat_thread_launch",
+    "goat_thread_list",
+    "goat_thread_merge_back",
+    "goat_thread_organize",
+    "goat_thread_read",
+    "goat_thread_search",
+    "goat_thread_send",
+    "goat_thread_send_attachments",
+    "goat_thread_transfers",
+    "goat_thread_update",
+    "goat_thread_wait",
+    "goat_worktree_handoff",
+    "goat_worktree_list",
+    "goat_worktree_status",
+  ]);
+  expect(names.size).toBe(83);
+  expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
+  expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
 });
 
@@ -144,9 +193,9 @@ const client = McpSchema.McpServerClient.of({
 it.effect("checks capability through the production registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    expect(server.tools.some(({ tool }) => tool.name === "t3_thread_organize")).toBe(true);
+    expect(server.tools.some(({ tool }) => tool.name === "goat_thread_organize")).toBe(true);
     const result = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
+      .callTool({ name: "goat_thread_organize", arguments: { action: "pin" } })
       .pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, {
           ...scope,
@@ -172,7 +221,7 @@ it.effect("returns a bounded public failure without serializing storage causes",
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     const result = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
+      .callTool({ name: "goat_thread_organize", arguments: { action: "pin" } })
       .pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
         Effect.provideService(McpSchema.McpServerClient, client),
@@ -189,7 +238,7 @@ it.effect("returns a bounded public failure without serializing storage causes",
         text: '{"_tag":"OrchestratorMcpFailure","code":"orchestration_error","message":"The operation could not be completed."}',
       },
     ]);
-    const definition = server.tools.find(({ tool }) => tool.name === "t3_thread_organize");
+    const definition = server.tools.find(({ tool }) => tool.name === "goat_thread_organize");
     expect(definition?.tool.outputSchema).toBeDefined();
     const validate = new AjvJsonSchemaValidator().getValidator(
       definition!.tool.outputSchema! as JsonSchemaType,
@@ -306,7 +355,7 @@ it.effect("returns invalid parameter errors through the production registration"
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     const error = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "invalid" } })
+      .callTool({ name: "goat_thread_organize", arguments: { action: "invalid" } })
       .pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
         Effect.provideService(McpSchema.McpServerClient, client),
@@ -328,7 +377,7 @@ it.effect("keeps unexpected handler defects private through the production regis
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     const result = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
+      .callTool({ name: "goat_thread_organize", arguments: { action: "pin" } })
       .pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
         Effect.provideService(McpSchema.McpServerClient, client),
@@ -430,11 +479,11 @@ it.effect("a client caller targets any thread within its ceiling and cannot act 
           Effect.provideService(McpSchema.McpServerClient, client),
         );
 
-    const untargeted = yield* call("t3_thread_organize", { action: "pin" }, clientScope("auto"));
+    const untargeted = yield* call("goat_thread_organize", { action: "pin" }, clientScope("auto"));
     expect(declaredFailure(untargeted)).toMatchObject({ code: "target_required" });
 
     const pinned = yield* call(
-      "t3_thread_organize",
+      "goat_thread_organize",
       { action: "pin", threadId: "other-project-thread" },
       clientScope("auto"),
     );
@@ -442,7 +491,7 @@ it.effect("a client caller targets any thread within its ceiling and cannot act 
     expect(pinned.structuredContent).toMatchObject({ sequence: 7 });
 
     const aboveCeiling = yield* call(
-      "t3_thread_organize",
+      "goat_thread_organize",
       { action: "pin", threadId: "other-project-thread" },
       clientScope("approval-required"),
     );
@@ -451,7 +500,7 @@ it.effect("a client caller targets any thread within its ceiling and cannot act 
     });
 
     const forked = yield* call(
-      "t3_thread_fork",
+      "goat_thread_fork",
       { sourcePoint: { type: "latest_stable" } },
       clientScope("auto"),
     );
@@ -497,20 +546,20 @@ it.effect("a read-only client reads threads and is refused every write before it
           Effect.provideService(McpSchema.McpServerClient, client),
         );
 
-    const configuration = yield* call("t3_thread_configuration", {
+    const configuration = yield* call("goat_thread_configuration", {
       threadId: "other-project-thread",
     });
     expect(configuration.isError).toBe(false);
     expect(configuration.structuredContent).toMatchObject({ runtimeMode: "auto" });
 
-    const pinned = yield* call("t3_thread_organize", {
+    const pinned = yield* call("goat_thread_organize", {
       action: "pin",
       threadId: "other-project-thread",
     });
     expect(declaredFailure(pinned)).toMatchObject({ code: "capability_denied" });
     expect(dispatched).toEqual([]);
 
-    const configure = yield* call("t3_thread_configure", {
+    const configure = yield* call("goat_thread_configure", {
       threadId: "other-project-thread",
       modelSelection: { instanceId: "codex", model: "gpt-5" },
     });
@@ -667,7 +716,7 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     const result = yield* server
-      .callTool({ name: "t3_thread_interrupt", arguments: { threadId: "full-access-thread" } })
+      .callTool({ name: "goat_thread_interrupt", arguments: { threadId: "full-access-thread" } })
       .pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
         Effect.provideService(McpSchema.McpServerClient, client),
@@ -721,7 +770,7 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
           Effect.provideService(McpSchema.McpServerClient, client),
         );
     const prepared = yield* call(
-      "t3_attachment_prepare_upload",
+      "goat_attachment_prepare_upload",
       { upload: { name: "shot.png", mimeType: "image/png", sizeBytes: 4 } },
       scope,
     );
@@ -732,21 +781,21 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
       thread: { ...scope.thread!, threadId: ThreadId.make("other-thread") },
     };
 
-    const refused = yield* call("t3_attachment_discard", { attachmentId }, otherThread);
+    const refused = yield* call("goat_attachment_discard", { attachmentId }, otherThread);
     expect(declaredFailure(refused)).toMatchObject({ code: "invalid_request" });
 
     // Another prepare a day later keeps it: the file outlives its URL's 24 hours
     // by as long as the upload took, up to the URL's own lifetime.
     yield* TestClock.adjust(24 * 60 * 60 * 1000 + 5 * 60_000);
     yield* call(
-      "t3_attachment_prepare_upload",
+      "goat_attachment_prepare_upload",
       { upload: { name: "later.png", mimeType: "image/png", sizeBytes: 4 } },
       scope,
     );
 
     // A new provider session of the same thread still owns the upload.
     const discarded = yield* call(
-      "t3_attachment_discard",
+      "goat_attachment_discard",
       { attachmentId },
       { ...scope, requestNamespace: "mcp-core-session-2" },
     );

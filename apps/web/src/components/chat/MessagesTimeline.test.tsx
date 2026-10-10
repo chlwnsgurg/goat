@@ -2310,7 +2310,7 @@ describe("MessagesTimeline", () => {
       completedAt: null,
       updatedAt: {},
       type: "dynamic_tool",
-      toolName: "mcp__t3-code__t3_thread_read",
+      toolName: "mcp__t3-code__goat_thread_read",
       input: { threadId: "thread-child" },
       output: { messages: [] },
     } as const;
@@ -2360,10 +2360,10 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    // The goat mark replaces the generic tool icon for T3 MCP calls.
+    // The goat mark replaces the generic tool icon for GOAT MCP calls.
     expect(markup).toContain('viewBox="92 92 1070 1070"');
     expect(markup).toContain("Read a T3 thread");
-    expect(markup).not.toContain("mcp__t3-code__t3_thread_read");
+    expect(markup).not.toContain("mcp__t3-code__goat_thread_read");
   });
 
   it("formats changed file paths from the workspace root", async () => {

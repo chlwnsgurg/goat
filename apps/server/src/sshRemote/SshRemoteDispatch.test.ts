@@ -1,14 +1,156 @@
-import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { describe, expect, it, vi } from "@effect/vitest";
+import * as SshConfig from "@t3tools/ssh/config";
+import * as SshTunnel from "@t3tools/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import { FetchHttpClient } from "effect/http";
 import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
 
+import * as ServerConfig from "../config.ts";
+import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
 import {
   matchRemoteProject,
   readRemoteToolResult,
   resolveSshCliRunner,
 } from "./SshRemoteDispatch.ts";
+
+describe("SSH dispatch tool compatibility", () => {
+  it.effect("fails once with the host and unknown GOAT tool on a legacy-only endpoint", () =>
+    Effect.gen(function* () {
+      const host = "legacy-host";
+      const target = { alias: host, hostname: host, username: null, port: null };
+      // Build the legacy catalog explicitly without adding live old-name fixtures to the gate.
+      const legacyTools = new Set(
+        ["project_list", "project_create", "thread_launch"].map((suffix) => `t3_${suffix}`),
+      );
+      const calls: string[] = [];
+      let projectsCreated = 0;
+      let threadsLaunched = 0;
+      const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as {
+          id?: string;
+          method: string;
+          params?: { name?: string };
+        };
+        switch (request.method) {
+          case "initialize":
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "T3 Code", version: "legacy" },
+              },
+            });
+          case "notifications/initialized":
+            return new Response(null, { status: 202 });
+          case "tools/list":
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: { tools: [...legacyTools].map((name) => ({ name })) },
+            });
+          case "tools/call": {
+            const name = request.params?.name ?? "";
+            calls.push(name);
+            if (!legacyTools.has(name)) {
+              return Response.json({
+                jsonrpc: "2.0",
+                id: request.id,
+                error: { code: -32602, message: `Unknown tool: ${name}; legacy catalog only` },
+              });
+            }
+            if (name.endsWith("project_create")) projectsCreated += 1;
+            if (name.endsWith("thread_launch")) threadsLaunched += 1;
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                structuredContent: { projects: [], id: "new-project", threadId: "new-thread" },
+              },
+            });
+          }
+          default:
+            throw new Error(`Unexpected remote method: ${request.method}`);
+        }
+      });
+      const manager = SshTunnel.SshEnvironmentManager.of({
+        ensureEnvironment: () =>
+          Effect.succeed({
+            target,
+            httpBaseUrl: "http://legacy-host:3773/",
+            wsBaseUrl: "ws://legacy-host:3773/",
+            pairingToken: null,
+          }),
+        disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
+        issueMcpClientSession: () =>
+          Effect.succeed({
+            token: "fixture-session",
+            expiresAt: null,
+            runtimeModeCeilingApplied: true,
+          }),
+        runRemoteScript: () =>
+          Effect.succeed({
+            stdout:
+              "T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t/home/agent/repo\nREAL\t/home/agent/repo\n",
+            stderr: "",
+          }),
+      });
+      const discoverHosts = vi
+        .spyOn(SshConfig, "discoverSshHosts")
+        .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+      const managerLayer = vi
+        .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+        .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+      vi.stubGlobal("fetch", fetchEndpoint);
+      try {
+        const result = yield* Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          return yield* dispatch
+            .launchThread(
+              {
+                host,
+                cwd: "/home/agent/repo",
+                workspace: { type: "cwd" },
+                title: "Compatibility probe",
+                runtimeMode: "approval-required",
+                callerRuntimeMode: "approval-required",
+              },
+              Effect.void,
+            )
+            .pipe(Effect.result);
+        }).pipe(
+          Effect.provide(
+            SshRemoteDispatch.layer.pipe(
+              Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "goat-dispatch-test-" })),
+              Layer.provide(FetchHttpClient.layer),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        expect(result._tag).toBe("Failure");
+        if (result._tag !== "Failure") throw new Error("Expected remote dispatch failure");
+        expect(result.failure.reason).toBe("ssh_failed");
+        expect(result.failure.message).toContain("Calling goat_project_list on legacy-host failed");
+        expect(result.failure.message).toContain(
+          "Unknown tool: goat_project_list; legacy catalog only",
+        );
+        expect(calls).toEqual(["goat_project_list"]);
+        expect(projectsCreated).toBe(0);
+        expect(threadsLaunched).toBe(0);
+        expect(fetchEndpoint).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.unstubAllGlobals();
+        managerLayer.mockRestore();
+        discoverHosts.mockRestore();
+      }
+    }),
+  );
+});
 
 describe("matchRemoteProject", () => {
   const project = { id: "project-1", workspaceRoot: "/home/agent/repo/" };

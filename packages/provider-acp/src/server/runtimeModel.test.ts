@@ -1588,12 +1588,12 @@ describe("extractMcpToolCallIdentity", () => {
       kind: "other",
       title: "unrelated display title",
       status: "pending",
-      _meta: { toolName: "mcp::t3-code::t3_thread_send", serverId: "t3-code", provenance: "mcp" },
+      _meta: { toolName: "mcp::t3-code::goat_thread_send", serverId: "t3-code", provenance: "mcp" },
     });
 
     expect(extractMcpToolCallIdentity(toolCall)).toEqual({
       server: "t3-code",
-      tool: "t3_thread_send",
+      tool: "goat_thread_send",
     });
   });
 

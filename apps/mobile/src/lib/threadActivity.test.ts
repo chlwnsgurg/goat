@@ -1437,7 +1437,7 @@ describe("buildThreadFeed", () => {
     const toolItem: OrchestrationV2TurnItem = {
       ...base("item-t3-tool", "2026-06-20T00:00:04.000Z", 3),
       type: "dynamic_tool",
-      toolName: "mcp__t3-code__t3_thread_read",
+      toolName: "mcp__t3-code__goat_thread_read",
       input: { threadId: "thread-child" },
       output: { messages: [] },
     };
@@ -1465,7 +1465,7 @@ describe("buildThreadFeed", () => {
   it("uses canonical T3 orchestration summaries in compact work groups", () => {
     const rows = [
       projected(command("2026-06-20T00:00:01.000Z"), 0),
-      ...["mcp__t3-code__t3_thread_send", "t3_code.t3_thread_send", "t3_thread_send"].map(
+      ...["mcp__t3-code__goat_thread_send", "t3_code.goat_thread_send", "goat_thread_send"].map(
         (toolName, index) =>
           projected(
             {
@@ -1510,7 +1510,7 @@ describe("buildThreadFeed", () => {
         ...base("list", "2026-09-19T00:00:01.000Z", 1),
         type: "dynamic_tool",
         title: "Custom provider title",
-        toolName: "T3-code.t3_project_list",
+        toolName: "T3-code.goat_project_list",
         input: {},
         output: { projects: [] },
       },
@@ -1518,7 +1518,7 @@ describe("buildThreadFeed", () => {
         ...base("clone", "2026-09-19T00:00:02.000Z", 2),
         type: "dynamic_tool",
         title: "Custom provider title",
-        toolName: "mcp__t3_code__t3_project_clone",
+        toolName: "mcp__t3_code__goat_project_clone",
         input: {},
         output: { cwd: "/tmp/repo" },
       },
@@ -1526,7 +1526,7 @@ describe("buildThreadFeed", () => {
         ...base("failed-clone", "2026-09-19T00:00:03.000Z", 3),
         type: "dynamic_tool",
         title: "Custom provider title",
-        toolName: "t3_project_clone",
+        toolName: "goat_project_clone",
         input: {},
         output: { isError: true },
       },

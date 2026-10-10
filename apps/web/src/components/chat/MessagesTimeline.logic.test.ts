@@ -181,7 +181,7 @@ describe("work entry labels", () => {
       toolLifecycleStatus,
       structuredPayload: {
         type: "dynamic_tool",
-        toolName: "t3-code.t3_thread_read",
+        toolName: "t3-code.goat_thread_read",
         input: { threadId: " thread-child ", view: "activity" },
       } as never,
     };
@@ -194,9 +194,9 @@ describe("work entry labels", () => {
     const payload = (toolName: string, input: unknown) => ({
       structuredPayload: { type: "dynamic_tool", toolName, input } as never,
     });
-    expect(threadReadTargetId(payload("t3-code.t3_thread_wait", { threadId: "t" }))).toBeNull();
-    expect(threadReadTargetId(payload("t3-code.t3_thread_read", { threadId: "  " }))).toBeNull();
-    expect(threadReadTargetId(payload("t3-code.t3_thread_read", null))).toBeNull();
+    expect(threadReadTargetId(payload("t3-code.goat_thread_wait", { threadId: "t" }))).toBeNull();
+    expect(threadReadTargetId(payload("t3-code.goat_thread_read", { threadId: "  " }))).toBeNull();
+    expect(threadReadTargetId(payload("t3-code.goat_thread_read", null))).toBeNull();
   });
 
   it("uses the active summary state for legacy tools without a lifecycle status", () => {
@@ -788,7 +788,7 @@ describe("deriveMessagesTimelineRows", () => {
         id: TurnItemId.make("list"),
         status: "completed",
         title: "Custom provider title",
-        toolName: "T3-code.t3_project_list",
+        toolName: "T3-code.goat_project_list",
         input: {},
         output: { projects: [] },
       },
@@ -798,7 +798,7 @@ describe("deriveMessagesTimelineRows", () => {
         id: TurnItemId.make("clone"),
         status: "completed",
         title: "Custom provider title",
-        toolName: "mcp__t3_code__t3_project_clone",
+        toolName: "mcp__t3_code__goat_project_clone",
         input: {},
         output: { cwd: "/tmp/repo" },
       },
@@ -808,7 +808,7 @@ describe("deriveMessagesTimelineRows", () => {
         id: TurnItemId.make("failed-clone"),
         status: "completed",
         title: "Custom provider title",
-        toolName: "t3_project_clone",
+        toolName: "goat_project_clone",
         input: {},
         output: { isError: true },
       },
@@ -3575,7 +3575,7 @@ describe("computeStableMessagesTimelineRows", () => {
 
 describe("resolveTimelineToolPresentation", () => {
   it("pretty prints Claude and Cursor T3 MCP tool names", () => {
-    expect(resolveTimelineToolPresentation("mcp__t3-code__t3_thread_read")).toEqual({
+    expect(resolveTimelineToolPresentation("mcp__t3-code__goat_thread_read")).toEqual({
       displayName: "Read a T3 thread",
       logo: "t3-code",
     });

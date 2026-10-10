@@ -265,7 +265,7 @@ const make = Effect.gen(function* () {
     if (!hosts.some((entry) => entry.alias === alias)) {
       return yield* failure(
         "host_unknown",
-        `${alias} is not in this machine's SSH config or known_hosts. Call t3_ssh_host_list for the hosts it can reach.`,
+        `${alias} is not in this machine's SSH config or known_hosts. Call goat_ssh_host_list for the hosts it can reach.`,
       );
     }
     return {
@@ -405,7 +405,7 @@ const make = Effect.gen(function* () {
     for (let page = 0; page < MAX_PROJECT_PAGES && cursor !== null; page += 1) {
       const listed = (yield* callRemote({
         ...remote,
-        tool: "t3_project_list",
+        tool: "goat_project_list",
         arguments: { cursor, limit: 100 },
       })) as {
         readonly projects?: ReadonlyArray<RemoteProject>;
@@ -541,7 +541,7 @@ const make = Effect.gen(function* () {
       yield* beforeLaunch;
       const created = (yield* callRemote({
         ...remote,
-        tool: "t3_project_create",
+        tool: "goat_project_create",
         arguments: {
           title:
             input.projectTitle?.trim() ||
@@ -553,7 +553,7 @@ const make = Effect.gen(function* () {
       if (typeof created?.id !== "string") {
         return yield* failure(
           "remote_refused",
-          "The remote t3_project_create returned no project id.",
+          "The remote goat_project_create returned no project id.",
         );
       }
       project = { id: created.id, workspaceRoot: folder.path };
@@ -565,7 +565,7 @@ const make = Effect.gen(function* () {
     yield* beforeLaunch;
     const launched = (yield* callRemote({
       ...remote,
-      tool: "t3_thread_launch",
+      tool: "goat_thread_launch",
       arguments: {
         projectId: project.id,
         title: input.title,
@@ -577,10 +577,13 @@ const make = Effect.gen(function* () {
       },
     })) as { readonly threadId?: string };
     if (typeof launched?.threadId !== "string") {
-      return yield* failure("remote_refused", "The remote t3_thread_launch returned no thread id.");
+      return yield* failure(
+        "remote_refused",
+        "The remote goat_thread_launch returned no thread id.",
+      );
     }
     notes.push(
-      `The thread lives in the T3 environment on ${target.alias}. Connect to ${target.alias} (Settings → Connections → SSH) to watch it; t3_thread_read here only sees this environment.`,
+      `The thread lives in the T3 environment on ${target.alias}. Connect to ${target.alias} (Settings → Connections → SSH) to watch it; goat_thread_read here only sees this environment.`,
     );
     return {
       host: target.alias,
