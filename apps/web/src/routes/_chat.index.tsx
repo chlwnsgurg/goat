@@ -239,7 +239,13 @@ function IndexDraftLanding() {
       />
     );
   }
-  if ((resolutionKind === "fallback" || fallbackReady) && mostRecentProject === null) {
+  // The hero belongs to the fallback only: once creation starts it would offer a second,
+  // competing "start without a project". A confirm wait that ended in the fallback keeps
+  // resolutionKind "confirm-thread", hence fallbackReady.
+  if (
+    (resolutionKind === "fallback" || (resolutionKind === "confirm-thread" && fallbackReady)) &&
+    mostRecentProject === null
+  ) {
     // First-run routing to the welcome wizard happens in FirstRunGate at the
     // root, before this route ever renders.
     return <NoProjectsHero />;
