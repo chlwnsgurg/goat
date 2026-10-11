@@ -28,7 +28,7 @@ describe("remote MCP session script", () => {
     home = NodeFS.realpathSync(
       NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-session-")),
     );
-    const stateDirectory = NodePath.join(home, ".t3", "ssh-launch", stateKey);
+    const stateDirectory = NodePath.join(home, ".goat", "ssh-launch", stateKey);
     NodeFS.mkdirSync(stateDirectory, { recursive: true });
     runner = NodePath.join(stateDirectory, "run-t3.sh");
   });
@@ -106,7 +106,8 @@ JSON
     options.label,
     "--json",
   ];
-  const baseArgs = () => expectedArgs.map((arg) => (arg === "" ? NodePath.join(home, ".t3") : arg));
+  const baseArgs = () =>
+    expectedArgs.map((arg) => (arg === "" ? NodePath.join(home, ".goat") : arg));
 
   it.effect("retries an older CLI without the ceiling and decodes its pretty JSON", () =>
     Effect.gen(function* () {
@@ -150,37 +151,22 @@ JSON
     }),
   );
 
-  it.effect(
-    "replaces an existing runner when keepExistingRunner is false and uses the pinned runtime",
-    () =>
-      Effect.gen(function* () {
-        const originalRunner = installFakeRunner(true);
-        const runtimeDirectory = NodePath.join(home, ".t3", "runtime", "versions", archiveVersion);
-        NodeFS.mkdirSync(runtimeDirectory, { recursive: true });
-        NodeFS.writeFileSync(
-          NodePath.join(runtimeDirectory, "t3"),
-          fakeCli(false, "replacement-runtime-token"),
-          {
-            mode: 0o700,
-          },
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(runtimeDirectory, ".install-complete"),
-          `${archiveVersion}\n`,
-        );
-
-        expect(yield* runSession(false)).toEqual({
-          token: "replacement-runtime-token",
-          expiresAt,
-          runtimeModeCeilingApplied: true,
-        });
-        expect(NodeFS.readFileSync(runner, "utf8")).not.toBe(originalRunner);
-        expect(receivedArgs(1)).toEqual([
-          ...baseArgs(),
-          "--runtime-mode-ceiling",
-          options.runtimeModeCeiling,
-        ]);
-        expect(() => receivedArgs(2)).toThrow();
-      }),
+  it.effect("retains the installed runner even when keepExistingRunner is false", () =>
+    Effect.gen(function* () {
+      const originalRunner = installFakeRunner(false);
+      expect(yield* runSession(false)).toEqual({
+        token,
+        expiresAt,
+        runtimeModeCeilingApplied: true,
+      });
+      expect(NodeFS.readFileSync(runner, "utf8")).toBe(originalRunner);
+      expect(receivedArgs(1)).toEqual([
+        ...baseArgs(),
+        "--runtime-mode-ceiling",
+        options.runtimeModeCeiling,
+      ]);
+      expect(() => receivedArgs(2)).toThrow();
+      expect(NodeFS.existsSync(NodePath.join(home, ".goat", "runtime"))).toBe(false);
+    }),
   );
 });

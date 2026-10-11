@@ -307,7 +307,7 @@ function applyScriptPlaceholders(
 ): string {
   let result = template;
   for (const [token, value] of Object.entries(replacements)) {
-    result = result.replaceAll(`@@${token}@@`, value);
+    result = result.replaceAll(`@@${token}@@`, () => value);
   }
   return result;
 }
@@ -590,10 +590,14 @@ if ! t3_runtime_ready; then
   fi
   tar -xzf "$T3_STAGING/$T3_ARCHIVE" -C "$T3_STAGING" --strip-components=1
   rm -f "$T3_STAGING/$T3_ARCHIVE" "$T3_STAGING/SHA256SUMS"
-  # Prove the binary runs here (libc, arch) before marking it ready, or every
-  # later launch would exec a broken install instead of retrying.
-  if ! "$T3_STAGING/goat" --version >/dev/null 2>&1; then
+  # Verify the executable and exact version before replacing a runtime,
+  # including a same-version directory whose completion marker is broken.
+  if ! T3_STAGED_VERSION_OUTPUT="$("$T3_STAGING/goat" --version)"; then
     printf 'The goat %s executable does not run on this host.\\n' "$T3_ARCHIVE_VERSION" >&2; exit 1
+  fi
+  if [ "$T3_STAGED_VERSION_OUTPUT" != "goat v$T3_ARCHIVE_VERSION" ]; then
+    printf 'Cannot install goat %s: expected goat v%s, but the archive executable reported "%s". The existing runtime directory and completion marker have been left unchanged. Supply the correct requested archive in the local SSH runtime archive directory or release mirror, then retry.\\n' "$T3_ARCHIVE_VERSION" "$T3_ARCHIVE_VERSION" "$T3_STAGED_VERSION_OUTPUT" >&2
+    exit 1
   fi
   printf '%s\\n' "$T3_ARCHIVE_VERSION" > "$T3_STAGING/.install-complete"
   rm -rf "$T3_RUNTIME_DIR"
@@ -606,6 +610,38 @@ fi
 exec "$T3_RUNTIME_DIR/goat" "$@"
 `;
 
+// Publishing a runner is the switch boundary. Execute the candidate first;
+// auth commands keep an existing runner so they match its running server.
+const REMOTE_RUNNER_SETUP_SCRIPT = `RUNNER_FILE="$STATE_DIR/run-t3.sh"
+RUNNER_NEXT="$STATE_DIR/run-t3.next.$$"
+REQUESTED_RUNNER=@@T3_REQUESTED_RUNNER@@
+EXPECTED_ARCHIVE_VERSION=@@T3_EXPECTED_ARCHIVE_VERSION@@
+mkdir -p "$STATE_DIR"
+cleanup_runner_next() {
+  rm -f "$RUNNER_NEXT"
+}
+trap cleanup_runner_next EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cat >"$RUNNER_NEXT" <<'SH'
+@@T3_RUNNER_SCRIPT@@
+SH
+verify_runner_next() {
+  chmod 700 "$RUNNER_NEXT"
+  if ! RUNNER_VERSION_OUTPUT="$("$RUNNER_NEXT" --version)"; then
+    printf 'Cannot prepare %s on this host. The existing runner and server have been left unchanged. Supply a valid archive for the requested version in the local SSH runtime archive directory, or configure a release mirror containing that version, then retry.\\n' "$REQUESTED_RUNNER" >&2
+    exit 1
+  fi
+  if [ -n "$EXPECTED_ARCHIVE_VERSION" ] && [ "$RUNNER_VERSION_OUTPUT" != "goat v$EXPECTED_ARCHIVE_VERSION" ]; then
+    printf 'Cannot prepare %s: expected goat v%s, but the candidate reported "%s". The existing runner and server have been left unchanged. Supply the correct requested archive in the local SSH runtime archive directory or release mirror, and have the owning client clear the rejected version cache at %s before retrying.\\n' "$REQUESTED_RUNNER" "$EXPECTED_ARCHIVE_VERSION" "$RUNNER_VERSION_OUTPUT" "$HOME/.goat/runtime/goat/versions/$EXPECTED_ARCHIVE_VERSION" >&2
+    exit 1
+  fi
+}
+RUNNER_CHANGED=0
+@@T3_RUNNER_INSTALL@@
+`;
+
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
@@ -616,19 +652,7 @@ PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
 MANAGED_FILE="$STATE_DIR/managed"
 LOG_FILE="$STATE_DIR/server.log"
-RUNNER_FILE="$STATE_DIR/run-t3.sh"
-RUNNER_NEXT="$STATE_DIR/run-t3.next.$$"
-mkdir -p "$STATE_DIR"
-cleanup_runner_next() {
-  rm -f "$RUNNER_NEXT"
-}
-trap cleanup_runner_next EXIT
-cat >"$RUNNER_NEXT" <<'SH'
-@@T3_RUNNER_SCRIPT@@
-SH
-RUNNER_CHANGED=0
-@@T3_RUNNER_INSTALL@@
-chmod 700 "$RUNNER_FILE"
+@@T3_RUNNER_SETUP@@
 T3_ARCHIVE_MODE=@@T3_ARCHIVE_MODE@@
 if [ "$T3_ARCHIVE_MODE" = "1" ]; then
   # The archive ships the helpers below inside the executable; the remote
@@ -787,30 +811,33 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 const REMOTE_PAIRING_SCRIPT = `set -eu
 STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
 DEFAULT_SERVER_HOME="$HOME/.goat"
-RUNNER_FILE="$STATE_DIR/run-t3.sh"
-mkdir -p "$STATE_DIR"
-cat >"$RUNNER_FILE" <<'SH'
-@@T3_RUNNER_SCRIPT@@
-SH
-chmod 700 "$RUNNER_FILE"
+@@T3_RUNNER_SETUP@@
 PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 "$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json
 `;
 
-// How the launch script installs the runner it just wrote to RUNNER_NEXT.
-// The default replaces a changed runner and flags RUNNER_CHANGED, which
-// restarts a managed server; its bytes are part of the frozen launch baseline.
-const REPLACE_RUNNER_INSTALL = `if [ ! -f "$RUNNER_FILE" ] || ! cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
+// Matching bytes preserve the installed file and do not restart a server.
+const REPLACE_RUNNER_INSTALL = `if [ -f "$RUNNER_FILE" ] && cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
+  rm -f "$RUNNER_NEXT"
+else
+  verify_runner_next
+  mv "$RUNNER_NEXT" "$RUNNER_FILE"
   RUNNER_CHANGED=1
-fi
-mv "$RUNNER_NEXT" "$RUNNER_FILE"`;
+fi`;
 // A second client of the host keeps whatever runner is already there, so it
 // never restarts a server another client launched.
 const KEEP_EXISTING_RUNNER_INSTALL = `if [ -f "$RUNNER_FILE" ]; then
   rm -f "$RUNNER_NEXT"
 else
+  verify_runner_next
   mv "$RUNNER_NEXT" "$RUNNER_FILE"
 fi`;
+
+// A managed server also writes the default runtime descriptor. Keep its
+// ownership here; the later RUNNER_CHANGED branch alone decides replacement.
+const REPLACE_OWN_RUNTIME_CHECK = `if [ "$REMOTE_MANAGED" = "managed" ] && [ -n "$REMOTE_PID" ] && [ "$REMOTE_PID" = "$DEFAULT_RUNTIME_PID" ]; then
+      REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+    el`;
 
 // A managed server started with the default base dir records itself as the
 // default runtime, so a later launch would read its own server as a separate
@@ -839,14 +866,7 @@ const KEEP_BUSY_SERVER_GUARD = `echo "The T3 server on this host did not answer 
 const REMOTE_MCP_SESSION_SCRIPT = `set -eu
 STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
 DEFAULT_SERVER_HOME="$HOME/.goat"
-RUNNER_FILE="$STATE_DIR/run-t3.sh"
-mkdir -p "$STATE_DIR"
-if [ "@@T3_KEEP_EXISTING_RUNNER@@" != "1" ] || [ ! -f "$RUNNER_FILE" ]; then
-  cat >"$RUNNER_FILE" <<'SH'
-@@T3_RUNNER_SCRIPT@@
-SH
-  chmod 700 "$RUNNER_FILE"
-fi
+@@T3_RUNNER_SETUP@@
 set -- auth session issue --base-dir "$DEFAULT_SERVER_HOME" --subject mcp-client --scope orchestration:read --scope orchestration:operate --ttl @@T3_TTL@@ --label @@T3_LABEL@@ --json
 CEILING=@@T3_CEILING@@
 if [ -n "$CEILING" ] && OUTPUT="$("$RUNNER_FILE" "$@" --runtime-mode-ceiling "$CEILING" 2>/dev/null)"; then
@@ -948,11 +968,28 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
   );
 }
 
+function buildRemoteRunnerSetupScript(
+  input: RemoteT3RunnerOptions | undefined,
+  keepExistingRunner: boolean,
+): string {
+  const requestedRunner = isNodeScriptRunner(input)
+    ? `Node script ${input?.nodeScriptPath?.trim()}`
+    : `GOAT ${input?.archiveVersion?.trim()}`;
+  return applyScriptPlaceholders(REMOTE_RUNNER_SETUP_SCRIPT, {
+    T3_REQUESTED_RUNNER: shellSingleQuote(requestedRunner),
+    T3_EXPECTED_ARCHIVE_VERSION: shellSingleQuote(
+      isNodeScriptRunner(input) ? "" : input?.archiveVersion?.trim() || "",
+    ),
+    T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
+    T3_RUNNER_INSTALL: keepExistingRunner ? KEEP_EXISTING_RUNNER_INSTALL : REPLACE_RUNNER_INSTALL,
+  });
+}
+
 export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
-    T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
+    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, input?.keepExistingRunner === true),
     T3_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
     T3_WAIT_READY_SCRIPT: stripTrailingNewlines(REMOTE_WAIT_READY_SCRIPT),
     T3_DEFAULT_REMOTE_PORT: String(DEFAULT_REMOTE_PORT),
@@ -960,10 +997,9 @@ export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
     T3_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     T3_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     T3_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
-    T3_RUNNER_INSTALL: input?.keepExistingRunner
-      ? KEEP_EXISTING_RUNNER_INSTALL
-      : REPLACE_RUNNER_INSTALL,
-    T3_OWN_RUNTIME_CHECK: input?.keepExistingRunner ? KEEP_OWN_RUNTIME_CHECK : "",
+    T3_OWN_RUNTIME_CHECK: input?.keepExistingRunner
+      ? KEEP_OWN_RUNTIME_CHECK
+      : REPLACE_OWN_RUNTIME_CHECK,
     T3_BUSY_SERVER_GUARD: input?.keepExistingRunner ? KEEP_BUSY_SERVER_GUARD : "",
   });
 }
@@ -975,11 +1011,10 @@ export function buildRemoteMcpSessionScript(
 ): string {
   return applyScriptPlaceholders(REMOTE_MCP_SESSION_SCRIPT, {
     T3_STATE_KEY: stateKey,
-    T3_KEEP_EXISTING_RUNNER: input?.keepExistingRunner ? "1" : "0",
     T3_TTL: shellSingleQuote(options.ttl),
     T3_LABEL: shellSingleQuote(options.label),
     T3_CEILING: shellSingleQuote(options.runtimeModeCeiling ?? ""),
-    T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
+    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, true),
   });
 }
 
@@ -1002,7 +1037,7 @@ export const decodeRemoteMcpSessionOutput = Effect.fn("ssh/tunnel.decodeRemoteMc
 export function buildRemotePairingScript(stateKey: string, input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_PAIRING_SCRIPT, {
     T3_STATE_KEY: stateKey,
-    T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
+    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, true),
   });
 }
 
@@ -1212,7 +1247,18 @@ export const prepareRemoteRuntime = (
       timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
     });
     yield* Effect.annotateCurrentSpan("t3.runtime.upload.installComplete", true);
-  }).pipe(Effect.withSpan("ssh.prepareRemoteRuntime"));
+  }).pipe(
+    Effect.mapError((error) =>
+      error instanceof SshLaunchError
+        ? new SshLaunchError({
+            message: `Cannot prepare GOAT ${runner?.archiveVersion?.trim() || "(node-script runner)"} on ${target.alias}: ${error.message} The existing runner and server have been left unchanged. Supply the requested runtime archive in the local SSH runtime archive directory or a release mirror, then retry.`,
+            stdout: error.stdout,
+            cause: error,
+          })
+        : error,
+    ),
+    Effect.withSpan("ssh.prepareRemoteRuntime"),
+  );
 
 export function buildRemoteStopScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
@@ -1304,7 +1350,12 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     ...sshTargetLogFields(target),
     stateKey,
   });
-  yield* prepareRemoteRuntime(target, input ?? {}, runner);
+  yield* prepareRemoteRuntime(
+    target,
+    input ?? {},
+    { ...runner, keepExistingRunner: true },
+    stateKey,
+  );
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
     stdin: buildRemotePairingScript(stateKey, runner),
@@ -1358,7 +1409,12 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
     ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
   > {
     const stateKey = yield* remoteStateKey(target);
-    yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey);
+    yield* prepareRemoteRuntime(
+      target,
+      input ?? {},
+      { ...runner, keepExistingRunner: true },
+      stateKey,
+    );
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-s"],
       stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, runner),
@@ -2052,7 +2108,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         remotePort: entry.remotePort,
         cause: readinessExit.cause,
       });
-      yield* closeTunnelEntry(entry);
+      // A failed local forward is not authority to stop its remote server.
+      // Remove ownership before closing so the scope finalizer stays local.
+      yield* Effect.gen(function* () {
+        if (tunnels.get(key) === entry) {
+          tunnels.delete(key);
+        }
+        yield* closeTunnelEntry(entry);
+      }).pipe(Effect.uninterruptible);
     }
 
     return yield* createTunnelEntry({
@@ -2156,17 +2219,19 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           hasTunnel: entry !== null,
         });
         if (entry !== null) {
-          // Explicit disconnect owns the remote stop so its failure reaches the caller.
+          // Remove this entry before closure; an owner stops explicitly below.
           yield* Effect.gen(function* () {
             tunnels.delete(key);
             yield* closeTunnelEntry(entry);
           }).pipe(Effect.uninterruptible);
         }
-        yield* runWithSshAuth({
-          key,
-          target: resolvedTarget,
-          operation: (authOptions) => stopRemoteServer(resolvedTarget, authOptions),
-        });
+        if (options.leaveRemoteServerRunning !== true) {
+          yield* runWithSshAuth({
+            key,
+            target: resolvedTarget,
+            operation: (authOptions) => stopRemoteServer(resolvedTarget, authOptions),
+          });
+        }
         yield* Effect.logInfo("ssh.environment.disconnect.succeeded", {
           ...sshTargetLogFields(resolvedTarget),
           key,

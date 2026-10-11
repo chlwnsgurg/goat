@@ -123,7 +123,7 @@ const makeUploadFixture = Effect.fn("test.makeUploadFixture")(function* () {
   const directory = `${root}/mirror/v${ARCHIVE.archiveVersion}`;
   yield* fs.makeDirectory(stage, { recursive: true });
   yield* fs.makeDirectory(directory, { recursive: true });
-  yield* fs.writeFileString(`${stage}/goat`, `#!/bin/sh\necho t3 v${ARCHIVE.archiveVersion}\n`);
+  yield* fs.writeFileString(`${stage}/goat`, `#!/bin/sh\necho goat v${ARCHIVE.archiveVersion}\n`);
   yield* fs.chmod(`${stage}/goat`, 0o700);
   const child = yield* spawner.spawn(
     ChildProcess.make("tar", ["-czf", `${directory}/${stem}.tar.gz`, "-C", `${root}/stage`, stem]),
@@ -153,7 +153,7 @@ const nativeScripts = Effect.fn("test.nativeScripts")(function* (
   const moduleUrl = new URL("./tunnel.ts", import.meta.url).href;
   const script = `import * as t from ${JSON.stringify(moduleUrl)};
 const input = ${JSON.stringify(input)};
-console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input), pairing: t.buildRemotePairingScript("711bc738002d72fd", input), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }));`;
+console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input), pairing: t.buildRemotePairingScript("711bc738002d72fd", input), mcp: t.buildRemoteMcpSessionScript("711bc738002d72fd", { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }));`;
   const child = yield* spawner.spawn(
     ChildProcess.make(process.execPath, ["--input-type=module", "-e", script]),
   );
@@ -170,6 +170,7 @@ console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch:
     runner: string;
     launch: string;
     pairing: string;
+    mcp: string;
     upload: string | null;
   };
 });
@@ -221,6 +222,38 @@ describe("ssh tunnel scripts", () => {
       );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
+  it.effect("preserves literal shell PIDs through every nested script builder", () =>
+    Effect.gen(function* () {
+      const lockOwner = `printf '%s\\n' "$$" > "$T3_LOCK/pid.tmp"`;
+      for (const input of [
+        ARCHIVE,
+        { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
+        { nodeScriptPath: "/fixture/cli entry.mjs", nodeEngineRange: TEST_NODE_ENGINE_RANGE },
+      ]) {
+        const generated = yield* nativeScripts(input);
+        for (const field of ["runner", "launch", "pairing", "mcp"] as const) {
+          assert.include(generated[field], lockOwner, field);
+          assert.notInclude(generated[field], `printf '%s\\n' "$" > "$T3_LOCK/pid.tmp"`, field);
+        }
+        for (const field of ["launch", "pairing", "mcp"] as const) {
+          assert.include(generated[field], 'RUNNER_NEXT="$STATE_DIR/run-t3.next.$$"', field);
+          const nested = generated[field].split("<<'SH'\n")[1]!.split("\nSH\n")[0]!;
+          assert.equal(nested, generated.runner, field);
+        }
+        if (generated.upload !== null) assert.include(generated.upload, lockOwner);
+      }
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("inserts dollar metacharacters literally in nested quoted runner paths", () =>
+    Effect.gen(function* () {
+      const generated = yield* nativeScripts({ nodeScriptPath: "/fixture/dollar $$ $& entry.mjs" });
+      for (const field of ["runner", "launch", "pairing", "mcp"] as const) {
+        assert.include(generated[field], "T3_NODE_SCRIPT_PATH='/fixture/dollar $$ $& entry.mjs'");
+      }
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it("installs and runs the release archive without Node, npm, or npx", () => {
     const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
 
@@ -566,17 +599,31 @@ describe("ssh tunnel scripts", () => {
       username: "julius",
       port: 2222,
     } as const;
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        makeSuccessfulProcess(`{
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        const input = command._tag === "StandardCommand" ? command.options.stdin : undefined;
+        const bytes =
+          input !== undefined &&
+          typeof input === "object" &&
+          "stream" in input &&
+          Stream.isStream(input.stream)
+            ? yield* input.stream.pipe(Stream.runCollect)
+            : [];
+        const script = new TextDecoder().decode(
+          new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))),
+        );
+        if (script.includes("ready=false")) {
+          return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: true }));
+        }
+        return makeSuccessfulProcess(`{
   "id": "88941235-6ed5-4184-a2ff-5339e2075958",
   "credential": "LCL4R2TPHDKQ",
   "scopes": ["orchestration:read"],
   "expiresAt": "2026-04-29T01:01:20.994Z"
 }
 
-`),
-      ),
+`);
+      }),
     );
     const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
     const layerProcess = Layer.merge(NodeServices.layer, layerSpawner);
@@ -593,9 +640,23 @@ describe("ssh tunnel scripts", () => {
       username: "julius",
       port: 2222,
     } as const;
-    const spawner = ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        makeSuccessfulProcess(`loaded nvm default
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        const input = command._tag === "StandardCommand" ? command.options.stdin : undefined;
+        const bytes =
+          input !== undefined &&
+          typeof input === "object" &&
+          "stream" in input &&
+          Stream.isStream(input.stream)
+            ? yield* input.stream.pipe(Stream.runCollect)
+            : [];
+        const script = new TextDecoder().decode(
+          new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))),
+        );
+        if (script.includes("ready=false")) {
+          return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: true }));
+        }
+        return makeSuccessfulProcess(`loaded nvm default
 {
   "id": "88941235-6ed5-4184-a2ff-5339e2075958",
   "credential": "LCL4R2TPHDKQ",
@@ -603,8 +664,8 @@ describe("ssh tunnel scripts", () => {
   "expiresAt": "2026-04-29T01:01:20.994Z"
 }
 
-`),
-      ),
+`);
+      }),
     );
     const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
     const layerProcess = Layer.merge(NodeServices.layer, layerSpawner);
@@ -613,6 +674,89 @@ describe("ssh tunnel scripts", () => {
       assert.equal(result.credential, "LCL4R2TPHDKQ");
     }).pipe(Effect.provide(layerProcess));
   });
+
+  it.effect.each(["successful reconnect", "failed reconnect"] as const)(
+    "stale local forward never stops the remote during %s",
+    (mode) =>
+      Effect.gen(function* () {
+        let forwards = 0;
+        let kills = 0;
+        let launches = 0;
+        let stops = 0;
+        let remoteRunning = true;
+        let stale = false;
+        const probeStarted = yield* Deferred.make<void>();
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.sync(() => {
+            const args = commandArgs(command);
+            if (args.includes("-G"))
+              return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
+            if (args.includes("-N")) {
+              forwards++;
+              return makeRunningProcess(() => {
+                kills++;
+              });
+            }
+            if (args.includes("--")) {
+              launches++;
+              if (launches === 2 && mode === "failed reconnect")
+                return {
+                  ...makeSuccessfulProcess(""),
+                  exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+                  stderr: Stream.make(encoder.encode("Cannot prepare requested GOAT version")),
+                };
+              stale = false;
+              return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
+            }
+            if (args.includes("sh")) {
+              stops++;
+              remoteRunning = false;
+              return makeSuccessfulProcess('{"stopped":true}');
+            }
+            return makeSuccessfulProcess("");
+          }),
+        );
+        const client = HttpClient.make((request) =>
+          stale
+            ? Deferred.succeed(probeStarted, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response("", { status: 200 })),
+              ),
+        );
+        const layer = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Layer.succeed(HttpClient.HttpClient, client),
+          Layer.succeed(NetService.NetService, testNetService),
+          SshAuth.SshPasswordPrompt.disabledLayer,
+          SshTunnel.SshEnvironmentManager.layer({
+            resolveCliRunner: Effect.succeed(PROTOCOL_ARCHIVE),
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          yield* manager.ensureEnvironment(uploadTarget);
+          stale = true;
+          const reconnect = yield* Effect.forkChild(
+            Effect.result(manager.ensureEnvironment(uploadTarget)),
+          );
+          yield* Deferred.await(probeStarted);
+          yield* TestClock.adjust(Duration.seconds(2));
+          const result = yield* Fiber.join(reconnect);
+          assert.equal(kills, 1);
+          assert.equal(stops, 0);
+          assert.isTrue(remoteRunning);
+          assert.equal(forwards, mode === "successful reconnect" ? 2 : 1);
+          assert.equal(launches, 2);
+          assert.equal(Result.isSuccess(result), mode === "successful reconnect");
+          // Disconnect remains an explicit remote-stop operation, including
+          // when reconnection failed and no map entry remains.
+          yield* manager.disconnectEnvironment(uploadTarget);
+          assert.equal(stops, 1);
+        }).pipe(Effect.provide(layer), Effect.scoped);
+        assert.equal(stops, 1);
+      }),
+  );
 
   it.effect.each(["successful stop", "failed stop"] as const)(
     "closes the tunnel scope and starts fresh after a %s",
@@ -834,6 +978,14 @@ describe("runtime preparation", () => {
     { entry: "launch", mode: "invalid" },
     { entry: "mcp", mode: "invalid" },
     { entry: "pairing", mode: "ready" },
+    { entry: "pairing", mode: "missing" },
+    { entry: "pairing", mode: "dev" },
+    { entry: "pairing", mode: "none" },
+    { entry: "pairing", mode: "invalid" },
+    { entry: "pairing", mode: "upstream-only" },
+    { entry: "pairing", mode: "marker-only" },
+    { entry: "pairing", mode: "non-executable" },
+    { entry: "pairing", mode: "wrong-marker" },
     { entry: "launch", mode: "upstream-only" },
     { entry: "mcp", mode: "upstream-only" },
     { entry: "launch", mode: "marker-only" },
@@ -891,10 +1043,6 @@ describe("runtime preparation", () => {
         );
       }
       const archiveDirectory = `${root}/missing-cache`;
-      const bytes = new Uint8Array([0, 128, 255]);
-      const crypto = yield* Crypto.Crypto;
-      const sha256 = Hex.encode(yield* crypto.digest("SHA-256", bytes));
-      const asset = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`;
       const calls: string[] = [];
       const spans: Tracer.Span[] = [];
       let cacheReads = 0;
@@ -915,17 +1063,6 @@ describe("runtime preparation", () => {
           if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
           if (command.command === "gh") {
             calls.push("gh");
-            if (entry === "pairing") {
-              assert.include(command.args, `v${ARCHIVE.archiveVersion}`);
-              assert.include(command.args, asset);
-              assert.notInclude(command.args, `v${retainedVersion}`);
-              const staging = command.args[command.args.indexOf("--dir") + 1];
-              assert.isDefined(staging);
-              if (staging === undefined) return makeSuccessfulProcess("");
-              yield* fs.writeFile(`${staging}/${asset}`, bytes);
-              yield* fs.writeFileString(`${staging}/SHA256SUMS`, `${sha256}  ${asset}\n`);
-              return makeSuccessfulProcess("");
-            }
             return {
               ...makeSuccessfulProcess(""),
               exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
@@ -942,7 +1079,6 @@ describe("runtime preparation", () => {
           const data = new Uint8Array(chunks.flatMap((chunk) => Array.from(chunk)));
           if (command.args.includes("-c")) {
             calls.push("upload");
-            assert.deepEqual(data, bytes);
             assert.include(command.args.join(" "), ARCHIVE.archiveVersion);
             return makeSuccessfulProcess("");
           }
@@ -994,12 +1130,7 @@ describe("runtime preparation", () => {
           Effect.withTracer(recordSpans(spans)),
         ),
       );
-      if (entry === "pairing") {
-        assert.isTrue(Result.isSuccess(result));
-        assert.deepEqual(calls, ["probe", "gh", "upload", "pairing"]);
-        assert.isAbove(cacheReads, 0);
-        assert.deepEqual(yield* fs.readFile(`${archiveDirectory}/${asset}`), bytes);
-      } else if (mode === "ready" || mode === "dev") {
+      if (mode === "ready" || mode === "dev") {
         assert.isTrue(Result.isSuccess(result));
         assert.deepEqual(calls, ["probe", entry]);
         assert.equal(cacheReads, 0);
@@ -1016,10 +1147,11 @@ describe("runtime preparation", () => {
         if (Result.isFailure(result)) {
           assert.instanceOf(result.failure, SshLaunchError);
           if (retainedMissing) {
-            assert.equal(
+            assert.include(
               result.failure.message,
               `The retained runner ~/.goat/ssh-launch/${stateKey}/run-t3.sh selects goat ${retainedVersion}, which is not installed on ${uploadTarget.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
             );
+            assert.include(result.failure.message, ARCHIVE.archiveVersion);
           }
         }
         assert.deepEqual(calls, ["probe"]);
@@ -1098,6 +1230,7 @@ else {
       const persistedRunner =
         baseline.archive.launch.split("<<'SH'\n")[1]!.split("\nSH\n")[0]! + "\n";
       yield* fs.writeFileString(`${state}/run-t3.sh`, persistedRunner);
+      yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
       const scripts = yield* nativeScripts(ARCHIVE);
       let uploads = 0;
       const spawner = ChildProcessSpawner.make((command) => {
@@ -1281,7 +1414,11 @@ else {
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
       );
       assert.isTrue(Result.isFailure(result));
-      if (Result.isFailure(result)) assert.instanceOf(result.failure, SshLaunchError);
+      if (Result.isFailure(result)) {
+        assert.instanceOf(result.failure, SshLaunchError);
+        assert.include(result.failure.message, ARCHIVE.archiveVersion);
+        assert.include(result.failure.message, "local SSH runtime archive directory");
+      }
       assert.equal(calls, 1);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -1442,7 +1579,7 @@ describe("archive runner script", () => {
     const script = [
       "set -eu",
       `mkdir -p '${stage}' '${release}'`,
-      `printf '#!/bin/sh\\necho t3 v${archiveVersion}\\n' > '${stage}/goat'`,
+      `printf '#!/bin/sh\\necho goat v${archiveVersion}\\n' > '${stage}/goat'`,
       `chmod +x '${stage}/goat'`,
       `tar -czf '${release}/${stem}.tar.gz' -C '${root}/stage' '${stem}'`,
       `cd '${release}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
@@ -1554,7 +1691,7 @@ describe("archive runner script", () => {
       );
       for (const result of results) {
         assert.equal(result.exitCode, 0, result.stderr);
-        assert.include(result.stdout, `t3 v${archiveVersion}`);
+        assert.include(result.stdout, `goat v${archiveVersion}`);
       }
       const versions = `${root}/.goat/runtime/goat/versions`;
       assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
@@ -1586,7 +1723,7 @@ describe("archive runner script", () => {
         );
         for (const result of results) {
           assert.equal(result.exitCode, 0, result.stderr);
-          assert.include(result.stdout, `t3 v${archiveVersion}`);
+          assert.include(result.stdout, `goat v${archiveVersion}`);
         }
         const versionsDir = `${home}/.goat/runtime/goat/versions`;
         assert.deepEqual(yield* fs.readDirectory(versionsDir), [archiveVersion]);
@@ -1613,3 +1750,783 @@ describe("archive runner script", () => {
     60_000,
   );
 });
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "install before runner switch",
+  () => {
+    const stateKey = "711bc738002d72fd";
+    const oldVersion = "1.2.2-preview.20260910.1";
+    const nextVersion = ARCHIVE.archiveVersion;
+
+    const shell = Effect.fn("test.runnerSwitch.shell")(function* (
+      home: string,
+      script: string,
+      args: string[] = [],
+      pathValue: string = process.env.PATH ?? "",
+    ) {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const child = yield* spawner.spawn(
+        ChildProcess.make("sh", ["-s", "--", ...args], {
+          env: { HOME: home, PATH: pathValue, LC_ALL: "C" },
+          extendEnv: false,
+          stdin: { stream: Stream.make(encoder.encode(script)), endOnDone: true },
+        }),
+      );
+      return yield* Effect.all(
+        {
+          stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+          stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+          code: child.exitCode.pipe(Effect.map(Number)),
+        },
+        { concurrency: "unbounded" },
+      );
+    });
+
+    // Written into the old runtime and the tiny release archive. This is a
+    // behavioral double for the executable, not a duplicate of the installer.
+    const executable = (version: string) => `#!${process.execPath}
+const fs = require("node:fs");
+const http = require("node:http");
+const net = require("node:net");
+const path = require("node:path");
+const home = process.env.HOME;
+const fixture = path.join(home, ".test");
+const version = ${JSON.stringify(version)};
+const config = JSON.parse(fs.readFileSync(path.join(fixture, "config.json"), "utf8"));
+const state = path.join(home, ".goat/ssh-launch/${stateKey}");
+const runtimeFile = path.join(home, ".goat/userdata/server-runtime.json");
+function alive(pid) { try { process.kill(Number(pid), 0); return true; } catch { return false; } }
+function event(type, extra = {}) {
+  fs.appendFileSync(path.join(fixture, "events"), JSON.stringify({ type, version, ...extra }) + "\\n");
+}
+function runtime() { try { return JSON.parse(fs.readFileSync(runtimeFile, "utf8")); } catch { return null; } }
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  let runner = "";
+  try { runner = fs.readFileSync(path.join(state, "run-t3.sh"), "utf8"); } catch {}
+  const old = runtime();
+  event("version", { runner, oldAlive: Boolean(old && alive(old.pid)) });
+  console.log("goat v" + version);
+} else if (args[0] === "__ssh-helper") {
+  if (args[1] === "runtime-port") {
+    const current = runtime();
+    if (!config.publishDefault || !current || !alive(current.pid)) process.exit(1);
+    console.log(current.pid + " " + current.port);
+  } else if (args[1] === "pick-port") {
+    const socket = net.createServer();
+    socket.listen(0, "127.0.0.1", () => {
+      const port = socket.address().port;
+      socket.close(() => console.log(port));
+    });
+  } else if (args[1] === "wait-ready") {
+    let current = runtime();
+    const accepted = current && (current.pid === config.seedPid ||
+      fs.existsSync(path.join(fixture, "accepted-ready-" + current.pid)));
+    if (!current || !alive(current.pid) || !accepted) {
+      // The new serve command writes only after listening; no test sleeps.
+      const fd = fs.openSync(path.join(fixture, "ready.fifo"), "r");
+      fs.readSync(fd, Buffer.alloc(32), 0, 32, null);
+      fs.closeSync(fd);
+      current = runtime();
+      if (current) fs.writeFileSync(path.join(fixture, "accepted-ready-" + current.pid), "ready");
+    }
+    if (!current || Number(args[2]) !== current.port) process.exit(1);
+    const request = http.get("http://127.0.0.1:" + current.port + "/", response => {
+      response.resume();
+      response.on("end", () => process.exit(response.statusCode === 200 ? 0 : 1));
+    });
+    request.on("error", () => process.exit(1));
+  } else process.exit(2);
+} else if (args[0] === "auth") {
+  event("auth", { args });
+  if (args[1] === "pairing") console.log(JSON.stringify({ credential: "fixture-pairing" }));
+  else console.log(JSON.stringify({ token: "fixture-session", expiresAt: null }));
+} else if (args[0] === "serve") {
+  const requested = args.indexOf("--port");
+  const port = requested < 0 ? 0 : Number(args[requested + 1]);
+  const server = http.createServer((_request, response) => response.end("ok"));
+  process.on("SIGTERM", () => {
+    event("stop");
+    if (runtime()?.pid === process.pid) fs.unlinkSync(runtimeFile);
+    server.close(() => process.exit(0));
+  });
+  server.listen(port, "127.0.0.1", () => {
+    const record = { pid: process.pid, port: server.address().port,
+      origin: "http://127.0.0.1:" + server.address().port };
+    fs.mkdirSync(path.dirname(runtimeFile), { recursive: true });
+    fs.writeFileSync(runtimeFile, JSON.stringify(record));
+    fs.appendFileSync(path.join(fixture, "pids"), process.pid + "\\n");
+    const installed = fs.existsSync(path.join(state, "run-t3.sh"))
+      ? fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") : "";
+    const marker = path.join(home, ".goat/runtime/goat/versions", version, ".install-complete");
+    event("start", { installed, complete: fs.readFileSync(marker, "utf8").trim() });
+    if (args.includes("--test-seed")) console.log(JSON.stringify(record));
+    else {
+      const fd = fs.openSync(path.join(fixture, "ready.fifo"), "w");
+      fs.writeSync(fd, "ready\\n");
+      fs.closeSync(fd);
+    }
+  });
+} else process.exit(2);
+`;
+
+    const fixture = Effect.fn("test.runnerSwitch.fixture")(function* (
+      failure: "none" | "missing-release" | "bad-checksum" | "broken-executable" | "wrong-version",
+      options: { seed?: boolean; identical?: boolean; publishDefault?: boolean } = {},
+    ) {
+      const fs = yield* FileSystem.FileSystem;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-switch-" });
+      const state = `${home}/.goat/ssh-launch/${stateKey}`;
+      const previous = options.identical ? nextVersion : oldVersion;
+      const oldRuntime = `${home}/.goat/runtime/goat/versions/${previous}`;
+      const test = `${home}/.test`;
+      yield* fs.makeDirectory(state, { recursive: true });
+      yield* fs.makeDirectory(test, { recursive: true });
+      yield* fs.writeFileString(`${test}/events`, "");
+      yield* fs.writeFileString(`${test}/pids`, "");
+      const upstream = `${home}/.t3/runtime/versions/${previous}`;
+      yield* fs.makeDirectory(upstream, { recursive: true });
+      yield* fs.writeFileString(`${upstream}/t3`, "upstream executable sentinel\n");
+      yield* fs.writeFileString(`${upstream}/.install-complete`, `${previous}\n`);
+      yield* fs.writeFileString(
+        `${test}/config.json`,
+        JSON.stringify({
+          publishDefault: options.publishDefault !== false,
+        }),
+      );
+      const fifo = yield* spawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
+      assert.equal(Number(yield* fifo.exitCode), 0);
+      // Register last-created server cleanup before any server is started.
+      // Every PID below is emitted by this fixture's executable, not searched.
+      yield* Effect.addFinalizer(() =>
+        fs.readFileString(`${test}/pids`).pipe(
+          Effect.flatMap((data) =>
+            Effect.sync(() => {
+              for (const pid of data.trim().split("\n").filter(Boolean).map(Number)) {
+                try {
+                  process.kill(pid, "SIGKILL");
+                } catch {
+                  /* already exited */
+                }
+              }
+            }),
+          ),
+          Effect.ignore,
+        ),
+      );
+      const mirror = `file://${home}/mirror`;
+      const runner = { ...ARCHIVE, releaseBaseUrl: mirror };
+      const scripts = yield* nativeScripts(runner);
+      const oldScripts = yield* nativeScripts({ archiveVersion: previous, releaseBaseUrl: mirror });
+      let oldProcess: ChildProcessSpawner.ChildProcessHandle | null = null;
+      if (options.seed !== false) {
+        yield* fs.makeDirectory(oldRuntime, { recursive: true });
+        yield* fs.writeFileString(`${oldRuntime}/goat`, executable(previous));
+        yield* fs.chmod(`${oldRuntime}/goat`, 0o700);
+        yield* fs.writeFileString(`${oldRuntime}/.install-complete`, `${previous}\n`);
+        yield* fs.writeFileString(`${state}/run-t3.sh`, oldScripts.runner + "\n");
+        yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
+        oldProcess = yield* spawner.spawn(
+          ChildProcess.make(`${oldRuntime}/goat`, ["serve", "--test-seed"], {
+            env: { HOME: home, PATH: process.env.PATH ?? "" },
+            extendEnv: false,
+          }),
+        );
+        const ready = JSON.parse(
+          yield* oldProcess.stdout.pipe(
+            Stream.decodeText(),
+            Stream.splitLines,
+            Stream.take(1),
+            Stream.mkString,
+          ),
+        ) as { pid: number; port: number };
+        assert.equal(ready.pid, oldProcess.pid);
+        yield* fs.writeFileString(
+          `${test}/config.json`,
+          JSON.stringify({
+            publishDefault: options.publishDefault !== false,
+            seedPid: ready.pid,
+          }),
+        );
+        yield* fs.writeFileString(`${state}/pid`, `${ready.pid}\n`);
+        yield* fs.writeFileString(`${state}/port`, `${ready.port}\n`);
+        yield* fs.writeFileString(`${state}/managed`, "managed\n");
+      }
+      const stem = `goat-${nextVersion}-${platform}-${arch}`;
+      const release = `${home}/mirror/v${nextVersion}`;
+      const stage = `${home}/stage/${stem}`;
+      yield* fs.makeDirectory(stage, { recursive: true });
+      yield* fs.makeDirectory(release, { recursive: true });
+      yield* fs.writeFileString(
+        `${stage}/goat`,
+        failure === "broken-executable"
+          ? "#!/bin/sh\nprintf 'wrong architecture\\n' >&2\nexit 95\n"
+          : executable(failure === "wrong-version" ? oldVersion : nextVersion),
+      );
+      yield* fs.chmod(`${stage}/goat`, 0o700);
+      const packed = yield* spawner.spawn(
+        ChildProcess.make("tar", [
+          "-czf",
+          `${release}/${stem}.tar.gz`,
+          "-C",
+          `${home}/stage`,
+          stem,
+        ]),
+      );
+      assert.equal(Number(yield* packed.exitCode), 0);
+      const crypto = yield* Crypto.Crypto;
+      const sum = Hex.encode(
+        yield* crypto.digest("SHA-256", yield* fs.readFile(`${release}/${stem}.tar.gz`)),
+      );
+      yield* fs.writeFileString(
+        `${release}/SHA256SUMS`,
+        `${failure === "bad-checksum" ? "0".repeat(64) : sum}  ${stem}.tar.gz\n`,
+      );
+      if (failure === "missing-release") yield* fs.remove(release, { recursive: true });
+      const snapshot = Effect.gen(function* () {
+        const files = ["run-t3.sh", "pid", "port", "managed"];
+        const values: Record<string, unknown> = {};
+        for (const file of files)
+          if (yield* fs.exists(`${state}/${file}`)) {
+            values[file] = yield* fs.readFileString(`${state}/${file}`);
+          }
+        if (yield* fs.exists(`${state}/run-t3.sh`)) {
+          const info = yield* fs.stat(`${state}/run-t3.sh`);
+          values.runnerMetadata = { ino: info.ino, mode: info.mode, mtime: info.mtime };
+        }
+        if (yield* fs.exists(oldRuntime)) {
+          values.oldExecutable = yield* fs.readFileString(`${oldRuntime}/goat`);
+          values.oldMarker = yield* fs.readFileString(`${oldRuntime}/.install-complete`);
+          for (const file of ["goat", ".install-complete"]) {
+            const info = yield* fs.stat(`${oldRuntime}/${file}`);
+            values[`oldMetadata:${file}`] = { ino: info.ino, mode: info.mode, mtime: info.mtime };
+          }
+        }
+        const descriptor = `${home}/.goat/userdata/server-runtime.json`;
+        if (yield* fs.exists(descriptor)) values.descriptor = yield* fs.readFileString(descriptor);
+        values.upstreamExecutable = yield* fs.readFileString(`${upstream}/t3`);
+        values.upstreamMarker = yield* fs.readFileString(`${upstream}/.install-complete`);
+        return values;
+      });
+      const events = fs.readFileString(`${test}/events`).pipe(
+        Effect.map((data) =>
+          data
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map(
+              (line) =>
+                JSON.parse(line) as {
+                  type: string;
+                  version: string;
+                  runner?: string;
+                  oldAlive?: boolean;
+                  installed?: string;
+                  complete?: string;
+                },
+            ),
+        ),
+      );
+      const cleanCandidates = Effect.gen(function* () {
+        assert.deepEqual(
+          (yield* fs.readDirectory(state)).filter((name) => name.startsWith("run-t3.next.")),
+          [],
+        );
+      });
+      return { home, state, runner, scripts, oldProcess, snapshot, events, cleanCandidates, fs };
+    });
+
+    it.live("a nested auth runner publishes the real shell PID as install-lock owner", () =>
+      Effect.gen(function* () {
+        const f = yield* fixture("none", { seed: false });
+        const bin = `${f.home}/.test/bin`;
+        const observed = `${f.home}/.test/lock-owners.jsonl`;
+        yield* f.fs.makeDirectory(bin, { recursive: true });
+        yield* f.fs.writeFileString(observed, "");
+        yield* f.fs.writeFileString(
+          `${bin}/curl`,
+          `#!${process.execPath}
+const fs = require("node:fs");
+const { fileURLToPath } = require("node:url");
+const home = process.env.HOME;
+const lock = home + "/.goat/runtime/goat/versions/.${nextVersion}.install.lock";
+const owner = fs.readFileSync(lock + "/pid", "utf8").trim();
+let alive = false;
+try { process.kill(Number(owner), 0); alive = true; } catch {}
+fs.appendFileSync(home + "/.test/lock-owners.jsonl",
+  JSON.stringify({ owner, shellPid: process.ppid, alive }) + "\\n");
+const args = process.argv.slice(2);
+const url = args.find(arg => arg.startsWith("file://"));
+const output = args[args.indexOf("-o") + 1];
+fs.copyFileSync(fileURLToPath(url), output);
+`,
+        );
+        yield* f.fs.chmod(`${bin}/curl`, 0o700);
+        const result = yield* shell(
+          f.home,
+          f.scripts.pairing,
+          [],
+          `${bin}:${process.env.PATH ?? ""}`,
+        );
+        assert.equal(result.code, 0, result.stderr);
+        assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
+        const records = (yield* f.fs.readFileString(observed))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { owner: string; shellPid: number; alive: boolean });
+        assert.equal(records.length, 2); // checksum and archive downloads
+        for (const record of records) {
+          assert.match(record.owner, /^[1-9][0-9]*$/);
+          assert.equal(Number(record.owner), record.shellPid);
+          assert.isTrue(record.alive);
+        }
+        assert.equal(records[0]!.owner, records[1]!.owner);
+        assert.isFalse(
+          yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/.${nextVersion}.install.lock`),
+        );
+        yield* f.cleanCandidates;
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("a Node dev runner succeeds without matching an archive version", () =>
+      Effect.gen(function* () {
+        const f = yield* fixture("missing-release", { seed: false });
+        const devScript = `${f.home}/.test/dev.mjs`;
+        yield* f.fs.writeFileString(
+          devScript,
+          `
+if (process.argv[2] === "--version") console.log("dev build without archive version");
+else if (process.argv[2] === "auth") console.log(JSON.stringify({ credential: "dev-pairing" }));
+else process.exit(2);
+`,
+        );
+        // Even if the input carries an archive version, nodeScriptPath selects dev mode.
+        const generated = yield* nativeScripts({ ...ARCHIVE, nodeScriptPath: devScript });
+        const result = yield* shell(f.home, generated.pairing);
+        assert.equal(result.code, 0, result.stderr);
+        assert.equal(JSON.parse(result.stdout).credential, "dev-pairing");
+        assert.include(yield* f.fs.readFileString(`${f.state}/run-t3.sh`), devScript);
+        assert.isFalse(yield* f.fs.exists(`${f.state}/pid`));
+        yield* f.cleanCandidates;
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      { leaveRemoteServerRunning: true, action: "disconnect" },
+      { leaveRemoteServerRunning: false, action: "disconnect" },
+      { leaveRemoteServerRunning: true, action: "shutdown" },
+      { leaveRemoteServerRunning: false, action: "shutdown" },
+    ] as const)(
+      "$action follows leaveRemoteServerRunning=$leaveRemoteServerRunning",
+      ({ leaveRemoteServerRunning, action }) =>
+        Effect.gen(function* () {
+          const f = yield* fixture("none");
+          const before = yield* f.snapshot;
+          const remote = f.oldProcess!;
+          let forwardKills = 0;
+          let remoteStops = 0;
+          const spawner = ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              const args = commandArgs(command);
+              if (args.includes("-G")) {
+                return makeSuccessfulProcess(
+                  "hostname devbox.example.com\nuser julius\nport 2222\n",
+                );
+              }
+              if (args.includes("-N"))
+                return makeRunningProcess(() => {
+                  forwardKills++;
+                });
+              if (args.includes("--")) {
+                return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
+              }
+              if (args.includes("sh")) {
+                remoteStops++;
+                assert.equal(forwardKills, 1); // local forward closes before remote stop
+                yield* remote.kill({ killSignal: "SIGTERM" });
+                assert.equal(Number(yield* remote.exitCode), 0);
+                return makeSuccessfulProcess('{"stopped":true}');
+              }
+              return makeSuccessfulProcess("");
+            }),
+          );
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed(PROTOCOL_ARCHIVE),
+              ...(leaveRemoteServerRunning ? { leaveRemoteServerRunning: true } : {}),
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+            assert.isTrue(yield* remote.isRunning);
+            if (action === "disconnect") {
+              yield* manager.disconnectEnvironment(uploadTarget);
+              assert.equal(forwardKills, 1);
+              assert.equal(remoteStops, leaveRemoteServerRunning ? 0 : 1);
+              assert.equal(yield* remote.isRunning, leaveRemoteServerRunning);
+              if (leaveRemoteServerRunning) {
+                assert.deepEqual(yield* f.snapshot, before);
+                // No cached tunnel remains: a second disconnect still cannot stop it.
+                yield* manager.disconnectEnvironment(uploadTarget);
+                assert.equal(remoteStops, 0);
+                assert.equal(forwardKills, 1);
+                assert.isTrue(yield* remote.isRunning);
+              }
+            }
+          }).pipe(Effect.provide(layer), Effect.scoped);
+          // In shutdown rows the manager finalizer performed the tested action.
+          // In disconnect rows it must not perform a duplicate close/remote stop.
+          assert.equal(forwardKills, 1);
+          assert.equal(remoteStops, leaveRemoteServerRunning ? 0 : 1);
+          assert.equal(yield* remote.isRunning, leaveRemoteServerRunning);
+          if (leaveRemoteServerRunning) {
+            assert.deepEqual(yield* f.snapshot, before);
+            assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+          } else {
+            assert.equal((yield* f.events).filter((event) => event.type === "stop").length, 1);
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      { failure: "missing-release", publishDefault: true },
+      { failure: "missing-release", publishDefault: false },
+      { failure: "bad-checksum", publishDefault: true },
+      { failure: "bad-checksum", publishDefault: false },
+      { failure: "broken-executable", publishDefault: true },
+      { failure: "broken-executable", publishDefault: false },
+      { failure: "wrong-version", publishDefault: true },
+      { failure: "wrong-version", publishDefault: false },
+    ] as const)(
+      "$failure preserves the live server (default descriptor=$publishDefault)",
+      ({ failure, publishDefault }) =>
+        Effect.gen(function* () {
+          const f = yield* fixture(failure, { publishDefault });
+          const before = yield* f.snapshot;
+          const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+          assert.notEqual(result.code, 0);
+          assert.include(result.stderr, nextVersion);
+          assert.include(result.stderr, "existing runner and server");
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+          yield* f.cleanCandidates;
+          if (failure === "wrong-version") {
+            assert.include(result.stderr, `expected goat v${nextVersion}`);
+            assert.include(result.stderr, `reported "goat v${oldVersion}"`);
+            assert.isTrue(
+              (yield* f.events).some(
+                (event) =>
+                  event.type === "version" && event.version === oldVersion && event.oldAlive,
+              ),
+            );
+          } else {
+            assert.isFalse(
+              yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/${nextVersion}`),
+            );
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live(
+      "rejects a same-version wrong archive without replacing the broken-marker runtime",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-same-version-rejected-" });
+          const requestedVersion = "1.2.3";
+          const reportedVersion = "9.9.9";
+          const state = `${home}/.goat/ssh-launch/${stateKey}`;
+          const versions = `${home}/.goat/runtime/goat/versions`;
+          const runtime = `${versions}/${requestedVersion}`;
+          const stem = `goat-${requestedVersion}-${platform}-${arch}`;
+          const stage = `${home}/stage/${stem}`;
+          const release = `${home}/mirror/v${requestedVersion}`;
+          for (const directory of [state, runtime, stage, release]) {
+            yield* fs.makeDirectory(directory, { recursive: true });
+          }
+          yield* fs.writeFileString(`${runtime}/goat`, "#!/bin/sh\nprintf 'goat v1.2.3\\n'\n");
+          yield* fs.chmod(`${runtime}/goat`, 0o700);
+          yield* fs.writeFileString(`${runtime}/.install-complete`, "broken-marker\n");
+          yield* fs.writeFileString(`${runtime}/preserved`, "existing runtime sentinel\n");
+          const installed = yield* nativeScripts({ archiveVersion: requestedVersion });
+          yield* fs.writeFileString(`${state}/run-t3.sh`, installed.runner + "\n");
+          yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
+          yield* fs.writeFileString(
+            `${stage}/goat`,
+            `#!/bin/sh\nprintf 'goat v${reportedVersion}\\n'\n`,
+          );
+          yield* fs.chmod(`${stage}/goat`, 0o700);
+          const packed = yield* spawner.spawn(
+            ChildProcess.make("tar", [
+              "-czf",
+              `${release}/${stem}.tar.gz`,
+              "-C",
+              `${home}/stage`,
+              stem,
+            ]),
+          );
+          assert.equal(Number(yield* packed.exitCode), 0);
+          const crypto = yield* Crypto.Crypto;
+          const sha256 = Hex.encode(
+            yield* crypto.digest("SHA-256", yield* fs.readFile(`${release}/${stem}.tar.gz`)),
+          );
+          yield* fs.writeFileString(`${release}/SHA256SUMS`, `${sha256}  ${stem}.tar.gz\n`);
+          const snapshot = Effect.gen(function* () {
+            const values: Record<string, unknown> = {};
+            for (const file of [
+              `${state}/run-t3.sh`,
+              `${runtime}/goat`,
+              `${runtime}/.install-complete`,
+              `${runtime}/preserved`,
+            ]) {
+              const info = yield* fs.stat(file);
+              values[file] = {
+                bytes: yield* fs.readFile(file),
+                ino: info.ino,
+                mode: info.mode,
+                mtime: info.mtime,
+              };
+            }
+            return values;
+          });
+          const before = yield* snapshot;
+          const generated = yield* nativeScripts({
+            archiveVersion: requestedVersion,
+            releaseBaseUrl: `file://${home}/mirror`,
+          });
+          const result = yield* shell(home, generated.launch, [stateKey]);
+          assert.notEqual(result.code, 0);
+          assert.equal(result.stdout, "");
+          assert.include(result.stderr, `expected goat v${requestedVersion}`);
+          assert.include(result.stderr, `reported "goat v${reportedVersion}"`);
+          assert.deepEqual(yield* snapshot, before);
+          assert.deepEqual(yield* fs.readDirectory(versions), [requestedVersion]);
+          assert.deepEqual(yield* fs.readDirectory(state), ["run-t3.sh"]);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("verifies, publishes, stops, then starts on a successful upgrade", () =>
+      Effect.gen(function* () {
+        const f = yield* fixture("none");
+        const before = yield* f.snapshot;
+        const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+        assert.equal(result.code, 0, result.stderr);
+        const events = yield* f.events;
+        const verified = events.findIndex(
+          (event) => event.type === "version" && event.version === nextVersion,
+        );
+        const stopped = events.findIndex(
+          (event) => event.type === "stop" && event.version === oldVersion,
+        );
+        const started = events.findIndex(
+          (event) => event.type === "start" && event.version === nextVersion,
+        );
+        const published = events.findIndex(
+          (event) =>
+            event.type === "version" &&
+            event.version === nextVersion &&
+            event.runner?.includes(`T3_ARCHIVE_VERSION='${nextVersion}'`),
+        );
+        assert.isAtLeast(verified, 0);
+        assert.include(events[verified]!.runner!, `T3_ARCHIVE_VERSION='${oldVersion}'`);
+        assert.isTrue(events[verified]!.oldAlive);
+        assert.isTrue(events[published]!.oldAlive);
+        assert.isBelow(verified, published);
+        assert.isBelow(published, stopped);
+        assert.isBelow(verified, stopped);
+        assert.isBelow(stopped, started);
+        assert.include(events[started]!.installed!, `T3_ARCHIVE_VERSION='${nextVersion}'`);
+        assert.equal(events[started]!.complete, nextVersion);
+        assert.equal(Number(yield* f.oldProcess!.exitCode), 0);
+        const resultJson = JSON.parse(result.stdout.trim()) as { serverKind: string };
+        assert.equal(resultJson.serverKind, "managed");
+        const after = yield* f.snapshot;
+        for (const key of [
+          "oldExecutable",
+          "oldMarker",
+          "oldMetadata:goat",
+          "oldMetadata:.install-complete",
+          "upstreamExecutable",
+          "upstreamMarker",
+        ])
+          assert.deepEqual(after[key], before[key]);
+        yield* f.cleanCandidates;
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("identical runner retains managed PID even with its default descriptor", () =>
+      Effect.gen(function* () {
+        const f = yield* fixture("none", { identical: true });
+        const before = yield* f.snapshot;
+        const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+        assert.equal(result.code, 0, result.stderr);
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.isTrue(yield* f.oldProcess!.isRunning);
+        assert.deepEqual(
+          (yield* f.events)
+            .filter((event) => event.type === "start" || event.type === "stop")
+            .map((event) => event.type),
+          ["start"],
+        );
+        yield* f.cleanCandidates;
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live(
+      "keep-existing ignores a newer unavailable release and leaves the older runtime untouched",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture("missing-release");
+          const before = yield* f.snapshot;
+          const scripts = yield* nativeScripts({ ...f.runner, keepExistingRunner: true });
+          const result = yield* shell(f.home, scripts.launch, [stateKey]);
+          assert.equal(result.code, 0, result.stderr);
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.version === nextVersion));
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["pairing", "mcp"] as const)(
+      "warm %s uses the retained runner even without a keep flag",
+      (entry) =>
+        Effect.gen(function* () {
+          const f = yield* fixture("missing-release");
+          const before = yield* f.snapshot;
+          const result = yield* shell(f.home, f.scripts[entry]);
+          assert.equal(result.code, 0, result.stderr);
+          if (entry === "pairing") {
+            assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
+          } else {
+            assert.deepEqual(yield* SshTunnel.decodeRemoteMcpSessionOutput(result.stdout), {
+              token: "fixture-session",
+              expiresAt: null,
+              runtimeModeCeilingApplied: false,
+            });
+          }
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.deepEqual(
+            (yield* f.events)
+              .filter((event) => event.type === "auth")
+              .map((event) => event.version),
+            [oldVersion],
+          );
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["pairing", "mcp"] as const)(
+      "cold %s verifies and publishes before issuing credentials",
+      (entry) =>
+        Effect.gen(function* () {
+          const f = yield* fixture("none", { seed: false });
+          const result = yield* shell(f.home, f.scripts[entry]);
+          assert.equal(result.code, 0, result.stderr);
+          if (entry === "pairing") {
+            assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
+          } else {
+            assert.deepEqual(yield* SshTunnel.decodeRemoteMcpSessionOutput(result.stdout), {
+              token: "fixture-session",
+              expiresAt: null,
+              runtimeModeCeilingApplied: false,
+            });
+          }
+          const events = yield* f.events;
+          const verified = events.findIndex((event) => event.type === "version");
+          const issued = events.findIndex((event) => event.type === "auth");
+          assert.isAtLeast(verified, 0);
+          assert.isBelow(verified, issued);
+          assert.include(
+            yield* f.fs.readFileString(`${f.state}/run-t3.sh`),
+            `T3_ARCHIVE_VERSION='${nextVersion}'`,
+          );
+          assert.equal(
+            (yield* f.fs.readFileString(
+              `${f.home}/.goat/runtime/goat/versions/${nextVersion}/.install-complete`,
+            )).trim(),
+            nextVersion,
+          );
+          assert.isFalse(yield* f.fs.exists(`${f.state}/pid`));
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      { entry: "pairing", failure: "missing-release" },
+      { entry: "pairing", failure: "bad-checksum" },
+      { entry: "pairing", failure: "broken-executable" },
+      { entry: "pairing", failure: "wrong-version" },
+      { entry: "mcp", failure: "missing-release" },
+      { entry: "mcp", failure: "bad-checksum" },
+      { entry: "mcp", failure: "broken-executable" },
+      { entry: "mcp", failure: "wrong-version" },
+    ] as const)(
+      "cold $entry refuses $failure without publishing or issuing credentials",
+      ({ entry, failure }) =>
+        Effect.gen(function* () {
+          const f = yield* fixture(failure, { seed: false });
+          const before = yield* f.snapshot;
+          const result = yield* shell(f.home, f.scripts[entry]);
+          assert.notEqual(result.code, 0);
+          assert.include(result.stderr, nextVersion);
+          assert.include(result.stderr, "existing runner and server");
+          assert.deepEqual(yield* f.snapshot, before);
+          for (const file of ["run-t3.sh", "pid", "port", "managed"]) {
+            assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
+          }
+          assert.isFalse(
+            (yield* f.events).some((event) => event.type === "auth" || event.type === "start"),
+          );
+          if (failure === "wrong-version") {
+            assert.include(result.stderr, `expected goat v${nextVersion}`);
+            assert.include(result.stderr, `reported "goat v${oldVersion}"`);
+          } else {
+            assert.isFalse(
+              yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/${nextVersion}`),
+            );
+          }
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live(
+      "TERM during candidate validation removes the candidate and preserves the old server",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture("none");
+          const before = yield* f.snapshot;
+          const candidateRuntime = `${f.home}/.goat/runtime/goat/versions/${nextVersion}`;
+          yield* f.fs.makeDirectory(candidateRuntime, { recursive: true });
+          yield* f.fs.writeFileString(`${candidateRuntime}/.install-complete`, `${nextVersion}\n`);
+          yield* f.fs.writeFileString(
+            `${candidateRuntime}/goat`,
+            `#!${process.execPath}
+const fs = require("node:fs");
+fs.appendFileSync(process.env.HOME + "/.test/events", JSON.stringify({ type: "interrupted-validation", version: ${JSON.stringify(nextVersion)} }) + "\\n");
+process.kill(process.ppid, "SIGTERM");
+process.exit(95);
+`,
+          );
+          yield* f.fs.chmod(`${candidateRuntime}/goat`, 0o700);
+          const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+          assert.notEqual(result.code, 0);
+          assert.isTrue((yield* f.events).some((event) => event.type === "interrupted-validation"));
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  },
+);
