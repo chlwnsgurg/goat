@@ -1,14 +1,17 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
+  CommandId,
   ProjectId,
   RunId,
   ThreadId,
   type OrchestrationV2Command,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -46,7 +49,12 @@ interface World {
   readonly assistantMessages: Array<{ runId: RunId; text: string }>;
   requests: Array<{ id: string; status: string; kind: string }>;
   /** Failures for the next dispatches, used up in order. */
-  readonly dispatchFailures: Array<unknown>;
+  readonly dispatchFailures: Array<"transient" | "refused">;
+  /**
+   * Command ids the orchestrator recorded as rejected. Like the real receipt
+   * store, a dispatch that fails is recorded, and its id is refused again.
+   */
+  readonly rejected: Set<string>;
   readonly attempts: Array<Dispatch>;
   readonly delivered: Queue.Queue<Dispatch>;
   readonly deliveredLog: Array<Dispatch>;
@@ -78,6 +86,7 @@ const makeWorld = Effect.gen(function* () {
     assistantMessages: [],
     requests: [],
     dispatchFailures: [],
+    rejected: new Set(),
     attempts: [],
     delivered: yield* Queue.unbounded<Dispatch>(),
     deliveredLog: [],
@@ -87,14 +96,45 @@ const makeWorld = Effect.gen(function* () {
   return world;
 });
 
+const dispatchIn = (world: World, command: OrchestrationV2ServerCommand) =>
+  Effect.suspend(() => {
+    const dispatch = command as Dispatch;
+    world.attempts.push(dispatch);
+    const commandId = CommandId.make(dispatch.commandId);
+    if (world.rejected.has(commandId)) {
+      return Effect.fail(
+        new OrchestratorCommandPreviouslyRejectedError({
+          commandId,
+          commandType: dispatch.type,
+          detail: "rejected before",
+        }),
+      );
+    }
+    const failure = world.dispatchFailures.shift();
+    if (failure !== undefined) {
+      world.rejected.add(commandId);
+      return Effect.fail(
+        failure === "transient"
+          ? new OrchestratorDispatchError({ commandId, commandType: dispatch.type })
+          : new OrchestratorCommandPreviouslyRejectedError({
+              commandId,
+              commandType: dispatch.type,
+              detail: "refused",
+            }),
+      );
+    }
+    world.deliveredLog.push(dispatch);
+    return Queue.offer(world.delivered, dispatch).pipe(Effect.as({} as never));
+  });
+
 const layerFor = (world: World, baseDir: string) =>
   LaunchWatchService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadShell: (threadId) =>
-            Effect.succeed(
-              (world.shells.get(threadId) ?? null) as OrchestrationV2ThreadShell | null,
+            Effect.sync(
+              () => (world.shells.get(threadId) ?? null) as OrchestrationV2ThreadShell | null,
             ),
           waitForThread: (input) =>
             Effect.suspend(() => {
@@ -112,15 +152,7 @@ const layerFor = (world: World, baseDir: string) =>
                   runtimeRequests: world.requests,
                 }) as never,
             ),
-          dispatch: (command) =>
-            Effect.suspend(() => {
-              const dispatch = command as Dispatch;
-              world.attempts.push(dispatch);
-              const failure = world.dispatchFailures.shift();
-              if (failure !== undefined) return Effect.fail(failure as never);
-              world.deliveredLog.push(dispatch);
-              return Queue.offer(world.delivered, dispatch).pipe(Effect.as({} as never));
-            }),
+          dispatch: (command) => dispatchIn(world, command),
         }),
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
           callHostTool: (call, authorize) =>
@@ -154,25 +186,34 @@ const tempDir = Effect.gen(function* () {
   return yield* fs.makeTempDirectoryScoped({ prefix: "t3-launch-watch-" });
 }).pipe(Effect.provide(NodeServices.layer));
 
-/** Lets forked followers run until check holds. */
-const eventually = (check: () => boolean, what: string) =>
+/** A real-time pause, so file writes started by followers can finish. */
+const settle = TestClock.withLive(Effect.sleep("2 millis"));
+
+/** Waits, in real time, until check holds. */
+const eventually = <E>(check: Effect.Effect<boolean, E>, what: string) =>
   Effect.gen(function* () {
-    for (let attempt = 0; attempt < 5_000; attempt++) {
-      if (check()) return;
-      yield* Effect.yieldNow;
+    for (let attempt = 0; attempt < 1_500; attempt++) {
+      if (yield* check) return;
+      yield* settle;
     }
     return yield* Effect.die(new Error("never happened: " + what));
   });
 
-/** Advances time until check holds, for followers sleeping through backoff. */
-const eventuallyWithTime = (check: () => boolean, what: string) =>
+const holds = (check: () => boolean) => Effect.sync(check);
+
+/** Advances the test clock in steps until check holds, for followers sleeping through backoff. */
+const eventuallyWithTime = (
+  check: () => boolean,
+  what: string,
+  step: Duration.Input = "16 minutes",
+) =>
   Effect.gen(function* () {
-    for (let round = 0; round < 60; round++) {
-      for (let attempt = 0; attempt < 200; attempt++) {
+    for (let round = 0; round < 200; round++) {
+      for (let attempt = 0; attempt < 20; attempt++) {
         if (check()) return;
-        yield* Effect.yieldNow;
+        yield* settle;
       }
-      yield* TestClock.adjust("16 minutes");
+      yield* TestClock.adjust(step);
     }
     return yield* Effect.die(new Error("never happened: " + what));
   });
@@ -187,15 +228,23 @@ const stillRunning = (runId: RunId): WaitAnswer =>
     timedOut: true,
   });
 
+const local = { launcherThreadId: launcher, host: null, threadId: target } as const;
+
 const watchLocal = (service: LaunchWatchService.LaunchWatchServiceShape, runId: RunId | null) =>
+  service.register({ ...local, projectId, title: "Fix the flake", runId });
+
+const watchRemote = (service: LaunchWatchService.LaunchWatchServiceShape, runId: RunId) =>
   service.register({
     launcherThreadId: launcher,
-    host: null,
+    host: " box ",
     threadId: target,
-    projectId,
-    title: "Fix the flake",
+    projectId: null,
+    title: null,
     runId,
   });
+
+const pendingRuns = (service: LaunchWatchService.LaunchWatchServiceShape) =>
+  service.list(launcher).pipe(Effect.map(([watch]) => watch?.pendingRuns ?? null));
 
 describe("LaunchWatchService", () => {
   it.effect("wakes the launcher once when the followed run ends, with its answer and branch", () =>
@@ -223,10 +272,6 @@ describe("LaunchWatchService", () => {
           expect(wake.text).toContain("Fixed the flake; tests pass.");
           expect(wake.text).not.toContain("Looking into it.");
           expect(world.waitCalls[0]).toMatchObject({ projectId, threadId: target, runId: run1 });
-          yield* eventually(
-            () => world.waitCalls.length === 1,
-            "the follower stops after the last run",
-          );
         }),
       );
       // A restarted service has nothing left to follow for that run.
@@ -242,46 +287,32 @@ describe("LaunchWatchService", () => {
     }),
   );
 
-  it.effect("reports queued runs in order, each once", () =>
+  it.effect("reports queued runs in order, each once, including one added as the last ends", () =>
     Effect.gen(function* () {
       const world = yield* makeWorld;
       const baseDir = yield* tempDir;
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
           yield* watchLocal(service, run1);
-          // A send while run 1 is still going queues run 2; resending run 1 changes nothing.
-          yield* service.rearm({
-            launcherThreadId: launcher,
-            host: null,
-            threadId: target,
-            runId: run2,
-          });
-          yield* service.rearm({
-            launcherThreadId: launcher,
-            host: null,
-            threadId: target,
-            runId: run1,
-          });
+          // Resending to a run already followed changes nothing.
+          yield* service.rearm({ ...local, runId: run1 });
           yield* Queue.offer(world.waits, finished(run1));
-          yield* Queue.offer(world.waits, finished(run2, "failed"));
           const first = yield* Queue.take(world.delivered);
-          const second = yield* Queue.take(world.delivered);
           expect(first.text).toContain("finished run run-1 with status completed");
+          // The follower may be exiting right now; the next send must still be followed.
+          yield* service.rearm({ ...local, runId: run2 });
+          yield* Queue.offer(world.waits, finished(run2, "failed"));
+          const second = yield* Queue.take(world.delivered);
           expect(second.text).toContain("finished run run-2 with status failed");
           expect(second.notification?.outcome).toBe("failed");
           expect(world.waitCalls.map((call) => call.runId)).toEqual([run1, run2]);
           // A reported run is not followed again.
-          yield* service.rearm({
-            launcherThreadId: launcher,
-            host: null,
-            threadId: target,
-            runId: run2,
-          });
-          const [watch] = yield* service.list(launcher);
-          expect(watch?.pendingRuns).toEqual([]);
+          yield* service.rearm({ ...local, runId: run2 });
+          expect(yield* pendingRuns(service)).toEqual([]);
         }),
       );
       expect(world.waitCalls).toHaveLength(2);
+      expect(world.deliveredLog).toHaveLength(2);
     }),
   );
 
@@ -292,15 +323,17 @@ describe("LaunchWatchService", () => {
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
           yield* watchLocal(service, run1);
-          yield* eventually(() => world.waitCalls.length === 1, "the follower waits on run 1");
+          yield* eventually(
+            holds(() => world.waitCalls.length === 1),
+            "the follower waits",
+          );
         }),
       );
       // Stopping the server mid-wait reports nothing and leaves the run owed.
       expect(world.deliveredLog).toEqual([]);
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
-          const [watch] = yield* service.list(launcher);
-          expect(watch?.pendingRuns).toEqual([run1]);
+          expect(yield* pendingRuns(service)).toEqual([run1]);
           yield* Queue.offer(world.waits, finished(run1));
           const wake = yield* Queue.take(world.delivered);
           expect(wake.commandId).toContain("run:run-1");
@@ -324,17 +357,22 @@ describe("LaunchWatchService", () => {
           expect(first.text).toContain("goat_pending_request_read");
           expect(first.notification?.outcome).toBe("updated");
 
-          // The same question at the next tick is not news; a second one is.
+          // The same question at the next tick is not news; an approval is, and it says
+          // where it can be given.
           yield* Queue.offer(world.waits, stillRunning(run1));
-          yield* eventually(() => world.waitCalls.length === 3, "the next tick");
+          yield* eventually(
+            holds(() => world.waitCalls.length === 3),
+            "the next tick",
+          );
           world.requests = [
             { id: "question-1", status: "pending", kind: "user_input" },
-            { id: "question-2", status: "pending", kind: "command" },
+            { id: "approval-1", status: "pending", kind: "command" },
             { id: "tool-call", status: "pending", kind: "dynamic_tool_call" },
           ];
           yield* Queue.offer(world.waits, stillRunning(run1));
           const second = yield* Queue.take(world.delivered);
-          expect(second.text).toContain("question-2");
+          expect(second.text).toContain("approval-1");
+          expect(second.text).not.toContain("goat_pending_request_respond");
 
           world.requests = [];
           yield* Queue.offer(world.waits, finished(run1));
@@ -357,6 +395,13 @@ describe("LaunchWatchService", () => {
           case "goat_thread_wait":
             if (failures > 0) {
               failures -= 1;
+              // The launcher's mode drops during the outage; later calls carry the new ceiling.
+              if (failures === 1) {
+                world.shells.set(launcher, {
+                  ...world.shells.get(launcher),
+                  runtimeMode: "approval-required",
+                });
+              }
               return Effect.fail(
                 new SshRemoteDispatch.SshRemoteDispatchError({
                   reason: "host_unavailable",
@@ -372,16 +417,20 @@ describe("LaunchWatchService", () => {
             });
           case "goat_thread_read":
             readArgs.push(call.arguments);
+            if (call.arguments.limit === 1) return Effect.succeed(remoteRead({ itemCount: 100 }));
             return Effect.succeed(
-              call.arguments.limit === 1
-                ? remoteRead({ itemCount: 100, items: [] })
-                : remoteRead({
+              call.arguments.afterPosition === 59
+                ? remoteRead({
                     itemCount: 100,
                     items: [
                       remoteItem(70, run1, "First pass done."),
-                      remoteItem(80, run2, "An answer from another run."),
-                      remoteItem(95, run1, "Remote fix pushed."),
+                      remoteItem(79, run2, "An answer from another run."),
                     ],
+                    nextPosition: 79,
+                  })
+                : remoteRead({
+                    itemCount: 100,
+                    items: [remoteItem(95, run1, "Remote fix pushed.")],
                   }),
             );
           default:
@@ -390,14 +439,7 @@ describe("LaunchWatchService", () => {
       };
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
-          yield* service.register({
-            launcherThreadId: launcher,
-            host: " box ",
-            threadId: target,
-            projectId: null,
-            title: null,
-            runId: run1,
-          });
+          yield* watchRemote(service, run1);
           yield* eventuallyWithTime(() => world.deliveredLog.length === 2, "outage then finish");
           const [outage, done] = world.deliveredLog;
           expect(outage?.text).toMatch(/^host_unavailable: T3 Code cannot reach host box/);
@@ -405,19 +447,20 @@ describe("LaunchWatchService", () => {
           expect(done?.text).toContain("(threadId target, host box) finished run run-1");
           expect(done?.text).toContain("Remote fix pushed.");
           expect(done?.text).not.toContain("another run");
-          yield* eventuallyEffect(
+          yield* eventually(
             service.list(launcher).pipe(Effect.map(([watch]) => watch?.outage === null)),
             "contact ends the outage",
           );
         }),
       );
-      // Reads only, capped at the launcher's runtime mode.
+      // Reads only, at the launcher's runtime mode as it is at each call.
       expect(
         world.hostCalls.every(({ call }) => call.writes === false && call.host === "box"),
       ).toBe(true);
-      expect(world.hostCalls.every(({ ceiling }) => ceiling === "full-access")).toBe(true);
-      // The transcript tail starts a fixed window before its end.
-      expect(readArgs[1]).toMatchObject({ view: "messages", afterPosition: 59 });
+      expect(world.hostCalls[0]?.ceiling).toBe("full-access");
+      expect(world.hostCalls.at(-1)?.ceiling).toBe("approval-required");
+      // The transcript tail starts a fixed window before its end and follows its pages.
+      expect(readArgs.map((args) => args.afterPosition)).toEqual([undefined, 59, 79]);
     }),
   );
 
@@ -442,19 +485,61 @@ describe("LaunchWatchService", () => {
       };
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
-          yield* service.register({
-            launcherThreadId: launcher,
-            host: "box",
-            threadId: target,
-            projectId: null,
-            title: null,
-            runId: run1,
-          });
+          yield* watchRemote(service, run1);
           const wake = yield* Queue.take(world.delivered);
           expect(wake.text).toContain("Short answer.");
         }),
       );
       expect(readArgs[1]).not.toHaveProperty("afterPosition");
+    }),
+  );
+
+  it.effect("keeps backing off after a restart in an outage, without a second notice", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      const baseDir = yield* tempDir;
+      let reachable = false;
+      world.hostCall = (call) => {
+        if (!reachable) {
+          return Effect.fail(
+            new SshRemoteDispatch.SshRemoteDispatchError({
+              reason: "ssh_failed",
+              message: "SSH to box failed",
+            }),
+          );
+        }
+        return call.tool === "goat_thread_wait"
+          ? Effect.succeed({ threadId: target, runId: run1, status: "completed", timedOut: false })
+          : Effect.succeed(remoteRead({ itemCount: 0 }));
+      };
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* watchRemote(service, run1);
+          // Small steps, so the clock stops well before the next retry is due.
+          yield* eventuallyWithTime(
+            () => world.deliveredLog.length === 1,
+            "the outage notice",
+            "10 seconds",
+          );
+          yield* eventually(
+            service.list(launcher).pipe(Effect.map(([watch]) => watch?.outage?.notified === true)),
+            "the notice is recorded",
+          );
+        }),
+      );
+      const contactsBefore = world.hostCalls.length;
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          // Still in backoff: the restarted follower waits instead of calling at once.
+          yield* settle;
+          expect(world.hostCalls.length).toBe(contactsBefore);
+          reachable = true;
+          yield* eventuallyWithTime(() => world.deliveredLog.length === 2, "the run report");
+          expect(yield* pendingRuns(service)).toEqual([]);
+        }),
+      );
+      expect(world.deliveredLog[0]?.text).toMatch(/^host_unavailable/);
+      expect(world.deliveredLog[1]?.text).toContain("finished run run-1");
     }),
   );
 
@@ -465,12 +550,17 @@ describe("LaunchWatchService", () => {
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
           yield* watchLocal(service, run1);
-          yield* eventually(() => world.waitCalls.length === 1, "the follower waits on run 1");
-          const target_ = { launcherThreadId: launcher, host: null, threadId: target };
-          expect(yield* service.unwatch(target_)).toBe(true);
-          expect(yield* service.unwatch(target_)).toBe(false);
+          yield* eventually(
+            holds(() => world.waitCalls.length === 1),
+            "the follower waits",
+          );
+          expect(yield* service.unwatch(local)).toBe(true);
+          expect(yield* service.unwatch(local)).toBe(false);
           yield* watchLocal(service, run2);
-          yield* eventually(() => world.waitCalls.length === 2, "a new follower waits on run 2");
+          yield* eventually(
+            holds(() => world.waitCalls.length === 2),
+            "a new follower waits",
+          );
           expect(world.waitCalls[1]?.runId).toBe(run2);
           yield* Queue.offer(world.waits, finished(run2));
           const wake = yield* Queue.take(world.delivered);
@@ -481,68 +571,101 @@ describe("LaunchWatchService", () => {
     }),
   );
 
-  it.effect("drops the watch without a wake when the launcher is archived", () =>
+  it.effect("drops the watch without a wake when the launcher is archived while it waits", () =>
     Effect.gen(function* () {
       const world = yield* makeWorld;
-      world.shells.set(launcher, {
-        ...world.shells.get(launcher),
-        archivedAt: DateTime.makeUnsafe(0) as never,
-      });
       const baseDir = yield* tempDir;
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
           yield* watchLocal(service, run1);
-          yield* eventuallyEffect(
+          yield* eventually(
+            holds(() => world.waitCalls.length === 1),
+            "the follower waits",
+          );
+          world.shells.set(launcher, {
+            ...world.shells.get(launcher),
+            archivedAt: DateTime.makeUnsafe(0) as never,
+          });
+          yield* Queue.offer(world.waits, finished(run1));
+          yield* eventually(
             service.list(launcher).pipe(Effect.map((watches) => watches.length === 0)),
             "the watch is dropped",
           );
         }),
       );
-      expect(world.waitCalls).toEqual([]);
-      expect(world.deliveredLog).toEqual([]);
+      expect(world.attempts).toEqual([]);
     }),
   );
 
-  it.effect("retries a wake the orchestrator could not store, and drops one it refused", () =>
+  it.effect("retries a wake the orchestrator failed to store under a fresh id, once", () =>
     Effect.gen(function* () {
       const world = yield* makeWorld;
       const baseDir = yield* tempDir;
-      world.dispatchFailures.push(
-        new OrchestratorDispatchError({ commandId: "x" as never, commandType: "message.dispatch" }),
-      );
+      world.dispatchFailures.push("transient");
       yield* withService(world, baseDir, (service) =>
         Effect.gen(function* () {
           yield* watchLocal(service, run1);
           yield* Queue.offer(world.waits, finished(run1));
           yield* Queue.offer(world.waits, finished(run1));
           yield* eventuallyWithTime(() => world.deliveredLog.length === 1, "the retried wake");
-          expect(world.attempts.map((attempt) => attempt.commandId)).toEqual([
-            world.deliveredLog[0]!.commandId,
-            world.deliveredLog[0]!.commandId,
-          ]);
-
-          world.dispatchFailures.push(
-            new OrchestratorCommandPreviouslyRejectedError({
-              commandId: "y" as never,
-              commandType: "message.dispatch",
-              detail: "rejected",
-            }),
+          const [first, retry] = world.attempts;
+          expect(retry?.commandId).toBe(first?.commandId + ":attempt-1");
+          expect(retry?.messageId).toBe(first?.messageId + ":attempt-1");
+          yield* eventually(
+            pendingRuns(service).pipe(Effect.map((runs) => runs?.length === 0)),
+            "the run is settled",
           );
-          yield* service.rearm({
-            launcherThreadId: launcher,
-            host: null,
-            threadId: target,
-            runId: run2,
-          });
-          yield* Queue.offer(world.waits, finished(run2));
-          yield* eventuallyEffect(
-            service.list(launcher).pipe(Effect.map(([watch]) => watch?.pendingRuns.length === 0)),
-            "the refused run is settled",
-          );
-          yield* TestClock.adjust("16 minutes");
-          expect(world.attempts).toHaveLength(3);
         }),
       );
+      expect(world.attempts).toHaveLength(2);
+    }),
+  );
+
+  it.effect("settles a wake the orchestrator refuses for good", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      const baseDir = yield* tempDir;
+      world.dispatchFailures.push("refused");
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* watchLocal(service, run1);
+          yield* Queue.offer(world.waits, finished(run1));
+          yield* Queue.offer(world.waits, finished(run1));
+          // A previously rejected id is retried once under a fresh id; that one goes through.
+          yield* eventuallyWithTime(() => world.deliveredLog.length === 1, "the fresh attempt");
+          yield* eventually(
+            pendingRuns(service).pipe(Effect.map((runs) => runs?.length === 0)),
+            "the run is settled",
+          );
+        }),
+      );
+      expect(world.attempts).toHaveLength(2);
+    }),
+  );
+
+  it.effect("keeps the gone notice owed until it can be queued", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      world.shells.set(target, {
+        ...world.shells.get(target),
+        deletedAt: DateTime.makeUnsafe(0) as never,
+      });
+      world.dispatchFailures.push("transient");
+      const baseDir = yield* tempDir;
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* watchLocal(service, run1);
+          yield* eventuallyWithTime(() => world.deliveredLog.length === 1, "the gone notice");
+          expect(world.deliveredLog[0]?.text).toContain(
+            "can no longer be followed: the thread was deleted.",
+          );
+          yield* eventually(
+            service.list(launcher).pipe(Effect.map((watches) => watches.length === 0)),
+            "the watch ends",
+          );
+        }),
+      );
+      expect(world.waitCalls).toEqual([]);
     }),
   );
 
@@ -566,17 +689,26 @@ describe("LaunchWatchService", () => {
       ).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
-});
 
-/** Polls an effectful check while followers run. */
-const eventuallyEffect = (check: Effect.Effect<boolean>, what: string) =>
-  Effect.gen(function* () {
-    for (let attempt = 0; attempt < 5_000; attempt++) {
-      if (yield* check) return;
-      yield* Effect.yieldNow;
-    }
-    return yield* Effect.die(new Error("never happened: " + what));
-  });
+  it.effect("refuses changes while the state file cannot be read, leaving it intact", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      const baseDir = yield* tempDir;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* withService(world, baseDir, (service) => watchLocal(service, run1));
+      const file = path.join(baseDir, "userdata", LaunchWatchService.LAUNCH_WATCH_FILE);
+      const before = yield* fs.readFileString(file);
+      yield* fs.chmod(file, 0o000);
+      const refused = yield* withService(world, baseDir, (service) =>
+        Effect.result(service.register({ ...local, projectId, title: null, runId: run2 })),
+      );
+      yield* fs.chmod(file, 0o600);
+      expect(refused._tag).toBe("Failure");
+      expect(yield* fs.readFileString(file)).toBe(before);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
 
 const remoteItem = (position: number, runId: RunId, text: string) => ({
   position,
@@ -597,7 +729,8 @@ const remoteItem = (position: number, runId: RunId, text: string) => ({
 
 const remoteRead = (input: {
   readonly itemCount: number;
-  readonly items: ReadonlyArray<unknown>;
+  readonly items?: ReadonlyArray<unknown>;
+  readonly nextPosition?: number;
 }) => ({
   thread: {
     threadId: target,
@@ -630,7 +763,7 @@ const remoteRead = (input: {
     updatedAt: "2026-10-12T00:00:00.000Z",
   },
   recentRuns: [],
-  items: input.items,
-  nextPosition: null,
-  hasMore: false,
+  items: input.items ?? [],
+  nextPosition: input.nextPosition ?? null,
+  hasMore: input.nextPosition !== undefined,
 });

@@ -8,6 +8,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import * as Effect from "effect/Effect";
 
 /**
  * Decisions and messages for launch watches, kept free of I/O so they can be
@@ -49,6 +50,14 @@ export const LaunchWatch = Schema.Struct({
   /** Number of the last outage episode that ended; the next one counts from it. */
   lastEpisode: Schema.Number,
   outage: Schema.NullOr(LaunchWatchOutage),
+  /**
+   * Wakes that failed to queue, by their first command id: how many attempts
+   * were made. A retry uses a fresh command id, since the orchestrator records
+   * a failed command as rejected and would refuse the same id again.
+   */
+  deliveryAttempts: Schema.Record(Schema.String, Schema.Number).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
 });
@@ -119,9 +128,39 @@ export function newLaunchWatch(input: {
     reportedQuestions: [],
     lastEpisode: 0,
     outage: null,
+    deliveryAttempts: {},
     createdAt: input.now,
     updatedAt: input.now,
   };
+}
+
+/** The wake to send on this attempt: the first keeps its ids, later ones get fresh ones. */
+export function wakeAttempt(watch: LaunchWatch, wake: LaunchWatchWake): LaunchWatchWake {
+  const attempt = watch.deliveryAttempts[wake.commandId] ?? 0;
+  if (attempt === 0) return wake;
+  return {
+    ...wake,
+    commandId: CommandId.make(`${wake.commandId}:attempt-${attempt}`),
+    messageId: MessageId.make(`${wake.messageId}:attempt-${attempt}`),
+  };
+}
+
+/** Records a failed attempt at a wake, so the next one uses fresh ids. */
+export function recordFailedAttempt(watch: LaunchWatch, wake: LaunchWatchWake): LaunchWatch {
+  return {
+    ...watch,
+    deliveryAttempts: {
+      ...watch.deliveryAttempts,
+      [wake.commandId]: (watch.deliveryAttempts[wake.commandId] ?? 0) + 1,
+    },
+  };
+}
+
+/** Forgets the attempts at a wake once it is settled. */
+export function clearAttempts(watch: LaunchWatch, wake: LaunchWatchWake): LaunchWatch {
+  if (!(wake.commandId in watch.deliveryAttempts)) return watch;
+  const { [wake.commandId]: _settled, ...rest } = watch.deliveryAttempts;
+  return { ...watch, deliveryAttempts: rest };
 }
 
 const keepRecent = <A>(values: ReadonlyArray<A>, value: A) =>
@@ -298,9 +337,11 @@ export function questionWake(input: {
   const request =
     input.kind === null ? "a request" : `a ${input.kind.replaceAll("_", " ")} request`;
   const answer =
-    watch.host === null
-      ? `Read it with goat_pending_request_read {threadId: "${watch.threadId}", requestId: "${input.requestId}"} and answer with goat_pending_request_respond if you can decide, or leave it to the user.`
-      : `It can be answered in that thread from a client connected to ${watch.host}.`;
+    watch.host !== null
+      ? `It can be answered in that thread from a client connected to ${watch.host}.`
+      : input.kind === "user_input"
+        ? `Read it with goat_pending_request_read {threadId: "${watch.threadId}", requestId: "${input.requestId}"} and answer with goat_pending_request_respond if you can decide, or leave it to the user.`
+        : "An approval can only be given in that thread from a T3 client, so tell the user.";
   return {
     ...wakeIds(watch, `question:${questionKey(input.runId, input.requestId)}`),
     text: `${name} (${identity(watch)}) is waiting on ${request} (${input.requestId}) in run ${input.runId} and cannot continue until it is answered. ${answer} ${STOP_HINT}`,

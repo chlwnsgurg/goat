@@ -515,7 +515,9 @@ const make = Effect.gen(function* () {
     listWatches: (scope) =>
       Effect.gen(function* () {
         const launcherThreadId = yield* watcherOf(scope);
-        const watches = yield* launchWatches.list(launcherThreadId);
+        const watches = yield* launchWatches
+          .list(launcherThreadId)
+          .pipe(Effect.mapError(storeFailure));
         return { watches: watches.map(watchView) } satisfies OrchestratorMcpThreadWatchListResult;
       }),
   });

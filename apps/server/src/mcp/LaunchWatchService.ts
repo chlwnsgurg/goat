@@ -27,6 +27,7 @@ import { forkParked } from "../serverActivation.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import {
   addPendingRun,
+  clearAttempts,
   EXCERPT_MAX_CHARS,
   finishedWake,
   goneWake,
@@ -44,7 +45,9 @@ import {
   recordContact,
   recordFailure,
   recordQuestion,
+  recordFailedAttempt,
   settleRun,
+  wakeAttempt,
 } from "./launchWatch.ts";
 
 /**
@@ -103,7 +106,9 @@ export interface LaunchWatchServiceShape {
     input: LaunchWatchTarget & { readonly runId: RunId },
   ) => Effect.Effect<void, LaunchWatchStoreError>;
   readonly unwatch: (input: LaunchWatchTarget) => Effect.Effect<boolean, LaunchWatchStoreError>;
-  readonly list: (launcherThreadId: ThreadId) => Effect.Effect<ReadonlyArray<LaunchWatch>>;
+  readonly list: (
+    launcherThreadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<LaunchWatch>, LaunchWatchStoreError>;
 }
 
 export class LaunchWatchService extends Context.Service<
@@ -137,9 +142,12 @@ const noDetails: Details = { title: null, branch: null, worktreePath: null, exce
 
 class LauncherGone extends Data.TaggedError("LauncherGone")<{}> {}
 
-/** Orchestrator refusals that a retry of the same command cannot change. */
+/**
+ * Orchestrator refusals a retry cannot change. A previously rejected command
+ * is not one of them: the orchestrator also records a command that failed for
+ * a passing reason as rejected, so the wake is retried under a fresh id.
+ */
 const PERMANENT_DISPATCH_ERRORS = new Set([
-  "OrchestratorCommandPreviouslyRejectedError",
   "OrchestratorCommandRejectedError",
   "OrchestratorSubagentThreadReadOnlyError",
   "OrchestratorThreadAboveModeLimitError",
@@ -456,13 +464,17 @@ export const make = Effect.gen(function* () {
     });
 
   /**
-   * Sends a wake. A refusal the orchestrator will repeat counts as delivered,
-   * with a warning; anything else (a storage failure) is reported as
-   * undelivered so the obligation stays and is tried again.
+   * Sends a wake. A refusal the orchestrator will repeat settles it, with a
+   * warning; any other failure (a storage failure, or a command id the
+   * orchestrator recorded as rejected) leaves it owed, with the attempt
+   * counted so the retry uses a fresh id.
    */
-  const deliver = (watch: LaunchWatch, message: LaunchWatchWake) =>
-    wake(watch, message).pipe(
-      Effect.as(true),
+  const deliver = (
+    watch: LaunchWatch,
+    message: LaunchWatchWake,
+  ): Effect.Effect<{ readonly delivered: boolean; readonly watch: LaunchWatch }> =>
+    wake(watch, wakeAttempt(watch, message)).pipe(
+      Effect.as({ delivered: true, watch: clearAttempts(watch, message) }),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.interrupt
@@ -471,12 +483,12 @@ export const make = Effect.gen(function* () {
                 watchId: watch.id,
                 commandId: message.commandId,
                 cause,
-              }).pipe(Effect.as(true))
+              }).pipe(Effect.as({ delivered: true, watch: clearAttempts(watch, message) }))
             : Effect.logWarning("launch watch: wake failed, will retry", {
                 watchId: watch.id,
                 commandId: message.commandId,
                 cause,
-              }).pipe(Effect.as(false)),
+              }).pipe(Effect.as({ delivered: false, watch: recordFailedAttempt(watch, message) })),
       ),
     );
 
@@ -524,25 +536,40 @@ export const make = Effect.gen(function* () {
           const watch = current(watchId, incarnation);
           if (watch === undefined || !watch.pendingRuns.includes(runId)) return 0;
           const now = yield* Clock.currentTimeMillis;
+          const keep = (next: LaunchWatch) => save((map) => map.set(watchId, next));
+          if (result._tag !== "LauncherGone" && result._tag !== "CallerChanged") {
+            // The launcher may have been archived while the step waited; a wake
+            // queued on an archived thread would never run.
+            const launcher = yield* Effect.result(launcherCeiling(watch));
+            if (launcher._tag === "Failure") {
+              if (launcher.failure instanceof LauncherGone) {
+                yield* save((map) => map.delete(watchId));
+                return 0;
+              }
+              return RETRY_MS;
+            }
+          }
           switch (result._tag) {
             case "Terminal": {
-              const delivered = yield* deliver(
+              const sent = yield* deliver(
                 watch,
                 finishedWake({ watch, runId, status: result.status, ...details }),
               );
-              if (!delivered) return RETRY_MS;
+              if (!sent.delivered) {
+                yield* keep(sent.watch);
+                return RETRY_MS;
+              }
               const title = details.title ?? watch.title;
-              yield* save((map) =>
-                map.set(watchId, { ...settleRun(recordContact(watch, now), runId, now), title }),
-              );
+              yield* keep({ ...settleRun(recordContact(sent.watch, now), runId, now), title });
               return 0;
             }
             case "Running": {
               let next = recordContact(watch, now);
+              let pause = 0;
               for (const question of result.questions) {
                 const key = questionKey(runId, question.id);
                 if (next.reportedQuestions.includes(key)) continue;
-                const delivered = yield* deliver(
+                const sent = yield* deliver(
                   next,
                   questionWake({
                     watch: next,
@@ -552,22 +579,28 @@ export const make = Effect.gen(function* () {
                     title: null,
                   }),
                 );
-                if (delivered) next = recordQuestion(next, key, now);
+                next = sent.delivered ? recordQuestion(sent.watch, key, now) : sent.watch;
+                if (!sent.delivered) pause = RETRY_MS;
               }
-              if (next !== watch) yield* save((map) => map.set(watchId, next));
-              return 0;
+              if (next !== watch) yield* keep(next);
+              return pause;
             }
             case "RunMissing":
               yield* Effect.logWarning("launch watch: followed run no longer exists", {
                 watchId,
                 runId,
               });
-              yield* save((map) => map.set(watchId, settleRun(watch, runId, now)));
+              yield* keep(settleRun(watch, runId, now));
               return 0;
-            case "Gone":
-              yield* deliver(watch, goneWake({ watch, reason: result.reason }));
+            case "Gone": {
+              const sent = yield* deliver(watch, goneWake({ watch, reason: result.reason }));
+              if (!sent.delivered) {
+                yield* keep(sent.watch);
+                return RETRY_MS;
+              }
               yield* save((map) => map.delete(watchId));
               return 0;
+            }
             case "LauncherGone":
               yield* save((map) => map.delete(watchId));
               return 0;
@@ -587,8 +620,10 @@ export const make = Effect.gen(function* () {
       const { next, notify } = recordFailure(watch, now, error);
       let saved = next;
       if (notify && next.outage !== null) {
-        const delivered = yield* deliver(next, outageWake({ watch: next, outage: next.outage }));
-        if (!delivered) saved = { ...next, outage: { ...next.outage, notified: false } };
+        const sent = yield* deliver(next, outageWake({ watch: next, outage: next.outage }));
+        saved = sent.delivered
+          ? sent.watch
+          : { ...sent.watch, outage: { ...next.outage, notified: false } };
       }
       yield* save((map) => map.set(watch.id, saved));
       return Math.max(0, (saved.outage?.nextRetryAt ?? now) - now);
@@ -654,9 +689,44 @@ export const make = Effect.gen(function* () {
     return { host, id: launchWatchId({ ...input, host }) };
   };
 
+  let loaded = false;
+
+  /**
+   * Reads the state file once, then resumes its followers. Call with the lock
+   * held. Until a read succeeds every operation fails, so a file that could
+   * not be read is never overwritten with a partial set of watches.
+   */
+  const ensureLoaded = Effect.gen(function* () {
+    if (loaded) return;
+    const stored = yield* load.pipe(
+      Effect.mapError(
+        (cause) =>
+          new LaunchWatchStoreError({
+            message: `Could not read launch watches at ${statePath}: ${describe(cause)}`,
+            cause,
+          }),
+      ),
+    );
+    const now = yield* Clock.currentTimeMillis;
+    // Keep only watches that still owe a report or changed recently.
+    watches = new Map(
+      stored
+        .filter(
+          (watch) =>
+            watch.pendingRuns.length > 0 ||
+            watch.outage !== null ||
+            now - watch.updatedAt < DORMANT_RETENTION_MS,
+        )
+        .map((watch) => [watch.id, watch]),
+    );
+    loaded = true;
+    yield* Effect.forEach([...watches.values()], ensureFollower, { discard: true });
+  });
+
   const register: LaunchWatchServiceShape["register"] = (input) =>
     locked(
       Effect.gen(function* () {
+        yield* ensureLoaded;
         const { host, id } = keyOf(input);
         const now = yield* Clock.currentTimeMillis;
         const existing = watches.get(id);
@@ -691,6 +761,7 @@ export const make = Effect.gen(function* () {
   const rearm: LaunchWatchServiceShape["rearm"] = (input) =>
     locked(
       Effect.gen(function* () {
+        yield* ensureLoaded;
         const { id } = keyOf(input);
         const existing = watches.get(id);
         if (existing === undefined) return;
@@ -705,6 +776,7 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const detached = yield* locked(
         Effect.gen(function* () {
+          yield* ensureLoaded;
           const { id } = keyOf(input);
           if (!watches.has(id)) return { removed: false, fiber: undefined } as const;
           yield* save((map) => map.delete(id));
@@ -718,36 +790,25 @@ export const make = Effect.gen(function* () {
     });
 
   const list: LaunchWatchServiceShape["list"] = (launcherThreadId) =>
-    Effect.sync(() =>
-      [...watches.values()]
-        .filter((watch) => watch.launcherThreadId === launcherThreadId)
-        .toSorted((left, right) => right.updatedAt - left.updatedAt),
+    locked(ensureLoaded).pipe(
+      Effect.map(() =>
+        [...watches.values()]
+          .filter((watch) => watch.launcherThreadId === launcherThreadId)
+          .toSorted((left, right) => right.updatedAt - left.updatedAt),
+      ),
     );
 
   // ── start ────────────────────────────────────────────────────────────
 
-  const loaded = yield* load.pipe(
-    Effect.catch((error) =>
-      Effect.logWarning("launch watches: state file unreadable, starting empty", {
-        path: statePath,
-        cause: error,
-      }).pipe(Effect.as([] as ReadonlyArray<LaunchWatch>)),
-    ),
-  );
-  const bootedAt = yield* Clock.currentTimeMillis;
-  // Keep only watches that still owe a report or changed recently.
-  watches = new Map(
-    loaded
-      .filter(
-        (watch) =>
-          watch.pendingRuns.length > 0 ||
-          watch.outage !== null ||
-          bootedAt - watch.updatedAt < DORMANT_RETENTION_MS,
-      )
-      .map((watch) => [watch.id, watch]),
-  );
   yield* forkParked(
-    locked(Effect.forEach([...watches.values()], ensureFollower, { discard: true })),
+    locked(ensureLoaded).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("launch watches: state unreadable; retrying on next use", {
+          path: statePath,
+          cause: error,
+        }),
+      ),
+    ),
   );
 
   return LaunchWatchService.of({ register, rearm, unwatch, list });
