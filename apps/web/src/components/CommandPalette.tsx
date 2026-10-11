@@ -49,6 +49,7 @@ import * as Option from "effect/Option";
 import {
   CloudDownloadIcon,
   ArrowLeftIcon,
+  ArrowUpFromLineIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -118,6 +119,7 @@ import { useNewProject } from "../hooks/useNewProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
+import { useCanPromoteThread, usePromoteThread } from "./promoteThread";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
@@ -786,6 +788,8 @@ function OpenCommandPaletteDialog(props: {
   const activeThreadServerConfig = useServerConfigs().get(
     activeThread?.environmentId ?? ("" as EnvironmentId),
   );
+  const canPromoteActiveThread = useCanPromoteThread(activeThread);
+  const promoteThread = usePromoteThread();
   const activeThreadReferenceCopyTarget =
     referenceThreadRef === null || (pathname === "/pull-requests" && !openPanelPullRequestUrl)
       ? null
@@ -2021,6 +2025,21 @@ function OpenCommandPaletteDialog(props: {
         },
       });
     }
+  }
+
+  if (activeThread !== null && canPromoteActiveThread) {
+    const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    actionItems.push({
+      kind: "action",
+      value: "action:promote-thread",
+      searchTerms: ["promote", "delegated", "task", "subagent", "top-level", "detach"],
+      title: "Promote to thread",
+      description: "Detach this delegated task into its own thread",
+      icon: <ArrowUpFromLineIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await promoteThread(threadRef);
+      },
+    });
   }
 
   if (activeThread !== null) {

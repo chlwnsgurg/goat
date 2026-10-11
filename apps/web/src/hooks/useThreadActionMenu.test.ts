@@ -49,6 +49,7 @@ vi.mock("../state/session", () => ({
 vi.mock("../state/entities", () => ({
   readEnvironmentSupportsAutoSettleOptOut: () => true,
   readEnvironmentSupportsPinning: () => true,
+  readEnvironmentSupportsPromotion: () => false,
   readEnvironmentSupportsSettlement: () => true,
   readEnvironmentSupportsSnooze: () => true,
   readEnvironmentSupportsTitleRegeneration: () => true,
@@ -106,6 +107,10 @@ vi.mock("../components/Sidebar.snooze", () => ({
     { id: "hour", label: "In 1 hour", whenLabel: "3 PM", snoozedUntil: "2099-01-01T00:00:00Z" },
   ],
   snoozeWakeDescription: () => "later",
+}));
+vi.mock("../components/Sidebar.logic", () => ({ canPromoteThread: () => false }));
+vi.mock("../components/promoteThread", () => ({
+  usePromoteThread: () => async () => {},
 }));
 vi.mock("./useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: () => recordEffect("copy") }),

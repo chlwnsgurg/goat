@@ -18,6 +18,8 @@ upstream 머지에서 충돌이나 의미 회귀를 만드는 것은 아래 영�
   들어온 해시는 그대로 적어도 된다.
 - 같은 ID가 이미 있으면 다른 슬러그를 고른다. 한 영역이 넓어졌으면 새 블록 대신 기존 블록의 경로와
   정책을 고친다.
+- `devlog/_chase/scan.sh --delta`가 ID 중복, 슬러그 형식, 순서, dev에서 닿지 않는 해시를 검사하고
+  문제가 있으면 1로 끝난다. 영역을 고친 브랜치와 머지 관리자는 머지 전에 돌린다.
 
 2026-10-12 이전 커밋 메시지의 G 번호는 이렇게 읽는다: G1 `brand`, G2 `global-agent`,
 G3 `mcp-names`, G4 `cli-home`, G5 `desktop-identity`, G6 `ssh-runtime`, G7 `server-activity`,
@@ -48,6 +50,12 @@ G13 `goat-copy`, G14 `launch-watch`.
 - 경로: `apps/web/src/components/chat`, `apps/web/src/index.css`
 - 정책: 레이아웃은 GOAT, 컴포저 동작은 upstream.
 
+### `delegated-tasks` 사이드바 위임 작업, 승격, launch 계보
+
+- 커밋: #33
+- 경로: `apps/web/src/components/{Sidebar.tsx,Sidebar.logic.ts,Sidebar.drag.ts,promoteThread.ts,CommandPalette.tsx,threadActionMenu.logic.ts}`, `apps/web/src/components/sidebar/{SidebarDelegatedChildren.tsx,delegatedChildIndex.ts}`, `apps/web/src/components/chat/{ChatHeader.tsx,ThreadRelationshipsControl.tsx,threadLauncher.logic.ts}`, `apps/server/src/orchestration-v2/{Orchestrator.ts,ThreadManagementService.ts,ThreadLaunchService.ts,ThreadForkService.ts,ProjectionStore.ts}`, `apps/server/src/mcp/{OrchestratorMcpService.ts,AcpMcpStdioBridge.ts,toolkits/{project,ssh,orchestrator}}`, `apps/server/src/sshRemote/SshRemoteDispatch.ts`, `packages/contracts/src/{orchestrationV2.ts,environment.ts}`, `packages/client-runtime/src/{operations/commands.ts,state/threadCommands.ts,state/threadRelationships.ts}`, `packages/provider-core/src/server/subagentProjection.ts`
+- 정책: GOAT 전용 계약 필드(`launchedBy`, subagent `promotedAt`, `thread.stop.stopCascadeFrom`), 명령 `thread.promote`, capability `threadPromotion`. 마이그레이션 없음(`payload_json`). upstream이 같은 이름이나 계보 변경 명령을 들이면 카드로 결정한다. upstream의 사이드바, Orchestrator, fork/subagent builder 변경은 받고 이 동작을 다시 얹는다. 머지 때 확인할 것: Orchestrator의 "계보는 분리만 일어난다" 가정(`appOwnedSubagentParentThreadId`), 연쇄 Stop의 조상 확인, fork·subagent builder의 `launchedBy` 제거.
+
 ### `desktop-identity` 데스크톱 정체성
 
 - 커밋: `b79ff462c`
@@ -57,8 +65,8 @@ G13 `goat-copy`, G14 `launch-watch`.
 ### `devlog` devlog
 
 - 커밋: `24d4ee846` `37073207d`
-- 경로: `devlog/`
-- 정책: GOAT 전용, 충돌 없음.
+- 경로: `devlog/`, `.gitignore`의 `!/devlog/`
+- 정책: GOAT 전용, 충돌 없음. `.gitignore` 충돌에서는 `!/devlog/` 줄을 남긴다.
 
 ### `global-agent` 글로벌 에이전트
 

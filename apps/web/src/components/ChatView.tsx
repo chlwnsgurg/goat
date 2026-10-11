@@ -468,6 +468,7 @@ import {
   resolveScrollToEndClearance,
 } from "./composerFooterLayout";
 import { ChatHeader } from "./chat/ChatHeader";
+import { resolveLauncherRef } from "./chat/threadLauncher.logic";
 import { useRemoteOpenState } from "~/remoteOpen";
 import { shouldShowOpenInPicker } from "./chat/OpenInPicker.logic";
 import { useOpenFavoriteEditorShortcut } from "./chat/OpenInPickerShortcut";
@@ -504,6 +505,7 @@ import {
   type EditQueuedRunRequest,
 } from "./chat/QueuedRunsControl";
 import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
+import { EnvironmentConnectionProgressLabel } from "./EnvironmentConnectionProgress";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ThreadStatusLine } from "./chat/ThreadStatusLine";
 import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
@@ -2214,6 +2216,37 @@ export default function ChatView(props: ChatViewProps) {
           },
     [parentSubagentThread?.title, parentSubagentThreadRef],
   );
+  const launchedBy = serverThread?.source.launchedBy;
+  const launcherOwnEnvironmentId = serverThread?.environmentId;
+  const launcherRelationshipToParent = activeThread?.lineage.relationshipToParent;
+  const launcherThreadRef = useMemo(
+    () =>
+      launcherRelationshipToParent !== "subagent" &&
+      launchedBy !== undefined &&
+      launcherOwnEnvironmentId !== undefined
+        ? resolveLauncherRef(launchedBy, launcherOwnEnvironmentId)
+        : null,
+    [launcherRelationshipToParent, launchedBy, launcherOwnEnvironmentId],
+  );
+  const launcherThread = useThreadShell(launcherThreadRef);
+  const launcherThreadTitle = launcherThread?.title;
+  const launcherKind = launchedBy?.kind;
+  const launcherThreadLink = useMemo(
+    () =>
+      launcherThreadRef !== null && launcherThreadTitle !== undefined && launcherKind !== undefined
+        ? { ref: launcherThreadRef, title: launcherThreadTitle, kind: launcherKind }
+        : null,
+    [launcherKind, launcherThreadTitle, launcherThreadRef],
+  );
+  const onOpenScopedThread = useCallback(
+    (ref: ScopedThreadRef) => {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(ref),
+      });
+    },
+    [navigate],
+  );
   const threadError = isServerThread
     ? (localServerError ?? serverRuntime?.lastError ?? null)
     : localDraftError;
@@ -3160,22 +3193,29 @@ export default function ChatView(props: ChatViewProps) {
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
         variant: unavailableConnection.phase === "error" ? "error" : "warning",
         icon: <WifiOffIcon />,
-        title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+        title: (
+          <>
+            {activeEnvironmentUnavailableState.label} ·{" "}
+            <EnvironmentConnectionProgressLabel connection={unavailableConnection} />
+          </>
+        ),
+        description: unavailableConnection.error ? (
+          <span className="line-clamp-2">{unavailableConnection.error}</span>
+        ) : undefined,
         actions: (
           <>
-            {!environmentReconnecting ? (
-              <Button
-                size="xs"
-                variant="ghost"
-                onClick={() =>
-                  void handleReconnectActiveEnvironment(
-                    activeEnvironmentUnavailableState.environmentId,
-                  )
-                }
-              >
-                Reconnect
-              </Button>
-            ) : null}
+            {/* Reachable while reconnecting too: retrying skips the backoff wait. */}
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() =>
+                void handleReconnectActiveEnvironment(
+                  activeEnvironmentUnavailableState.environmentId,
+                )
+              }
+            >
+              {environmentReconnecting ? "Retry now" : "Reconnect"}
+            </Button>
             {disconnectAction}
           </>
         ),
@@ -11715,7 +11755,9 @@ export default function ChatView(props: ChatViewProps) {
             globalAgent={isGlobalAgentActive}
             activeProject={activeProject ?? null}
             parentThreadLink={parentThreadLink}
+            launcherThreadLink={launcherThreadLink}
             onOpenThread={onOpenRelatedThread}
+            onOpenScopedThread={onOpenScopedThread}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
             onNewThreadInProject={handleNewThreadInActiveProject}
             {...(activeDraftLogicalProjectKey && !isGlobalAgentActive
