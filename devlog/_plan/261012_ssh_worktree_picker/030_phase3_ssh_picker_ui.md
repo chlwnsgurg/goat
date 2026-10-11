@@ -1,5 +1,29 @@
 # 030 wp3 / PR3 — saved SSH worktree picker and remote submission
 
+## Stale check at wp3 P (branch goat/ws-picker-2-ssh-service a27a90042 = PR1 + dev 034041ce4 + PR2)
+
+These amendments override older excerpts. Line anchors below are historical (ba65eae6b); re-locate by content.
+Full anchor map: Archimedes stale check (gpt-6.1-sol) summarized here.
+
+1. PR1 and PR2 are implemented. Real names: `createVcsEnvironmentAtoms(...).sshWorkspaceLaunch` /
+   `.sshWorkspaceFetchBack` (packages/client-runtime/src/state/vcs.ts), `WS_METHODS.sshWorkspaceLaunch`
+   (packages/contracts/src/rpc.ts), schemas in packages/contracts/src/sshWorkspace.ts. All 25 error codes and
+   7 stages match the copy table below.
+2. Labels: wrap PR1's `resolveWorkspaceChipLabel` (apps/web/src/components/BranchToolbar.logic.ts) in a
+   pending-SSH helper that returns `Worktree · <saved label>` when an SSH destination is selected; do not pass
+   the saved host as `activeEnvironment` (that yields "New worktree · …"). PR1 already removed the Auto/
+   environment label override; the trigger renders `{workspaceLabel}`. Keep `collapseWhenCompact={false}`.
+3. New-thread reset: there is no `hasExplicitWorkspaceOption`. Add SSH destination to
+   `pickExplicitWorkspaceOptions` / `resolveRequestedWorkspaceContext` in useHandleNewThread.ts, and compare
+   SSH destination identity in `workspaceSelectionChanged` so a host pick during a pending defaults read is kept.
+4. Composer: the model picker disable expression is the `ProviderModelPicker` one in ChatComposer.tsx (the old
+   anchor was deleted on dev); the noProviderAvailable reference near the keyboard handler is a dependency-array
+   entry, not a guard.
+5. `clearComposerDraftContent` binding, toast action shape, send guards, upload and turn start moved by a few
+   lines in ChatView.tsx; semantics unchanged.
+6. Wide selector: `PreviousWorktreeItemContent` and `SelectValue` are already gone; replace only the remaining
+   Select-family imports with the shared menu.
+
 Depends on: [020_phase2_ssh_workspace_service.md](020_phase2_ssh_workspace_service.md), after [010_phase1_local_default.md](010_phase1_local_default.md).
 Authority: [000_plan.md](000_plan.md), including every D-u disposition, A1–A14 disposition and M1–M6.
 Implementation branch: `goat/ws-picker-3-ssh-ui`; PR base: `goat/ws-picker-2-ssh-service`.
