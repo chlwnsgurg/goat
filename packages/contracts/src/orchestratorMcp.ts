@@ -592,14 +592,14 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   schedule: ScheduledTaskSchedule,
   nextRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
-  /** For webhook tasks: the public T3 Connect URL. Absent when this environment has no managed tunnel. */
+  /** For webhook tasks: the public T3 Connect URL, shown only to a caller that may start the task's runs. */
   webhookUrl: Schema.optional(Schema.String).annotate({
     description:
-      "Public URL to give the sender. Absent when this environment has no T3 Connect managed tunnel; the user must enable T3 Connect remote access first.",
+      "Public URL to give the sender. Absent when this environment has no T3 Connect managed tunnel or this caller may not start the task's runs; webhookUrlUnavailableReason then says why.",
   }),
   webhookUrlUnavailableReason: Schema.optional(Schema.String).annotate({
     description:
-      "Why webhookUrl is absent, and what the user should do, when this environment knows.",
+      "For a webhook task without webhookUrl: why it is absent and what the user can do.",
   }),
   webhookSignature: Schema.optional(Schema.Literals(["none", "set"])).annotate({
     description: "Whether requests must carry a valid signature.",

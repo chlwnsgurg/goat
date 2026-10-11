@@ -1667,6 +1667,43 @@ describe("OrchestratorMcpService provider resolution", () => {
           listed.tasks.map((summary) => summary.webhookUrl),
           [undefined, "https://t3.example/hooks/secret"],
         );
+        assert.include(listed.tasks[0]?.webhookUrlUnavailableReason ?? "", "withheld");
+        assert.equal(listed.tasks[1]?.webhookUrlUnavailableReason, undefined);
+      }),
+    );
+
+    it.effect("says why a webhook task has no public URL", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const listed = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.listScheduledTasks(supervisedClient, { projectId })),
+          Effect.provide(
+            service(
+              [
+                task({
+                  webhook: {
+                    path: "/hooks/scheduled-task/secret",
+                    url: null,
+                    urlUnavailableReason: "managed_tunnel_not_configured",
+                    hasSecret: false,
+                  },
+                }),
+                // The link state could not be read.
+                task({
+                  id: ScheduledTaskId.make("scheduled-task:unknown"),
+                  webhook: { path: "/hooks/scheduled-task/other", url: null, hasSecret: false },
+                }),
+              ],
+              null,
+              upserted,
+            ),
+          ),
+        );
+        const [noTunnel, unknown] = listed.tasks;
+        assert.equal(noTunnel?.webhookUrl, undefined);
+        assert.include(noTunnel?.webhookUrlUnavailableReason ?? "", "has no managed tunnel");
+        assert.include(noTunnel?.webhookUrlUnavailableReason ?? "", "Settings → Scheduled Tasks");
+        assert.include(unknown?.webhookUrlUnavailableReason ?? "", "could not read");
       }),
     );
 
@@ -1736,6 +1773,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           Effect.provide(service([task({})], null, upserted)),
         );
         assert.equal(listed.tasks[0]?.webhookUrl, undefined);
+        assert.include(listed.tasks[0]?.webhookUrlUnavailableReason ?? "", "withheld");
       }),
     );
 

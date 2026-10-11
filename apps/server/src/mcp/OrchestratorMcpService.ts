@@ -248,12 +248,45 @@ const WEBHOOK_URL_UNAVAILABLE: Record<ScheduledTaskWebhookUrlUnavailableReason, 
 };
 
 /**
+ * The server cannot tell which of its addresses a sender can reach, so only a
+ * client, which knows the address it uses, offers a direct URL.
+ */
+const WEBHOOK_DIRECT_URL_HINT =
+  " A sender that reaches this environment directly (this computer, the local network, or Tailscale) can use the address shown for the task in Settings → Scheduled Tasks.";
+
+/** The link state could not be read, so the cause is unknown. */
+const WEBHOOK_URL_UNKNOWN =
+  "This environment could not read its T3 Connect state. Ask the user to check remote access in Settings → Connections.";
+
+/** The URL starts runs, so a caller that may not start one does not see it. */
+const WEBHOOK_URL_WITHHELD =
+  "The URL is withheld because this caller may not start this task's runs: that needs write access, an active turn for a thread caller, and modes at least as broad as the task's. The user can copy it from Settings → Scheduled Tasks.";
+
+/** The webhook fields of an agent's task summary: the URL, or why it is absent. */
+function webhookUrlFields(
+  webhook: ScheduledTask["webhook"],
+  mayRun: boolean,
+): Pick<OrchestratorMcpScheduledTask, "webhookUrl" | "webhookUrlUnavailableReason"> {
+  if (webhook === undefined) return {};
+  if (webhook.url !== null) {
+    return mayRun
+      ? { webhookUrl: webhook.url }
+      : { webhookUrlUnavailableReason: WEBHOOK_URL_WITHHELD };
+  }
+  const reason = webhook.urlUnavailableReason;
+  return {
+    webhookUrlUnavailableReason:
+      (reason === undefined ? WEBHOOK_URL_UNKNOWN : WEBHOOK_URL_UNAVAILABLE[reason]) +
+      WEBHOOK_DIRECT_URL_HINT,
+  };
+}
+
+/**
  * A scheduled task as an agent sees it. `mayRun` says whether the caller may
  * run it: a webhook's URL carries the secret that starts the task's runs, so
  * only such a caller sees it.
  */
 function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
-  const urlUnavailable = task.webhook?.urlUnavailableReason;
   return {
     scheduledTaskId: task.id,
     title: task.title,
@@ -265,10 +298,7 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     nextRunAt: task.nextRunAt,
     lastRunStatus: task.lastRunStatus,
     // A bare path is not a URL anyone can call, so agents never get one to share.
-    ...(task.webhook?.url == null || !mayRun ? {} : { webhookUrl: task.webhook.url }),
-    ...(task.webhook?.url !== null || urlUnavailable === undefined || !mayRun
-      ? {}
-      : { webhookUrlUnavailableReason: WEBHOOK_URL_UNAVAILABLE[urlUnavailable] }),
+    ...webhookUrlFields(task.webhook, mayRun),
     ...(task.webhook === undefined
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
