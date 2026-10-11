@@ -3567,3 +3567,86 @@ describe("composerDraftStore attachment references", () => {
     );
   });
 });
+
+describe("SSH draft destinations", () => {
+  beforeEach(resetComposerDraftStore);
+  afterEach(resetComposerDraftStore);
+  const id = DraftId.make("ssh-draft");
+  const source = scopeProjectRef(EnvironmentId.make("local-source"), ProjectId.make("source"));
+  const destination = { connectionId: "saved-host", environmentId: EnvironmentId.make("remote") };
+  const store = () => useComposerDraftStore.getState();
+  function seed() {
+    store().setLogicalProjectDraftThreadId("ssh-source", source, id, {
+      threadId: ThreadId.make("ssh-source-thread"),
+      envMode: "worktree",
+      sshDestination: destination,
+    });
+    store().setPrompt(id, "keep my text");
+  }
+  it.each([
+    undefined,
+    destination,
+    { connectionId: "" },
+    { connectionId: "saved-host", environmentId: "remote" },
+  ])("round-trips or normalizes persisted SSH destination %j", async (value) => {
+    seed();
+    const state = JSON.parse(JSON.stringify(partializeComposerDraftStoreState(store())));
+    const session = Object.values(state.draftThreadsByThreadKey)[0] as Record<string, unknown>;
+    session.sshDestination = value;
+    session.envMode = "local";
+    session.worktreePath = "/incompatible";
+    session.startFromOrigin = true;
+    vi.useFakeTimers();
+    try {
+      const storage = useComposerDraftStore.persist.getOptions().storage!;
+      await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, { version: 9, state });
+      await vi.advanceTimersByTimeAsync(300);
+      resetComposerDraftStore();
+      await useComposerDraftStore.persist.rehydrate();
+      const restored = store().getDraftSession(id)!;
+      expect(restored.environmentId).toBe(source.environmentId);
+      expect(store().getComposerDraft(id)?.prompt).toBe("keep my text");
+      if (value === undefined) expect(restored.sshDestination).toBeNull();
+      else
+        expect(restored).toMatchObject({
+          envMode: "worktree",
+          worktreePath: null,
+          startFromOrigin: false,
+          environmentSelection: "manual",
+          loadBalancedEnvironmentId: null,
+          sshDestination:
+            "environmentId" in value
+              ? destination
+              : { connectionId: "unavailable", environmentId: source.environmentId },
+        });
+    } finally {
+      await useComposerDraftStore.persist.clearStorage();
+      vi.useRealTimers();
+    }
+  });
+  it("updates only the SSH destination when choosing another host", () => {
+    seed();
+    store().setDraftThreadContext(id, {
+      sshDestination: { ...destination, connectionId: "other" },
+    });
+    expect(store().getDraftSession(id)?.sshDestination?.connectionId).toBe("other");
+  });
+  it.each([
+    { envMode: "local" as const },
+    { envMode: "worktree" as const },
+    { branch: "main" },
+    { worktreePath: "/wt" },
+    { startFromOrigin: true },
+    { projectRef: scopeProjectRef(EnvironmentId.make("other-source"), ProjectId.make("other")) },
+  ])("clears SSH on workspace or source project changes %j", (options) => {
+    seed();
+    store().setDraftThreadContext(id, options);
+    expect(store().getDraftSession(id)?.sshDestination).toBeNull();
+  });
+  it("preserves SSH during runtime and model changes", () => {
+    seed();
+    store().setDraftThreadContext(id, { runtimeMode: "full-access", interactionMode: "plan" });
+    store().setModelSelection(id, modelSelection(CODEX_DRIVER, "gpt-5.6-terra"));
+    expect(store().getDraftSession(id)?.sshDestination).toEqual(destination);
+  });
+});

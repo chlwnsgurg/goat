@@ -387,3 +387,53 @@ it("retains concurrent fresh-creation winner context", async () => {
   expect(await pending).toEqual({ draftId, threadId });
   expect(store().getDraftSession(draftId)).toEqual(before);
 });
+
+describe("new-thread SSH reset", () => {
+  const destination = {
+    connectionId: "saved-host",
+    environmentId: EnvironmentId.make("destination"),
+  };
+  function chooseSsh() {
+    store().setDraftThreadContext(draftId, {
+      envMode: "worktree",
+      branch: null,
+      worktreePath: null,
+      startFromOrigin: false,
+      sshDestination: destination,
+    });
+  }
+  it.each(["local", "worktree"] as const)("resets a reused empty SSH draft to %s", async (mode) => {
+    seed(true);
+    chooseSsh();
+    testState.settings.defaultThreadEnvMode = mode;
+    await useNewThreadHandler()(projectRef);
+    expect(store().getDraftSession(draftId)).toMatchObject({ envMode: mode, sshDestination: null });
+  });
+  it("keeps an invested SSH draft when minting a fresh draft", async () => {
+    seed(true);
+    chooseSsh();
+    invest("text");
+    const result = await useNewThreadHandler()(projectRef);
+    expect(result?.draftId).not.toBe(draftId);
+    expect(store().getDraftSession(draftId)?.sshDestination).toEqual(destination);
+    expect(store().getDraftSession(result!.draftId)?.sshDestination).toBeNull();
+  });
+  it("does not clear the concurrently registered winner's SSH destination", async () => {
+    testState.settings.defaultThreadEnvMode = null;
+    const pending = useNewThreadHandler()(projectRef);
+    seed();
+    chooseSsh();
+    testState.completeProjectFileRead(null);
+    await pending;
+    expect(store().getDraftSession(draftId)?.sshDestination).toEqual(destination);
+  });
+  it("keeps a host pick during a pending defaults read", async () => {
+    seed(true);
+    testState.settings.defaultThreadEnvMode = null;
+    const pending = useNewThreadHandler()(projectRef);
+    chooseSsh();
+    testState.completeProjectFileRead(null);
+    expect(await pending).toBeNull();
+    expect(store().getDraftSession(draftId)?.sshDestination).toEqual(destination);
+  });
+});

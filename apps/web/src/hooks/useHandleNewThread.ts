@@ -10,6 +10,8 @@ import { useCallback, useMemo } from "react";
 import {
   composerDraftHasUserContent,
   markPromotedDraftThreadByRef,
+  draftSshDestinationsEqual,
+  type DraftSshDestination,
   type DraftId,
   type DraftThreadEnvMode,
   type DraftThreadState,
@@ -39,6 +41,7 @@ interface NewThreadWorkspaceOptions {
   branch?: string | null;
   worktreePath?: string | null;
   envMode?: DraftThreadEnvMode;
+  sshDestination?: DraftSshDestination | null;
   startFromOrigin?: boolean;
 }
 
@@ -50,6 +53,7 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
     ...(options?.branch !== undefined ? { branch: options.branch } : {}),
     ...(options?.worktreePath !== undefined ? { worktreePath: options.worktreePath } : {}),
     ...(options?.envMode !== undefined ? { envMode: options.envMode } : {}),
+    ...(options?.sshDestination !== undefined ? { sshDestination: options.sshDestination } : {}),
     ...(options?.startFromOrigin !== undefined ? { startFromOrigin: options.startFromOrigin } : {}),
   };
 }
@@ -70,6 +74,7 @@ function workspaceSelectionChanged(
     current.envMode !== initial.envMode ||
     current.worktreePath !== initial.worktreePath ||
     current.startFromOrigin !== initial.startFromOrigin ||
+    !draftSshDestinationsEqual(current.sshDestination, initial.sshDestination) ||
     branchReplaced
   );
 }
@@ -90,6 +95,7 @@ export function useNewThreadHandler() {
         branch?: string | null;
         worktreePath?: string | null;
         envMode?: DraftThreadEnvMode;
+        sshDestination?: DraftSshDestination | null;
         startFromOrigin?: boolean;
         replace?: boolean;
       },
@@ -186,7 +192,8 @@ export function useNewThreadHandler() {
           options?.branch !== undefined ||
           options?.worktreePath !== undefined ||
           options?.envMode !== undefined ||
-          options?.startFromOrigin !== undefined
+          options?.startFromOrigin !== undefined ||
+          options?.sshDestination !== undefined
         )
           return pickExplicitWorkspaceOptions(options);
         const defaultEnvMode = await resolveDefaultEnvMode();
@@ -194,6 +201,7 @@ export function useNewThreadHandler() {
           branch: null,
           worktreePath: null,
           envMode: defaultEnvMode,
+          sshDestination: null,
           startFromOrigin: resolveNewDraftStartFromOrigin({
             envMode: defaultEnvMode,
             newWorktreesStartFromOrigin: projectSettings.settings.newWorktreesStartFromOrigin,
@@ -442,6 +450,7 @@ export function useNewThreadHandler() {
           branch: options?.branch ?? null,
           worktreePath: options?.worktreePath ?? null,
           envMode: initialEnvMode,
+          sshDestination: options?.sshDestination ?? null,
           startFromOrigin:
             options?.startFromOrigin ??
             resolveNewDraftStartFromOrigin({

@@ -88,7 +88,7 @@ const isSnapShotSource = Schema.is(SnapShotSource);
 const isPreviewAnnotationPayload = Schema.is(PreviewAnnotationPayloadSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 9;
+const COMPOSER_DRAFT_STORAGE_VERSION = 10;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -316,6 +316,13 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
 
+export const DraftSshDestinationSchema = Schema.Struct({
+  connectionId: Schema.String.check(Schema.isMinLength(1)),
+  environmentId: EnvironmentId,
+});
+export type DraftSshDestination = typeof DraftSshDestinationSchema.Type;
+const isDraftSshDestination = Schema.is(DraftSshDestinationSchema);
+
 const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
   environmentId: Schema.String,
@@ -329,6 +336,7 @@ const PersistedDraftThreadState = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   envMode: DraftThreadEnvModeSchema,
+  sshDestination: Schema.optionalKey(Schema.NullOr(DraftSshDestinationSchema)),
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
@@ -461,6 +469,7 @@ export interface DraftSessionState {
   branch: string | null;
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
+  sshDestination?: DraftSshDestination | null;
   startFromOrigin: boolean;
   promotedTo?: ScopedThreadRef | null;
 }
@@ -539,6 +548,7 @@ interface ComposerDraftStoreState {
       worktreePath?: string | null;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
+      sshDestination?: DraftSshDestination | null;
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
@@ -556,6 +566,7 @@ interface ComposerDraftStoreState {
       worktreePath?: string | null;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
+      sshDestination?: DraftSshDestination | null;
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
@@ -572,6 +583,7 @@ interface ComposerDraftStoreState {
       projectRef?: ScopedProjectRef;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
+      sshDestination?: DraftSshDestination | null;
       startFromOrigin?: boolean;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
@@ -1581,6 +1593,34 @@ function toProjectDraftSession(
   };
 }
 
+function resolveDraftSshDestination(input: {
+  previous: DraftSshDestination | null | undefined;
+  requested: DraftSshDestination | null | undefined;
+  projectChanged: boolean;
+  workspaceEdited: boolean;
+  envMode: DraftThreadEnvMode;
+  worktreePath: string | null;
+  startFromOrigin: boolean;
+}): DraftSshDestination | null {
+  const candidate =
+    input.requested !== undefined
+      ? input.requested
+      : input.projectChanged || input.workspaceEdited
+        ? null
+        : (input.previous ?? null);
+  return input.envMode === "worktree" && input.worktreePath === null && !input.startFromOrigin
+    ? candidate
+    : null;
+}
+export function draftSshDestinationsEqual(
+  left: DraftSshDestination | null | undefined,
+  right: DraftSshDestination | null | undefined,
+): boolean {
+  return left == null || right == null
+    ? left == null && right == null
+    : left.connectionId === right.connectionId && left.environmentId === right.environmentId;
+}
+
 function createDraftThreadState(
   projectRef: ScopedProjectRef,
   threadId: ThreadId,
@@ -1592,6 +1632,7 @@ function createDraftThreadState(
     worktreePath?: string | null;
     createdAt?: string;
     envMode?: DraftThreadEnvMode;
+    sshDestination?: DraftSshDestination | null;
     startFromOrigin?: boolean;
     runtimeMode?: RuntimeMode;
     interactionMode?: ProviderInteractionMode;
@@ -1625,6 +1666,21 @@ function createDraftThreadState(
       : options.startFromOrigin;
   const environmentSelection =
     options?.environmentSelection ?? existingThread?.environmentSelection;
+  const nextEnvMode =
+    options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local"));
+  const sshDestination = resolveDraftSshDestination({
+    previous: existingThread?.sshDestination,
+    requested: options?.sshDestination,
+    projectChanged,
+    workspaceEdited:
+      options?.envMode !== undefined ||
+      options?.branch !== undefined ||
+      options?.worktreePath !== undefined ||
+      options?.startFromOrigin !== undefined,
+    envMode: nextEnvMode,
+    worktreePath: nextWorktreePath,
+    startFromOrigin: nextStartFromOrigin,
+  });
   return {
     threadId,
     environmentId: projectRef.environmentId,
@@ -1646,8 +1702,11 @@ function createDraftThreadState(
       options?.interactionMode ?? existingThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
     branch: nextBranch,
     worktreePath: nextWorktreePath,
-    envMode:
-      options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
+    envMode: nextEnvMode,
+    sshDestination,
+    ...(sshDestination
+      ? { environmentSelection: "manual" as const, loadBalancedEnvironmentId: null }
+      : {}),
     startFromOrigin: nextStartFromOrigin,
     promotedTo: null,
   };
@@ -1682,6 +1741,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
+    draftSshDestinationsEqual(left.sshDestination, right.sshDestination) &&
     left.startFromOrigin === right.startFromOrigin &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
@@ -1804,6 +1864,13 @@ function normalizePersistedDraftThreads(
         continue;
       }
       const normalizedEnvironmentId = environmentId as EnvironmentId;
+      const rawSshDestination = candidateDraftThread.sshDestination;
+      const normalizedSshDestination =
+        rawSshDestination == null
+          ? null
+          : isDraftSshDestination(rawSshDestination)
+            ? rawSshDestination
+            : { connectionId: "unavailable", environmentId: normalizedEnvironmentId };
       draftThreadsByThreadKey[threadKey] = {
         threadId,
         environmentId: normalizedEnvironmentId,
@@ -1841,6 +1908,16 @@ function normalizePersistedDraftThreads(
           : candidateDraftThread.loadBalancedEnvironmentId === null
             ? { loadBalancedEnvironmentId: null }
             : {}),
+        sshDestination: normalizedSshDestination,
+        ...(normalizedSshDestination
+          ? {
+              envMode: "worktree" as const,
+              worktreePath: null,
+              startFromOrigin: false,
+              environmentSelection: "manual" as const,
+              loadBalancedEnvironmentId: null,
+            }
+          : {}),
         promotedTo,
       };
     }
@@ -1892,6 +1969,7 @@ function normalizePersistedDraftThreads(
           branch: null,
           worktreePath: null,
           envMode: "local",
+          sshDestination: null,
           startFromOrigin: false,
           promotedTo: null,
         };
@@ -2304,7 +2382,10 @@ export function partializeComposerDraftStoreState(
     if (!keptSessionKeys.has(threadKey)) {
       continue;
     }
-    persistedDraftThreadsByThreadKey[threadKey] = draftThread;
+    persistedDraftThreadsByThreadKey[threadKey] = {
+      ...draftThread,
+      sshDestination: draftThread.sshDestination ?? null,
+    };
   }
   return {
     draftsByThreadKey: persistedDraftsByThreadKey,
@@ -2593,6 +2674,7 @@ function toHydratedDraftThreadState(
     branch: persistedDraftThread.branch,
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,
+    sshDestination: persistedDraftThread.sshDestination ?? null,
     startFromOrigin: persistedDraftThread.startFromOrigin,
     ...(persistedDraftThread.environmentSelection
       ? { environmentSelection: persistedDraftThread.environmentSelection }
@@ -2876,6 +2958,21 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               (options.branch != null || options.worktreePath != null
                 ? "manual"
                 : existing.environmentSelection);
+            const nextEnvMode =
+              options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local"));
+            const sshDestination = resolveDraftSshDestination({
+              previous: existing.sshDestination,
+              requested: options.sshDestination,
+              projectChanged,
+              workspaceEdited:
+                options.envMode !== undefined ||
+                options.branch !== undefined ||
+                options.worktreePath !== undefined ||
+                options.startFromOrigin !== undefined,
+              envMode: nextEnvMode,
+              worktreePath: nextWorktreePath,
+              startFromOrigin: nextStartFromOrigin,
+            });
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,
@@ -2896,8 +2993,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               interactionMode: options.interactionMode ?? existing.interactionMode,
               branch: nextBranch,
               worktreePath: nextWorktreePath,
-              envMode:
-                options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
+              envMode: nextEnvMode,
+              sshDestination,
+              ...(sshDestination
+                ? { environmentSelection: "manual" as const, loadBalancedEnvironmentId: null }
+                : {}),
               startFromOrigin: nextStartFromOrigin,
               promotedTo: existing.promotedTo ?? null,
             };
@@ -2913,6 +3013,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.branch === existing.branch &&
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
+              draftSshDestinationsEqual(nextDraftThread.sshDestination, existing.sshDestination) &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
