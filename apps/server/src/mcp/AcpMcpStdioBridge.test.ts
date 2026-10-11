@@ -7,7 +7,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { AcpMcpBridgeError, callAcpMcpTool, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
+import {
+  AcpMcpBridgeError,
+  callAcpMcpTool,
+  listAcpMcpTools,
+  runAcpMcpStdioBridge,
+} from "./AcpMcpStdioBridge.ts";
 
 function makeHarness(responder: (request: Request) => Promise<Response> | Response) {
   const input = new NodeStream.PassThrough();
@@ -45,6 +50,46 @@ describe("AcpMcpStdioBridge", () => {
 
       expect(failure).toBeInstanceOf(AcpMcpBridgeError);
       expect(failure.cause).toBe(source);
+    }),
+  );
+
+  it.effect("skips malformed entries in a remote tool listing", () =>
+    Effect.gen(function* () {
+      const tools = yield* listAcpMcpTools({
+        endpoint: "http://127.0.0.1:1/mcp",
+        authorization: "Bearer bridge-test",
+        fetchImplementation: async (_url, init) => {
+          const request = JSON.parse(String(init?.body ?? "{}")) as {
+            readonly id?: unknown;
+            readonly method?: unknown;
+          };
+          if (request.method === "notifications/initialized") {
+            return new Response(null, { status: 202 });
+          }
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              result:
+                request.method === "initialize"
+                  ? { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: {} }
+                  : {
+                      tools: [
+                        null,
+                        "goat_thread_launch",
+                        {
+                          name: "goat_thread_launch",
+                          inputSchema: { properties: { launchedBy: {} } },
+                        },
+                      ],
+                    },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+
+      expect(tools).toEqual([{ name: "goat_thread_launch", argumentNames: ["launchedBy"] }]);
     }),
   );
 
