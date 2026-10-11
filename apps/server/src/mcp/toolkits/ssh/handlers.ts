@@ -71,6 +71,7 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
             runtimeMode,
             callerRuntimeMode: caller.limits.runtimeMode,
             interactionMode: input.interactionMode,
+            allowBroadWorkspaceRoot: input.allowBroadWorkspaceRoot,
           },
           check.pipe(Effect.asVoid),
         )

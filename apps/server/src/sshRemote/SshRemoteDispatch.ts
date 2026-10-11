@@ -109,6 +109,8 @@ export interface SshLaunchInput {
    */
   readonly callerRuntimeMode: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode | undefined;
+  /** Accept a folder that broadWorkspaceRoot rejects; only when the user asked for it. */
+  readonly allowBroadWorkspaceRoot?: boolean | undefined;
 }
 
 export interface SshLaunchResult {
@@ -219,6 +221,39 @@ const normalizeRemotePath = (value: string) =>
 interface RemoteProject {
   readonly id: string;
   readonly workspaceRoot: string;
+}
+
+/**
+ * Why a remote folder is too broad to be a thread's workspace, or null. The
+ * filesystem root, the home directory, a folder above home, and other top-level
+ * folders would give an agent a whole account or machine, and the folder
+ * becomes a project on the remote. Case is folded, which can only over-reject.
+ */
+export function broadWorkspaceRoot(
+  folder: Pick<SshBrowseResult, "path" | "realPath" | "home">,
+): string | null {
+  // A Windows drive letter is part of the root, not a folder below it.
+  const segments = (value: string) =>
+    value
+      .split(/[\\/]+/)
+      .filter((part) => part.length > 0 && !/^[A-Za-z]:$/.test(part))
+      .map((part) => part.toLowerCase());
+  const home = folder.home === null ? [] : segments(folder.home);
+  for (const candidate of [folder.path, folder.realPath]) {
+    const parts = segments(candidate);
+    if (parts.length === 0) return "the filesystem root";
+    if (
+      home.length > 0 &&
+      parts.length <= home.length &&
+      parts.every((part, i) => part === home[i])
+    ) {
+      return parts.length === home.length
+        ? "the home directory"
+        : "a folder that contains the home directory";
+    }
+    if (parts.length === 1) return "a top-level folder";
+  }
+  return null;
 }
 
 /** Finds the project registered at the browsed folder, by either form of its path. */
@@ -512,6 +547,13 @@ const make = Effect.gen(function* () {
   ) {
     const target = yield* resolveHost(input.host);
     const folder = yield* browseTarget(target, { path: input.cwd, limit: 0 });
+    const broad = input.allowBroadWorkspaceRoot === true ? null : broadWorkspaceRoot(folder);
+    if (broad !== null) {
+      return yield* failure(
+        "invalid_request",
+        `${folder.path} on ${target.alias} is ${broad}. A thread there gets everything below it as its workspace, and the folder becomes a project on ${target.alias}. Pick a project folder inside it with goat_ssh_browse, or pass allowBroadWorkspaceRoot:true only if the user explicitly asked to use this folder.`,
+      );
+    }
     // Re-check the caller before each remote change: SSH steps take seconds,
     // during which the caller's run can end or its modes can drop.
     yield* beforeLaunch;

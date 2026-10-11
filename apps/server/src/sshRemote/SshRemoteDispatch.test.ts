@@ -15,6 +15,7 @@ import * as ServerConfig from "../config.ts";
 import { hostFailure } from "../mcp/HostThreadsMcpService.ts";
 import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
 import {
+  broadWorkspaceRoot,
   matchRemoteProject,
   readRemoteToolResult,
   resolveSshCliRunner,
@@ -153,6 +154,40 @@ describe("SSH dispatch tool compatibility", () => {
       }
     }),
   );
+});
+
+describe("broadWorkspaceRoot", () => {
+  const folder = (path: string, home: string | null = "/Users/jun", realPath = path) => ({
+    path,
+    realPath,
+    home,
+  });
+
+  it("refuses the root, home, folders above home, and other top-level folders", () => {
+    expect(broadWorkspaceRoot(folder("/"))).toBe("the filesystem root");
+    expect(broadWorkspaceRoot(folder("/Users/jun/"))).toBe("the home directory");
+    expect(broadWorkspaceRoot(folder("/users/JUN"))).toBe("the home directory");
+    expect(broadWorkspaceRoot(folder("/Users"))).toBe("a folder that contains the home directory");
+    expect(broadWorkspaceRoot(folder("/tmp"))).toBe("a top-level folder");
+    expect(broadWorkspaceRoot(folder("/srv", null))).toBe("a top-level folder");
+    expect(broadWorkspaceRoot(folder("C:\\", "C:\\Users\\jun"))).toBe("the filesystem root");
+    expect(broadWorkspaceRoot(folder("C:\\Users\\jun", "C:\\Users\\jun"))).toBe(
+      "the home directory",
+    );
+  });
+
+  it("refuses a link whose physical path is the home directory", () => {
+    expect(broadWorkspaceRoot(folder("/work/me", "/home/me", "/home/me"))).toBe(
+      "the home directory",
+    );
+  });
+
+  it("accepts a project folder below home or elsewhere", () => {
+    expect(broadWorkspaceRoot(folder("/Users/jun/Developer/goat"))).toBeNull();
+    expect(broadWorkspaceRoot(folder("/Users/jun/scratch"))).toBeNull();
+    expect(broadWorkspaceRoot(folder("/srv/app", null))).toBeNull();
+    expect(broadWorkspaceRoot(folder("/home/agent/repo", "/home/agent"))).toBeNull();
+  });
 });
 
 describe("matchRemoteProject", () => {
