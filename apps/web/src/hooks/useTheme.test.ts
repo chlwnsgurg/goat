@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 function createStorage(overrides: Partial<Storage> = {}): Storage {
   const store = new Map<string, string>();
@@ -18,6 +18,13 @@ function createStorage(overrides: Partial<Storage> = {}): Storage {
     ...overrides,
   };
 }
+
+// A cold import of the theme graph can use most of the 15 s test timeout on a
+// loaded CI runner. Transform it once here; every test still imports fresh.
+beforeAll(async () => {
+  await import("./useTheme").catch(() => undefined);
+  vi.resetModules();
+}, 60_000);
 
 afterEach(() => {
   vi.doUnmock("react");

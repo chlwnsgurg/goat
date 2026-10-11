@@ -3,27 +3,110 @@
 > 기준: fork point `de49d637d` 이후 GOAT dev `f4b6c14e5`의 44커밋 (devlog 제외 378파일)
 
 upstream 머지에서 충돌이나 의미 회귀를 만드는 것은 아래 영역이다. 새 GOAT 기능이 upstream 파일을
-바꾸면 이 표에 영역을 추가하거나 기존 행을 고친다. 충돌이 이 표의 정책으로 풀리지 않으면 카드를
+바꾸면 영역을 추가하거나 기존 영역을 고친다. 충돌이 여기 적힌 정책으로 풀리지 않으면 카드를
 만든다.
 
 ## 영역
 
-| ID  | 영역                            | 대표 커밋                                                   | 주로 바뀐 경로                                                                                                                        | 충돌 정책                                                                                                                                                                                                                                                                               |
-| --- | ------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G1  | 브랜드                          | `cc1ba0550` `8f36aefa3`                                     | `apps/{web,mobile}`, `apps/desktop/src/{app,window}`, `apps/desktop/resources/dmg`, `assets`, `scripts/export-*-icons.ts`             | 보이는 이름, 마크, 아이콘은 GOAT 유지. 같은 컴포넌트의 upstream 로직 변경은 받는다.                                                                                                                                                                                                     |
-| G2  | 글로벌 에이전트                 | `f391710d2` `0dc31be25` `83d1ebbd0` `6bebb0699`             | `apps/web/src/globalAgent*.ts`, `Sidebar.tsx`, `ChatView.tsx`, 헤더와 메뉴 컴포넌트                                                   | `globalAgent*` 파일은 GOAT 전용이다. 공유 컴포넌트는 upstream을 받고 글로벌 에이전트 분기를 다시 얹는다.                                                                                                                                                                                |
-| G3  | MCP 이름 `goat_*`               | `e893682a4` `7a7a16584` `4dee8b21c`                         | `apps/server/src/mcp/toolkits/*/tools.ts`, `orchestration-v2`, `packages/provider-*/src/server`, `t3McpToolPresentation.ts`           | upstream 로직을 받고 도구 이름은 `goat_*`, 서버 이름은 GOAT로 다시 쓴다. 새 `t3_*` 도구는 이름을 바꾸고 표시용 legacy alias를 둔다.                                                                                                                                                     |
-| G4  | CLI `goat`와 `~/.goat`          | `ddb93f2b5` `d85eb9aff`                                     | `apps/server/src/cli`, `apps/server/src/cloud`, `apps/desktop/src/wsl`, `scripts/install.sh`                                          | upstream 로직을 받고 실행 파일 `goat`, `runtime/goat/versions`, SSH 호스트 `~/.goat`를 유지한다.                                                                                                                                                                                        |
-| G5  | 데스크톱 정체성                 | `b79ff462c`                                                 | `apps/desktop/src/app`, `scripts/build-desktop-artifact.ts`, `.github/workflows/release-desktop.yml`                                  | 앱 id, userData, 업데이트 피드는 GOAT 유지. release workflow의 upstream 변경은 손으로 옮긴다.                                                                                                                                                                                           |
-| G6  | SSH 런타임 공급과 원격 디스패치 | `aa2eaf2ff` `480ed90da` `b32fe81d1` `b6a829960` `716f27dac` | `packages/ssh/src/tunnel.ts`, `apps/server/src/sshRemote`, `apps/server/src/mcp/toolkits/ssh`, `apps/desktop/src/ssh`                 | GOAT가 `tunnel.ts`를 크게 다시 썼다. upstream ssh 변경은 의도를 GOAT 코드에 손으로 옮긴다. 충돌 위험이 가장 높다.                                                                                                                                                                       |
-| G7  | 서버 activity와 마이그레이션 61 | `c96310a1a` `d18f83e4e`                                     | `apps/server/src/persistence/Migrations*`, `ProjectionStore.ts`, `apps/server/src/http.ts`, `packages/contracts/src/environment*`     | 아래 마이그레이션 규칙.                                                                                                                                                                                                                                                                 |
-| G8  | CI                              | `bfce4301d` `cc5003979` `095115376`                         | `.github/workflows/goat-ci.yml`, `.vite-hooks/`, `packages/ssh/src/tunnel.*.test.ts`                                                  | GOAT CI는 EPYC의 goat-ci 하나이고 upstream workflow는 goat-si/goat에서 모두 비활성이다. `tunnel.test.ts`는 여러 파일로 나뉘었다.                                                                                                                                                        |
-| G9  | 컴포저 푸터                     | `bb13f89b5` `a122f433a` `f4b6c14e5`                         | `apps/web/src/components/chat`, `apps/web/src/index.css`                                                                              | 레이아웃은 GOAT, 컴포저 동작은 upstream.                                                                                                                                                                                                                                                |
-| G10 | 링크로 시작한 스레드 최대화     | `ef4748eb7`                                                 | `apps/web/src/components`                                                                                                             | upstream 우선, GOAT 동작만 다시 얹는다.                                                                                                                                                                                                                                                 |
-| G11 | devlog                          | `24d4ee846` `37073207d`                                     | `devlog/`                                                                                                                             | GOAT 전용, 충돌 없음.                                                                                                                                                                                                                                                                   |
-| G12 | T3 불러오기 제거                | `59d7fe1a6`                                                 | `ProjectScriptsControl.tsx`, `settings/ProjectActionsSettings.tsx`, `chat/ThreadDetailsPanel.tsx`, `hooks/useT3ProjectFileScripts.ts` | t3.json 액션 가져오기 메뉴("Import scripts", "From t3.json")는 다시 들이지 않는다. 같은 파일의 다른 upstream 변경은 받는다. upstream이 `ThreadDetailsPanel.test.tsx`를 고치면 삭제를 유지한다. t3.json 기본값, iconPath, 깨진 파일 경고, V1→V2 스레드 마이그레이션은 upstream 그대로다. |
-| G13 | 보이는 문구 GOAT                | `e0596e725`                                                 | UI·토스트·CLI 도움말 문자열 전반, `packages/provider-*/src/server`, `provider-core` 안내문, MCP 도구 설명, `docs/user`, `README.md`   | upstream 문구 변경을 받고 앱을 가리키는 "T3 Code"/"T3"만 GOAT로 다시 쓴다. 주석과 아래 이름 규칙의 "그대로" 항목은 바꾸지 않는다.                                                                                                                                                       |
-| G14 | 띄운 스레드 완료 알림           | `840e58797`                                                 | `apps/server/src/mcp/LaunchWatchService.ts`, `launchWatch.ts`, `HostThreadsMcpService.ts`, `toolkits/{project,ssh,orchestrator}`      | GOAT 전용 상태 파일, 마이그레이션 없음. upstream을 받고 launch 등록, send re-arm, watch 도구를 다시 얹는다.                                                                                                                                                                             |
+영역 ID는 짧은 kebab-case 슬러그다. 번호가 아니므로 병렬 브랜치가 같은 ID를 고를 일이 없고, 머지
+때 다시 매길 것도 없다. 새 영역을 더하는 규칙은 이렇다.
+
+- 블록은 ID의 알파벳 순서 자리에 끼워 넣는다. 끝에 덧붙이면 병렬 브랜치가 모두 같은 줄을 고쳐
+  머지 충돌이 난다. 표 대신 블록을 쓰는 이유도 같다. 표는 한 행이 길어지면 포매터가 모든 행을 다시
+  정렬한다.
+- 브랜치에서 커밋은 PR 번호(`#17`)로 적는다. 브랜치 해시는 rebase 뒤 dev에서 찾을 수 없다. dev에
+  들어온 해시는 그대로 적어도 된다.
+- 같은 ID가 이미 있으면 다른 슬러그를 고른다. 한 영역이 넓어졌으면 새 블록 대신 기존 블록의 경로와
+  정책을 고친다.
+
+2026-10-12 이전 커밋 메시지의 G 번호는 이렇게 읽는다: G1 `brand`, G2 `global-agent`,
+G3 `mcp-names`, G4 `cli-home`, G5 `desktop-identity`, G6 `ssh-runtime`, G7 `server-activity`,
+G8 `ci`, G9 `composer-footer`, G10 `link-thread-maximize`, G11 `devlog`, G12 `no-t3-import`,
+G13 `goat-copy`, G14 `launch-watch`.
+
+### `brand` 브랜드
+
+- 커밋: `cc1ba0550` `8f36aefa3`
+- 경로: `apps/{web,mobile}`, `apps/desktop/src/{app,window}`, `apps/desktop/resources/dmg`, `assets`, `scripts/export-*-icons.ts`
+- 정책: 보이는 이름, 마크, 아이콘은 GOAT 유지. 같은 컴포넌트의 upstream 로직 변경은 받는다.
+
+### `ci` CI
+
+- 커밋: `bfce4301d` `cc5003979` `095115376`
+- 경로: `.github/workflows/goat-ci.yml`, `.vite-hooks/`, `packages/ssh/src/tunnel.*.test.ts`
+- 정책: GOAT CI는 EPYC의 goat-ci 하나이고 upstream workflow는 goat-si/goat에서 모두 비활성이다. `tunnel.test.ts`는 여러 파일로 나뉘었다.
+
+### `cli-home` CLI `goat`와 `~/.goat`
+
+- 커밋: `ddb93f2b5` `d85eb9aff`
+- 경로: `apps/server/src/cli`, `apps/server/src/cloud`, `apps/desktop/src/wsl`, `scripts/install.sh`
+- 정책: upstream 로직을 받고 실행 파일 `goat`, `runtime/goat/versions`, SSH 호스트 `~/.goat`를 유지한다.
+
+### `composer-footer` 컴포저 푸터
+
+- 커밋: `bb13f89b5` `a122f433a` `f4b6c14e5`
+- 경로: `apps/web/src/components/chat`, `apps/web/src/index.css`
+- 정책: 레이아웃은 GOAT, 컴포저 동작은 upstream.
+
+### `desktop-identity` 데스크톱 정체성
+
+- 커밋: `b79ff462c`
+- 경로: `apps/desktop/src/app`, `scripts/build-desktop-artifact.ts`, `.github/workflows/release-desktop.yml`
+- 정책: 앱 id, userData, 업데이트 피드는 GOAT 유지. release workflow의 upstream 변경은 손으로 옮긴다.
+
+### `devlog` devlog
+
+- 커밋: `24d4ee846` `37073207d`
+- 경로: `devlog/`
+- 정책: GOAT 전용, 충돌 없음.
+
+### `global-agent` 글로벌 에이전트
+
+- 커밋: `f391710d2` `0dc31be25` `83d1ebbd0` `6bebb0699`
+- 경로: `apps/web/src/globalAgent*.ts`, `Sidebar.tsx`, `ChatView.tsx`, 헤더와 메뉴 컴포넌트
+- 정책: `globalAgent*` 파일은 GOAT 전용이다. 공유 컴포넌트는 upstream을 받고 글로벌 에이전트 분기를 다시 얹는다.
+
+### `goat-copy` 보이는 문구 GOAT
+
+- 커밋: `e0596e725`
+- 경로: UI·토스트·CLI 도움말 문자열 전반, `packages/provider-*/src/server`, `provider-core` 안내문, MCP 도구 설명, `docs/user`, `README.md`
+- 정책: upstream 문구 변경을 받고 앱을 가리키는 "T3 Code"/"T3"만 GOAT로 다시 쓴다. 주석과 아래 이름 규칙의 "그대로" 항목은 바꾸지 않는다.
+
+### `launch-watch` 띄운 스레드 완료 알림
+
+- 커밋: `840e58797`
+- 경로: `apps/server/src/mcp/LaunchWatchService.ts`, `launchWatch.ts`, `HostThreadsMcpService.ts`, `toolkits/{project,ssh,orchestrator}`
+- 정책: GOAT 전용 상태 파일, 마이그레이션 없음. upstream을 받고 launch 등록, send re-arm, watch 도구를 다시 얹는다.
+
+### `link-thread-maximize` 링크로 시작한 스레드 최대화
+
+- 커밋: `ef4748eb7`
+- 경로: `apps/web/src/components`
+- 정책: upstream 우선, GOAT 동작만 다시 얹는다.
+
+### `mcp-names` MCP 이름 `goat_*`
+
+- 커밋: `e893682a4` `7a7a16584` `4dee8b21c`
+- 경로: `apps/server/src/mcp/toolkits/*/tools.ts`, `orchestration-v2`, `packages/provider-*/src/server`, `t3McpToolPresentation.ts`
+- 정책: upstream 로직을 받고 도구 이름은 `goat_*`, 서버 이름은 GOAT로 다시 쓴다. 새 `t3_*` 도구는 이름을 바꾸고 표시용 legacy alias를 둔다.
+
+### `no-t3-import` T3 불러오기 제거
+
+- 커밋: `59d7fe1a6`
+- 경로: `ProjectScriptsControl.tsx`, `settings/ProjectActionsSettings.tsx`, `chat/ThreadDetailsPanel.tsx`, `hooks/useT3ProjectFileScripts.ts`
+- 정책: t3.json 액션 가져오기 메뉴("Import scripts", "From t3.json")는 다시 들이지 않는다. 같은 파일의 다른 upstream 변경은 받는다. upstream이 `ThreadDetailsPanel.test.tsx`를 고치면 삭제를 유지한다. t3.json 기본값, iconPath, 깨진 파일 경고, V1→V2 스레드 마이그레이션은 upstream 그대로다.
+
+### `server-activity` 서버 activity와 마이그레이션 61
+
+- 커밋: `c96310a1a` `d18f83e4e`
+- 경로: `apps/server/src/persistence/Migrations*`, `ProjectionStore.ts`, `apps/server/src/http.ts`, `packages/contracts/src/environment*`
+- 정책: 아래 마이그레이션 규칙.
+
+### `ssh-runtime` SSH 런타임 공급과 원격 디스패치
+
+- 커밋: `aa2eaf2ff` `480ed90da` `b32fe81d1` `b6a829960` `716f27dac`
+- 경로: `packages/ssh/src/tunnel.ts`, `apps/server/src/sshRemote`, `apps/server/src/mcp/toolkits/ssh`, `apps/desktop/src/ssh`
+- 정책: GOAT가 `tunnel.ts`를 크게 다시 썼다. upstream ssh 변경은 의도를 GOAT 코드에 손으로 옮긴다. 충돌 위험이 가장 높다.
 
 ## 깨끗하게 머지되고도 깨지는 것
 
@@ -65,4 +148,4 @@ upstream이 다른 이름으로 쓰면, 이미 GOAT 마이그레이션을 기록
 | upstream 클라우드     | T3 Connect, T3 account | 그대로 (`app.t3.codes` 계정과 릴레이를 그대로 쓴다)                                                              |
 | 외부에 남는 식별 이름 | T3 Code                | 그대로 (Codex `clientInfo`, ChatGPT `agent_name_hint`, Cursor API 키·세션 이름, OpenCode 세션 제목, 커밋 작성자) |
 | 설치된 시스템 통합    | T3 Code                | 그대로 (GNOME 확장, KDE 항목, systemd 유닛, AppArmor 프로필, 원격 실행 스크립트 기준선)                          |
-| 모바일 앱 정체성      | T3 Code                | 그대로 (`apps/mobile/app.config.ts` 이름·번들 id·권한 문구, G5 같은 결정 전)                                     |
+| 모바일 앱 정체성      | T3 Code                | 그대로 (`apps/mobile/app.config.ts` 이름·번들 id·권한 문구, `desktop-identity` 같은 결정 전)                     |
