@@ -99,16 +99,16 @@ stop (no production change).
 
 ### D6 result (measured at wp2 P, tree 8ab853b20, files run one at a time with the sleep logger)
 
-| File | wall alone | `sleep 0.1` calls | budget | share |
-|---|---:|---:|---:|---:|
-| tunnel.protocol-stop.test.ts | 81 s | 4 | 0.4 s | 0.5% |
-| tunnel.protocol-acquisition.test.ts | 75 s | 1 | 0.1 s | 0.1% |
-| tunnel.protocol-manager.test.ts | 67 s | 3 | 0.3 s | 0.4% |
+| File                                | wall alone | `sleep 0.1` calls | budget | share |
+| ----------------------------------- | ---------: | ----------------: | -----: | ----: |
+| tunnel.protocol-stop.test.ts        |       81 s |                 4 |  0.4 s |  0.5% |
+| tunnel.protocol-acquisition.test.ts |       75 s |                 1 |  0.1 s |  0.1% |
+| tunnel.protocol-manager.test.ts     |       67 s |                 3 |  0.3 s |  0.4% |
 
 All three passed (exit 0). Decision: below the 10% trigger, so no production change and no P
 amendment; wp2 implements sections 1 and 2 only. Unmeasured: the shim=true stop cases (remote PATH
 /usr/bin:/bin), 15.078 s of 79.432 s (18.98%) of the stop file (A fold 2, from d6-protocol-stop.json).
-Raw logs: /tmp/goat-ci/d6-*.calls, reports /tmp/goat-ci/d6-*.json.
+Raw logs: /tmp/goat-ci/d6-_.calls, reports /tmp/goat-ci/d6-_.json.
 Side observation: alone these files take 67-81 s, in the 10-file parallel run 105-125 s, so on the
 12-core Mac the lanes contend for CPU; EPYC (192 threads) should show less inflation.
 
