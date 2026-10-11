@@ -164,6 +164,14 @@ import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
 import { useThreadSearch } from "../state/queries";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
+import { useAtomCommand } from "../state/use-atom-command";
+import {
+  DEFAULT_SIDEBAR_DELEGATED_CHILDREN_UI,
+  SidebarDelegatedChildren,
+  useSidebarDelegatedChildrenUiStore,
+} from "./sidebar/SidebarDelegatedChildren";
+import { useSidebarDelegatedChildIndex } from "./sidebar/delegatedChildIndex";
+import { usePromoteThread } from "./promoteThread";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import {
   buildThreadRouteParams,
@@ -176,6 +184,10 @@ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import {
+  SidebarEnvironmentConnectionDot,
+  SidebarEnvironmentConnectionStatus,
+} from "./sidebar/SidebarEnvironmentConnection";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
@@ -184,6 +196,10 @@ import {
 } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
+  canPromoteThread,
+  canStopSidebarDelegatedChild,
+  resolveSidebarDelegatedChildWindow,
+  type SidebarDelegatedChildren as SidebarDelegatedChildrenEntry,
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
   buildBulkTitleRegenerationContextMenuItem,
@@ -490,6 +506,7 @@ function SidebarThreadTooltip({
               className="size-3 shrink-0 stroke-muted-foreground"
             />
             <div className="min-w-0 truncate text-foreground/75">{environmentLabel}</div>
+            <SidebarEnvironmentConnectionStatus environmentId={thread.environmentId} />
           </div>
         ) : null}
         {thread.branch ? (
@@ -1112,6 +1129,16 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
+  delegatedChildren?: SidebarDelegatedChildrenEntry<EnvironmentThreadShell> | undefined;
+  delegatedChildrenShowFinished: boolean;
+  openThreadKey: string | null;
+  onOpenDelegatedChild: (threadRef: ScopedThreadRef) => void;
+  onStopDelegatedChild: (threadRef: ScopedThreadRef) => void;
+  onDelegatedChildContextMenu: (
+    threadRef: ScopedThreadRef,
+    position: { x: number; y: number },
+  ) => void;
+  stoppingDelegatedChildKey: string | null;
   variant: "card" | "slim";
   // Settled rows un-settle, snoozed rows wake, and cards settle.
   variantAction: SidebarSweepAction;
@@ -1213,6 +1240,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     [thread.environmentId, thread.id],
   );
   const threadKey = scopedThreadKey(threadRef);
+  const delegatedChildrenGroup = props.delegatedChildren ? (
+    <SidebarDelegatedChildren
+      parentKey={threadKey}
+      showFinished={props.delegatedChildrenShowFinished}
+      openThreadKey={props.openThreadKey}
+      onOpen={props.onOpenDelegatedChild}
+      onStop={props.onStopDelegatedChild}
+      onContextMenu={props.onDelegatedChildContextMenu}
+      stoppingThreadKey={props.stoppingDelegatedChildKey}
+    >
+      {props.delegatedChildren}
+    </SidebarDelegatedChildren>
+  ) : null;
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   useEffect(() => {
     if (!canOperateThread && isRenaming) onCancelRename();
@@ -1803,11 +1843,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         data-thread-item={threadKey}
         {...sortableRootProps}
         {...(fileDropHandlers ?? {})}
-        className={cn(
-          // Matches the h-9 row so unrendered rows never shift the list when they paint.
-          "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
-          sortable?.isDragging && "relative z-20",
-        )}
+        className={cn("list-none", sortable?.isDragging && "relative z-20")}
       >
         <Tooltip disabled={sortable?.isDragging}>
           <TooltipTrigger
@@ -1820,7 +1856,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-current={accessibility.current}
                 data-testid="sidebar-row-slim"
                 aria-busy={isRegeneratingTitle || undefined}
-                className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
+                className={cn(
+                  rowSurfaceClassName,
+                  "flex h-9 items-center gap-2.5 px-2.5 [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
+                )}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
@@ -1957,6 +1996,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           </TooltipTrigger>
           {detailsTooltip}
         </Tooltip>
+        {delegatedChildrenGroup}
       </li>
     );
   }
@@ -1968,11 +2008,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       data-thread-item={threadKey}
       {...sortableRootProps}
       {...(fileDropHandlers ?? {})}
-      className={cn(
-        // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
-        "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
-        sortable?.isDragging && "relative z-20",
-      )}
+      className={cn("list-none py-0.5", sortable?.isDragging && "relative z-20")}
     >
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
         <TooltipTrigger
@@ -1985,7 +2021,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               aria-current={accessibility.current}
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
-              className={rowSurfaceClassName}
+              className={cn(
+                rowSurfaceClassName,
+                "[content-visibility:auto] [contain-intrinsic-size:auto_78px]",
+              )}
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
@@ -2202,6 +2241,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 aria-hidden
                 className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
               >
+                {isRemote ? (
+                  <SidebarEnvironmentConnectionDot environmentId={thread.environmentId} />
+                ) : null}
                 {isRemote && !showsScratchMachine ? (
                   <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
                     <EnvironmentMachineIcon
@@ -2222,6 +2264,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         </TooltipTrigger>
         {detailsTooltip}
       </Tooltip>
+      {delegatedChildrenGroup}
     </li>
   );
 });
@@ -2394,6 +2437,14 @@ export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
+  const delegatedChildIndex = useSidebarDelegatedChildIndex();
+  const delegatedChildrenUi = useSidebarDelegatedChildrenUiStore((state) => state.parents);
+  const promoteDelegatedChild = usePromoteThread();
+  const interruptDelegatedTurn = useAtomCommand(threadEnvironment.interruptTurn, {
+    reportFailure: false,
+  });
+  const [stoppingDelegatedChildKey, setStoppingDelegatedChildKey] = useState<string | null>(null);
+  const stoppingDelegatedChildKeyRef = useRef<string | null>(null);
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -3919,10 +3970,31 @@ export default function Sidebar() {
       inboxReturns.returnedAt,
     ).map(key);
   }, [activeThreads, dragState, threadByKey, workingShelfEnabled]);
+  const nestedKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const item of sidebarListItems) {
+      if (item.kind !== "thread") continue;
+      const children = delegatedChildIndex.get(item.key);
+      if (!children) continue;
+      const ui = delegatedChildrenUi.get(item.key) ?? DEFAULT_SIDEBAR_DELEGATED_CHILDREN_UI;
+      const rows = resolveSidebarDelegatedChildWindow({
+        children,
+        runningExpanded: ui.running,
+        finishedExpanded: ui.finished,
+        finishedVisibleCount: ui.finishedVisible,
+        showFinished: item.section !== "settled" && item.section !== "snoozed",
+        openThreadKey: routeThreadKey,
+      });
+      if (rows.activeRows.length > 0 || rows.finishedCount > 0 || rows.pinnedOpenRow !== null)
+        keys.add(item.key);
+    }
+    return keys;
+  }, [delegatedChildIndex, delegatedChildrenUi, routeThreadKey, sidebarListItems]);
   const sidebarSortingStrategy = useMemo(
     () =>
       createSidebarSortingStrategy({
         items: sidebarListItems,
+        nestedKeys,
         enabled: !isContextDrag,
         boundaryLabelHeight: SIDEBAR_DRAG_LABEL_HEIGHT,
         settledOrder: draggedSettledOrder,
@@ -3936,6 +4008,7 @@ export default function Sidebar() {
       draggedActiveOrder,
       draggedSettledOrder,
       isContextDrag,
+      nestedKeys,
       routeThreadKey,
       settledShelfExpanded,
       settledVisibleCount,
@@ -4581,6 +4654,135 @@ export default function Sidebar() {
     [copyBranchToClipboard, copyPathToClipboard, openProjectSettings, projectByKey],
   );
 
+  const attemptArchive = useCallback(
+    async (threadRef: ScopedThreadRef) => {
+      const api = readLocalApi();
+      const thread = readThreadShell(threadRef);
+      if (
+        !api ||
+        !thread ||
+        !readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)
+      )
+        return;
+      if (confirmThreadArchive) {
+        const confirmed = await settlePromise(() =>
+          api.dialogs.confirm(`Archive thread "${thread.title}"?`),
+        );
+        if (confirmed._tag === "Failure" || !confirmed.value) return;
+      }
+      let didArchive = false;
+      const result = await archiveThread(threadRef, {
+        onArchived: () => {
+          didArchive = true;
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: didArchive
+              ? "Thread archived, but navigation failed"
+              : "Failed to archive thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    },
+    [archiveThread, confirmThreadArchive],
+  );
+
+  const onStopDelegatedChild = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      const thread = readThreadShell(threadRef);
+      if (
+        stoppingDelegatedChildKeyRef.current !== null ||
+        !thread ||
+        !canStopSidebarDelegatedChild(thread) ||
+        !readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)
+      )
+        return;
+      const key = scopedThreadKey(threadRef);
+      stoppingDelegatedChildKeyRef.current = key;
+      setStoppingDelegatedChildKey(key);
+      void (async () => {
+        try {
+          const result = await interruptDelegatedTurn({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId },
+          });
+          if (result._tag === "Failure")
+            toastManager.add({ type: "error", title: "Could not stop task" });
+        } catch {
+          toastManager.add({ type: "error", title: "Could not stop task" });
+        } finally {
+          stoppingDelegatedChildKeyRef.current = null;
+          setStoppingDelegatedChildKey(null);
+        }
+      })();
+    },
+    [interruptDelegatedTurn],
+  );
+
+  const onDelegatedChildContextMenu = useCallback(
+    (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+      void (async () => {
+        const api = readLocalApi();
+        const thread = readThreadShell(threadRef);
+        if (!api || !thread) return;
+        const canOperate = readEnvironmentScope(
+          threadRef.environmentId,
+          AuthOrchestrationOperateScope,
+        );
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(
+            [
+              { id: "open", label: "Open" },
+              ...(canOperate && canStopSidebarDelegatedChild(thread)
+                ? [
+                    {
+                      id: "stop",
+                      label: "Stop",
+                      disabled: stoppingDelegatedChildKeyRef.current !== null,
+                    },
+                  ]
+                : []),
+              {
+                id: "archive",
+                label: "Archive",
+                disabled: !canOperate || !threadRuntimeCanArchive(thread.runtime),
+              },
+              ...(canOperate &&
+              canPromoteThread(
+                thread,
+                serverConfigs.get(threadRef.environmentId)?.environment.capabilities,
+              )
+                ? [{ id: "promote", label: "Promote to thread" }]
+                : []),
+            ],
+            position,
+          ),
+        );
+        if (clicked._tag === "Failure") return;
+        switch (clicked.value) {
+          case "open":
+            void navigateToThread(threadRef);
+            return;
+          case "stop":
+            onStopDelegatedChild(threadRef);
+            return;
+          case "archive":
+            await attemptArchive(threadRef);
+            return;
+          case "promote":
+            await promoteDelegatedChild(threadRef);
+            return;
+        }
+      })();
+    },
+    [attemptArchive, navigateToThread, onStopDelegatedChild, promoteDelegatedChild, serverConfigs],
+  );
+
   const handleThreadContextMenu = useCallback(
     (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
       void (async () => {
@@ -4788,31 +4990,7 @@ export default function Sidebar() {
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
           case "archive": {
-            if (confirmThreadArchive) {
-              const confirmed = await settlePromise(() =>
-                api.dialogs.confirm(`Archive thread "${thread.title}"?`),
-              );
-              if (confirmed._tag === "Failure" || !confirmed.value) return;
-            }
-            let didArchive = false;
-            const result = await archiveThread(threadRef, {
-              onArchived: () => {
-                didArchive = true;
-              },
-            });
-            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-              const error = squashAtomCommandFailure(result);
-              toastManager.add(
-                stackedThreadToast({
-                  type: "error",
-                  title: didArchive
-                    ? "Thread archived, but navigation failed"
-                    : "Failed to archive thread",
-                  description: error instanceof Error ? error.message : "An error occurred.",
-                }),
-              );
-              return;
-            }
+            await attemptArchive(threadRef);
             return;
           }
           case "delete": {
@@ -4848,14 +5026,13 @@ export default function Sidebar() {
       })();
     },
     [
-      archiveThread,
+      attemptArchive,
       attemptPin,
       attemptSettle,
       attemptSnooze,
       attemptUnpin,
       attemptUnsettle,
       attemptUnsnooze,
-      confirmThreadArchive,
       confirmThreadDelete,
       copyBranchToClipboard,
       copyPathToClipboard,
@@ -5287,6 +5464,19 @@ export default function Sidebar() {
                             // sortable wrapper keeps its identity during a drag.
                             key={`${threadKey}:${rowVariant}`}
                             thread={thread}
+                            delegatedChildren={delegatedChildIndex.get(threadKey)}
+                            delegatedChildrenShowFinished={
+                              section !== "settled" && section !== "snoozed"
+                            }
+                            openThreadKey={
+                              delegatedChildIndex.has(threadKey) ? routeThreadKey : null
+                            }
+                            onOpenDelegatedChild={navigateToThread}
+                            onStopDelegatedChild={onStopDelegatedChild}
+                            onDelegatedChildContextMenu={onDelegatedChildContextMenu}
+                            stoppingDelegatedChildKey={
+                              delegatedChildIndex.has(threadKey) ? stoppingDelegatedChildKey : null
+                            }
                             variant={rowVariant}
                             // Snoozed rows wake, settled rows un-settle, and cards settle.
                             variantAction={

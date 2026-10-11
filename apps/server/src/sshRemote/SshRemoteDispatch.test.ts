@@ -2,11 +2,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as SshConfig from "@t3tools/ssh/config";
 import { SshCommandError } from "@t3tools/ssh/errors";
-import type { RuntimeMode } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, type RuntimeMode } from "@t3tools/contracts";
 import * as SshTunnel from "@t3tools/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
 import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
@@ -91,6 +93,7 @@ describe("SSH dispatch tool compatibility", () => {
             pairingToken: null,
           }),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
+        revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
           Effect.succeed({
             token: "fixture-session",
@@ -486,6 +489,7 @@ describe("SshRemoteDispatch.callHostTool", () => {
                 pairingToken: null,
               }),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
+        revalidateTunnels: () => Effect.void,
         issueMcpClientSession: () =>
           Effect.sync(() => {
             record.sessionsIssued += 1;
@@ -685,6 +689,191 @@ describe("SshRemoteDispatch.callHostTool", () => {
       );
       expect(result._tag === "Failure" && result.failure.reason).toBe("remote_refused");
       expect(record.requests).toBe(0);
+    }),
+  );
+});
+
+describe("SSH dispatch launch lineage", () => {
+  const launcher = {
+    kind: "launch" as const,
+    threadId: ThreadId.make("orchestrator"),
+    environmentId: EnvironmentId.make("launcher-environment"),
+    environmentLabel: "studio",
+    threadTitle: "Orchestrator",
+  };
+
+  /** Launches against a fake remote and returns the arguments goat_thread_launch received. */
+  const launchAgainst = (remote: {
+    readonly declaresLaunchedBy: boolean;
+    readonly listFails?: boolean;
+    /** The listing never answers until the caller gives up and aborts it. */
+    readonly onListStalled?: () => void;
+  }) =>
+    Effect.gen(function* () {
+      const host = "lineage-host";
+      const target = { alias: host, hostname: host, username: null, port: null };
+      const launches: Array<Record<string, unknown>> = [];
+      const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as {
+          id?: string;
+          method: string;
+          params?: { name?: string; arguments?: Record<string, unknown> };
+        };
+        switch (request.method) {
+          case "initialize":
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "GOAT", version: "fixture" },
+              },
+            });
+          case "notifications/initialized":
+            return new Response(null, { status: 202 });
+          case "tools/list":
+            if (remote.listFails === true) return new Response(null, { status: 500 });
+            if (remote.onListStalled !== undefined) {
+              remote.onListStalled();
+              return new Promise<Response>((_resolve, reject) =>
+                init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))),
+              );
+            }
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                tools: [
+                  {
+                    name: "goat_thread_launch",
+                    inputSchema: {
+                      type: "object",
+                      properties: {
+                        title: { type: "string" },
+                        ...(remote.declaresLaunchedBy ? { launchedBy: { type: "object" } } : {}),
+                      },
+                    },
+                  },
+                ],
+              },
+            });
+          case "tools/call": {
+            if (request.params?.name === "goat_thread_launch") {
+              launches.push(request.params.arguments ?? {});
+            }
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                structuredContent: { projects: [], id: "new-project", threadId: "new-thread" },
+              },
+            });
+          }
+          default:
+            throw new Error(`Unexpected remote method: ${request.method}`);
+        }
+      });
+      const manager = SshTunnel.SshEnvironmentManager.of({
+        ensureEnvironment: () =>
+          Effect.succeed({
+            target,
+            httpBaseUrl: "http://lineage-host:3773/",
+            wsBaseUrl: "ws://lineage-host:3773/",
+            pairingToken: null,
+          }),
+        disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
+        revalidateTunnels: () => Effect.void,
+        issueMcpClientSession: () =>
+          Effect.succeed({
+            token: "fixture-session",
+            expiresAt: null,
+            runtimeModeCeilingApplied: true,
+          }),
+        runRemoteScript: () =>
+          Effect.succeed({
+            stdout:
+              "T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t/home/agent/repo\nREAL\t/home/agent/repo\n",
+            stderr: "",
+          }),
+      });
+      const discoverHosts = vi
+        .spyOn(SshConfig, "discoverSshHosts")
+        .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+      const managerLayer = vi
+        .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+        .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+      vi.stubGlobal("fetch", fetchEndpoint);
+      try {
+        const result = yield* Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          return yield* dispatch.launchThread(
+            {
+              host,
+              cwd: "/home/agent/repo",
+              workspace: { type: "cwd" },
+              title: "Lineage probe",
+              runtimeMode: "approval-required",
+              callerRuntimeMode: "approval-required",
+              launchedBy: launcher,
+            },
+            Effect.void,
+          );
+        }).pipe(
+          Effect.provide(
+            SshRemoteDispatch.layer.pipe(
+              Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "goat-dispatch-test-" })),
+              Layer.provide(FetchHttpClient.layer),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        return { result, launches };
+      } finally {
+        vi.unstubAllGlobals();
+        managerLayer.mockRestore();
+        discoverHosts.mockRestore();
+      }
+    });
+
+  it.effect("forwards the launcher to a remote whose goat_thread_launch declares it", () =>
+    Effect.gen(function* () {
+      const { result, launches } = yield* launchAgainst({ declaresLaunchedBy: true });
+      expect(result.threadId).toBe("new-thread");
+      expect(launches).toHaveLength(1);
+      expect(launches[0]?.launchedBy).toEqual(launcher);
+    }),
+  );
+
+  it.effect("launches once without the launcher on an older remote or a failed listing", () =>
+    Effect.gen(function* () {
+      for (const remote of [
+        { declaresLaunchedBy: false },
+        { declaresLaunchedBy: true, listFails: true },
+      ]) {
+        const { result, launches } = yield* launchAgainst(remote);
+        expect(result.threadId).toBe("new-thread");
+        expect(launches).toHaveLength(1);
+        expect(launches[0]).not.toHaveProperty("launchedBy");
+      }
+    }),
+  );
+
+  it.effect("launches once without the launcher when the remote never answers the listing", () =>
+    Effect.gen(function* () {
+      let listStalled!: () => void;
+      const stalled = new Promise<void>((resolve) => {
+        listStalled = resolve;
+      });
+      const launch = yield* Effect.forkChild(
+        launchAgainst({ declaresLaunchedBy: true, onListStalled: () => listStalled() }),
+      );
+      yield* Effect.promise(() => stalled);
+      yield* TestClock.adjust(SshRemoteDispatch.LAUNCH_LINEAGE_PROBE_TIMEOUT);
+      const { result, launches } = yield* Fiber.join(launch);
+      expect(result.threadId).toBe("new-thread");
+      expect(launches).toHaveLength(1);
+      expect(launches[0]).not.toHaveProperty("launchedBy");
     }),
   );
 });
