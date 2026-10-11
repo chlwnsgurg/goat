@@ -135,7 +135,10 @@ const buildExeCmd = Command.make(
             T3CODE_PACK_EXE: "1",
             ...Option.match(config.target, {
               onNone: () => ({}),
-              onSome: (target) => ({ T3CODE_PACK_EXE_TARGET: target }),
+              onSome: (target) =>
+                target.trim() === "host"
+                  ? { T3CODE_PACK_EXE_TARGET: "" }
+                  : { T3CODE_PACK_EXE_TARGET: target },
             }),
           },
           stdout: config.verbose ? "inherit" : "ignore",

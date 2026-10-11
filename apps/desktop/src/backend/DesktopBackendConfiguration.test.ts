@@ -76,7 +76,7 @@ function layerEnvironment(
     appVersion: options?.appVersion ?? "1.2.3",
     appPath: options?.appPath ?? "/repo",
     isPackaged: options?.isPackaged ?? true,
-    resourcesPath: options?.resourcesPath ?? "/missing/resources",
+    resourcesPath: options?.resourcesPath ?? "/missing/resources with spaces",
     runningUnderArm64Translation: false,
   }).pipe(
     Layer.provide(
@@ -227,6 +227,43 @@ const withPackagedWslHarness = <A, E, R>(
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 describe("DesktopBackendConfiguration", () => {
+  it.effect("unpackaged children clear inherited bundle paths and WSLENV flags", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped();
+      const name = "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR";
+      const previous = process.env[name];
+      const previousWsl = process.env.WSLENV;
+      try {
+        process.env[name] = "C:\\old bundle";
+        process.env.WSLENV = `KEEP/p::${name}/p:${name}:${name}/lu`;
+        yield* Effect.gen(function* () {
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          assert.isUndefined((yield* configuration.resolvePrimary).env[name]);
+          const wsl = yield* configuration.resolveWsl({ port: 5050, distro: "Ubuntu" });
+          assert.isUndefined(wsl.env[name]);
+          assert.equal(wsl.env.WSLENV?.split(":").slice(0, 2).join(":"), "KEEP/p:");
+          assert.isFalse((wsl.env.WSLENV ?? "").includes(name));
+        }).pipe(
+          Effect.provide(
+            DesktopBackendConfiguration.layer.pipe(
+              Layer.provideMerge(layerServerExposure),
+              Layer.provideMerge(DesktopAppSettings.layerTest()),
+              Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+              Layer.provideMerge(DesktopWslServerTree.layerTest()),
+              Layer.provideMerge(
+                layerEnvironment(baseDir, { isPackaged: false, platform: "win32" }),
+              ),
+            ),
+          ),
+        );
+      } finally {
+        restoreEnv(name, previous);
+        restoreEnv("WSLENV", previousWsl);
+      }
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("resolvePrimary produces a stable scoped bootstrap token", () =>
     withHarness(
       Effect.gen(function* () {
@@ -246,6 +283,10 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.cwd, environment.backendCwd);
         assert.equal(first.captureOutput, true);
         assert.equal(first.env.ELECTRON_RUN_AS_NODE, "1");
+        assert.equal(
+          first.env.T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR,
+          environment.path.join(environment.resourcesPath, "ssh-runtime", "archives"),
+        );
         assert.isUndefined(first.env.T3CODE_PORT);
         assert.isUndefined(first.env.T3CODE_MODE);
         assert.isUndefined(first.env.T3CODE_DESKTOP_LAN_HOST);
@@ -408,7 +449,7 @@ describe("DesktopBackendConfiguration", () => {
 
       assert.equal(config.runningDistro, "Ubuntu");
       assert.deepEqual(config.args.slice(0, 2), ["-d", "Ubuntu"]);
-      assert.deepEqual(observedDistros, ["Ubuntu", "Ubuntu", "Ubuntu"]);
+      assert.deepEqual(observedDistros, ["Ubuntu", "Ubuntu", "Ubuntu", "Ubuntu"]);
       assert.isTrue(Option.isNone(config.preflightFailure));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
@@ -1100,6 +1141,52 @@ describe("DesktopBackendConfiguration", () => {
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each(["/p", "/l", "/u", "/w", "/pluw", ""] as const)(
+    "resolveWsl replaces inherited bundle WSLENV flags with a bare name: %s",
+    (suffix) =>
+      Effect.gen(function* () {
+        const name = "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR";
+        const translated = "/mnt/c/Program Files/GOAT/resources/ssh-runtime/archives";
+        const previousWslEnv = process.env.WSLENV;
+        const previousBundle = process.env[name];
+        try {
+          for (const translationSucceeds of [true, false]) {
+            process.env.WSLENV = `GOPATH/p:EMPTY::${name}${suffix}:${name}:${name}/u:KEEP/w`;
+            process.env[name] = "C:\\Program Files\\GOAT\\resources\\ssh-runtime\\archives";
+            yield* withPackagedWslHarness(
+              {
+                archiveHash: "a".repeat(64),
+                wsl: (context) => ({
+                  windowsToWslPath: (_distro, windowsPath) =>
+                    windowsPath.endsWith("archives")
+                      ? translationSucceeds
+                        ? Option.some(translated)
+                        : Option.none()
+                      : Option.some(context.mountedAppRoot),
+                }),
+              },
+              () =>
+                Effect.gen(function* () {
+                  const configuration =
+                    yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+                  const config = yield* configuration.resolveWsl({ port: 5050, distro: "Ubuntu" });
+                  assert.equal(config.env[name], translationSucceeds ? translated : undefined);
+                  const entries = (config.env.WSLENV ?? "").split(":");
+                  assert.deepEqual(
+                    entries.filter((entry) => entry.trim().split("/")[0] === name),
+                    translationSucceeds ? [name] : [],
+                  );
+                  assert.equal(entries.slice(0, 4).join(":"), "GOPATH/p:EMPTY::KEEP/w");
+                }),
+            );
+          }
+        } finally {
+          restoreEnv("WSLENV", previousWslEnv);
+          restoreEnv(name, previousBundle);
+        }
+      }),
+  );
+
   it.effect("resolveWsl preserves existing WSLENV entries when forwarding backend secrets", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1147,7 +1234,7 @@ describe("DesktopBackendConfiguration", () => {
           // already declared, so it isn't forwarded twice.
           assert.equal(
             config.env.WSLENV,
-            "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u:ANTHROPIC_API_KEY:T3CODE_OTLP_HEADERS:T3CODE_OTLP_PROTOCOL",
+            "GOPATH/p:OPENAI_API_KEY/u:EMPTY::AZURE_DEVOPS_EXT_PAT/u:ANTHROPIC_API_KEY:T3CODE_OTLP_HEADERS:T3CODE_OTLP_PROTOCOL:T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR",
           );
         }).pipe(
           Effect.provide(

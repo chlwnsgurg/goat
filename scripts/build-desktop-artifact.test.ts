@@ -68,6 +68,12 @@ import {
   stageResourceMonitor,
   stageLinuxCaptureHelper,
   stageWslRuntimeArchive,
+  stageSshRuntimeArchives,
+  validateSshRuntimeArchives,
+  validatePackagedSshRuntimeArchives,
+  SSH_RUNTIME_PLATFORM_KEYS,
+  SSH_RUNTIME_EXTRA_RESOURCES,
+  SSH_RUNTIME_RESOURCE_SOURCE_DIR,
   bundlesWslRuntime,
   STAGE_INSTALL_ARGS,
   ancestorNodeModulesPaths,
@@ -263,6 +269,33 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
     generatedAsarPath,
     appExecutableName,
   } as const;
+});
+
+const stageWindowsSshRuntimeFixture = Effect.fn("test.stageWindowsSshRuntimeFixture")(function* (
+  packagedAppDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.makeTempDirectoryScoped();
+  const source = path.join(root, "source");
+  yield* fs.makeDirectory(source);
+  for (const key of SSH_RUNTIME_PLATFORM_KEYS) {
+    const stem = `goat-${WINDOWS_PAYLOAD_FIXTURE_VERSION}-${key}`;
+    const archive = yield* makeLinuxCliArchiveFixture({
+      root: path.join(root, key),
+      stem,
+      extraMembers: [`${stem}/resource-monitor/${key}/t3-resource-monitor`],
+    });
+    yield* fs.copyFile(archive, path.join(source, stem + ".tar.gz"));
+  }
+  const destination = path.join(packagedAppDir, "resources", "ssh-runtime", "archives");
+  yield* stageSshRuntimeArchives({
+    sourceDirectory: source,
+    destinationDirectory: destination,
+    version: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+    requireAll: true,
+  });
+  assert.equal((yield* fs.readDirectory(destination)).length, 6);
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
@@ -587,6 +620,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "!apps/desktop/prod-resources/browser-secret/**/*",
       "!apps/desktop/prod-resources/windows-server",
       "!apps/desktop/prod-resources/windows-server/**/*",
+      "!apps/desktop/prod-resources/ssh-runtime",
+      "!apps/desktop/prod-resources/ssh-runtime/**/*",
       "!apps/desktop/prod-resources/wsl-runtime.tar.gz",
       "!apps/desktop/prod-resources/wsl-runtime.tar.gz.sha256",
       "!apps/desktop/gnome-extension",
@@ -1278,12 +1313,29 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const fixture = yield* makeWindowsPayloadFixture({ copyUnpackedNatives: true });
+        const fixture = yield* makeWindowsPayloadFixture({
+          copyUnpackedNatives: true,
+          wslRuntime: "valid",
+        });
+        const beforeBundle = yield* validateWindowsPackagedPayload({
+          stageDistDir: fixture.stageDistDir,
+          appExecutableName: fixture.appExecutableName,
+          targetArch: "x64",
+          appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+        });
+        yield* stageWindowsSshRuntimeFixture(fixture.packagedAppDir);
         const result = yield* validateWindowsPackagedPayload({
           stageDistDir: fixture.stageDistDir,
           appExecutableName: fixture.appExecutableName,
           targetArch: "x64",
           appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+          expectWslRuntime: true,
+        });
+        assert.equal(result.fileCount, beforeBundle.fileCount + 6);
+        yield* validatePackagedSshRuntimeArchives({
+          stageDistDir: fixture.stageDistDir,
+          version: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+          requireAll: true,
         });
 
         const secondAsarPath = path.join(path.dirname(fixture.generatedAsarPath), "second.asar");
@@ -1770,20 +1822,42 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it.effect("rejects a Windows payload that regresses above the file-count budget", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const fixture = yield* makeWindowsPayloadFixture({ copyUnpackedNatives: true });
-        const error = yield* validateWindowsPackagedPayload({
-          stageDistDir: fixture.stageDistDir,
-          appExecutableName: fixture.appExecutableName,
-          targetArch: "x64",
-          appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
-          fileLimit: 2,
-        }).pipe(Effect.flip);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* makeWindowsPayloadFixture({
+          copyUnpackedNatives: true,
+          wslRuntime: "valid",
+        });
+        yield* stageWindowsSshRuntimeFixture(fixture.packagedAppDir);
+        const validate = () =>
+          validateWindowsPackagedPayload({
+            stageDistDir: fixture.stageDistDir,
+            appExecutableName: fixture.appExecutableName,
+            targetArch: "x64",
+            appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+            expectWslRuntime: true,
+          });
+        const initial = yield* validate();
+        assert.equal(WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT, 80);
+        for (let count = initial.fileCount; count < 80; count++) {
+          yield* fs.writeFileString(
+            path.join(fixture.packagedAppDir, `padding-${count}`),
+            "fixture",
+          );
+        }
+        assert.equal((yield* validate()).fileCount, 80);
+        yield* fs.writeFileString(
+          path.join(fixture.packagedAppDir, "one-file-over-budget"),
+          "fixture",
+        );
+        const error = yield* validate().pipe(Effect.flip);
 
         assert.instanceOf(error, WindowsPackagedPayloadValidationError);
         assert.equal(error.reason, "file-limit-exceeded");
-        assert.isAbove(error.fileCount ?? 0, 2);
+        assert.equal(error.fileCount, 81);
+        assert.equal(error.fileLimit, 80);
       }),
-    ),
+    ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("rejects a sidecar whose extracted server bundle cannot resolve", () =>
@@ -2373,6 +2447,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.none(),
         mockUpdateServerPort: Option.none(),
         wslRuntime: Option.none(),
+        sshRuntimeArchiveDir: Option.none(),
+        requireAllSshRuntimes: Option.none(),
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -2413,6 +2489,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             mockUpdates: Option.none(),
             mockUpdateServerPort: Option.none(),
             wslRuntime: Option.none(),
+            sshRuntimeArchiveDir: Option.none(),
+            requireAllSshRuntimes: Option.none(),
           }),
         );
 
@@ -2437,6 +2515,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.some(false),
         mockUpdateServerPort: Option.none(),
         wslRuntime: Option.none(),
+        sshRuntimeArchiveDir: Option.none(),
+        requireAllSshRuntimes: Option.none(),
       }).pipe(
         Effect.provide(
           ConfigProvider.layer(
@@ -2543,3 +2623,344 @@ it("ignores trailing separators", () => {
     ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
   );
 });
+
+it.effect.each([
+  "local",
+  "complete",
+  "missing",
+  "bad-sidecar",
+  "missing-monitor",
+  "wrong-stem",
+  "missing-goat",
+  "missing-client",
+  "missing-pty",
+  "loose-bin",
+  "corrupt",
+  "missing-source",
+  "wrong-version",
+  "oversized",
+] as const)("stages and validates exact SSH payload bytes: %s", (mode) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-bundle-packaging-" });
+    const source = path.join(root, "source");
+    const destination = path.join(root, "staged");
+    const version = "1.2.3";
+    yield* fs.makeDirectory(source, { recursive: true });
+    const keys = mode === "complete" ? SSH_RUNTIME_PLATFORM_KEYS : [SSH_RUNTIME_PLATFORM_KEYS[0]];
+    const before = new Map<string, Uint8Array>();
+    for (const key of keys) {
+      const stem = `goat-${version}-${key}`;
+      const fixture = yield* makeLinuxCliArchiveFixture({
+        root: path.join(root, key),
+        stem: mode === "wrong-stem" ? "goat-9.9.9-linux-x64" : stem,
+        extraMembers:
+          mode === "missing-monitor"
+            ? []
+            : [
+                `${stem}/resource-monitor/${key}/t3-resource-monitor`,
+                ...(mode === "loose-bin" ? [`${stem}/bin.mjs`] : []),
+              ],
+        omitMembers:
+          mode === "missing-goat"
+            ? [`${stem}/goat`]
+            : mode === "missing-client"
+              ? [`${stem}/client/index.html`]
+              : mode === "missing-pty"
+                ? [`${stem}/node_modules/node-pty/build/Release/pty.node`]
+                : [],
+      });
+      const name = `${stem}.tar.gz`;
+      const bytes = yield* fs.readFile(fixture);
+      yield* fs.writeFile(path.join(source, name), bytes);
+      before.set(name, bytes);
+      if (mode === "bad-sidecar")
+        yield* fs.writeFileString(path.join(source, name + ".sha256"), "bad");
+      if (mode === "corrupt") {
+        const corrupt = new Uint8Array([1, 2, 3]);
+        yield* fs.writeFile(path.join(source, name), corrupt);
+        before.set(name, corrupt);
+      }
+      if (mode === "oversized") {
+        yield* fs.truncate(path.join(source, name), 268435457);
+        before.delete(name);
+      }
+    }
+    if (mode === "missing-source") {
+      yield* fs.remove(source, { recursive: true });
+      before.clear();
+    }
+    const result = yield* Effect.exit(
+      stageSshRuntimeArchives({
+        sourceDirectory: source,
+        destinationDirectory: destination,
+        version: mode === "wrong-version" ? "9.9.9" : version,
+        requireAll: mode === "complete" || mode === "missing",
+      }),
+    );
+    const success = mode === "complete" || mode === "local";
+    assert.equal(result._tag === "Success", success);
+    for (const [name, bytes] of before)
+      assert.deepEqual(yield* fs.readFile(path.join(source, name)), bytes);
+    if (!success) {
+      assert.isFalse(yield* fs.exists(destination));
+      return;
+    }
+    const archives = yield* validateSshRuntimeArchives({
+      directory: destination,
+      version,
+      requireAll: mode === "complete",
+      requireSidecars: true,
+    });
+    assert.equal(archives.length, keys.length);
+    for (const archive of archives) {
+      assert.deepEqual(archive.bytes, before.get(archive.fileName));
+      assert.equal(
+        yield* fs.readFileString(path.join(destination, archive.fileName + ".sha256")),
+        `${archive.sha256}  ${archive.fileName}\n`,
+      );
+    }
+    const dist = path.join(root, "dist");
+    const resources = path.join(
+      dist,
+      "mac-arm64",
+      "GOAT.app",
+      "Contents",
+      "Resources",
+      "ssh-runtime",
+      "archives",
+    );
+    yield* fs.makeDirectory(path.dirname(resources), { recursive: true });
+    yield* fs.copy(destination, resources);
+    yield* validatePackagedSshRuntimeArchives({
+      stageDistDir: dist,
+      version,
+      requireAll: mode === "complete",
+    });
+    yield* fs.writeFile(path.join(resources, archives[0]!.fileName), new Uint8Array([1]));
+    assert.equal(
+      (yield* Effect.exit(
+        validatePackagedSshRuntimeArchives({
+          stageDistDir: dist,
+          version,
+          requireAll: mode === "complete",
+        }),
+      ))._tag,
+      "Failure",
+    );
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([
+  "ci",
+  "strict",
+  "local",
+  "omitted",
+  "missing",
+  "override",
+  "env-override",
+  "preview-ci",
+  "preview-with-bundle",
+  "preview-strict",
+  "ci-without-bundle",
+] as const)("resolves SSH packaging inputs before staging: %s", (mode) =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      resolveBuildOptions({
+        platform: Option.some("mac"),
+        target: Option.none(),
+        arch: Option.some("arm64"),
+        buildVersion: mode === "override" ? Option.some("9.9.9") : Option.none(),
+        outputDir: Option.none(),
+        skipBuild: Option.none(),
+        keepStage: Option.none(),
+        signed: Option.none(),
+        verbose: Option.none(),
+        mockUpdates: Option.none(),
+        mockUpdateServerPort: Option.none(),
+        wslRuntime: Option.none(),
+        sshRuntimeArchiveDir:
+          mode === "missing" ||
+          mode === "omitted" ||
+          mode === "preview-ci" ||
+          mode === "preview-strict" ||
+          mode === "ci-without-bundle"
+            ? Option.none()
+            : Option.some("  /fixture/archives  "),
+        requireAllSshRuntimes: Option.some(
+          mode === "strict" || mode === "missing" || mode === "preview-strict",
+        ),
+      }).pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnvRecord({
+              CI:
+                mode === "ci" || mode.startsWith("preview-") || mode === "ci-without-bundle"
+                  ? "true"
+                  : "false",
+              T3CODE_DESKTOP_SSH_RUNTIME_BUNDLE_OPTIONAL: mode.startsWith("preview-")
+                ? "true"
+                : "false",
+              ...(mode === "env-override" ? { T3CODE_DESKTOP_VERSION: "9.9.9" } : {}),
+            }),
+          ),
+        ),
+      ),
+    );
+    const failed =
+      mode === "missing" ||
+      mode === "override" ||
+      mode === "env-override" ||
+      mode === "preview-strict" ||
+      mode === "ci-without-bundle";
+    assert.equal(result._tag === "Failure", failed);
+    if (result._tag === "Success") {
+      assert.equal(
+        result.value.requireAllSshRuntimes,
+        mode === "ci" || mode === "strict" || mode === "preview-with-bundle",
+      );
+      assert.equal(
+        result.value.sshRuntimeArchiveDir,
+        mode === "omitted" || mode === "preview-ci" ? undefined : "/fixture/archives",
+      );
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["mac", "linux", "win"] as const)(
+  "copies configured SSH resources and rejects damaged packaged %s bytes",
+  (platform) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-resource-copy-" });
+      const app = path.join(root, "app");
+      const source = path.join(root, "source");
+      const version = "1.2.3";
+      for (const key of SSH_RUNTIME_PLATFORM_KEYS) {
+        const stem = `goat-${version}-${key}`;
+        const archive = yield* makeLinuxCliArchiveFixture({
+          root: path.join(root, key),
+          stem,
+          extraMembers: [`${stem}/resource-monitor/${key}/t3-resource-monitor`],
+        });
+        yield* fs.makeDirectory(source, { recursive: true });
+        yield* fs.copyFile(archive, path.join(source, stem + ".tar.gz"));
+      }
+      yield* stageSshRuntimeArchives({
+        sourceDirectory: source,
+        destinationDirectory: path.join(app, SSH_RUNTIME_RESOURCE_SOURCE_DIR),
+        version,
+        requireAll: true,
+      });
+      const config = yield* createBuildConfig(
+        platform,
+        platform === "mac" ? "dmg" : platform === "win" ? "nsis" : "appimage",
+        version,
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "arm64",
+        true,
+      );
+      const dist = path.join(root, "dist");
+      const resources =
+        platform === "mac"
+          ? path.join(dist, "mac-arm64", "GOAT.app", "Contents", "Resources")
+          : path.join(dist, `${platform}-unpacked`, "resources");
+      const sets = config.extraResources as typeof SSH_RUNTIME_EXTRA_RESOURCES;
+      const bundleSet = sets.find((set) => set.to === "ssh-runtime/archives");
+      assert.isDefined(bundleSet);
+      if (!bundleSet) return;
+      const destination = path.join(resources, bundleSet.to);
+      yield* fs.makeDirectory(destination, { recursive: true });
+      for (const file of yield* fs.readDirectory(path.join(app, bundleSet.from))) {
+        if (bundleSet.filter.some((pattern) => NodePath.matchesGlob(file, pattern))) {
+          yield* fs.copyFile(path.join(app, bundleSet.from, file), path.join(destination, file));
+        }
+      }
+      assert.equal((yield* fs.readDirectory(destination)).length, 6);
+      yield* validatePackagedSshRuntimeArchives({ stageDistDir: dist, version, requireAll: true });
+      const name = `goat-${version}-${SSH_RUNTIME_PLATFORM_KEYS[0]}.tar.gz`;
+      const bytes = yield* fs.readFile(path.join(destination, name));
+      const sidecar = yield* fs.readFileString(path.join(destination, name + ".sha256"));
+      for (const damage of ["archive", "sidecar", "noncanonical", "bytes"] as const) {
+        if (damage === "archive") yield* fs.remove(path.join(destination, name));
+        if (damage === "sidecar") yield* fs.remove(path.join(destination, name + ".sha256"));
+        if (damage === "noncanonical")
+          yield* fs.writeFileString(
+            path.join(destination, name + ".sha256"),
+            sidecar.replace("  ", " *"),
+          );
+        if (damage === "bytes")
+          yield* fs.writeFile(path.join(destination, name), new Uint8Array([1]));
+        assert.equal(
+          (yield* Effect.exit(
+            validatePackagedSshRuntimeArchives({ stageDistDir: dist, version, requireAll: true }),
+          ))._tag,
+          "Failure",
+        );
+        yield* fs.writeFile(path.join(destination, name), bytes);
+        yield* fs.writeFileString(path.join(destination, name + ".sha256"), sidecar);
+        yield* validateSshRuntimeArchives({
+          directory: path.join(app, SSH_RUNTIME_RESOURCE_SOURCE_DIR),
+          version,
+          requireAll: true,
+          requireSidecars: true,
+        });
+      }
+      const omitted = yield* createBuildConfig(
+        platform,
+        "dir",
+        version,
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.isFalse(
+        (omitted.extraResources as Array<{ to: string }>).some(
+          (set) => set.to === "ssh-runtime/archives",
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(SSH_RUNTIME_PLATFORM_KEYS)(
+  "strict staging rejects missing %s before writing resources",
+  (missing) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const source = path.join(root, "source");
+      const destination = path.join(root, "destination");
+      yield* fs.makeDirectory(source);
+      for (const key of SSH_RUNTIME_PLATFORM_KEYS) {
+        const stem = `goat-1.2.3-${key}`;
+        const archive = yield* makeLinuxCliArchiveFixture({
+          root: path.join(root, key),
+          stem,
+          extraMembers: [`${stem}/resource-monitor/${key}/t3-resource-monitor`],
+        });
+        if (key !== missing) yield* fs.copyFile(archive, path.join(source, stem + ".tar.gz"));
+      }
+      const before = yield* fs.readDirectory(source);
+      assert.equal(
+        (yield* Effect.exit(
+          stageSshRuntimeArchives({
+            sourceDirectory: source,
+            destinationDirectory: destination,
+            version: "1.2.3",
+            requireAll: true,
+          }),
+        ))._tag,
+        "Failure",
+      );
+      assert.isFalse(yield* fs.exists(destination));
+      assert.deepEqual(yield* fs.readDirectory(source), before);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);

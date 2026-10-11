@@ -117,6 +117,15 @@ const layerDesktopSshEnvironment = Layer.unwrap(
             archiveDirectory: Option.getOrElse(config.sshRuntimeArchiveDir, () =>
               environment.path.join(environment.baseDir, "runtime", "archives"),
             ),
+            ...(environment.isPackaged
+              ? {
+                  bundledArchiveDirectory: environment.path.join(
+                    environment.resourcesPath,
+                    "ssh-runtime",
+                    "archives",
+                  ),
+                }
+              : {}),
             ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
           },
           serverPackageJson,

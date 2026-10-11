@@ -601,6 +601,9 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       env: {
         ...backendChildEnvPatch(),
         ELECTRON_RUN_AS_NODE: "1",
+        T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: environment.isPackaged
+          ? environment.path.join(environment.resourcesPath, "ssh-runtime", "archives")
+          : undefined,
         // The server names this launcher in commands it asks a person to run.
         T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
       },
@@ -722,6 +725,12 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   // changes between probing and spawning the backend.
   const runningDistro = preflight._tag === "Ready" ? preflight.runningDistro : null;
   const distroForConfig = runningDistro ?? input.distro;
+  const bundledArchiveDirectory = environment.isPackaged
+    ? yield* wslEnvironment.windowsToWslPath(
+        distroForConfig,
+        environment.path.join(environment.resourcesPath, "ssh-runtime", "archives"),
+      )
+    : Option.none<string>();
 
   // Resolve the selected distro's IPv4 address. In mirrored mode the distro
   // reports a host interface, so use loopback instead; a failed probe also
@@ -754,8 +763,22 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   // their env-ids collide).
   const parentEnvWithoutT3Home: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (key === "T3CODE_HOME") continue;
-    parentEnvWithoutT3Home[key] = value;
+    if (key === "T3CODE_HOME" || key === "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR") continue;
+    // mergeWslEnv preserves inherited suffixes; remove this owned variable
+    // before appending its already-translated Linux value as a bare name.
+    parentEnvWithoutT3Home[key] =
+      key === "WSLENV"
+        ? value
+            ?.split(":")
+            .filter(
+              (entry) =>
+                getWslEnvEntryName(entry.trim()) !== "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR",
+            )
+            .join(":")
+        : value;
+  }
+  if (Option.isSome(bundledArchiveDirectory)) {
+    forwardedEnvNames.push("T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR");
   }
   const wslEnv = mergeWslEnv(parentEnvWithoutT3Home.WSLENV, forwardedEnvNames);
 
@@ -768,6 +791,11 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       ...parentEnvWithoutT3Home,
       ...backendChildEnvPatch(),
       ...forwardedEnv,
+      // wsl.exe receives Windows env; /mnt/... is already a Linux path. WSLENV
+      // forwards this value without /p, avoiding a second path conversion.
+      ...(Option.isSome(bundledArchiveDirectory)
+        ? { T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: bundledArchiveDirectory.value }
+        : {}),
       ...(wslEnv !== undefined ? { WSLENV: wslEnv } : {}),
     },
     // env is already a complete process.env minus T3CODE_HOME; pass it

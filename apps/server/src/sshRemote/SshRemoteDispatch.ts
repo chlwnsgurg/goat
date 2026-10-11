@@ -607,6 +607,12 @@ export const resolveSshCliRunner = (baseDir: string) =>
     const archiveDirectory = yield* Config.String("T3CODE_SSH_RUNTIME_ARCHIVE_DIR").pipe(
       Config.withDefault(baseDir + "/runtime/archives"),
     );
+    const bundledArchiveDirectory = yield* Config.String(
+      "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR",
+    ).pipe(
+      Config.withDefault(""),
+      Effect.map((value) => value.trim() || undefined),
+    );
     const releaseBaseUrl = yield* Config.String("T3CODE_RELEASE_BASE_URL").pipe(
       Config.withDefault(""),
       Effect.map((value) => value.trim() || undefined),
@@ -614,6 +620,7 @@ export const resolveSshCliRunner = (baseDir: string) =>
     return {
       archiveVersion: packageJson.version,
       archiveDirectory,
+      ...(bundledArchiveDirectory === undefined ? {} : { bundledArchiveDirectory }),
       ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
       keepExistingRunner: true,
     } satisfies SshTunnel.RemoteT3RunnerOptions;

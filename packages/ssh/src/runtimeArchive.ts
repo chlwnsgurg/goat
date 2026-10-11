@@ -17,6 +17,7 @@ export const readLocalRuntimeArchive = Effect.fn("ssh.runtimeArchive.read")(func
   directory: string,
   version: string,
   platformKey: CliArchivePlatformKey,
+  requireSidecar = false,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -44,8 +45,22 @@ export const readLocalRuntimeArchive = Effect.fn("ssh.runtimeArchive.read")(func
   }
   const sha256 = Hex.encode(yield* crypto.digest("SHA-256", bytes));
   const sidecarPath = `${filePath}.sha256`;
-  if (yield* fs.exists(sidecarPath)) {
-    const expected = parseChecksums(yield* fs.readFileString(sidecarPath)).get(fileName);
+  const hasSidecar = yield* fs.exists(sidecarPath);
+  if (requireSidecar && !hasSidecar) {
+    return yield* new SshLaunchError({
+      message: `Bundled SSH runtime archive is missing its SHA-256 sidecar (${sidecarPath}). Rebuild or reinstall the desktop bundle.`,
+      stdout: "",
+    });
+  }
+  if (hasSidecar) {
+    const sidecar = yield* fs.readFileString(sidecarPath);
+    const expected = parseChecksums(sidecar).get(fileName);
+    if (requireSidecar && sidecar !== `${sha256}  ${fileName}\n`) {
+      return yield* new SshLaunchError({
+        message: `Bundled SSH runtime archive requires a canonical matching SHA-256 sidecar (${sidecarPath}). Rebuild or reinstall the desktop bundle.`,
+        stdout: "",
+      });
+    }
     if (expected === undefined || sha256 !== expected) {
       return yield* new SshLaunchError({
         message: `Cached SSH runtime archive SHA-256 mismatch or malformed sidecar (${filePath}). Remove or replace the invalid cache entry before retrying.`,

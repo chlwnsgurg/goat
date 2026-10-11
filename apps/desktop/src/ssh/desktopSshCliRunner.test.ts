@@ -66,3 +66,30 @@ describe("resolveDesktopSshCliRunner", () => {
     );
   });
 });
+
+it("carries read-only packaged resources separately from the writable cache", () => {
+  const options = {
+    ...archiveOptions,
+    bundledArchiveDirectory:
+      "/Applications/GOAT Nightly.app/Contents/Resources/ssh-runtime/archives",
+  };
+  const runner = resolveDesktopSshCliRunner(
+    environment({ appVersion: "1.2.3-nightly.1", isPackaged: true, isDevelopment: false }),
+    options,
+    server,
+  );
+  assert.equal(runner.bundledArchiveDirectory, options.bundledArchiveDirectory);
+  assert.equal(runner.archiveDirectory, archiveOptions.archiveDirectory);
+  assert.notEqual(runner.bundledArchiveDirectory, runner.archiveDirectory);
+  const dev = resolveDesktopSshCliRunner(
+    environment({
+      appVersion: "44",
+      isPackaged: false,
+      isDevelopment: true,
+      devRemoteEntry: "/fixture/cli.mjs",
+    }),
+    options,
+    server,
+  );
+  assert.isUndefined(dev.bundledArchiveDirectory);
+});

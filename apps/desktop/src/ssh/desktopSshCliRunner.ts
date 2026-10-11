@@ -16,7 +16,10 @@ export const resolveDesktopSshCliRunner = (
     DesktopEnvironment.DesktopEnvironment["Service"],
     "appVersion" | "isPackaged" | "isDevelopment" | "devRemoteT3ServerEntryPath"
   >,
-  archiveOptions: Pick<RemoteT3RunnerOptions, "archiveDirectory" | "releaseBaseUrl">,
+  archiveOptions: Pick<
+    RemoteT3RunnerOptions,
+    "archiveDirectory" | "bundledArchiveDirectory" | "releaseBaseUrl"
+  >,
   serverPackage: { readonly version: string; readonly engines: { readonly node: string } },
 ): RemoteT3RunnerOptions => {
   const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteT3ServerEntryPath);

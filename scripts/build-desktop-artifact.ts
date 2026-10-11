@@ -15,6 +15,11 @@ import {
   type DirectoryRecord,
 } from "@electron/asar";
 
+import {
+  cliArchiveFileName,
+  cliArchiveTarCommand,
+  parseChecksums,
+} from "@t3tools/shared/cliRelease";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
@@ -182,6 +187,8 @@ interface BuildCliInput {
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
   readonly wslRuntime: Option.Option<string>;
+  readonly sshRuntimeArchiveDir: Option.Option<string>;
+  readonly requireAllSshRuntimes: Option.Option<boolean>;
 }
 
 function detectHostBuildPlatform(hostPlatform: string): typeof BuildPlatform.Type | undefined {
@@ -939,6 +946,8 @@ interface ResolvedBuildOptions {
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
   readonly wslRuntime: string | undefined;
+  readonly sshRuntimeArchiveDir: string | undefined;
+  readonly requireAllSshRuntimes: boolean;
 }
 
 interface StagePackageJson {
@@ -986,6 +995,8 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   // staging inputs out of app.asar; they are emitted once at resources/.
   "!apps/desktop/prod-resources/windows-server",
   "!apps/desktop/prod-resources/windows-server/**/*",
+  "!apps/desktop/prod-resources/ssh-runtime",
+  "!apps/desktop/prod-resources/ssh-runtime/**/*",
   "!apps/desktop/prod-resources/wsl-runtime.tar.gz",
   "!apps/desktop/prod-resources/wsl-runtime.tar.gz.sha256",
   "!apps/desktop/gnome-extension",
@@ -1682,6 +1693,16 @@ const BuildEnvConfig = Config.all({
   // by the build_linux_cli CI job. The Windows build embeds it verbatim as the
   // WSL runtime.
   wslRuntime: Config.String("T3CODE_DESKTOP_WSL_RUNTIME").pipe(Config.option),
+  sshRuntimeArchiveDir: Config.String("T3CODE_DESKTOP_SSH_RUNTIME_ARCHIVE_DIR").pipe(Config.option),
+  requireAllSshRuntimes: Config.Boolean("T3CODE_DESKTOP_REQUIRE_ALL_SSH_RUNTIMES").pipe(
+    Config.withDefault(false),
+  ),
+  ci: Config.Boolean("CI").pipe(Config.withDefault(false)),
+  // Standalone previews have no sibling archive producers. A supplied bundle
+  // still requires all targets in CI, even when omission is explicitly allowed.
+  sshRuntimeBundleOptional: Config.Boolean("T3CODE_DESKTOP_SSH_RUNTIME_BUNDLE_OPTIONAL").pipe(
+    Config.withDefault(false),
+  ),
 });
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
@@ -1776,6 +1797,27 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const wslRuntime =
     Option.getOrUndefined(input.wslRuntime) ?? Option.getOrUndefined(env.wslRuntime);
 
+  const sshRuntimeArchiveDir =
+    (
+      Option.getOrUndefined(input.sshRuntimeArchiveDir) ??
+      Option.getOrUndefined(env.sshRuntimeArchiveDir)
+    )?.trim() || undefined;
+  const requireAllSshRuntimes =
+    (env.ci && (!env.sshRuntimeBundleOptional || sshRuntimeArchiveDir !== undefined)) ||
+    resolveBooleanFlag(input.requireAllSshRuntimes, env.requireAllSshRuntimes);
+  const appVersion = version ?? serverPackageJson.version;
+  if (sshRuntimeArchiveDir !== undefined && appVersion !== serverPackageJson.version) {
+    return yield* new SshRuntimeArchiveValidationError({
+      message: `Bundled SSH runtime version ${appVersion} must equal packaged server version ${serverPackageJson.version}. Stamp package versions before building; do not use a desktop-only version override.`,
+    });
+  }
+  if (requireAllSshRuntimes && sshRuntimeArchiveDir === undefined) {
+    return yield* new SshRuntimeArchiveValidationError({
+      message:
+        "CI/release desktop packaging requires --ssh-runtime-archive-dir with darwin-arm64, linux-x64 and linux-arm64 archives.",
+    });
+  }
+
   return {
     platform,
     target,
@@ -1789,6 +1831,8 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mockUpdates,
     mockUpdateServerPort,
     wslRuntime,
+    sshRuntimeArchiveDir,
+    requireAllSshRuntimes,
   } satisfies ResolvedBuildOptions;
 });
 
@@ -2765,6 +2809,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   // source file was never written fails the electron-builder step.
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  sshRuntimeBundled = false,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
@@ -2790,6 +2835,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       : {}),
     extraResources: [
       ...DESKTOP_EXTRA_RESOURCES,
+      ...(sshRuntimeBundled ? SSH_RUNTIME_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
@@ -3027,6 +3073,171 @@ export const parseWslRuntimeArchiveMembers = (listing: string): ReadonlyArray<st
     .split(/\r?\n/)
     .map((member) => member.replace(/^\.\//, "").replace(/\/$/, ""))
     .filter((member) => member.length > 0);
+
+export class SshRuntimeArchiveValidationError extends Schema.TaggedError<SshRuntimeArchiveValidationError>()(
+  "SshRuntimeArchiveValidationError",
+  { message: Schema.String },
+) {}
+
+export const SSH_RUNTIME_PLATFORM_KEYS = ["darwin-arm64", "linux-x64", "linux-arm64"] as const;
+export const SSH_RUNTIME_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/ssh-runtime/archives";
+export const SSH_RUNTIME_EXTRA_RESOURCES = [
+  {
+    from: SSH_RUNTIME_RESOURCE_SOURCE_DIR,
+    to: "ssh-runtime/archives",
+    filter: ["*.tar.gz", "*.tar.gz.sha256"],
+  },
+] as const;
+
+export const validateSshRuntimeArchives = Effect.fn("validateSshRuntimeArchives")(
+  function* (input: {
+    readonly directory: string;
+    readonly version: string;
+    readonly requireAll: boolean;
+    readonly requireSidecars?: boolean;
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const archives: Array<{ fileName: string; bytes: Uint8Array; sha256: string }> = [];
+    for (const key of SSH_RUNTIME_PLATFORM_KEYS) {
+      const fileName = cliArchiveFileName(input.version, key);
+      const archivePath = path.join(input.directory, fileName);
+      if (!(yield* fs.exists(archivePath))) {
+        if (input.requireAll)
+          return yield* Effect.fail(
+            new SshRuntimeArchiveValidationError({
+              message: `Missing SSH runtime archive ${archivePath}`,
+            }),
+          );
+        continue;
+      }
+      const stat = yield* fs.stat(archivePath);
+      if (stat.type !== "File" || stat.size > 256n * 1024n * 1024n) {
+        return yield* Effect.fail(
+          new SshRuntimeArchiveValidationError({
+            message: `Invalid SSH runtime archive ${archivePath}`,
+          }),
+        );
+      }
+      const bytes = yield* fs.readFile(archivePath);
+      if (BigInt(bytes.byteLength) !== stat.size || bytes.byteLength > 256 * 1024 * 1024) {
+        return yield* Effect.fail(
+          new SshRuntimeArchiveValidationError({
+            message: `SSH runtime archive changed while reading ${archivePath}`,
+          }),
+        );
+      }
+      const sha256 = NodeCrypto.createHash("sha256").update(bytes).digest("hex");
+      const sidecar = `${archivePath}.sha256`;
+      const hasSidecar = yield* fs.exists(sidecar);
+      if (input.requireSidecars && !hasSidecar) {
+        return yield* Effect.fail(
+          new SshRuntimeArchiveValidationError({
+            message: `Missing SSH runtime checksum ${sidecar}`,
+          }),
+        );
+      }
+      if (hasSidecar) {
+        const checksum = yield* fs.readFileString(sidecar);
+        if (
+          parseChecksums(checksum).get(fileName) !== sha256 ||
+          (input.requireSidecars && checksum !== `${sha256}  ${fileName}\n`)
+        ) {
+          return yield* Effect.fail(
+            new SshRuntimeArchiveValidationError({
+              message: `Invalid or noncanonical SSH runtime checksum ${sidecar}`,
+            }),
+          );
+        }
+      }
+      const tarCommand = cliArchiveTarCommand(yield* HostProcess.Platform, process.env);
+      const listing = yield* spawnAndCollectOutput(
+        ChildProcess.make(tarCommand, ["-tzf", archivePath], {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        }),
+      );
+      if (listing.exitCode !== 0) {
+        return yield* Effect.fail(
+          new SshRuntimeArchiveValidationError({
+            message: `Cannot list ${archivePath}: ${listing.stderr.trim()}`,
+          }),
+        );
+      }
+      const members = parseWslRuntimeArchiveMembers(listing.stdout);
+      const stem = fileName.slice(0, -".tar.gz".length);
+      const required = [
+        `${stem}/goat`,
+        `${stem}/client/index.html`,
+        `${stem}/resource-monitor/${key}/t3-resource-monitor`,
+      ];
+      const pty = [
+        `${stem}/node_modules/node-pty/build/Release/pty.node`,
+        `${stem}/node_modules/node-pty/prebuilds/${key}/pty.node`,
+      ];
+      if (
+        members.length === 0 ||
+        members.some(
+          (member) =>
+            member.split("/").some((segment) => segment === "..") ||
+            (member !== stem && !member.startsWith(`${stem}/`)) ||
+            member.endsWith("/bin.mjs"),
+        ) ||
+        required.some((member) => !members.includes(member)) ||
+        !pty.some((member) => members.includes(member))
+      ) {
+        return yield* Effect.fail(
+          new SshRuntimeArchiveValidationError({
+            message: `Incomplete or wrong-version SSH runtime archive ${archivePath}`,
+          }),
+        );
+      }
+      archives.push({ fileName, bytes, sha256 });
+    }
+    if (archives.length === 0)
+      return yield* Effect.fail(
+        new SshRuntimeArchiveValidationError({
+          message: `No SSH runtime archives for ${input.version} in ${input.directory}`,
+        }),
+      );
+    return archives;
+  },
+);
+
+export const stageSshRuntimeArchives = Effect.fn("stageSshRuntimeArchives")(function* (input: {
+  readonly sourceDirectory: string;
+  readonly destinationDirectory: string;
+  readonly version: string;
+  readonly requireAll: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  // Validate the entire input before creating any destination resources.
+  const archives = yield* validateSshRuntimeArchives({
+    directory: input.sourceDirectory,
+    version: input.version,
+    requireAll: input.requireAll,
+  });
+  yield* fs.makeDirectory(input.destinationDirectory, { recursive: true });
+  for (const archive of archives) {
+    // Write the bytes we hashed, not a second read/copy of a mutable source.
+    yield* fs.writeFile(path.join(input.destinationDirectory, archive.fileName), archive.bytes);
+    yield* fs.writeFileString(
+      path.join(input.destinationDirectory, `${archive.fileName}.sha256`),
+      `${archive.sha256}  ${archive.fileName}\n`,
+    );
+  }
+  yield* Effect.logInfo(
+    `Staged SSH runtime archives: ${archives.length} archives, ${archives.reduce((total, archive) => total + archive.bytes.byteLength, 0)} bytes (plus canonical SHA-256 sidecars).`,
+  );
+  yield* validateSshRuntimeArchives({
+    directory: input.destinationDirectory,
+    version: input.version,
+    requireAll: input.requireAll,
+    requireSidecars: true,
+  });
+});
 
 // Stage and pack the Windows server sidecar: the bundled server plus a hoisted
 // install of only its runtime-external/native dependency closure for win32.
@@ -3292,6 +3503,48 @@ export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
     }),
   );
 });
+
+export const validatePackagedSshRuntimeArchives = Effect.fn("validatePackagedSshRuntimeArchives")(
+  function* (input: {
+    readonly stageDistDir: string;
+    readonly version: string;
+    readonly requireAll: boolean;
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const resourceDirectories: string[] = [];
+    // electron-builder keeps an unpacked app next to installers. Visit only
+    // the output root and one platform directory, never a dependency tree.
+    for (const entry of yield* fs.readDirectory(input.stageDistDir)) {
+      const directory = path.join(input.stageDistDir, entry);
+      if ((yield* fs.stat(directory)).type !== "Directory") continue;
+      if (entry.endsWith("-unpacked")) resourceDirectories.push(path.join(directory, "resources"));
+      if (entry.endsWith(".app"))
+        resourceDirectories.push(path.join(directory, "Contents", "Resources"));
+      if (entry === "mac" || entry.startsWith("mac-")) {
+        for (const app of yield* fs.readDirectory(directory)) {
+          if (app.endsWith(".app"))
+            resourceDirectories.push(path.join(directory, app, "Contents", "Resources"));
+        }
+      }
+    }
+    if (resourceDirectories.length === 0) {
+      return yield* Effect.fail(
+        new SshRuntimeArchiveValidationError({
+          message: `No packaged app resources found in ${input.stageDistDir}`,
+        }),
+      );
+    }
+    for (const resources of resourceDirectories) {
+      yield* validateSshRuntimeArchives({
+        directory: path.join(resources, "ssh-runtime", "archives"),
+        version: input.version,
+        requireAll: input.requireAll,
+        requireSidecars: true,
+      });
+    }
+  },
+);
 
 export const validateWindowsPackagedPayload = Effect.fn(
   "desktopArtifact.validateWindowsPackagedPayload",
@@ -3889,6 +4142,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      options.sshRuntimeArchiveDir !== undefined,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -3960,6 +4214,15 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       sourceArchivePath: options.wslRuntime,
       archivePath: path.join(stageAppDir, WSL_RUNTIME_ARCHIVE_EXTRA_RESOURCE.from),
       hashPath: path.join(stageAppDir, WSL_RUNTIME_ARCHIVE_HASH_EXTRA_RESOURCE.from),
+    });
+  }
+
+  if (options.sshRuntimeArchiveDir !== undefined) {
+    yield* stageSshRuntimeArchives({
+      sourceDirectory: path.resolve(repoRoot, options.sshRuntimeArchiveDir),
+      destinationDirectory: path.join(stageAppDir, SSH_RUNTIME_RESOURCE_SOURCE_DIR),
+      version: appVersion,
+      requireAll: options.requireAllSshRuntimes,
     });
   }
 
@@ -4071,6 +4334,14 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
+  if (options.sshRuntimeArchiveDir !== undefined) {
+    yield* validatePackagedSshRuntimeArchives({
+      stageDistDir,
+      version: appVersion,
+      requireAll: options.requireAllSshRuntimes,
+    });
+  }
+
   const stageEntries = yield* fs.readDirectory(stageDistDir);
   yield* fs.makeDirectory(options.outputDir, { recursive: true });
 
@@ -4148,6 +4419,16 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   mockUpdateServerPort: Flag.Int("mock-update-server-port").pipe(
     Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
     Flag.withDescription("Mock update server port (env: T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT)."),
+    Flag.optional,
+  ),
+  sshRuntimeArchiveDir: Flag.String("ssh-runtime-archive-dir").pipe(
+    Flag.withDescription("Directory of exact-version SSH CLI archives to bundle read-only."),
+    Flag.optional,
+  ),
+  requireAllSshRuntimes: Flag.Boolean("require-all-ssh-runtimes").pipe(
+    Flag.withDescription(
+      "Require darwin-arm64, linux-x64 and linux-arm64 (CI requires them unless bundle omission is explicitly allowed).",
+    ),
     Flag.optional,
   ),
   wslRuntime: Flag.String("wsl-runtime").pipe(

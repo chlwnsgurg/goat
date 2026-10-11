@@ -86,7 +86,10 @@ export interface RemoteT3RunnerOptions {
    */
   readonly archiveVersion?: string | null;
   readonly releaseBaseUrl?: string | null;
+  /** Writable user cache; only this directory may receive gh downloads. */
   readonly archiveDirectory?: string | null;
+  /** Read-only packaged archives. Never create, repair, or download into this directory. */
+  readonly bundledArchiveDirectory?: string | null;
   /** Local gh executable used for authenticated acquisition; defaults to PATH lookup. */
   readonly ghCommand?: string | undefined;
   /**
@@ -1170,9 +1173,10 @@ export const prepareRemoteRuntime = (
     const mayRetainRunner = runner?.keepExistingRunner && stateKey !== undefined;
     if (isNodeScriptRunner(runner) && !mayRetainRunner) return;
     const directory = runner?.archiveDirectory?.trim() ?? "";
+    const bundleDirectory = runner?.bundledArchiveDirectory?.trim() ?? "";
     const mirror = runner?.releaseBaseUrl?.trim() ?? "";
     // Explicit mirrors retain the existing path without a local cache.
-    if (directory === "" && mirror !== "" && !mayRetainRunner) return;
+    if (directory === "" && bundleDirectory === "" && mirror !== "" && !mayRetainRunner) return;
     const version = runner?.archiveVersion?.trim() ?? "";
     yield* Effect.annotateCurrentSpan({
       "ssh.target": target.alias,
@@ -1206,7 +1210,7 @@ export const prepareRemoteRuntime = (
       return;
     }
     const platformKey = cliArchivePlatformKey(probe.platform, probe.arch);
-    if (platformKey === undefined || directory === "") {
+    if (platformKey === undefined) {
       if (mirror !== "") {
         yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
         return;
@@ -1220,16 +1224,42 @@ export const prepareRemoteRuntime = (
         stdout: "",
       });
     }
-    const localArchive = yield* readLocalRuntimeArchive(directory, version, platformKey).pipe(
-      Effect.mapError(runtimePreparationError),
-    );
-    if (localArchive === null && mirror !== "") {
+    const bundledArchive =
+      bundleDirectory === ""
+        ? null
+        : yield* readLocalRuntimeArchive(bundleDirectory, version, platformKey, true).pipe(
+            Effect.mapError(runtimePreparationError),
+          );
+    const localArchive =
+      bundledArchive !== null || directory === ""
+        ? null
+        : yield* readLocalRuntimeArchive(directory, version, platformKey).pipe(
+            Effect.mapError(runtimePreparationError),
+          );
+    if (bundledArchive === null && localArchive === null && mirror !== "") {
       yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
       return;
     }
+    if (bundledArchive === null && localArchive === null) {
+      const path = yield* Path.Path;
+      if (
+        directory === "" ||
+        (bundleDirectory !== "" && path.resolve(directory) === path.resolve(bundleDirectory))
+      ) {
+        return yield* new SshLaunchError({
+          message: `Cannot acquire ${cliArchiveFileName(version, platformKey)} for ${target.alias}: no writable user archive cache distinct from the bundle (${directory || "<not configured>"}). Configure archiveDirectory for goat-si/goat release v${version} or rebuild the packaged archives.`,
+          stdout: "",
+        });
+      }
+    }
     const archive =
+      bundledArchive ??
       localArchive ??
       (yield* downloadRuntimeArchiveWithGh(directory, version, platformKey, runner?.ghCommand));
+    yield* Effect.annotateCurrentSpan(
+      "t3.runtime.acquisition",
+      bundledArchive !== null ? "bundle" : localArchive !== null ? "cache" : "gh",
+    );
     yield* Effect.annotateCurrentSpan({
       "t3.runtime.source": "upload",
       "t3.runtime.upload.bytes": archive.bytes.byteLength,

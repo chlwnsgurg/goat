@@ -187,6 +187,12 @@ describe("ssh tunnel scripts", () => {
         for (const input of [
           inputs[key],
           { ...inputs[key], archiveDirectory: "/fixture/archives" },
+          { ...inputs[key], bundledArchiveDirectory: "/fixture/bundle" },
+          {
+            ...inputs[key],
+            archiveDirectory: "/fixture/archives",
+            bundledArchiveDirectory: "/fixture/bundle",
+          },
         ]) {
           const actual = yield* nativeScripts(input);
           assert.equal(actual.runner, baseline[key].runner);
@@ -2037,6 +2043,140 @@ if (args[0] === "--version") {
       return { home, state, runner, scripts, oldProcess, snapshot, events, cleanCandidates, fs };
     });
 
+    it.live.each([
+      "launch",
+      "mcp",
+      "corrupt-bundle",
+      "candidate-version",
+      "upload-failure",
+      "cache-write-failure",
+      "retained-bundle-bypass",
+    ] as const)("public bundle %s preserves the install-before-switch boundary", (mode) =>
+      Effect.gen(function* () {
+        const f = yield* fixture("none", { seed: mode !== "mcp" });
+        const before = yield* f.snapshot;
+        const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const bundle = `${f.home}/packaged resources/ssh-runtime/archives`;
+        const asset = `goat-${nextVersion}-${platform}-${arch}.tar.gz`;
+        const source = `${f.home}/mirror/v${nextVersion}/${asset}`;
+        if (mode === "candidate-version") {
+          const binary = `${f.home}/stage/${asset.slice(0, -7)}/goat`;
+          const script = (yield* f.fs.readFileString(binary)).replace(
+            'console.log("goat v" + version);',
+            `
+const counter = path.join(fixture, "candidate-versions");
+const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+fs.writeFileSync(counter, String(count + 1));
+console.log("goat v" + (count === 0 ? version : "9.9.9"));`,
+          );
+          yield* f.fs.writeFileString(binary, script);
+          const tar = yield* realSpawner.spawn(
+            ChildProcess.make("tar", ["-czf", source, "-C", `${f.home}/stage`, asset.slice(0, -7)]),
+          );
+          assert.equal(Number(yield* tar.exitCode), 0);
+        }
+        const bytes = yield* f.fs.readFile(source);
+        const crypto = yield* Crypto.Crypto;
+        const hash = Hex.encode(yield* crypto.digest("SHA-256", bytes));
+        yield* f.fs.makeDirectory(bundle, { recursive: true });
+        yield* f.fs.writeFile(`${bundle}/${asset}`, bytes);
+        const checksum = `${mode === "corrupt-bundle" || mode === "retained-bundle-bypass" ? "0".repeat(64) : hash}  ${asset}
+`;
+        yield* f.fs.writeFileString(`${bundle}/${asset}.sha256`, checksum);
+        let downloads = 0;
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
+            if (command.command === "gh") {
+              downloads++;
+              return makeSuccessfulProcess("");
+            }
+            if (
+              mode === "upload-failure" &&
+              command.args.some((arg) => arg.includes("T3_SSH_UPLOADED_ARCHIVE"))
+            )
+              return {
+                ...makeSuccessfulProcess(""),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(43)),
+              };
+            const index = command.args.indexOf("sh");
+            assert.isAtLeast(index, 0);
+            const args = command.args.slice(index);
+            return yield* realSpawner.spawn(
+              ChildProcess.make(
+                "sh",
+                command.args.includes("-c")
+                  ? ["-c", args.join(" ")]
+                  : args.slice(1).filter((arg) => arg !== "-l"),
+                {
+                  env: { HOME: f.home, PATH: process.env.PATH ?? "" },
+                  extendEnv: false,
+                  stdin: command.options.stdin,
+                },
+              ),
+            );
+          }),
+        );
+        const runner = {
+          ...ARCHIVE,
+          bundledArchiveDirectory: bundle,
+          ...(mode === "cache-write-failure"
+            ? { archiveDirectory: `${f.home}/cache-parent-file/cache` }
+            : {}),
+          keepExistingRunner: mode === "retained-bundle-bypass",
+        };
+        if (mode === "cache-write-failure") {
+          yield* f.fs.remove(`${bundle}/${asset}`);
+          yield* f.fs.writeFileString(
+            `${f.home}/cache-parent-file`,
+            "cannot create a cache below a file",
+          );
+        }
+        const invocation =
+          mode === "mcp" || mode === "retained-bundle-bypass"
+            ? SshTunnel.issueRemoteMcpClientSession(
+                uploadTarget,
+                { label: "fixture", ttl: "1h", runtimeModeCeiling: null },
+                {},
+                runner,
+              ).pipe(Effect.map((session) => ({ token: session.token, remotePort: 0 })))
+            : SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, runner).pipe(
+                Effect.map((server) => ({ token: "", remotePort: server.remotePort })),
+              );
+        const result = yield* Effect.result(
+          invocation.pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        );
+        const failure =
+          mode === "corrupt-bundle" ||
+          mode === "candidate-version" ||
+          mode === "upload-failure" ||
+          mode === "cache-write-failure";
+        assert.equal(Result.isFailure(result), failure);
+        if (failure || mode === "retained-bundle-bypass") {
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+        } else if (Result.isSuccess(result)) {
+          if (mode === "mcp") assert.equal(result.success.token, "fixture-session");
+          else {
+            assert.isAbove(result.success.remotePort, 0);
+            assert.equal(Number(yield* f.oldProcess!.exitCode), 0);
+          }
+          assert.equal(
+            (yield* f.fs.readFileString(
+              `${f.home}/.goat/runtime/goat/versions/${nextVersion}/.install-complete`,
+            )).trim(),
+            nextVersion,
+          );
+        }
+        yield* f.cleanCandidates;
+        assert.equal(downloads, 0);
+        assert.equal(yield* f.fs.readFileString(`${bundle}/${asset}.sha256`), checksum);
+        if (mode !== "cache-write-failure")
+          assert.deepEqual(yield* f.fs.readFile(`${bundle}/${asset}`), bytes);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
     it.live("a nested auth runner publishes the real shell PID as install-lock owner", () =>
       Effect.gen(function* () {
         const f = yield* fixture("none", { seed: false });
@@ -2530,3 +2670,233 @@ process.exit(95);
     );
   },
 );
+
+describe("bundled runtime acquisition", () => {
+  it.live.each([
+    "bundle",
+    "cache",
+    "gh",
+    "ready",
+    "retained",
+    "corrupt",
+    "missing-sidecar",
+    "wrong-executable",
+    "bundle-only",
+    "wrong-bundle-version",
+    "wrong-bundle-platform",
+    "no-cache",
+    "same-cache",
+    "blank-bundle",
+  ] as const)(
+    "%s installs or preserves the selected runtime without writing bundle bytes",
+    (mode) =>
+      Effect.gen(function* () {
+        if (HostProcess.Platform.defaultValue() === "win32") return;
+        const fs = yield* FileSystem.FileSystem;
+        const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const crypto = yield* Crypto.Crypto;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-bundle-behavior-" });
+        const home = `${root}/remote-home`;
+        const bundle = `${root}/packaged resources/ssh-runtime/archives`;
+        const cache = `${root}/cache`;
+        const asset = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`;
+        const executable = (version: string, origin: string) =>
+          `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  printf 'goat v${version}\\n'\nelif [ "$1" = "auth" ] && [ "$2" = "pairing" ]; then\n  printf '{"credential":"${origin}-pairing"}\\n'\nelse\n  exit 64\nfi\n`;
+        const makeArchive = (directory: string, origin: string) =>
+          Effect.gen(function* () {
+            const stem = asset.slice(0, -7);
+            const content = `${root}/${origin}-content/${stem}`;
+            yield* fs.makeDirectory(content, { recursive: true });
+            yield* fs.makeDirectory(directory, { recursive: true });
+            const executableVersion =
+              mode === "wrong-executable" && origin === "bundle" ? "1.2.2" : ARCHIVE.archiveVersion;
+            yield* fs.writeFileString(`${content}/goat`, executable(executableVersion, origin));
+            yield* fs.chmod(`${content}/goat`, 0o700);
+            yield* fs.writeFileString(`${content}/origin`, origin);
+            const tar = yield* realSpawner.spawn(
+              ChildProcess.make("tar", [
+                "-czf",
+                `${directory}/${asset}`,
+                "-C",
+                `${root}/${origin}-content`,
+                stem,
+              ]),
+            );
+            assert.equal(Number(yield* tar.exitCode), 0);
+            const bytes = yield* fs.readFile(`${directory}/${asset}`);
+            const hash = Hex.encode(yield* crypto.digest("SHA-256", bytes));
+            yield* fs.writeFileString(`${directory}/${asset}.sha256`, `${hash}  ${asset}\n`);
+            return { bytes, hash };
+          });
+        yield* fs.makeDirectory(home, { recursive: true });
+        const fromBundle = yield* makeArchive(bundle, "bundle");
+        const fromCache = yield* makeArchive(cache, "cache");
+        const fromGh = yield* makeArchive(`${root}/gh-source`, "gh");
+        if (mode === "corrupt" || mode === "ready" || mode === "retained")
+          yield* fs.writeFileString(`${bundle}/${asset}.sha256`, `${"0".repeat(64)}  ${asset}\n`);
+        if (mode === "missing-sidecar") yield* fs.remove(`${bundle}/${asset}.sha256`);
+        if (mode === "wrong-bundle-version" || mode === "wrong-bundle-platform") {
+          yield* fs.rename(
+            `${bundle}/${asset}`,
+            `${bundle}/${mode === "wrong-bundle-version" ? "goat-9.9.9-" + platform + "-" + arch : "goat-" + ARCHIVE.archiveVersion + "-other-platform"}.tar.gz`,
+          );
+        }
+        if (mode === "cache" || mode === "gh" || mode === "no-cache" || mode === "same-cache")
+          yield* fs.remove(`${bundle}/${asset}`);
+        if (mode === "gh") yield* fs.remove(`${cache}/${asset}`);
+        const bundleBefore = yield* fs.readDirectory(bundle);
+        const bundleArchiveBefore = (yield* fs.exists(`${bundle}/${asset}`))
+          ? yield* fs.readFile(`${bundle}/${asset}`)
+          : null;
+        const stateKey = yield* remoteStateKey(uploadTarget);
+        const retainedVersion = "1.2.2-preview.20260910.1";
+        const installedVersion = mode === "retained" ? retainedVersion : ARCHIVE.archiveVersion;
+        const runtime = `${home}/.goat/runtime/goat/versions/${installedVersion}`;
+        if (mode === "ready" || mode === "retained") {
+          yield* fs.makeDirectory(runtime, { recursive: true });
+          yield* fs.writeFileString(`${runtime}/goat`, executable(installedVersion, mode));
+          yield* fs.chmod(`${runtime}/goat`, 0o700);
+          yield* fs.writeFileString(`${runtime}/.install-complete`, installedVersion);
+          yield* fs.writeFileString(`${runtime}/origin`, mode);
+          if (mode === "retained") {
+            const state = `${home}/.goat/ssh-launch/${stateKey}`;
+            yield* fs.makeDirectory(state, { recursive: true });
+            yield* fs.writeFileString(
+              `${state}/run-t3.sh`,
+              SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: retainedVersion }),
+            );
+            yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
+          }
+        }
+        const mutations: string[] = [];
+        const guard = (file: string) => {
+          if (file === bundle || file.startsWith(bundle + "/")) mutations.push(file);
+        };
+        const checkedFs = FileSystem.FileSystem.of({
+          ...fs,
+          writeFile: (file, bytes, options) => {
+            guard(file);
+            return fs.writeFile(file, bytes, options);
+          },
+          writeFileString: (file, text, options) => {
+            guard(file);
+            return fs.writeFileString(file, text, options);
+          },
+          makeDirectory: (file, options) => {
+            guard(file);
+            return fs.makeDirectory(file, options);
+          },
+          remove: (file, options) => {
+            guard(file);
+            return fs.remove(file, options);
+          },
+          rename: (from, to) => {
+            guard(from);
+            guard(to);
+            return fs.rename(from, to);
+          },
+          chmod: (file, mode) => {
+            guard(file);
+            return fs.chmod(file, mode);
+          },
+        });
+        let downloads = 0;
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            assert.equal(command._tag, "StandardCommand");
+            if (command._tag !== "StandardCommand") return makeSuccessfulProcess("");
+            if (command.command === "gh") {
+              downloads++;
+              const destination = command.args[command.args.indexOf("--dir") + 1]!;
+              assert.isFalse(destination.startsWith(bundle));
+              yield* fs.writeFile(`${destination}/${asset}`, fromGh.bytes);
+              yield* fs.writeFileString(`${destination}/SHA256SUMS`, `${fromGh.hash}  ${asset}\n`);
+              return makeSuccessfulProcess("");
+            }
+            const index = command.args.indexOf("sh");
+            assert.isAtLeast(index, 0);
+            const remoteArgs = command.args.slice(index);
+            return yield* realSpawner.spawn(
+              ChildProcess.make(
+                "sh",
+                command.args.includes("-c") ? ["-c", remoteArgs.join(" ")] : ["-s"],
+                {
+                  env: { HOME: home, PATH: process.env.PATH ?? "" },
+                  extendEnv: false,
+                  stdin: command.options.stdin,
+                },
+              ),
+            );
+          }),
+        );
+        const runner = {
+          ...ARCHIVE,
+          bundledArchiveDirectory: mode === "blank-bundle" ? "  " : bundle,
+          ...(mode === "bundle-only" || mode === "no-cache"
+            ? {}
+            : { archiveDirectory: mode === "same-cache" ? bundle + "/../archives" : cache }),
+          // Bundle must also win over an explicit unusable mirror.
+          ...(mode === "bundle" ? { releaseBaseUrl: "file:///unavailable" } : {}),
+          keepExistingRunner: mode === "retained",
+        };
+        const result = yield* Effect.result(
+          SshTunnel.prepareRemoteRuntime(uploadTarget, {}, runner, stateKey).pipe(
+            Effect.provideService(FileSystem.FileSystem, checkedFs),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
+        );
+        const failure =
+          mode === "corrupt" ||
+          mode === "missing-sidecar" ||
+          mode === "wrong-executable" ||
+          mode === "no-cache" ||
+          mode === "same-cache";
+        assert.equal(Result.isFailure(result), failure);
+        if (failure) {
+          assert.isFalse(yield* fs.exists(`${runtime}/.install-complete`));
+          assert.isFalse(yield* fs.exists(`${home}/.goat/ssh-launch/${stateKey}/run-t3.sh`));
+        } else {
+          const expected =
+            mode === "bundle-only"
+              ? "bundle"
+              : mode === "wrong-bundle-version" ||
+                  mode === "wrong-bundle-platform" ||
+                  mode === "blank-bundle"
+                ? "cache"
+                : mode;
+          assert.equal(yield* fs.readFileString(`${runtime}/origin`), expected);
+          assert.equal(
+            (yield* fs.readFileString(`${runtime}/.install-complete`)).trim(),
+            installedVersion,
+          );
+          const runnerFile = `${home}/.goat/ssh-launch/${stateKey}/run-t3.sh`;
+          const retainedBefore = mode === "retained" ? yield* fs.readFileString(runnerFile) : null;
+          if (mode !== "retained") assert.isFalse(yield* fs.exists(runnerFile));
+          // Public pairing runs prepare again, then verifies/publishes its candidate.
+          const pairing = yield* SshTunnel.issueRemotePairingToken(uploadTarget, {}, runner).pipe(
+            Effect.provideService(FileSystem.FileSystem, checkedFs),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          );
+          assert.equal(pairing.credential, `${expected}-pairing`);
+          assert.isTrue(yield* fs.exists(runnerFile));
+          if (retainedBefore !== null)
+            assert.equal(yield* fs.readFileString(runnerFile), retainedBefore);
+          assert.deepEqual(
+            (yield* fs.readDirectory(`${home}/.goat/ssh-launch/${stateKey}`)).filter((name) =>
+              name.startsWith("run-t3.next."),
+            ),
+            [],
+          );
+        }
+        assert.equal(downloads, mode === "gh" ? 1 : 0);
+        assert.deepEqual(mutations, []);
+        assert.deepEqual(yield* fs.readDirectory(bundle), bundleBefore);
+        if (bundleArchiveBefore !== null)
+          assert.deepEqual(yield* fs.readFile(`${bundle}/${asset}`), bundleArchiveBefore);
+        if (mode !== "gh")
+          assert.deepEqual(yield* fs.readFile(`${cache}/${asset}`), fromCache.bytes);
+        // Distinct tar origins prove which executable tree actually got installed.
+        assert.notDeepEqual(fromBundle.bytes, fromCache.bytes);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+});

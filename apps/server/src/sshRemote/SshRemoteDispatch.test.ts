@@ -340,3 +340,42 @@ describe("SSH dispatch release mirror", () => {
       }),
   );
 });
+
+describe("SSH dispatch packaged runtime", () => {
+  it.effect("resolves bundle separately from writable user cache", () =>
+    Effect.gen(function* () {
+      const runner = yield* resolveSshCliRunner("/fixture/home").pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnvRecord({
+            T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR:
+              "  /Applications/GOAT.app/Contents/Resources/ssh-runtime/archives  ",
+            T3CODE_SSH_RUNTIME_ARCHIVE_DIR: "/fixture/user-cache",
+          }),
+        ),
+      );
+      expect(runner.bundledArchiveDirectory).toBe(
+        "/Applications/GOAT.app/Contents/Resources/ssh-runtime/archives",
+      );
+      expect(runner.archiveDirectory).toBe("/fixture/user-cache");
+      expect(runner.keepExistingRunner).toBe(true);
+    }),
+  );
+  it.effect.each([undefined, "", "  "])("omits empty bundle %s", (value) =>
+    Effect.gen(function* () {
+      const runner = yield* resolveSshCliRunner("/fixture/home").pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnvRecord(
+            {
+              T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: value,
+            },
+            { preserveEmptyStrings: true },
+          ),
+        ),
+      );
+      expect("bundledArchiveDirectory" in runner).toBe(false);
+      expect(runner.archiveDirectory).toBe("/fixture/home/runtime/archives");
+    }),
+  );
+});
