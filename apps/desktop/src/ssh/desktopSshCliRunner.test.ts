@@ -32,7 +32,11 @@ describe("resolveDesktopSshCliRunner", () => {
         archiveOptions,
         server,
       ),
-      { archiveVersion: "0.0.46-nightly.20261010.7", ...archiveOptions },
+      {
+        archiveVersion: "0.0.46-nightly.20261010.7",
+        ...archiveOptions,
+        refreshOwnedRuntimeOnFirstConnection: true,
+      },
     );
   });
 

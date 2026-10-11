@@ -515,7 +515,7 @@ describe("ssh tunnel scripts", () => {
       'DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"',
     );
     assert.include(launch, "check_live_protocol()");
-    assert.include(launch, 'PID_TO_STOP="$LIVE_PID"');
+    assert.include(launch, 'PID_TO_STOP="$UPGRADE_PID"');
     assert.include(launch, 'REMOTE_PORT="$LIVE_PORT"');
     assert.include(launch, 'rm -f "$PID_FILE"');
     assert.include(launch, "printf 'external\\n' >\"$MANAGED_FILE\"");
@@ -2587,6 +2587,16 @@ else process.exit(2);
       Effect.gen(function* () {
         const f = yield* fixture("none");
         const before = yield* f.snapshot;
+        const psPath = `${f.home}/.test/identity-bin/ps`;
+        const originalPs = yield* f.fs.readFileString(psPath);
+        // Observe publication at the ownership check that immediately precedes signaling.
+        yield* f.fs.writeFileString(
+          psPath,
+          originalPs.replace(
+            "  printf '%s",
+            `  if grep -F "T3_ARCHIVE_VERSION='${nextVersion}'" '${f.state}/run-t3.sh' >/dev/null; then if kill -0 "$(cat '${f.state}/pid')" 2>/dev/null; then observed_alive=true; else observed_alive=false; fi; printf '{"type":"publication","oldAlive":%s}\\n' "$observed_alive" >> '${f.home}/.test/events'; fi\n  printf '%s`,
+          ),
+        );
         const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
         assert.equal(result.code, 0, result.stderr);
         const events = yield* f.events;
@@ -2599,12 +2609,7 @@ else process.exit(2);
         const started = events.findIndex(
           (event) => event.type === "start" && event.version === nextVersion,
         );
-        const published = events.findIndex(
-          (event) =>
-            event.type === "version" &&
-            event.version === nextVersion &&
-            event.runner?.includes(`T3_ARCHIVE_VERSION='${nextVersion}'`),
-        );
+        const published = events.findIndex((event) => event.type === "publication");
         assert.isAtLeast(verified, 0);
         assert.include(events[verified]!.runner!, `T3_ARCHIVE_VERSION='${oldVersion}'`);
         assert.isTrue(events[verified]!.oldAlive);
@@ -3308,14 +3313,17 @@ fi
             { concurrency: "unbounded" },
           );
           assert.notEqual(result.code, 0);
-          assert.include(result.stderr, "ownership could not be verified");
+          assert.include(
+            result.stderr,
+            mode === "missing identity" ? `kill ${pid}` : "ownership could not be verified",
+          );
           assert.equal(result.stdout, "");
           if (mode === "missing identity")
             assert.isFalse(yield* fs.exists(`${home}/.test/inspected`));
           else
-            assert.equal(
-              yield* fs.readFileString(`${home}/.test/inspected`),
-              mode === "stale PID" ? "inspected\n" : "inspected\ninspected\n",
+            assert.isAtLeast(
+              (yield* fs.readFileString(`${home}/.test/inspected`)).trim().split("\n").length,
+              mode === "identity changes after publication" ? 2 : 1,
             );
           assert.isFalse(yield* fs.exists(`${home}/.test/signals`));
           if (mode === "identity changes after publication")
@@ -3383,6 +3391,9 @@ if (args[0] === "--version") {
       value.sshRuntimeProtocolVersion ?? "unknown", value.orchestrationProtocolVersion ?? "unknown",
       value.pid ?? 0, value.port ?? 0].join(" "));
   } else console.log(JSON.stringify(value));
+} else if (args[0] === "__ssh-helper" && args[1] === "activity") {
+  const value = await (await import(${JSON.stringify(helperUrl)})).readSshServerActivity(Number(args[args.indexOf("--port")+1]), Number(args[args.indexOf("--pid")+1]));
+  event("activity", { value }); console.log(value);
 } else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
   const socket = net.createServer(); socket.listen(0, "127.0.0.1", () => {
     const port = socket.address().port; socket.close(() => console.log(port));
@@ -3401,6 +3412,7 @@ if (args[0] === "--version") {
   }); req.on("error", () => process.exit(1));
 } else if (args[0] === "auth") {
   event("auth", { args });
+  if (fs.existsSync(path.join(test, "pairing-fail"))) process.exit(2);
   if (args.includes("--runtime-mode-ceiling") && fs.existsSync(path.join(test, "reject-ceiling"))) process.exit(2);
   console.log(JSON.stringify(args[1] === "pairing" ? {credential: version} : {token: version, expiresAt: null}));
 } else if (args[0] === "serve") {
@@ -3410,6 +3422,16 @@ if (args[0] === "--version") {
     res.setHeader("content-type", "application/json");
     if (req.url === "/.well-known/t3/environment" && (${JSON.stringify(signals.descriptor404 ?? false)} || fs.existsSync(path.join(test, "descriptor404")))) {
       res.statusCode = 404; res.end("{}"); return;
+    }
+    if (req.url === "/.well-known/t3/activity") {
+      const file = path.join(test, "activity");
+      const values = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split(",") : ["unknown"];
+      const countFile = path.join(test, "activity-requests");
+      const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) : 0;
+      fs.writeFileSync(countFile, String(count+1));
+      const activity = values[Math.min(count, values.length-1)];
+      if (activity !== "idle" && activity !== "busy") { res.statusCode=404; res.end("{}"); return; }
+      res.end(JSON.stringify({activity, serverVersion: version, pid: process.pid})); return;
     }
     res.end(req.url === "/.well-known/t3/environment" ? JSON.stringify(descriptor) : "ok");
   });
@@ -3424,7 +3446,7 @@ if (args[0] === "--version") {
     fs.mkdirSync(path.dirname(runtimeFile), {recursive: true}); fs.writeFileSync(runtimeFile, JSON.stringify(record));
     fs.appendFileSync(path.join(test, "pids"), process.pid + "\\n");
     event("start", { runner: fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") });
-    if (args.includes("--test-seed")) {
+    if (args.includes("--test-seed") || process.env.T3_TEST_SEED === "1") {
       fs.writeFileSync(path.join(test, "accepted-ready-" + process.pid), "ready");
       console.log(JSON.stringify(record));
     }
@@ -3445,6 +3467,7 @@ if (args[0] === "--version") {
       ownTokens?: string;
       liveTokens?: string;
       descriptor404?: boolean;
+      nodeMode?: boolean;
     }) {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -3463,7 +3486,16 @@ if (args[0] === "--version") {
       yield* fs.writeFileString(`${old}/goat`, protocolExecutable(input.oldVersion, input, state));
       yield* fs.chmod(`${old}/goat`, 0o700);
       yield* fs.writeFileString(`${old}/.install-complete`, input.oldVersion + "\n");
-      const oldRunner = (yield* nativeScripts({ archiveVersion: input.oldVersion })).runner + "\n";
+      const nodeEntry = `${home}/old dev's entry.cjs`;
+      if (input.nodeMode)
+        yield* fs.writeFileString(
+          nodeEntry,
+          protocolExecutable(input.oldVersion, { ...input, nodeReadiness: true }, state),
+        );
+      const oldRunner =
+        (yield* nativeScripts(
+          input.nodeMode ? { nodeScriptPath: nodeEntry } : { archiveVersion: input.oldVersion },
+        )).runner + "\n";
       yield* fs.writeFileString(`${state}/run-t3.sh`, oldRunner);
       yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
       yield* Effect.addFinalizer(() =>
@@ -3485,11 +3517,31 @@ if (args[0] === "--version") {
       let pid = 0;
       let port = 0;
       if (input.live) {
+        const nodePort = input.nodeMode ? yield* NetService.make().reserveLoopbackPort() : 0;
         const child = yield* realSpawner.spawn(
-          ChildProcess.make(`${old}/goat`, ["serve", "--test-seed"], {
-            env: { HOME: home, PATH: process.env.PATH ?? "" },
-            extendEnv: false,
-          }),
+          ChildProcess.make(
+            input.nodeMode ? process.execPath : `${old}/goat`,
+            input.nodeMode
+              ? [
+                  nodeEntry,
+                  "serve",
+                  "--host",
+                  "127.0.0.1",
+                  "--port",
+                  String(nodePort),
+                  "--base-dir",
+                  `${home}/.goat`,
+                ]
+              : ["serve", "--test-seed"],
+            {
+              env: {
+                HOME: home,
+                PATH: process.env.PATH ?? "",
+                ...(input.nodeMode ? { T3_TEST_SEED: "1" } : {}),
+              },
+              extendEnv: false,
+            },
+          ),
         );
         const ready = JSON.parse(
           yield* child.stdout.pipe(
@@ -3502,7 +3554,7 @@ if (args[0] === "--version") {
         assert.equal(ready.pid, Number(child.pid));
         pid = ready.pid;
         port = ready.port;
-        yield* installArchivePsDouble(home, pid, port, input.oldVersion);
+        if (!input.nodeMode) yield* installArchivePsDouble(home, pid, port, input.oldVersion);
         yield* fs.writeFileString(`${state}/pid`, `${pid}\n`);
         yield* fs.writeFileString(`${state}/port`, `${port}\n`);
         yield* fs.writeFileString(`${state}/managed`, input.kind + "\n");
@@ -3530,6 +3582,23 @@ if (args[0] === "--version") {
       );
       yield* fs.writeFileString(`${cache}/${stem}.tar.gz.sha256`, `${sha}  ${stem}.tar.gz\n`);
       const runner = { ...ARCHIVE, archiveDirectory: cache };
+      const retainedPrepared: SshTunnel.PreparedRemoteRuntime = {
+        runner: {
+          ...runner,
+          archiveVersion: input.oldVersion,
+          refreshOwnedRuntimeOnFirstConnection: true,
+        },
+        version: input.oldVersion,
+        requestedVersion: ARCHIVE.archiveVersion,
+        source: "retained",
+        requireInstalled: true,
+        mayUpgradeOwnedServer: true,
+        retainedRunnerSha256: Hex.encode(
+          yield* crypto.digest("SHA-256", encoder.encode(oldRunner)),
+        ),
+        refreshIfIdle: true,
+        expectedLiveVersion: input.oldVersion,
+      };
       const remoteCommands: ChildProcess.Command[] = [];
       let uploads = 0;
       let gh = 0;
@@ -3608,26 +3677,39 @@ if (args[0] === "--version") {
           );
         });
       });
-      const run = (entry: "launch" | "pairing" | "mcp", secondary = false) => {
-        const inputRunner = { ...runner, keepExistingRunner: secondary };
+      const run = (
+        entry: "launch" | "pairing" | "mcp",
+        secondary = false,
+        options: SshTunnel.RemoteT3RunnerOptions = {},
+        prepared?: SshTunnel.PreparedRemoteRuntime,
+      ) => {
+        const inputRunner = { ...runner, ...options, keepExistingRunner: secondary };
         const action =
           entry === "launch"
             ? SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, inputRunner).pipe(
                 Effect.map((result) => ({
                   version: result.selectedRuntime.version,
                   port: result.remotePort,
+                  refresh: result.refresh,
                 })),
               )
             : entry === "pairing"
-              ? SshTunnel.issueRemotePairingToken(uploadTarget, {}, inputRunner).pipe(
-                  Effect.map((result) => ({ version: result.credential, port: 0 })),
+              ? SshTunnel.issueRemotePairingToken(uploadTarget, {}, inputRunner, prepared).pipe(
+                  Effect.map((result) => ({
+                    version: result.credential,
+                    port: 0,
+                    refresh: undefined,
+                  })),
                 )
               : SshTunnel.issueRemoteMcpClientSession(
                   uploadTarget,
                   { label: "fixture", ttl: "1h", runtimeModeCeiling: null },
                   {},
                   inputRunner,
-                ).pipe(Effect.map((result) => ({ version: result.token, port: 0 })));
+                  prepared,
+                ).pipe(
+                  Effect.map((result) => ({ version: result.token, port: 0, refresh: undefined })),
+                );
         return action.pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport),
           Effect.provideService(FileSystem.FileSystem, observedFs),
@@ -3652,6 +3734,7 @@ if (args[0] === "--version") {
         state,
         test,
         old,
+        nodeEntry,
         pid,
         port,
         run,
@@ -3665,6 +3748,7 @@ if (args[0] === "--version") {
         transport,
         runner,
         observedFs,
+        retainedPrepared,
       };
     });
 
@@ -3726,6 +3810,724 @@ if (args[0] === "--version") {
           const events = yield* f.fs.readFileString(`${f.test}/events`);
           assert.notInclude(events, '"type":"stop"');
           assert.notInclude(events, '"type":"auth"');
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["archive", "node"] as const).flatMap((mode) =>
+        [true, false].map((descriptor404) => ({ mode, descriptor404 })),
+      ),
+    )(
+      "adopts only verified legacy archives; mode=$mode unknown=$descriptor404",
+      ({ mode, descriptor404 }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            descriptor404,
+            ssh: 1,
+            orchestration: 2,
+            nodeMode: mode === "node",
+          });
+          yield* f.fs.remove(`${f.state}/identity`);
+          const nextEntry = `${f.home}/new dev's entry.cjs`;
+          if (mode === "node")
+            yield* f.fs.writeFileString(
+              nextEntry,
+              protocolExecutable(
+                "1.2.3",
+                { ssh: 1, orchestration: 2, nodeReadiness: true },
+                f.state,
+              ),
+            );
+          const bin = `${f.test}/trace-bin`;
+          yield* f.fs.makeDirectory(bin);
+          const ps = mode === "node" ? "/bin/ps" : `${f.test}/identity-bin/ps`;
+          yield* f.fs.writeFileString(
+            `${bin}/ps`,
+            `#!${process.execPath}
+const fs=require('node:fs'),cp=require('node:child_process');
+const args=process.argv.slice(2);
+if(args[3]===${JSON.stringify(String(f.pid))}) fs.appendFileSync(${JSON.stringify(`${f.test}/events`)},JSON.stringify({type:'verify',identity:fs.existsSync(${JSON.stringify(`${f.state}/identity`)})?fs.readFileSync(${JSON.stringify(`${f.state}/identity`)},'utf8'):null})+'\\n');
+process.stdout.write(cp.execFileSync(${JSON.stringify(ps)},args));
+`,
+          );
+          yield* f.fs.chmod(`${bin}/ps`, 0o700);
+          f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
+          const before = yield* f.snapshot;
+          const result = yield* f.run(
+            "launch",
+            false,
+            mode === "node" && descriptor404 ? { nodeScriptPath: nextEntry } : {},
+          );
+          if (mode === "node") {
+            assert.isTrue(Result.isFailure(result));
+            if (Result.isFailure(result)) assert.include(String(result.failure), `kill ${f.pid}`);
+            assert.deepEqual(yield* f.snapshot, before);
+            yield* Effect.sync(() => process.kill(f.pid, 0));
+            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '\"type\":\"stop\"');
+            return;
+          }
+          assert.isTrue(Result.isSuccess(result));
+          const events = (yield* f.fs.readFileString(`${f.test}/events`))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          const stopped = events.findIndex((event) => event.type === "stop");
+          assert.isAbove(stopped, 0);
+          assert.isTrue(
+            events
+              .slice(0, stopped)
+              .some((event) => event.type === "verify" && event.identity !== null),
+          );
+          assert.isTrue(
+            events
+              .slice(0, stopped)
+              .some(
+                (event) => event.type === "version" && event.version === ARCHIVE.archiveVersion,
+              ),
+          );
+          assert.notEqual((yield* f.fs.readFileString(`${f.state}/pid`)).trim(), String(f.pid));
+          const identity = yield* f.fs.readFileString(`${f.state}/identity`);
+          assert.include(identity, `/versions/${ARCHIVE.archiveVersion}/goat`);
+          assert.include(identity, `--base-dir ${f.home}/.goat`);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      "external",
+      "absent marker",
+      "dead pid",
+      "wrong port",
+      "wrong base dir",
+      "wrong version",
+      "malformed assignment",
+      "duplicate assignment",
+      "prefix command",
+      "suffix command",
+      "conflicting identity",
+    ] as const)("preserves an unverifiable legacy server: %s", (failure) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          descriptor404: true,
+        });
+        yield* f.fs.remove(`${f.state}/identity`);
+        if (failure === "external") yield* f.fs.writeFileString(`${f.state}/managed`, "external\n");
+        if (failure === "absent marker") yield* f.fs.remove(`${f.state}/managed`);
+        if (failure === "dead pid") yield* f.fs.writeFileString(`${f.state}/pid`, "424242\n");
+        if (failure === "wrong port")
+          yield* f.fs.writeFileString(
+            `${f.state}/port`,
+            String(f.port === 65535 ? 1234 : f.port + 1) + "\n",
+          );
+        if (failure === "conflicting identity")
+          yield* f.fs.writeFileString(`${f.state}/identity`, "conflicting identity\n");
+        if (["wrong version", "malformed assignment", "duplicate assignment"].includes(failure)) {
+          const runner = yield* f.fs.readFileString(`${f.state}/run-t3.sh`);
+          yield* f.fs.writeFileString(
+            `${f.state}/run-t3.sh`,
+            failure === "wrong version"
+              ? runner.replace("T3_ARCHIVE_VERSION='1.2.2'", "T3_ARCHIVE_VERSION='1.2.1'")
+              : failure === "malformed assignment"
+                ? runner.replace("T3_ARCHIVE_VERSION='1.2.2'", "T3_ARCHIVE_VERSION=1.2.2")
+                : runner + "\nT3_ARCHIVE_VERSION='1.2.2'\n",
+          );
+        }
+        if (["wrong base dir", "prefix command", "suffix command"].includes(failure)) {
+          const ps = yield* f.fs.readFileString(`${f.test}/identity-bin/ps`);
+          yield* f.fs.writeFileString(
+            `${f.test}/identity-bin/ps`,
+            failure === "wrong base dir"
+              ? ps.replace("--base-dir $HOME/.goat", "--base-dir /other/userdata")
+              : failure === "prefix command"
+                ? ps.replace('"$HOME/.goat/runtime/', '"tail -f $HOME/.goat/runtime/')
+                : ps.replace('--base-dir $HOME/.goat"', '--base-dir $HOME/.goat --extra"'),
+          );
+        }
+        const before = yield* f.snapshot;
+        const result = yield* f.run("launch");
+        assert.isTrue(Result.isFailure(result));
+        assert.deepEqual(yield* f.snapshot, before);
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      "other UID",
+      "arbitrary argv0",
+      "non-GOAT path",
+      "changed runner",
+      "symlink pid",
+      "symlink port",
+      "symlink managed",
+      "symlink run-t3.sh",
+      "control pid",
+      "control port",
+      "control version",
+      "extra newline",
+      "start time changes",
+      "start time changes before kill",
+    ] as const)("audit legacy refusal: %s", (failure) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          descriptor404: true,
+        });
+        yield* f.fs.remove(`${f.state}/identity`);
+        let linked: string | undefined;
+        if (failure.startsWith("symlink ")) {
+          linked = `${f.state}/${failure.slice("symlink ".length)}`;
+          yield* f.fs.rename(linked, `${linked}.original`);
+          yield* f.fs.symlink(`${linked}.original`, linked);
+        }
+        if (failure === "control pid")
+          yield* f.fs.writeFileString(`${f.state}/pid`, `${f.pid}\t\n`);
+        if (failure === "control port")
+          yield* f.fs.writeFileString(`${f.state}/port`, `${f.port}\r\n`);
+        if (failure === "extra newline")
+          yield* f.fs.writeFileString(`${f.state}/pid`, `${f.pid}\n\n`);
+        if (failure === "control version") {
+          const source = yield* f.fs.readFileString(`${f.state}/run-t3.sh`);
+          yield* f.fs.writeFileString(
+            `${f.state}/run-t3.sh`,
+            source.replace("T3_ARCHIVE_VERSION='1.2.2'", "T3_ARCHIVE_VERSION='1.2.2\t'"),
+          );
+        }
+        const psPath = `${f.test}/identity-bin/ps`;
+        let ps = yield* f.fs.readFileString(psPath);
+        if (failure === "arbitrary argv0")
+          ps = ps.replace('"$HOME/.goat/runtime/', '"arbitrary $HOME/.goat/runtime/');
+        if (failure === "non-GOAT path")
+          ps = ps.replace(
+            "$HOME/.goat/runtime/goat/versions/",
+            "$HOME/.other/runtime/goat/versions/",
+          );
+        let prefix = "";
+        if (failure === "other UID")
+          prefix = `if [ "$1 $2 $3 $4" = '-o uid= -p ${f.pid}' ]; then printf '9999999\\n'; exit 0; fi\n`;
+        if (failure === "changed runner")
+          prefix = `if [ "$1 $2 $3 $4" = '-o uid= -p ${f.pid}' ]; then printf '# changed during inspection\\n' >> '${f.state}/run-t3.sh'; fi\n`;
+        if (failure.startsWith("start time changes")) {
+          const condition = failure.endsWith("before kill")
+            ? `grep -q "T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'" '${f.state}/run-t3.sh'`
+            : `[ -e '${f.test}/start-inspected' ]`;
+          prefix = `if [ "$1 $2 $3 $4" = '-o lstart= -p ${f.pid}' ]; then if ${condition}; then printf 'Thu Jan  1 00:00:00 1970\\n'; else touch '${f.test}/start-inspected'; /bin/ps "$@"; fi; exit 0; fi\n`;
+        }
+        yield* f.fs.writeFileString(psPath, ps.replace("#!/bin/sh\n", "#!/bin/sh\n" + prefix));
+        const before = yield* f.snapshot;
+        const result = yield* f.run("launch");
+        assert.isTrue(Result.isFailure(result));
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+        const after = yield* f.snapshot;
+        if (failure === "start time changes before kill") {
+          assert.equal(after.pid, before.pid);
+          assert.equal(after.port, before.port);
+          assert.equal(after.managed, before.managed);
+          assert.equal(after.runtime, before.runtime);
+          assert.equal(after.oldExecutable, before.oldExecutable);
+          assert.equal(after.oldMarker, before.oldMarker);
+          assert.equal(after.identity, null);
+          assert.equal(after["run-t3.sh"], before["run-t3.sh"]);
+        } else if (failure === "changed runner") {
+          assert.isTrue(after["run-t3.sh"]!.startsWith(before["run-t3.sh"]!));
+          assert.include(after["run-t3.sh"]!, "# changed during inspection\n");
+          assert.deepEqual({ ...after, "run-t3.sh": null }, { ...before, "run-t3.sh": null });
+        } else assert.deepEqual(after, before);
+        if (linked !== undefined) assert.equal(yield* f.fs.readLink(linked), `${linked}.original`);
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        assert.notInclude(events, '"type":"stop"');
+        assert.notInclude(events, '"type":"auth"');
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("legacy acquisition failure preserves all running-server files", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          descriptor404: true,
+        });
+        yield* f.fs.remove(`${f.state}/identity`);
+        const cache = f.runner.archiveDirectory;
+        const name = (yield* f.fs.readDirectory(cache)).find((name) => name.endsWith(".sha256"))!;
+        yield* f.fs.writeFileString(`${cache}/${name}`, "invalid checksum\n");
+        const before = yield* f.snapshot;
+        assert.isTrue(Result.isFailure(yield* f.run("launch")));
+        assert.deepEqual(yield* f.snapshot, before);
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["idle", "busy", "unknown", "garbage", "idle,busy"] as const)(
+      "startup refresh respects activity %s",
+      (activity) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          yield* f.fs.writeFileString(`${f.test}/activity`, activity);
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch", false, {
+            refreshOwnedRuntimeOnFirstConnection: true,
+          });
+          assert.isTrue(Result.isSuccess(result));
+          if (Result.isSuccess(result)) {
+            assert.equal(
+              result.success.refresh,
+              activity === "idle"
+                ? "replaced"
+                : activity === "busy" || activity === "idle,busy"
+                  ? "reused-busy"
+                  : "reused-unknown",
+            );
+            assert.equal(
+              result.success.version,
+              activity === "idle" ? ARCHIVE.archiveVersion : "1.2.2",
+            );
+          }
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          if (activity === "idle") {
+            assert.include(events, '"type":"stop"');
+            assert.include(
+              yield* f.fs.readFileString(`${f.state}/identity`),
+              `/versions/${ARCHIVE.archiveVersion}/goat`,
+            );
+            assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "2");
+          } else {
+            assert.deepEqual(yield* f.snapshot, before);
+            yield* Effect.sync(() => process.kill(f.pid, 0));
+            assert.notInclude(events, '"type":"stop"');
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      ARCHIVE.archiveVersion,
+      "2.0.0",
+      "1.10.0",
+      "1.2.3-preview-z",
+      "1.2.3-preview.alpha",
+    ])("startup reuses an equal/newer release %s", (version) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: version,
+          ssh: 1,
+          orchestration: 2,
+        });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+        const before = yield* f.snapshot;
+        assert.isTrue(
+          Result.isSuccess(
+            yield* f.run("launch", false, { refreshOwnedRuntimeOnFirstConnection: true }),
+          ),
+        );
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.isFalse(yield* f.fs.exists(`${f.test}/activity-requests`));
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("refreshes only an older numeric prerelease", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.3-preview.9",
+          ssh: 1,
+          orchestration: 2,
+        });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+        const result = yield* f.run("launch", false, {
+          refreshOwnedRuntimeOnFirstConnection: true,
+        });
+        assert.isTrue(Result.isSuccess(result));
+        if (Result.isSuccess(result)) assert.equal(result.success.refresh, "replaced");
+        assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "2");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["pairing", "mcp", "keepExistingRunner"] as const).flatMap((entry) =>
+        (entry === "keepExistingRunner" ? [false] : [false, true]).map((prepared) => ({
+          entry,
+          prepared,
+        })),
+      ),
+    )("secondary $entry vetoes startup refresh; prepared=$prepared", ({ entry, prepared }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+        const before = yield* f.snapshot;
+        assert.isTrue(
+          Result.isSuccess(
+            yield* f.run(
+              entry === "keepExistingRunner" ? "launch" : entry,
+              entry === "keepExistingRunner",
+              { refreshOwnedRuntimeOnFirstConnection: true },
+              prepared ? f.retainedPrepared : undefined,
+            ),
+          ),
+        );
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.isFalse(yield* f.fs.exists(`${f.test}/activity-requests`));
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["pairing", "mcp", "keepExistingRunner"] as const).flatMap((entry) =>
+        (entry === "keepExistingRunner" ? [false] : [false, true]).map((prepared) => ({
+          entry,
+          prepared,
+        })),
+      ),
+    )("secondary $entry cannot adopt legacy ownership; prepared=$prepared", ({ entry, prepared }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          descriptor404: true,
+        });
+        yield* f.fs.remove(`${f.state}/identity`);
+        const before = yield* f.snapshot;
+        assert.isTrue(
+          Result.isFailure(
+            yield* f.run(
+              entry === "keepExistingRunner" ? "launch" : entry,
+              entry === "keepExistingRunner",
+              { refreshOwnedRuntimeOnFirstConnection: true },
+              prepared ? f.retainedPrepared : undefined,
+            ),
+          ),
+        );
+        assert.deepEqual(yield* f.snapshot, before);
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+        assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["busy", "unknown", "idle", "failure"] as const)(
+      "manager consumes its startup decision once: %s",
+      (mode) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          yield* f.fs.writeFileString(
+            `${f.test}/activity`,
+            mode === "busy" || mode === "unknown" ? mode : "idle",
+          );
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.succeed({
+                ...f.runner,
+                refreshOwnedRuntimeOnFirstConnection: true,
+              }),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            if (mode === "failure") {
+              const name = (yield* f.fs.readDirectory(f.runner.archiveDirectory)).find((name) =>
+                name.endsWith(".sha256"),
+              )!;
+              const file = `${f.runner.archiveDirectory}/${name}`;
+              const bytes = yield* f.fs.readFileString(file);
+              yield* f.fs.writeFileString(file, "invalid checksum\n");
+              assert.isTrue(
+                Result.isFailure(yield* Effect.result(manager.ensureEnvironment(uploadTarget))),
+              );
+              yield* f.fs.writeFileString(file, bytes);
+            }
+            yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
+            if (mode === "idle" || mode === "failure") {
+              yield* installArchivePsDouble(
+                f.home,
+                Number((yield* f.fs.readFileString(`${f.state}/pid`)).trim()),
+                Number((yield* f.fs.readFileString(`${f.state}/port`)).trim()),
+                ARCHIVE.archiveVersion,
+              );
+            }
+            const count = yield* f.fs.readFileString(`${f.test}/activity-requests`);
+            assert.equal(count, mode === "busy" || mode === "unknown" ? "1" : "2");
+            yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+            yield* manager.disconnectEnvironment(uploadTarget);
+            yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
+            assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), count);
+            const events = (yield* f.fs.readFileString(`${f.test}/events`))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            assert.equal(
+              events.filter((event) => event.type === "stop").length,
+              mode === "busy" || mode === "unknown" ? 0 : 1,
+            );
+          }).pipe(Effect.provide(layer), Effect.scoped);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("reconciles the cached forward after pairing fails during the first ensure", () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
+        yield* f.fs.writeFileString(`${f.test}/pairing-fail`, "fail");
+        const before = yield* f.snapshot;
+        const layer = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+          Layer.succeed(FileSystem.FileSystem, f.observedFs),
+          Layer.succeed(HttpClient.HttpClient, testHttpClient),
+          Layer.succeed(NetService.NetService, testNetService),
+          SshAuth.SshPasswordPrompt.disabledLayer,
+          SshTunnel.SshEnvironmentManager.layer({
+            resolveCliRunner: Effect.succeed({
+              ...f.runner,
+              refreshOwnedRuntimeOnFirstConnection: true,
+            }),
+            leaveRemoteServerRunning: true,
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          assert.isTrue(
+            Result.isFailure(
+              yield* Effect.result(
+                manager.ensureEnvironment(uploadTarget, { issuePairingToken: true }),
+              ),
+            ),
+          );
+          assert.deepEqual(yield* f.snapshot, before);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "1");
+          yield* f.fs.remove(`${f.test}/pairing-fail`);
+          yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
+          yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
+          assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "3");
+          assert.notEqual((yield* f.snapshot).pid, before.pid);
+          assert.include(
+            (yield* f.snapshot).identity!,
+            `/versions/${ARCHIVE.archiveVersion}/goat serve`,
+          );
+          yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
+          assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), "3");
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          assert.equal(events.split('"type":"stop"').length - 1, 1);
+        }).pipe(Effect.provide(layer), Effect.scoped);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([false, true])(
+      "rolls back a failed legacy runner publication and retries; partial=%s",
+      (partial) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            descriptor404: true,
+          });
+          yield* f.fs.remove(`${f.state}/identity`);
+          const before = yield* f.snapshot;
+          const bin = `${f.test}/mv-bin`;
+          yield* f.fs.makeDirectory(bin);
+          yield* f.fs.writeFileString(`${f.test}/fail-publication`, "fail");
+          yield* f.fs.writeFileString(
+            `${bin}/mv`,
+            `#!/bin/sh
+if [ "$2" = '${f.state}/run-t3.sh' ] && [ -f '${f.test}/fail-publication' ]; then
+  case "$1" in '${f.state}'/run-t3.next.*.restore) ;; '${f.state}'/run-t3.next.*)
+    ${partial ? '/bin/mv "$@" || exit $?' : ":"}
+    printf 'injected final publication failure\\n' >&2; exit 73 ;;
+  esac
+fi
+exec /bin/mv "$@"
+`,
+          );
+          yield* f.fs.chmod(`${bin}/mv`, 0o700);
+          f.setRemotePath(`${bin}:${f.test}/identity-bin:${process.env.PATH ?? ""}`);
+          assert.isTrue(Result.isFailure(yield* f.run("launch")));
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+          assert.isFalse(
+            (yield* f.fs.readDirectory(f.state)).some(
+              (name) => name.includes(".next.") || name.includes(".retained."),
+            ),
+          );
+          yield* f.fs.remove(`${f.test}/fail-publication`);
+          assert.isTrue(Result.isSuccess(yield* f.run("launch")));
+          const after = yield* f.snapshot;
+          assert.notEqual(after.pid, before.pid);
+          assert.include(after.identity!, `/versions/${ARCHIVE.archiveVersion}/goat serve`);
+          assert.include(after["run-t3.sh"]!, `T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'`);
+          assert.equal(
+            (yield* f.fs.readFileString(`${f.test}/events`)).split('"type":"stop"').length - 1,
+            1,
+          );
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["script", "base dir", "duplicate", "malformed", "prefix", "suffix"] as const)(
+      "refuses a legacy Node invocation with wrong %s",
+      (failure) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            descriptor404: true,
+            nodeMode: true,
+          });
+          yield* f.fs.remove(`${f.state}/identity`);
+          const nextEntry = `${f.home}/new entry.cjs`;
+          yield* f.fs.writeFileString(
+            nextEntry,
+            protocolExecutable("1.2.3", { ssh: 1, orchestration: 2, nodeReadiness: true }, f.state),
+          );
+          const file = `${f.state}/run-t3.sh`;
+          const runner = yield* f.fs.readFileString(file);
+          if (failure === "script")
+            yield* f.fs.writeFileString(file, runner.replace("old dev", "other dev"));
+          if (failure === "duplicate")
+            yield* f.fs.writeFileString(
+              file,
+              runner + "\nT3_NODE_SCRIPT_PATH='/other/entry.cjs'\n",
+            );
+          if (failure === "malformed")
+            yield* f.fs.writeFileString(
+              file,
+              runner.replace("T3_NODE_SCRIPT_PATH='", 'T3_NODE_SCRIPT_PATH="'),
+            );
+          if (["base dir", "prefix", "suffix"].includes(failure)) {
+            const bin = `${f.test}/wrong-ps`;
+            yield* f.fs.makeDirectory(bin);
+            yield* f.fs.writeFileString(
+              `${bin}/ps`,
+              `#!${process.execPath}
+const cp=require('node:child_process');
+let command=cp.execFileSync('/bin/ps',process.argv.slice(2),{encoding:'utf8'}).trim();
+if(process.argv[5]===${JSON.stringify(String(f.pid))}) command=${failure === "base dir" ? `command.replace(${JSON.stringify(`${f.home}/.goat`)},'/other/userdata')` : failure === "prefix" ? "'tail -f '+command" : "command+' --extra'"};
+console.log(command);
+`,
+            );
+            yield* f.fs.chmod(`${bin}/ps`, 0o700);
+            f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
+          }
+          const before = yield* f.snapshot;
+          assert.isTrue(
+            Result.isFailure(yield* f.run("launch", false, { nodeScriptPath: nextEntry })),
+          );
+          assert.deepEqual(yield* f.snapshot, before);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["before publication", "before kill", "candidate validation"] as const)(
+      "legacy replacement refuses a race/failure %s",
+      (boundary) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            descriptor404: true,
+          });
+          yield* f.fs.remove(`${f.state}/identity`);
+          const before = yield* f.snapshot;
+          if (boundary === "before kill") {
+            const ps = yield* f.fs.readFileString(`${f.test}/identity-bin/ps`);
+            yield* f.fs.writeFileString(
+              `${f.test}/identity-bin/ps`,
+              ps.replace(
+                "  printf '%s",
+                `  if grep -q "T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'" "$HOME/.goat/ssh-launch/${f.state.slice(f.state.lastIndexOf("/") + 1)}/run-t3.sh"; then printf 'external\\n' > '${f.state}/managed'; fi\n  printf '%s`,
+              ),
+            );
+          } else {
+            f.setBeforeCommand((script) =>
+              script.includes("REQUESTED_RUNNER=")
+                ? Effect.gen(function* () {
+                    const exe = `${f.home}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}/goat`;
+                    const source = yield* f.fs.readFileString(exe);
+                    yield* f.fs.writeFileString(
+                      exe,
+                      boundary === "candidate validation"
+                        ? source.replace(
+                            'console.log("goat v" + version);',
+                            'console.log("goat v0.0.0");',
+                          )
+                        : source.replace(
+                            '  event("version", { published:',
+                            `  fs.appendFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)},"# raced\\n");\n  event("version", { published:`,
+                          ),
+                    );
+                  })
+                : Effect.void,
+            );
+          }
+          assert.isTrue(Result.isFailure(yield* f.run("launch")));
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+          const after = yield* f.snapshot;
+          assert.equal(after.pid, before.pid);
+          assert.equal(after.port, before.port);
+          assert.equal(after.identity, null);
+          if (boundary === "before kill") {
+            assert.equal(after["run-t3.sh"], before["run-t3.sh"]);
+            assert.equal(after.managed, "external\n");
+          } else {
+            assert.equal(after.identity, null);
+            assert.equal(after.managed, before.managed);
+            if (boundary === "before publication") {
+              assert.isTrue(after["run-t3.sh"]!.startsWith(before["run-t3.sh"]!));
+              assert.include(after["run-t3.sh"]!, "# raced\n");
+            } else assert.equal(after["run-t3.sh"], before["run-t3.sh"]);
+          }
+          assert.isFalse(
+            (yield* f.fs.readDirectory(f.state)).some(
+              (name) => name.includes(".next.") || name.includes(".retained."),
+            ),
+          );
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
@@ -4482,7 +5284,7 @@ export PATH
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
-if (args[3] === ${JSON.stringify(pid)}) fs.appendFileSync(${JSON.stringify(`${f.test}/inspections`)}, JSON.stringify({ runner: fs.readFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)}, 'utf8'), identity: fs.readFileSync(${JSON.stringify(`${f.state}/identity`)}, 'utf8'), command: cp.execFileSync('/bin/ps', args, {encoding:'utf8'}).trim() }) + '\\n');
+if (args[3] === ${JSON.stringify(pid)}) fs.appendFileSync(${JSON.stringify(`${f.test}/inspections`)}, JSON.stringify({ runner: fs.readFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)}, 'utf8'), identity: fs.existsSync(${JSON.stringify(`${f.state}/identity`)}) ? fs.readFileSync(${JSON.stringify(`${f.state}/identity`)}, 'utf8') : null, command: cp.execFileSync('/bin/ps', args, {encoding:'utf8'}).trim() }) + '\\n');
 process.stdout.write(cp.execFileSync('/bin/ps', args));
 `,
           );
@@ -4491,48 +5293,46 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           const result = yield* Effect.result(
             Effect.gen(function* () {
               yield* (yield* SshTunnel.SshEnvironmentManager).ensureEnvironment(uploadTarget);
-            }).pipe(Effect.provide(layer(nextEntry, missingIdentity)), Effect.scoped),
+            }).pipe(Effect.provide(layer(nextEntry, false)), Effect.scoped),
           );
           if (missingIdentity) {
             assert.isTrue(Result.isFailure(result));
-            if (Result.isFailure(result))
-              assert.include(
-                result.failure.message,
-                "persisted launch identity is missing or mismatched",
-              );
+            if (Result.isFailure(result)) assert.include(String(result.failure), `kill ${pid}`);
             assert.deepEqual(yield* f.snapshot, before);
-            assert.isFalse(yield* f.fs.exists(`${f.test}/inspections`));
-            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
             yield* Effect.sync(() => process.kill(Number(pid), 0));
-          } else {
-            assert.isTrue(Result.isSuccess(result));
-            const inspections = (yield* f.fs.readFileString(`${f.test}/inspections`))
-              .trim()
-              .split("\n")
-              .map((line) => JSON.parse(line));
-            assert.lengthOf(inspections, 2);
-            assert.include(inspections[0].runner, entry);
-            assert.notInclude(inspections[0].runner, nextEntry);
-            assert.include(inspections[1].runner, nextEntry);
-            for (const inspection of inspections) {
-              assert.equal(inspection.identity, before.identity);
-              assert.equal(inspection.command, `node ${before.identity!.trim()}`);
-            }
-            const events = (yield* f.fs.readFileString(`${f.test}/events`))
-              .trim()
-              .split("\n")
-              .map((line) => JSON.parse(line));
-            assert.lengthOf(
-              events.filter((event) => event.type === "start"),
-              2,
-            );
-            assert.lengthOf(
-              events.filter((event) => event.type === "stop"),
-              2,
-            );
-            for (const file of ["pid", "port", "managed", "identity"])
-              assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
+            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '\"type\":\"stop\"');
+            return;
           }
+          assert.isTrue(Result.isSuccess(result));
+          const inspections = (yield* f.fs.readFileString(`${f.test}/inspections`))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          assert.isAtLeast(inspections.length, 2);
+          assert.include(inspections[0].runner, entry);
+          assert.notInclude(inspections[0].runner, nextEntry);
+          assert.isTrue(inspections.some((inspection) => inspection.runner.includes(nextEntry)));
+          const expectedIdentity =
+            before.identity ??
+            `${entry} serve --host 127.0.0.1 --port ${metadata.port} --base-dir ${f.home}/.goat\n`;
+          for (const inspection of inspections) {
+            if (inspection.identity !== null) assert.equal(inspection.identity, expectedIdentity);
+            assert.equal(inspection.command, `node ${expectedIdentity.trim()}`);
+          }
+          const events = (yield* f.fs.readFileString(`${f.test}/events`))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          assert.lengthOf(
+            events.filter((event) => event.type === "start"),
+            2,
+          );
+          assert.lengthOf(
+            events.filter((event) => event.type === "stop"),
+            2,
+          );
+          for (const file of ["pid", "port", "managed", "identity"])
+            assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 

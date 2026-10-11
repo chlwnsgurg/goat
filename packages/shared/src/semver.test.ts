@@ -46,6 +46,25 @@ describe("semver helpers", () => {
     expect(compareSemverVersions("2.1.111-beta.1", "2.1.111")).toBeLessThan(0);
   });
 
+  it.each([
+    ["1.2.3-preview-z", "1.2.3-preview.20260911.4", 1],
+    ["1.2.3-preview.9", "1.2.3-preview.10", -1],
+    ["1.2.3-preview.9", "1.2.3-preview.alpha", -1],
+    ["1.2.3-preview.Z", "1.2.3-preview.a", -1],
+    ["1.2.3-preview.99999999999999999999", "1.2.3-preview.99999999999999999998", 1],
+    ["1.2.3-preview-z+build.1", "1.2.3-preview-z+build.2", 0],
+    ["1.2.3+build.1", "1.2.3", 0],
+  ])("compares complete SemVer precedence: %s versus %s", (left, right, order) => {
+    expect(Math.sign(compareSemverVersions(left, right))).toBe(order);
+    expect(Math.sign(compareSemverVersions(right, left))).toBe(order === 0 ? 0 : -order);
+  });
+
+  it("preserves the full prerelease and build suffix while normalizing", () => {
+    expect(normalizeSemverVersion("20-preview-z+build.1")).toBe("20.0.0-preview-z+build.1");
+    expect(parseSemver("1.2.3-preview-z+build.1")?.prerelease).toEqual(["preview-z"]);
+    expect(parseSemver("1.2.3-preview.01")).toBeNull();
+  });
+
   it("falls back to lexical comparison for malformed numeric segments", () => {
     expect(compareSemverVersions("1.2.3abc", "1.2.10")).toBeGreaterThan(0);
   });

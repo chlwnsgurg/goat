@@ -8,7 +8,10 @@ interface ParsedSemver {
 const SEMVER_NUMBER_SEGMENT = /^\d+$/;
 
 export function normalizeSemverVersion(version: string): string {
-  const [main, prerelease] = version.trim().split("-", 2);
+  const trimmedVersion = version.trim();
+  const suffixIndex = trimmedVersion.search(/[-+]/);
+  const main = suffixIndex < 0 ? trimmedVersion : trimmedVersion.slice(0, suffixIndex);
+  const suffix = suffixIndex < 0 ? "" : trimmedVersion.slice(suffixIndex);
   const segments: string[] = [];
   for (const segment of (main ?? "").split(".")) {
     const trimmed = segment.trim();
@@ -26,12 +29,18 @@ export function normalizeSemverVersion(version: string): string {
     segments.push("0");
   }
 
-  return prerelease ? `${segments.join(".")}-${prerelease}` : segments.join(".");
+  return `${segments.join(".")}${suffix}`;
 }
 
 export function parseSemver(value: string): ParsedSemver | null {
   const normalized = normalizeSemverVersion(value).replace(/^v/, "");
-  const [main = "", prerelease] = normalized.split("-", 2);
+  const match =
+    /^(\d+\.\d+\.\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(
+      normalized,
+    );
+  if (!match) return null;
+  const [, main = "", prerelease] = match;
+  if (prerelease?.split(".").some((part) => /^0\d+$/.test(part))) return null;
   const segments = main.split(".");
   if (segments.length !== 3) {
     return null;
@@ -52,7 +61,7 @@ export function parseSemver(value: string): ParsedSemver | null {
   const major = Number.parseInt(majorSegment, 10);
   const minor = Number.parseInt(minorSegment, 10);
   const patch = Number.parseInt(patchSegment, 10);
-  if (![major, minor, patch].every(Number.isInteger)) {
+  if (![major, minor, patch].every(Number.isSafeInteger)) {
     return null;
   }
 
@@ -83,7 +92,8 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
   const rightNumeric = SEMVER_NUMBER_SEGMENT.test(right);
 
   if (leftNumeric && rightNumeric) {
-    return Number.parseInt(left, 10) - Number.parseInt(right, 10);
+    if (left.length !== right.length) return left.length - right.length;
+    return left === right ? 0 : left < right ? -1 : 1;
   }
   if (leftNumeric) {
     return -1;
@@ -91,7 +101,7 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
   if (rightNumeric) {
     return 1;
   }
-  return left.localeCompare(right);
+  return left === right ? 0 : left < right ? -1 : 1;
 }
 
 export function compareSemverVersions(left: string, right: string): number {

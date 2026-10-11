@@ -17,7 +17,7 @@ import {
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
-import { satisfiesSemverRange } from "@t3tools/shared/semver";
+import { compareSemverVersions, satisfiesSemverRange } from "@t3tools/shared/semver";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -103,6 +103,8 @@ export interface RemoteT3RunnerOptions {
    * commands with the binary that matches the running server.
    */
   readonly keepExistingRunner?: boolean | null;
+  /** Packaged desktop startup may refresh an older owned runtime once, when idle. */
+  readonly refreshOwnedRuntimeOnFirstConnection?: boolean;
 }
 
 export interface PreparedRemoteRuntime {
@@ -114,6 +116,9 @@ export interface PreparedRemoteRuntime {
   readonly mayUpgradeOwnedServer: boolean;
   /** SHA-256 of the retained run-t3.sh observed by preparation; null for other sources. */
   readonly retainedRunnerSha256: string | null;
+  readonly refreshIfIdle?: boolean;
+  readonly expectedLiveVersion?: string;
+  readonly expectedLiveRunnerSha256?: string;
 }
 const requestedRuntime = (runner: RemoteT3RunnerOptions | undefined): PreparedRemoteRuntime => ({
   runner: { ...runner },
@@ -307,6 +312,8 @@ export interface RemoteMcpClientSession {
 const RemoteLaunchResult = Schema.Struct({
   remotePort: Schema.Number,
   serverKind: Schema.optional(Schema.Literals(["external", "managed"])),
+  refresh: Schema.optionalKey(Schema.Literals(["replaced", "reused-busy", "reused-unknown"])),
+  selectedVersion: Schema.optionalKey(Schema.String),
 });
 
 const RemotePairingResult = Schema.Struct({
@@ -731,11 +738,29 @@ check_live_protocol() {
        [ "$stored_kind" = managed ] && [ "$stored_pid" = "$LIVE_PID" ] &&
        [ "$stored_port" = "$LIVE_PORT" ]; then LIVE_OWNED=1; fi
     if [ "$LIVE_STATUS" = live ] && compatible_fields "$2" "$3" "$4" &&
-       { [ -z "$SELECTED_VERSION" ] || [ "$2" = "$SELECTED_VERSION" ]; }; then LIVE_COMPATIBLE=1; fi
+       { [ -z "$SELECTED_VERSION" ] || [ "$2" = "$SELECTED_VERSION" ] ||
+         { [ "$REFRESH_IF_IDLE" = 1 ] && [ "$2" = "$REFRESH_LIVE_VERSION" ]; }; }; then LIVE_COMPATIBLE=1; fi
   else
     # An old helper may be absent, but identity files cannot be guessed away.
     if [ -e "$DEFAULT_RUNTIME_FILE" ] || [ -e "$PORT_FILE" ] || [ -e "$PID_FILE" ]; then LIVE_STATUS=unknown; fi
   fi
+  legacy_refused=0
+  if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] && [ "$REFRESH_IF_IDLE" != 1 ] &&
+     { { [ "$LEGACY_PENDING" = 1 ] && [ "$LEGACY_COMMITTED" = 1 ] && [ "$LIVE_STATUS" != none ]; } ||
+       [ "$LIVE_STATUS" = unknown ] || { [ "$LIVE_STATUS" = live ] && [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ]; }; }; then
+    if [ "$LEGACY_COMMITTED" = 1 ]; then
+      verify_owned_identity "$LEGACY_PID" "$LEGACY_PORT" || ownership_unverified
+    elif ! verify_legacy_identity; then
+      legacy_refused=1
+    fi
+    if [ "$LEGACY_COMMITTED" = 1 ] || { [ "$LEGACY_PENDING" = 1 ] && [ "\${legacy_refused:-0}" != 1 ]; }; then
+      LIVE_STATUS=live; LIVE_PID="$LEGACY_PID"; LIVE_PORT="$LEGACY_PORT"; LIVE_VERSION="$LEGACY_VERSION"
+      LIVE_OWNED=1; LIVE_COMPATIBLE=0; NEEDS_OWNED_UPGRADE=1
+      return
+    fi
+  fi
+  if [ "$ALLOW_OWNED_UPGRADE" = 1 ] && [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] &&
+     [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ]; then LIVE_STATUS=unknown; fi
   if [ "$LIVE_STATUS" = unknown ]; then
     recorded_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     recorded_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
@@ -744,6 +769,17 @@ check_live_protocol() {
     stop_pid="$recorded_pid"
     [ "$stop_pid" != unknown ] || stop_pid='<pid>'
     printf 'Cannot verify live GOAT PID=%s port=%s: descriptor unavailable or persisted identity disagrees; it may predate GOAT SSH runtime protocol metadata. It was left running, and the runner and ownership files were preserved. If this is your earlier GOAT server, stop it on the remote host (kill %s) and reconnect.\\n' "$recorded_pid" "$recorded_port" "$stop_pid" >&2; exit 1
+  fi
+  if [ "$REFRESH_IF_IDLE" = 1 ] && [ "$LIVE_STATUS" = live ]; then
+    [ "$LIVE_OWNED" = 1 ] && [ "$LIVE_VERSION" = "$REFRESH_LIVE_VERSION" ] || {
+      printf 'Refresh live identity changed; reconnect without replacing it.\\n' >&2; exit 1;
+    }
+    verify_owned_identity "$LIVE_PID" "$LIVE_PORT" || ownership_unverified
+    if [ -z "$REFRESH_DECISION" ]; then
+      activity="$(read_refresh_activity)"
+      case "$activity" in idle) REFRESH_DECISION=pending ;; busy) REFRESH_DECISION=reused-busy ;; *) REFRESH_DECISION=reused-unknown ;; esac
+    fi
+    if [ "$REFRESH_DECISION" = pending ]; then LIVE_COMPATIBLE=0; fi
   fi
   if [ "$LIVE_STATUS" != none ] && [ "$LIVE_COMPATIBLE" != 1 ]; then
     if [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] && [ "$ALLOW_OWNED_UPGRADE" = 1 ] &&
@@ -763,15 +799,17 @@ recheck_selected_before_use() {
       printf 'Selected GOAT runtime disappeared before use.\\n' >&2; exit 1
     fi
   fi
-  if [ "$PRESERVE_SELECTED_RUNNER" = 1 ] &&
-     [ "$(sed -n "s/^T3_ARCHIVE_VERSION='\\([^']*\\)'$/\\1/p" "$RUNNER_FILE")" != "$SELECTED_VERSION" ]; then
-    printf 'Selected runner changed before use.\\n' >&2; exit 1
+  if [ "$RUNNER_PUBLISHED" = 1 ]; then
+    if ! cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_FILE"; then
+      printf 'Published selected runner changed before use.\\n' >&2; exit 1
+    fi
+    CHECK_RUNNER="$RUNNER_FILE"
+  else
+    if ! cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_NEXT"; then
+      printf 'Candidate runner changed before use.\\n' >&2; exit 1
+    fi
+    CHECK_RUNNER="$RUNNER_NEXT"
   fi
-  # Subsequent reads use the published bytes, rechecking binary identity and live state.
-  if ! cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_FILE"; then
-    printf 'Published selected runner changed before use.\\n' >&2; exit 1
-  fi
-  CHECK_RUNNER="$RUNNER_FILE"
   check_candidate_protocol
   check_live_protocol
   CHECK_RUNNER="$RUNNER_CANDIDATE_FILE"
@@ -793,9 +831,20 @@ REQUESTED_VERSION=@@T3_REQUESTED_VERSION@@
 REQUIRE_INSTALLED=@@T3_REQUIRE_INSTALLED@@
 PRESERVE_SELECTED_RUNNER=@@T3_PRESERVE_SELECTED_RUNNER@@
 ALLOW_OWNED_UPGRADE=@@T3_ALLOW_OWNED_UPGRADE@@
+ALLOW_LEGACY_ADOPTION=@@T3_ALLOW_LEGACY_ADOPTION@@
+REFRESH_IF_IDLE=@@T3_REFRESH_IF_IDLE@@
+REFRESH_LIVE_VERSION=@@T3_REFRESH_LIVE_VERSION@@
+EXPECTED_LIVE_RUNNER_SHA256=@@T3_LIVE_RUNNER_SHA256@@
+RUNNER_PUBLISHED=0; REFRESH_DECISION=; LEGACY_PENDING=0; LEGACY_COMMITTED=0
+LEGACY_TERMINATED=0; LEGACY_IDENTITY_LINK=; LEGACY_PUBLICATION_STARTED=0
+RETAINED_SNAPSHOT_FILE=; LEGACY_PID=; LEGACY_PORT=; LEGACY_IDENTITY=; LEGACY_VERSION=; LEGACY_UID=; LEGACY_START=
 EXPECTED_RETAINED_SHA256=@@T3_RETAINED_RUNNER_SHA256@@
 @@T3_PROTOCOL_TOKENS@@
 check_retained_runner() {
+  if [ "$RUNNER_PUBLISHED" = 0 ] && [ -n "$EXPECTED_LIVE_RUNNER_SHA256" ] &&
+     [ "$(runner_sha256 "$RUNNER_FILE")" != "$EXPECTED_LIVE_RUNNER_SHA256" ]; then
+    printf 'Running runner changed before publication; process was preserved.\\n' >&2; exit 1
+  fi
   if [ "$PRESERVE_SELECTED_RUNNER" = 1 ]; then
     if [ -z "$EXPECTED_RETAINED_SHA256" ] || [ ! -f "$RUNNER_FILE" ] ||
        [ "$(runner_sha256 "$RUNNER_FILE")" != "$EXPECTED_RETAINED_SHA256" ]; then
@@ -804,11 +853,19 @@ check_retained_runner() {
   fi
 }
 mkdir -p "$STATE_DIR"
-cleanup_runner_next() { rm -f "$RUNNER_CANDIDATE_FILE" "$RUNNER_CANDIDATE_FILE.pin"; }
-trap cleanup_runner_next EXIT
+cleanup_runner_next() {
+  if [ "$LEGACY_COMMITTED" = 1 ] && [ "$LEGACY_TERMINATED" = 0 ]; then
+    rollback_legacy_switch
+  fi
+  rm -f "$RUNNER_CANDIDATE_FILE" "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_CANDIDATE_FILE.restore"
+  [ -z "$LEGACY_IDENTITY_LINK" ] || rm -f "$LEGACY_IDENTITY_LINK"
+  [ -z "$RETAINED_SNAPSHOT_FILE" ] || rm -f "$RETAINED_SNAPSHOT_FILE"
+}
+trap 'runner_exit=$?; cleanup_runner_next; exit "$runner_exit"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+@@T3_CAPTURE_RUNNING_RUNNER@@
 if [ "$REQUIRE_INSTALLED" = 1 ] && [ -n "$SELECTED_VERSION" ]; then
   selected_dir="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
   if [ ! -x "$selected_dir/goat" ] || [ "$(cat "$selected_dir/.install-complete" 2>/dev/null)" != "$SELECTED_VERSION" ]; then
@@ -858,11 +915,148 @@ check_live_protocol
 if ! cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_NEXT"; then
   printf 'Candidate runner changed during validation; reconnect.\\n' >&2; exit 1
 fi
-# Last read-only checks immediately before publication; unknown never grants upgrade.
+# Last read-only checks before publication; legacy adoption must prove ownership.
 check_retained_runner
 check_live_protocol
 UPGRADE_PID="$LIVE_PID"; UPGRADE_PORT="$LIVE_PORT"; UPGRADE_VERSION="$LIVE_VERSION"
-@@T3_VERIFY_OWNED_BEFORE_PUBLICATION@@@@T3_RUNNER_INSTALL@@
+@@T3_VERIFY_OWNED_BEFORE_PUBLICATION@@publish_selected_runner() {
+  [ "$LEGACY_COMMITTED" = 0 ] || LEGACY_PUBLICATION_STARTED=1
+@@T3_RUNNER_INSTALL@@
+  RUNNER_PUBLISHED=1
+}
+if [ "$NEEDS_OWNED_UPGRADE" != 1 ] && [ "$REFRESH_DECISION" != reused-busy ] && [ "$REFRESH_DECISION" != reused-unknown ]; then
+  publish_selected_runner
+fi
+`;
+
+// Legacy adoption reads only a pinned retained runner; never evaluate shell source.
+const REMOTE_LEGACY_IDENTITY_SCRIPT = String.raw`capture_running_runner() {
+  RETAINED_SNAPSHOT_FILE="$STATE_DIR/run-t3.retained.$$"
+  if [ -f "$RUNNER_FILE" ]; then
+    running_sha="$(runner_sha256 "$RUNNER_FILE")" || return 1
+    if [ -n "$EXPECTED_LIVE_RUNNER_SHA256" ] && [ "$running_sha" != "$EXPECTED_LIVE_RUNNER_SHA256" ]; then return 1; fi
+    cp "$RUNNER_FILE" "$RETAINED_SNAPSHOT_FILE"
+    [ "$(runner_sha256 "$RETAINED_SNAPSHOT_FILE")" = "$running_sha" ] &&
+      [ "$(runner_sha256 "$RUNNER_FILE")" = "$running_sha" ] || return 1
+    EXPECTED_LIVE_RUNNER_SHA256="$running_sha"
+  fi
+}
+decode_retained_assignment() {
+  awk -v key="$1" '
+    $0 ~ "^[[:space:]]*(export[[:space:]]+)?" key "[[:space:]]*=" {
+      count++
+      if (index($0, key "=") != 1) bad=1
+      value=substr($0,length(key)+2)
+    }
+    END {
+      if (bad || count != 1 || length(value)<2 || substr(value,1,1)!="\047" || substr(value,length(value),1)!="\047") exit 1
+      text=substr(value,2,length(value)-2); decoded=""
+      for (i=1;i<=length(text);i++) {
+        c=substr(text,i,1)
+        if (c=="\047") {
+          if (substr(text,i,4)!="\047\\\047\047") exit 1
+          decoded=decoded "\047"; i+=3
+        } else decoded=decoded c
+      }
+      print decoded
+    }' "$RETAINED_SNAPSHOT_FILE"
+}
+legacy_files_regular() {
+  for legacy_file in "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$RUNNER_FILE"; do
+    [ -f "$legacy_file" ] && [ ! -L "$legacy_file" ] || return 1
+  done
+}
+read_legacy_value() {
+  awk 'NR==1 { value=$0 } END { if (NR!=1) exit 1; print value }' "$1"
+}
+verify_legacy_process() {
+  legacy_files_regular || return 1
+  legacy_uid="$(ps -o uid= -p "$1" 2>/dev/null)" || return 1
+  legacy_uid="$(printf '%s\n' "$legacy_uid" | awk 'NF==1 { print $1 }')"
+  [ "$legacy_uid" = "$(id -u)" ] || return 1
+  legacy_start="$(ps -o lstart= -p "$1" 2>/dev/null)" || return 1
+  [ -n "$legacy_start" ] || return 1
+  case "$legacy_start" in *[[:cntrl:]]*) return 1 ;; esac
+  legacy_command="$(ps -o command= -p "$1" 2>/dev/null)" || return 1
+  [ "$legacy_command" = "$2" ] || return 1
+  if [ "$LEGACY_PENDING" = 1 ]; then
+    [ "$legacy_uid" = "$LEGACY_UID" ] && [ "$legacy_start" = "$LEGACY_START" ] || return 1
+  fi
+  if [ "$RUNNER_PUBLISHED" = 1 ]; then
+    cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_FILE" || return 1
+  else
+    [ "$(runner_sha256 "$RUNNER_FILE")" = "$EXPECTED_LIVE_RUNNER_SHA256" ] || return 1
+  fi
+  legacy_files_regular
+}
+verify_legacy_identity() {
+  [ "$ALLOW_LEGACY_ADOPTION" = 1 ] && [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ] || return 1
+  legacy_files_regular || return 1
+  [ -f "$RETAINED_SNAPSHOT_FILE" ] && [ -n "$EXPECTED_LIVE_RUNNER_SHA256" ] || return 1
+  [ "$(runner_sha256 "$RUNNER_FILE")" = "$EXPECTED_LIVE_RUNNER_SHA256" ] &&
+    [ "$(runner_sha256 "$RETAINED_SNAPSHOT_FILE")" = "$EXPECTED_LIVE_RUNNER_SHA256" ] || return 1
+  legacy_pid="$(read_legacy_value "$PID_FILE")" || return 1
+  legacy_port="$(read_legacy_value "$PORT_FILE")" || return 1
+  [ "$(read_legacy_value "$MANAGED_FILE")" = managed ] &&
+    valid_positive "$legacy_pid" && valid_positive "$legacy_port" && valid_port "$legacy_port" &&
+    kill -0 "$legacy_pid" 2>/dev/null || return 1
+  legacy_version="$(decode_retained_assignment T3_ARCHIVE_VERSION)" || return 1
+  legacy_entry="$(decode_retained_assignment T3_NODE_SCRIPT_PATH)" || return 1
+  [ -z "$legacy_entry" ] || return 1
+  case "$legacy_version" in ''|*[!0-9A-Za-z.-]*) return 1 ;; esac
+  valid_version "$legacy_version" || return 1
+  legacy_tail="$HOME/.goat/runtime/goat/versions/$legacy_version/goat serve --host 127.0.0.1 --port $legacy_port --base-dir $DEFAULT_SERVER_HOME"
+  verify_legacy_process "$legacy_pid" "$legacy_tail" || return 1
+  if [ "$LEGACY_PENDING" = 1 ]; then
+    [ "$LEGACY_PID" = "$legacy_pid" ] && [ "$LEGACY_PORT" = "$legacy_port" ] &&
+      [ "$LEGACY_IDENTITY" = "$legacy_tail" ] || return 1
+  fi
+  [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$legacy_pid" ] &&
+    [ "$(cat "$PORT_FILE" 2>/dev/null || true)" = "$legacy_port" ] &&
+    [ "$(cat "$MANAGED_FILE" 2>/dev/null || true)" = managed ] &&
+    [ ! -e "$STATE_DIR/identity" ] && [ ! -L "$STATE_DIR/identity" ] &&
+    [ "$(runner_sha256 "$RUNNER_FILE")" = "$EXPECTED_LIVE_RUNNER_SHA256" ] || return 1
+  LEGACY_PID="$legacy_pid"; LEGACY_PORT="$legacy_port"; LEGACY_IDENTITY="$legacy_tail"
+  LEGACY_VERSION="$legacy_version"; LEGACY_UID="$legacy_uid"; LEGACY_START="$legacy_start"; LEGACY_PENDING=1
+}
+commit_legacy_identity() {
+  verify_legacy_identity || return 1
+  legacy_next="$STATE_DIR/identity.next.$$"
+  printf '%s\n' "$LEGACY_IDENTITY" >"$legacy_next"
+  verify_legacy_identity || { rm -f "$legacy_next"; return 1; }
+  # Atomic create, refusing a competing identity instead of overwriting it.
+  if ! ln "$legacy_next" "$STATE_DIR/identity" 2>/dev/null; then rm -f "$legacy_next"; return 1; fi
+  if ! verify_owned_identity "$LEGACY_PID" "$LEGACY_PORT"; then
+    if [ "$legacy_next" -ef "$STATE_DIR/identity" ]; then rm -f "$STATE_DIR/identity"; fi
+    rm -f "$legacy_next"; return 1
+  fi
+  # Keep a hard link so rollback removes only the identity created by this attempt.
+  LEGACY_IDENTITY_LINK="$legacy_next"
+  LEGACY_COMMITTED=1
+}
+rollback_legacy_switch() {
+  # A failed switch must remain retryable while the legacy process is still alive.
+  # Never overwrite runner bytes or an identity replaced by another actor.
+  if [ "$LEGACY_PUBLICATION_STARTED" = 1 ] && [ -f "$RETAINED_SNAPSHOT_FILE" ] &&
+     [ ! -L "$RUNNER_FILE" ] && cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_FILE"; then
+    if cp -p "$RETAINED_SNAPSHOT_FILE" "$RUNNER_CANDIDATE_FILE.restore" &&
+       mv -f "$RUNNER_CANDIDATE_FILE.restore" "$RUNNER_FILE"; then :
+    else printf 'Could not restore the retained GOAT runner after a failed switch.\n' >&2; fi
+  fi
+  if [ -n "$LEGACY_IDENTITY_LINK" ] && [ "$LEGACY_IDENTITY_LINK" -ef "$STATE_DIR/identity" ] &&
+     [ "$(cat "$STATE_DIR/identity" 2>/dev/null)" = "$LEGACY_IDENTITY" ]; then
+    rm -f "$STATE_DIR/identity"
+  fi
+}
+read_refresh_activity() {
+  activity_runner="$RUNNER_CANDIDATE_FILE"
+  [ "$RUNNER_PUBLISHED" = 0 ] || activity_runner="$RUNNER_FILE"
+  if activity="$("$activity_runner" __ssh-helper activity --port "$LIVE_PORT" --pid "$LIVE_PID" --shell 2>/dev/null)"; then
+    case "$activity" in idle|busy) printf '%s' "$activity"; return ;; esac
+  fi
+  printf unknown
+}
+
 `;
 
 // PID existence and protocol metadata are not authority to signal a process.
@@ -895,7 +1089,9 @@ const REMOTE_OWNED_IDENTITY_SCRIPT = `verify_owned_identity() {
 }
 `;
 
-const VERIFY_OWNED_BEFORE_PUBLICATION = `if [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; then
+const VERIFY_OWNED_BEFORE_PUBLICATION = `if [ "$LEGACY_PENDING" = 1 ]; then
+  verify_legacy_identity || ownership_unverified
+elif [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; then
   printf 'GOAT ownership could not be verified for PID %s: persisted launch identity is missing or mismatched; process, runner and ownership files were preserved.\\n' "$LIVE_PID" >&2
   exit 1
 fi`;
@@ -910,10 +1106,14 @@ PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
 MANAGED_FILE="$STATE_DIR/managed"
 LOG_FILE="$STATE_DIR/server.log"
+ownership_unverified() {
+  printf 'GOAT ownership could not be verified; process and ownership files were preserved.\\n' >&2; exit 1
+}
 @@T3_OWNED_IDENTITY@@
+@@T3_LEGACY_IDENTITY@@
 @@T3_RUNNER_SETUP@@
 IDENTITY_NEXT="$STATE_DIR/identity.next.$$"
-trap 'cleanup_runner_next; rm -f "$IDENTITY_NEXT"' EXIT
+trap 'runner_exit=$?; cleanup_runner_next; rm -f "$IDENTITY_NEXT"; exit "$runner_exit"' EXIT
 T3_ARCHIVE_MODE=@@T3_ARCHIVE_MODE@@
 T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
 if [ "$T3_ARCHIVE_MODE" = 0 ]; then
@@ -950,12 +1150,7 @@ wait_for_pid_exit() {
     sleep 0.1
   done
 }
-recheck_selected_before_use
-REMOTE_PID=""
-REMOTE_PORT=""
-REMOTE_MANAGED=""
-if [ "$LIVE_STATUS" != none ]; then
-  if [ "$LIVE_COMPATIBLE" = 1 ]; then
+reuse_live_server() {
     REMOTE_PORT="$LIVE_PORT"
     if ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
       printf 'Selected live server did not answer; it was left running.\\n' >&2; exit 1
@@ -973,6 +1168,14 @@ if [ "$LIVE_STATUS" != none ]; then
       printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
       printf 'external\\n' >"$MANAGED_FILE"
     fi
+}
+recheck_selected_before_use
+REMOTE_PID=""
+REMOTE_PORT=""
+REMOTE_MANAGED=""
+if [ "$LIVE_STATUS" != none ]; then
+  if [ "$LIVE_COMPATIBLE" = 1 ]; then
+    reuse_live_server
   elif [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
     # Recompute retained hash and verify the same live identity immediately before kill.
     recheck_selected_before_use
@@ -981,10 +1184,32 @@ if [ "$LIVE_STATUS" != none ]; then
        [ "$LIVE_PORT" != "$UPGRADE_PORT" ] || [ "$LIVE_VERSION" != "$UPGRADE_VERSION" ]; then
       printf 'Owned GOAT identity changed before termination; process was left running.\\n' >&2; exit 1
     fi
-    PID_TO_STOP="$LIVE_PID"
-    if ! verify_owned_identity "$PID_TO_STOP" "$LIVE_PORT"; then
+    if [ "$REFRESH_IF_IDLE" = 1 ]; then
+      activity="$(read_refresh_activity)"
+      if [ "$activity" != idle ]; then
+        case "$activity" in busy) REFRESH_DECISION=reused-busy ;; *) REFRESH_DECISION=reused-unknown ;; esac
+        recheck_selected_before_use
+        reuse_live_server
+      else REFRESH_DECISION=replaced; fi
+    fi
+    if [ -z "$REMOTE_PORT" ]; then
+    if [ "$LEGACY_PENDING" = 1 ] && [ "$LEGACY_COMMITTED" = 0 ]; then
+      commit_legacy_identity || ownership_unverified
+    fi
+    check_retained_runner
+    verify_owned_identity "$UPGRADE_PID" "$UPGRADE_PORT" || ownership_unverified
+    publish_selected_runner
+    cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_FILE" || ownership_unverified
+    PID_TO_STOP="$UPGRADE_PID"
+    if ! verify_owned_identity "$PID_TO_STOP" "$UPGRADE_PORT"; then
       printf 'GOAT ownership could not be verified for PID %s; process and ownership files were preserved.\\n' "$PID_TO_STOP" >&2
       exit 1
+    fi
+    if [ "$LEGACY_PENDING" = 1 ]; then
+      verify_legacy_process "$PID_TO_STOP" "$LEGACY_IDENTITY" || ownership_unverified
+      [ "$(read_legacy_value "$PID_FILE")" = "$LEGACY_PID" ] &&
+        [ "$(read_legacy_value "$PORT_FILE")" = "$LEGACY_PORT" ] &&
+        [ "$(read_legacy_value "$MANAGED_FILE")" = managed ] || ownership_unverified
     fi
     kill "$PID_TO_STOP" 2>/dev/null || true
     wait_for_pid_exit "$PID_TO_STOP"
@@ -992,7 +1217,9 @@ if [ "$LIVE_STATUS" != none ]; then
       printf 'Owned server did not stop; ownership files were preserved.\\n' >&2
       exit 1
     fi
+    LEGACY_TERMINATED=1
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
+    fi
   else
     printf 'Live GOAT compatibility changed; reconnect.\\n' >&2; exit 1
   fi
@@ -1037,7 +1264,14 @@ if [ -z "$REMOTE_PORT" ]; then
     exit 1
   fi
 fi
-printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}"
+refresh_fields=
+case "$REFRESH_DECISION" in
+  replaced|reused-busy|reused-unknown) refresh_fields="$(printf ',\\"refresh\\":\\"%s\\"' "$REFRESH_DECISION")" ;;
+esac
+if [ "$REFRESH_DECISION" = reused-busy ] || [ "$REFRESH_DECISION" = reused-unknown ]; then
+  refresh_fields="$refresh_fields$(printf ',\\"selectedVersion\\":\\"%s\\"' "$LIVE_VERSION")"
+fi
+printf '{"remotePort":%s,"serverKind":"%s"%s}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}" "$refresh_fields"
 `;
 
 const REMOTE_PAIRING_SCRIPT = `set -eu
@@ -1202,7 +1436,21 @@ function buildRemoteRunnerSetupScript(
     T3_REQUESTED_VERSION: shellSingleQuote(selection.requestedVersion ?? ""),
     T3_REQUIRE_INSTALLED: selection.requireInstalled ? "1" : "0",
     T3_PRESERVE_SELECTED_RUNNER: preserve ? "1" : "0",
-    T3_ALLOW_OWNED_UPGRADE: selection.mayUpgradeOwnedServer ? "1" : "0",
+    T3_ALLOW_OWNED_UPGRADE:
+      verifyOwnedBeforePublication && selection.mayUpgradeOwnedServer ? "1" : "0",
+    T3_ALLOW_LEGACY_ADOPTION:
+      verifyOwnedBeforePublication && selection.mayUpgradeOwnedServer && !isNodeScriptRunner(input)
+        ? "1"
+        : "0",
+    T3_REFRESH_IF_IDLE:
+      verifyOwnedBeforePublication && selection.mayUpgradeOwnedServer && selection.refreshIfIdle
+        ? "1"
+        : "0",
+    T3_REFRESH_LIVE_VERSION: shellSingleQuote(selection.expectedLiveVersion ?? ""),
+    T3_LIVE_RUNNER_SHA256: shellSingleQuote(selection.expectedLiveRunnerSha256 ?? ""),
+    T3_CAPTURE_RUNNING_RUNNER: verifyOwnedBeforePublication
+      ? 'if [ "$ALLOW_LEGACY_ADOPTION" = 1 ] || [ "$REFRESH_IF_IDLE" = 1 ]; then capture_running_runner || ownership_unverified; fi'
+      : "",
     T3_RETAINED_RUNNER_SHA256: shellSingleQuote(selection.retainedRunnerSha256 ?? ""),
     T3_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
@@ -1225,6 +1473,7 @@ export function buildRemoteLaunchScript(
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
     T3_NODE_SCRIPT_PATH: shellSingleQuote(input?.nodeScriptPath?.trim() || ""),
     T3_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
+    T3_LEGACY_IDENTITY: REMOTE_LEGACY_IDENTITY_SCRIPT,
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
     T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, selection, true),
     T3_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
@@ -1387,6 +1636,9 @@ if [ -n "$state_key" ] && [ -f "$state/run-t3.sh" ]; then
   fi
 fi
 retained_fields=
+if [ -n "$retained_sha256" ]; then
+  retained_fields="$(printf ',"retainedRunnerSha256":"%s"' "$retained_sha256")"
+fi
 if ready_version "$retained_version"; then
   retained_signals="$(binary_json "$retained_version" || true)"
   if [ -n "$retained_signals" ]; then
@@ -1399,6 +1651,9 @@ fi
 # Persisted version is a path hint only. The live descriptor proves identity.
 live_hint="$(sed -n 's/.*"serverVersion"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' "$runtime_file" 2>/dev/null || true)"
 live_fields=
+live_owned=false
+identity_absent=false
+if [ -n "$state_key" ] && [ ! -e "$state/identity" ] && [ ! -L "$state/identity" ]; then identity_absent=true; fi
 for candidate in "$live_hint" "$retained_version" "$V"; do
   if ! ready_version "$candidate"; then continue; fi
   exe="$HOME/.goat/runtime/goat/versions/$candidate/goat"
@@ -1408,6 +1663,10 @@ for candidate in "$live_hint" "$retained_version" "$V"; do
       printf 'Malformed live GOAT protocol tokens; fix the remote helper and reconnect.\\n' >&2; exit 1
     fi
     live_fields="$(printf ',"liveStatus":"%s"' "$1")"
+    if [ "$1" = live ] && valid_positive "$5" &&
+       [ "$(cat "$state/managed" 2>/dev/null || true)" = managed ] &&
+       [ "$(cat "$state/pid" 2>/dev/null || true)" = "$5" ] &&
+       [ "$(cat "$state/port" 2>/dev/null || true)" = "$6" ]; then live_owned=true; fi
     if [ "$1" = live ] && valid_version "$2"; then
       live_version="$2"
       live_signals="$(signals_json "$2" "$3" "$4" || true)"
@@ -1426,7 +1685,7 @@ case "$(uname -s)" in Darwin) platform=darwin ;; Linux) platform=linux ;; *) exi
 case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; *) exit 1 ;; esac
 ready=false
 if ready_version "$V"; then ready=true; fi
-printf '{"platform":"%s","arch":"%s","ready":%s%s%s}\\n' "$platform" "$arch" "$ready" "$retained_fields" "$live_fields"
+printf '{"platform":"%s","arch":"%s","ready":%s,"liveOwned":%s,"identityAbsent":%s%s%s}\\n' "$platform" "$arch" "$ready" "$live_owned" "$identity_absent" "$retained_fields" "$live_fields"
 `;
 }
 
@@ -1443,6 +1702,8 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
         Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
       ),
       liveStatus: Schema.optionalKey(Schema.Literals(["none", "live", "unknown"])),
+      liveOwned: Schema.optionalKey(Schema.Boolean),
+      identityAbsent: Schema.optionalKey(Schema.Boolean),
       liveVersion: Schema.optionalKey(Schema.String),
       liveSignals: Schema.optionalKey(RuntimeSignals),
       liveBinarySignals: Schema.optionalKey(RuntimeSignals),
@@ -1464,9 +1725,10 @@ export const prepareRemoteRuntime = (
   authOptions: SshAuth.SshAuthOptions,
   runner?: RemoteT3RunnerOptions,
   stateKey?: string,
+  owningLaunch = false,
 ) =>
   Effect.gen(function* () {
-    const exact = requestedRuntime(runner);
+    let exact = requestedRuntime(runner);
     if (isNodeScriptRunner(runner)) return exact;
     const directory = runner?.archiveDirectory?.trim() ?? "";
     const bundleDirectory = runner?.bundledArchiveDirectory?.trim() ?? "";
@@ -1505,11 +1767,35 @@ export const prepareRemoteRuntime = (
       probe.retainedRunnerSha256 !== undefined &&
       probe.retainedSignals.serverVersion === probe.retainedVersion &&
       matchesSignals(probe.retainedSignals, version);
-    const selectedVersion = liveCompatible
-      ? probe.liveVersion
-      : retainedCompatible
-        ? probe.retainedVersion
-        : undefined;
+    const adoptLegacy =
+      owningLaunch &&
+      exact.mayUpgradeOwnedServer &&
+      probe.identityAbsent === true &&
+      (probe.liveStatus === "unknown" || (probe.liveStatus === "live" && probe.liveOwned === true));
+    const refreshIfIdle =
+      owningLaunch &&
+      exact.mayUpgradeOwnedServer &&
+      runner?.refreshOwnedRuntimeOnFirstConnection === true &&
+      liveCompatible &&
+      probe.liveOwned === true &&
+      probe.identityAbsent !== true &&
+      probe.liveVersion !== undefined &&
+      compareSemverVersions(probe.liveVersion, version) < 0;
+    if (adoptLegacy || refreshIfIdle) {
+      exact = {
+        ...exact,
+        ...(refreshIfIdle ? { refreshIfIdle: true, expectedLiveVersion: probe.liveVersion } : {}),
+        ...(probe.retainedRunnerSha256 === undefined
+          ? {}
+          : { expectedLiveRunnerSha256: probe.retainedRunnerSha256 }),
+      };
+    }
+    const selectedVersion =
+      liveCompatible && !adoptLegacy && !refreshIfIdle
+        ? probe.liveVersion
+        : retainedCompatible
+          ? probe.retainedVersion
+          : undefined;
     if (selectedVersion !== undefined) {
       const retained =
         selectedVersion === probe.retainedVersion &&
@@ -1640,6 +1926,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       readonly remotePort: number;
       readonly remoteServerKind: "external" | "managed" | null;
       readonly selectedRuntime: PreparedRemoteRuntime;
+      readonly refresh?: "replaced" | "reused-busy" | "reused-unknown";
     },
     SshCommandError | SshInvalidTargetError | SshLaunchError,
     ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
@@ -1650,7 +1937,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshRunnerLogFields(runner),
       stateKey,
     });
-    const selected = yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey);
+    const selected = yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey, true);
     yield* Effect.annotateCurrentSpan("t3.runtime.selectedVersion", selected.version);
     yield* Effect.annotateCurrentSpan("t3.runtime.requestedVersion", selected.requestedVersion);
     const result = yield* runSshCommand(target, {
@@ -1689,14 +1976,39 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshTargetLogFields(target),
       remotePort: parsed.remotePort,
       remoteServerKind: parsed.serverKind ?? null,
-      selectedVersion: selected.version,
+      selectedVersion: parsed.selectedVersion ?? selected.version,
       requestedVersion: selected.requestedVersion,
+      refresh: parsed.refresh ?? null,
       stateKey,
     });
+    const reusedVersion = parsed.selectedVersion;
+    const cachedSelection: PreparedRemoteRuntime =
+      reusedVersion === undefined
+        ? selected
+        : {
+            ...selected,
+            version: reusedVersion,
+            source: "retained",
+            runner: {
+              ...selected.runner,
+              archiveVersion: reusedVersion,
+              refreshOwnedRuntimeOnFirstConnection: false,
+            },
+            retainedRunnerSha256: selected.expectedLiveRunnerSha256 ?? null,
+            refreshIfIdle: false,
+          };
+    const durableSelection = { ...cachedSelection };
+    delete durableSelection.refreshIfIdle;
+    delete durableSelection.expectedLiveVersion;
+    delete durableSelection.expectedLiveRunnerSha256;
     return {
       remotePort: parsed.remotePort,
       remoteServerKind: parsed.serverKind ?? null,
-      selectedRuntime: { ...selected, requireInstalled: !isNodeScriptRunner(selected.runner) },
+      selectedRuntime: {
+        ...durableSelection,
+        requireInstalled: !isNodeScriptRunner(selected.runner),
+      },
+      ...(parsed.refresh === undefined ? {} : { refresh: parsed.refresh }),
     };
   },
 );
@@ -2202,6 +2514,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
 ): Effect.fn.Return<SshEnvironmentManagerShape, never, Scope.Scope> {
   const managerScope = yield* Scope.Scope;
   const tunnels = new Map<string, SshTunnelEntry>();
+  const firstConnectionDecisions = new Set<string>();
   const targetLocks = yield* KeyedLock.make<string>();
   const authSecrets = new Map<string, string>();
 
@@ -2480,7 +2793,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   ): Effect.fn.Return<SshTunnelEntry, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
     const entry = tunnels.get(key) ?? null;
 
-    if (entry !== null) {
+    if (entry !== null && runner?.refreshOwnedRuntimeOnFirstConnection === true) {
+      // A failed ensure may have cached a healthy forward before pairing failed.
+      // Drop only the local forward so the unconsumed startup decision runs again.
+      yield* Effect.gen(function* () {
+        if (tunnels.get(key) === entry) tunnels.delete(key);
+        yield* closeTunnelEntry(entry);
+      }).pipe(Effect.uninterruptible);
+    } else if (entry !== null) {
       yield* Effect.logDebug("ssh.environment.tunnel.existing.check", {
         ...sshTargetLogFields(resolvedTarget),
         key,
@@ -2564,7 +2884,17 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     return yield* withTargetLock(
       key,
       Effect.gen(function* () {
-        const entry = yield* ensureTunnelEntry(key, resolvedTarget, runner);
+        const connectionRunner =
+          runner === undefined
+            ? undefined
+            : {
+                ...runner,
+                refreshOwnedRuntimeOnFirstConnection:
+                  runner.keepExistingRunner !== true &&
+                  !firstConnectionDecisions.has(key) &&
+                  runner.refreshOwnedRuntimeOnFirstConnection === true,
+              };
+        const entry = yield* ensureTunnelEntry(key, resolvedTarget, connectionRunner);
 
         const pairingResult = requestOptions?.issuePairingToken
           ? yield* runWithSshAuth({
@@ -2584,6 +2914,9 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           remoteServerKind: entry.remoteServerKind,
           issuedPairingToken: pairingToken !== null,
         });
+        if (connectionRunner?.refreshOwnedRuntimeOnFirstConnection === true) {
+          firstConnectionDecisions.add(key);
+        }
         return {
           target: entry.target,
           httpBaseUrl: entry.httpBaseUrl,
