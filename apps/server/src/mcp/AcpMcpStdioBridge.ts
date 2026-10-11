@@ -241,6 +241,8 @@ export function listAcpMcpTools(options: {
     const tools = (result as { readonly tools?: unknown } | null)?.tools;
     if (!Array.isArray(tools)) return [];
     return tools.flatMap((tool): ReadonlyArray<AcpMcpListedTool> => {
+      // A remote can return anything here; skip entries that are not objects.
+      if (typeof tool !== "object" || tool === null) return [];
       const entry = tool as {
         readonly name?: unknown;
         readonly inputSchema?: { readonly properties?: unknown };

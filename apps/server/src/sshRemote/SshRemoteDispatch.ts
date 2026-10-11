@@ -17,6 +17,7 @@ import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -465,14 +466,16 @@ const make = Effect.gen(function* () {
       const key = `${remote.target.alias}\u0000${remote.ceiling}`;
       const known = launchLineageSupport.get(key);
       if (known !== undefined) return known;
-      const listed = yield* Effect.result(
+      // Effect.exit also catches defects, so even a malformed listing only
+      // drops the optional launchedBy argument and never fails the launch.
+      const listed = yield* Effect.exit(
         listAcpMcpTools({
           endpoint: new URL("mcp", remote.httpBaseUrl).toString(),
           authorization: `Bearer ${remote.token}`,
         }).pipe(Effect.timeout(LAUNCH_LINEAGE_PROBE_TIMEOUT)),
       );
-      if (listed._tag === "Failure") return false;
-      const accepts = listed.success.some(
+      if (Exit.isFailure(listed)) return false;
+      const accepts = listed.value.some(
         (tool) => tool.name === "goat_thread_launch" && tool.argumentNames.includes("launchedBy"),
       );
       launchLineageSupport.set(key, accepts);
