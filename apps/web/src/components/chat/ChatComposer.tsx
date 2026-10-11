@@ -1503,6 +1503,7 @@ export interface ChatComposerHandle {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps {
+  sshWorktreeSelected?: boolean;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   canOperateThread: boolean;
@@ -1722,6 +1723,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     canInterrupt,
     isConnecting,
     isSendBusy,
+    sshWorktreeSelected = false,
     canResume,
     isRevertingCheckpoint = false,
     sendDisabledReason: externalSendDisabledReason,
@@ -2192,10 +2194,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
-  const providerSendBlockReason = getAntigravitySendBlockReason(
-    selectedProviderEntry?.snapshot,
-    selectedModel,
-  );
+  const providerSendBlockReason = sshWorktreeSelected
+    ? null
+    : getAntigravitySendBlockReason(selectedProviderEntry?.snapshot, selectedModel);
   const sendDisabledReason =
     externalSendDisabledReason ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
