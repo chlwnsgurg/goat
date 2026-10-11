@@ -44,6 +44,7 @@ import {
   recordSpans,
   makeProtocolTestSpawner,
   nativeScripts,
+  nativeScriptsBatch,
   installArchivePsDouble,
 } from "./tunnel.fixture.ts";
 import { nextVersion, shell, fixture } from "./tunnel.runnerSwitch.fixture.ts";
@@ -56,8 +57,8 @@ describe("ssh tunnel scripts", () => {
         mirror: { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
         node: { nodeScriptPath: "/fixture/cli entry.mjs", nodeEngineRange: TEST_NODE_ENGINE_RANGE },
       };
-      for (const key of ["archive", "mirror", "node"] as const) {
-        for (const input of [
+      const requests = (["archive", "mirror", "node"] as const).flatMap((key) =>
+        [
           inputs[key],
           { ...inputs[key], archiveDirectory: "/fixture/archives" },
           { ...inputs[key], bundledArchiveDirectory: "/fixture/bundle" },
@@ -66,8 +67,14 @@ describe("ssh tunnel scripts", () => {
             archiveDirectory: "/fixture/archives",
             bundledArchiveDirectory: "/fixture/bundle",
           },
-        ]) {
-          const actual = yield* nativeScripts(input);
+        ].map((input) => ({ input })),
+      );
+      const results = yield* nativeScriptsBatch(requests);
+      let index = 0;
+      for (const key of ["archive", "mirror", "node"] as const) {
+        const first = results[index]!;
+        for (let variant = 0; variant < 4; variant++) {
+          const actual = results[index++]!;
           assert.equal(actual.runner, baseline[key].runner);
           assert.equal(actual.launch, baseline[key].launch);
           assert.equal(actual.pairing, baseline[key].pairing);
@@ -78,14 +85,14 @@ describe("ssh tunnel scripts", () => {
           '  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/SHA256SUMS"',
         );
         const end = ordinary.indexOf("  if command -v sha256sum >/dev/null 2>&1; then");
-        const upload = (yield* nativeScripts(inputs[key])).upload!;
+        const upload = first.upload!;
         assert.equal(upload.slice(0, start), ordinary.slice(0, start));
         assert.equal(
           upload.slice(upload.indexOf("  if command -v sha256sum >/dev/null 2>&1; then")),
           ordinary.slice(end),
         );
         assert.include(upload, `T3_EXPECTED='${"a".repeat(64)}'`);
-        assert.equal((yield* nativeScripts(inputs[key])).runner, ordinary);
+        assert.equal(first.runner, ordinary);
       }
       assert.throws(
         () => SshTunnel.buildRemoteT3UploadInstallerScript(inputs.node, "a".repeat(64)),
@@ -1397,12 +1404,15 @@ describe("archive runner script", () => {
   const windowsHost = hostPlatform === "win32";
   const archiveVersion = "1.2.3-preview.20260911.4";
 
-  const runShell = (home: string, args: string[], bytes?: Uint8Array) =>
+  const runShell = (home: string, args: string[], bytes?: Uint8Array, pathPrefix?: string) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
         ChildProcess.make(remoteShell, args, {
-          env: { PATH: process.env.PATH ?? "", HOME: home },
+          env: {
+            PATH: pathPrefix ? `${pathPrefix}:${process.env.PATH ?? ""}` : (process.env.PATH ?? ""),
+            HOME: home,
+          },
           extendEnv: false,
           ...(bytes === undefined
             ? {}
@@ -1432,7 +1442,8 @@ describe("archive runner script", () => {
       return { stdout, stderr, exitCode };
     });
 
-  const runRunner = (home: string, runner: string) => runShell(home, [runner, "--version"]);
+  const runRunner = (home: string, runner: string, pathPrefix?: string) =>
+    runShell(home, [runner, "--version"], undefined, pathPrefix);
   const runUpload = (home: string, script: string, bytes: Uint8Array) =>
     runShell(home, ["-c", script], bytes);
 
@@ -1649,9 +1660,17 @@ describe("archive runner script", () => {
 
         yield* fs.remove(`${versionsDir}/${archiveVersion}`, { recursive: true });
         yield* fs.makeDirectory(lock);
-        const afterUnowned = yield* runRunner(home, runner);
+        const bin = `${root}/bin`;
+        yield* fs.makeDirectory(bin);
+        yield* fs.writeFileString(
+          `${bin}/sleep`,
+          '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\nexec /bin/sleep 0.01\n',
+        );
+        yield* fs.chmod(`${bin}/sleep`, 0o700);
+        const afterUnowned = yield* runRunner(home, runner, bin);
         assert.equal(afterUnowned.exitCode, 0, afterUnowned.stderr);
         assert.isFalse(yield* fs.exists(lock));
+        assert.equal((yield* fs.readFileString(`${bin}/sleep-calls`)).trim().split("\n").length, 4);
       }).pipe(Effect.provide(NodeServices.layer)),
     60_000,
   );

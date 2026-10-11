@@ -173,17 +173,27 @@ export const makeProtocolTestSpawner = (spawn: Parameters<typeof ChildProcessSpa
     }),
   );
 
-// Vite reformats Function.toString(); persistent script bytes use native Node.
-export const nativeScripts = Effect.fn("test.nativeScripts")(function* (
-  input: SshTunnel.RemoteT3RunnerOptions,
-  selection?: SshTunnel.PreparedRemoteRuntime,
+type NativeScripts = {
+  runner: string;
+  launch: string;
+  pairing: string;
+  mcp: string;
+  upload: string | null;
+  probe: string;
+};
+
+// One native Node process renders every request; Vite reformats Function.toString().
+export const nativeScriptsBatch = Effect.fn("test.nativeScriptsBatch")(function* (
+  requests: ReadonlyArray<{
+    input: SshTunnel.RemoteT3RunnerOptions;
+    selection?: SshTunnel.PreparedRemoteRuntime | undefined;
+  }>,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const moduleUrl = new URL("./tunnel.ts", import.meta.url).href;
   const script = `import * as t from ${JSON.stringify(moduleUrl)};
-const input = ${JSON.stringify(input)};
-const selection = ${JSON.stringify(selection)};
-console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input, selection), pairing: t.buildRemotePairingScript("711bc738002d72fd", input, selection), mcp: t.buildRemoteMcpSessionScript("711bc738002d72fd", { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input, selection), probe: t.buildRemoteRuntimeProbeScript(input.archiveVersion ?? "", "711bc738002d72fd", true), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }));`;
+const requests = ${JSON.stringify(requests)};
+console.log(JSON.stringify(requests.map(({ input, selection }) => ({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input, selection), pairing: t.buildRemotePairingScript("711bc738002d72fd", input, selection), mcp: t.buildRemoteMcpSessionScript("711bc738002d72fd", { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input, selection), probe: t.buildRemoteRuntimeProbeScript(input.archiveVersion ?? "", "711bc738002d72fd", true), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }))));`;
   const child = yield* spawner.spawn(
     ChildProcess.make(process.execPath, ["--input-type=module", "-e", script]),
   );
@@ -196,18 +206,18 @@ console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch:
     { concurrency: "unbounded" },
   );
   assert.equal(result.code, 0, result.stderr);
-  const scripts = JSON.parse(result.stdout) as {
-    runner: string;
-    launch: string;
-    pairing: string;
-    mcp: string;
-    upload: string | null;
-    probe: string;
-  };
-  for (const entry of ["launch", "pairing", "mcp", "probe"] as const)
-    assert.notMatch(scripts[entry], /@@T3_[A-Z_]+@@/);
-  return scripts;
+  const all = JSON.parse(result.stdout) as Array<NativeScripts>;
+  assert.equal(all.length, requests.length);
+  for (const scripts of all)
+    for (const entry of ["launch", "pairing", "mcp", "probe"] as const)
+      assert.notMatch(scripts[entry], /@@T3_[A-Z_]+@@/);
+  return all;
 });
+
+export const nativeScripts = (
+  input: SshTunnel.RemoteT3RunnerOptions,
+  selection?: SshTunnel.PreparedRemoteRuntime,
+) => nativeScriptsBatch([{ input, selection }]).pipe(Effect.map((all) => all[0]!));
 
 // Archive doubles are Node scripts; emulate archive ps output only for the captured seed child.
 export const installArchivePsDouble = Effect.fn("test.installArchivePsDouble")(function* (
