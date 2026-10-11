@@ -82,12 +82,13 @@ const messageActionPillClassName =
   "relative inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full bg-message-action font-medium text-base text-message-action-foreground shadow-xs shadow-message-action/24 outline-none hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:text-sm pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11";
 
 /**
- * Round primary actions (send, stop) sit in the footer's 28px control row, like the model and
- * reasoning controls beside them. Coarse pointers keep a 44px hit area through a transparent
- * overlay, the same way ComposerControl does, so the visual size stays small on touch screens.
+ * Round primary actions (send, stop) stay within the footer's 28px control row, visually no
+ * taller than the model and reasoning labels beside them, like Codex. Coarse pointers keep a
+ * 44px hit area through a transparent overlay, the same way ComposerControl does, so the
+ * visual size stays small on touch screens.
  */
 export const composerRoundActionClassName =
-  "relative flex size-7 shrink-0 items-center justify-center rounded-full pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 [&_svg]:pointer-events-none";
+  "relative flex size-6 shrink-0 items-center justify-center rounded-full pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 [&_svg]:pointer-events-none";
 
 const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
   event.preventDefault();
@@ -158,7 +159,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           />
         }
       >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
           <rect x="2" y="2" width="8" height="8" rx="1.5" />
         </svg>
       </TooltipTrigger>
@@ -348,13 +349,13 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       {isConnecting || isSendBusy ? (
         <Spinner size="sm" aria-hidden="true" />
       ) : showResume ? (
-        <PlayIcon className="size-3.5 fill-current" aria-hidden="true" />
+        <PlayIcon className="size-3 fill-current" aria-hidden="true" />
       ) : isEditingQueuedMessage ? (
-        <CheckIcon className="size-3.5" aria-hidden="true" />
+        <CheckIcon className="size-3" aria-hidden="true" />
       ) : isRunning ? (
-        <MorphIcon className="size-3.5" icon={isQueuing ? ListPlus : CornerUpRight} />
+        <MorphIcon className="size-3" icon={isQueuing ? ListPlus : CornerUpRight} />
       ) : (
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
           <path
             d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
             stroke="currentColor"

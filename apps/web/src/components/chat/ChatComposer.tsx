@@ -433,7 +433,6 @@ function useComposerRestingTransition(
   const elementRef = useRef<HTMLDivElement>(null);
   const isCollapsedRef = useRef(isCollapsed);
   const previousCollapsedRef = useRef(isCollapsed);
-  const previousControlsCollapsedRef = useRef(false);
   const previousRestingRef = useRef(isResting);
   const previousHeightRef = useRef<number | null>(null);
   const previousModelStripHeightRef = useRef<number | null>(null);
@@ -516,11 +515,6 @@ function useComposerRestingTransition(
       if (!element || !surface) return;
 
       const nextIsCollapsed = isCollapsedRef.current;
-      // The resting controls element mounts only while the footer controls live outside the
-      // footer (the phone strip or inline row). The desktop resting composer keeps them in the
-      // footer, so nothing moves between the two.
-      const nextControlsCollapsed = restingControlsRef.current !== null;
-      const controlsMoved = previousControlsCollapsedRef.current !== nextControlsCollapsed;
 
       const visibleTransitionElement = (selector: string) =>
         Array.from(element.querySelectorAll<HTMLElement>(selector)).find(
@@ -534,16 +528,12 @@ function useComposerRestingTransition(
       const continuousControls =
         element.dataset.inlineRestingControls === "true" ||
         element.dataset.modelOnlyStrip === "true";
-      const controls = nextControlsCollapsed
+      const controls = nextIsCollapsed
         ? restingControlsRef.current
         : element.querySelector<HTMLElement>('[data-chat-composer-controls="left"]');
 
       const shell = element.closest<HTMLElement>('[data-slot="composer-shell"]');
-      // The model strip only takes part when the controls enter or leave it.
-      const modelStrip =
-        nextControlsCollapsed || previousControlsCollapsedRef.current
-          ? shell?.querySelector<HTMLElement>('[data-composer-model-strip="true"]')
-          : null;
+      const modelStrip = shell?.querySelector<HTMLElement>('[data-composer-model-strip="true"]');
       const interruptedStripHeight =
         animationRef.current && modelStrip ? modelStrip.getBoundingClientRect().height : null;
       const interruptedAnimation = animationRef.current;
@@ -662,8 +652,13 @@ function useComposerRestingTransition(
           footer.style.top = "auto";
           footer.style.bottom = `${String(footerBottom)}px`;
           footer.style.height = `${String(footerHeight)}px`;
-          footer.style.left = "1px";
-          footer.style.right = "1px";
+          if (nextIsCollapsed) {
+            footer.style.left = "auto";
+            footer.style.right = "1px";
+          } else {
+            footer.style.left = "1px";
+            footer.style.right = "1px";
+          }
         }
 
         let stripAnimation: Animation | null = null;
@@ -796,11 +791,11 @@ function useComposerRestingTransition(
           // to the bottom row the prompt still occupies while the surface is
           // short, so they stay hidden through the first half of the tween
           // and fade in once the geometry has mostly settled.
-          const arrivingControls = nextControlsCollapsed
+          const arrivingControls = nextIsCollapsed
             ? restingControlsRef.current
             : element.querySelector<HTMLElement>('[data-chat-composer-controls="left"]');
-          if (arrivingControls && controlsMoved && !continuousControls) {
-            const drift = nextControlsCollapsed
+          if (arrivingControls && !continuousControls) {
+            const drift = nextIsCollapsed
               ? -COMPOSER_RESTING_CONTROLS_ARRIVAL_DRIFT_PX
               : COMPOSER_RESTING_CONTROLS_ARRIVAL_DRIFT_PX;
             stateChangeAnimations.push(
@@ -810,8 +805,8 @@ function useComposerRestingTransition(
                   { opacity: 1, transform: "none" },
                 ],
                 {
-                  duration: nextControlsCollapsed ? duration : duration / 2,
-                  delay: nextControlsCollapsed ? 0 : duration / 2,
+                  duration: nextIsCollapsed ? duration : duration / 2,
+                  delay: nextIsCollapsed ? 0 : duration / 2,
                   fill: "backwards",
                   easing: COMPOSER_RESTING_TRANSITION_EASING,
                 },
@@ -875,7 +870,6 @@ function useComposerRestingTransition(
       }
 
       previousCollapsedRef.current = nextIsCollapsed;
-      previousControlsCollapsedRef.current = nextControlsCollapsed;
       previousHeightRef.current = nextHeight;
       previousModelStripHeightRef.current = nextModelStripHeight;
       previousContentOffsetsRef.current = {
@@ -950,8 +944,9 @@ function useComposerRestingTransition(
         '[data-chat-composer-transition-actions="true"]',
       )?.getBoundingClientRect().top;
       const controlsRect = (
-        restingControlsRef.current ??
-        visibleTransitionElement('[data-chat-composer-controls="left"]')
+        isCollapsedRef.current
+          ? restingControlsRef.current
+          : visibleTransitionElement('[data-chat-composer-controls="left"]')
       )?.getBoundingClientRect();
       previousHeightRef.current = elementRect.height;
       previousContentOffsetsRef.current = {
@@ -5226,10 +5221,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const expandedComposerImages = isComposerResting
     ? standaloneComposerImages.filter((image) => pendingSnapShotIdSet.has(image.id))
     : standaloneComposerImages;
-  // The desktop resting composer keeps its footer, laid over the single prompt line, so the
-  // controls hold the same left and right groups as the expanded footer. Only the collapsed
-  // phone composer moves them out, into the context strip or an inline row when there is none.
-  const composerControlsCollapsed = isComposerCollapsedMobile;
+  // Keep collapsed controls inside the input when workspace context is hidden.
+  const composerControlsCollapsed = isComposerResting || isComposerCollapsedMobile;
   const showInlineRestingControls = composerControlsCollapsed && restingControlsHost === null;
   const composerControlsVisibleInStrip =
     composerControlsCollapsed && restingControlsHost !== null && restingControlsVisible;
@@ -5243,31 +5236,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useLayoutEffect(() => {
     onRestingChange(isComposerResting);
   }, [isComposerResting, onRestingChange]);
-  // The resting footer floats over the prompt row. The prompt shows through the footer spacer
-  // between the left and right groups, so the row is inset to the spacer's measured edges.
-  // Control widths vary too much (model names, the compact-before-send chip) for fixed insets.
-  const [restingPromptRowElement, setRestingPromptRowElement] = useState<HTMLDivElement | null>(
-    null,
-  );
-  const [footerSpacerElement, setFooterSpacerElement] = useState<HTMLSpanElement | null>(null);
-  const [restingPromptInsets, setRestingPromptInsets] = useState<{
-    start: number;
-    end: number;
-  } | null>(null);
+  // The resting footer floats over the prompt row, so the row reserves its
+  // measured width. Wide actions like the compact-before-send chip vary too much for a fixed inset.
+  const [restingActionsElement, setRestingActionsElement] = useState<HTMLDivElement | null>(null);
+  const [restingActionsWidth, setRestingActionsWidth] = useState<number | null>(null);
   useLayoutEffect(() => {
-    if (!isComposerResting || !restingPromptRowElement || !footerSpacerElement) return;
-    const measure = () => {
-      const row = restingPromptRowElement.getBoundingClientRect();
-      const spacer = footerSpacerElement.getBoundingClientRect();
-      const start = Math.max(0, Math.round(spacer.left - row.left));
-      const end = Math.max(0, Math.round(row.right - spacer.right));
-      setRestingPromptInsets((current) =>
-        current?.start === start && current.end === end ? current : { start, end },
-      );
-    };
+    if (!isComposerResting || !restingActionsElement) return;
+    const measure = () => setRestingActionsWidth(restingActionsElement.offsetWidth);
     measure();
-    return observeResize([restingPromptRowElement, footerSpacerElement], measure);
-  }, [footerSpacerElement, isComposerResting, restingPromptRowElement]);
+    return observeResize(restingActionsElement, measure);
+  }, [isComposerResting, restingActionsElement]);
   const restingImagePreviewCounts = getRestingComposerImagePreviewCounts(
     standaloneComposerImages.length,
   );
@@ -5341,7 +5319,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   const composerMainSurfaceRef = useComposerRestingTransition(
-    isComposerResting || isComposerCollapsedMobile,
+    composerControlsCollapsed,
     isComposerResting,
     restingComposerControlsRef,
     onComposerOverlayHeightChange,
@@ -5473,10 +5451,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
     onOpenModelPicker: openComposerModelPicker,
   });
-  // The expanded footer reads like Codex: access on the left, then context, model, and effort
-  // on the right. Visual order comes from CSS so the overflow priority below (mode folds into
-  // the menu first, then effort) and the measured DOM stay unchanged.
-  const expandedFooterLayout = !composerControlsCollapsed;
+  // The footer and the collapsed composer's control row read alike, like Codex: attach and
+  // access on the left, then context, model, and effort on the right. Visual order comes from
+  // CSS so the overflow priority below (mode folds into the menu first, then effort) and the
+  // measured DOM stay unchanged. The collapsed row carries the attach button itself; the
+  // expanded footer places it before this cluster.
   const restingBlockDefs = [
     ...(providerTraitsPicker
       ? [
@@ -5505,205 +5484,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const hiddenRestingBlockIds = restingBlockDefs
     .slice(restingBlockDefs.length - restingHiddenBlockCount)
     .map((def) => def.id);
-  const composerControls = showProviderUnavailable ? (
-    <ComposerControl
-      type="button"
-      disabled={!providerSetupInstanceId}
-      onClick={() => {
-        if (providerSetupInstanceId) {
-          onOpenProviderSetup(providerSetupInstanceId);
-        }
-      }}
-      data-chat-provider-unavailable="true"
-      className="shrink-0"
-    >
-      <CircleAlertIcon className="size-4" />
-      {providerSetupInstanceId ? "Open provider settings" : "No provider available"}
-    </ComposerControl>
-  ) : (
-    <>
-      {composerControlsCollapsed &&
-      restingControlsHost !== null &&
-      restingControlsHaveLeadingContext ? (
-        <ComposerControlSeparator
-          size="xs"
-          className="@max-[400px]/composer-surface:hidden"
-          data-resting-controls-separator="true"
-        />
-      ) : null}
-      {expandedFooterLayout ? (
-        <>
-          <span
-            ref={setFooterSpacerElement}
-            aria-hidden="true"
-            data-resting-controls-spacer
-            className={cn(
-              // Invisible so a resting footer passes pointers through to the prompt beneath it.
-              // Resting also reserves room for the prompt before controls fold into overflow.
-              "invisible -order-1 flex-1",
-              isComposerResting ? "min-w-40" : "min-w-2",
-            )}
-          />
-          {activeContextWindowForMeter ? (
-            <span data-resting-fixed-control className="flex shrink-0 items-center">
-              <ContextWindowMeter
-                usage={activeContextWindowForMeter}
-                modelDisplayName={activeThreadModelDisplayName}
-                onCompact={compactCommandAvailable ? compactThreadContext : undefined}
-                compactDisabled={
-                  compactDisabled || noProviderAvailable || isSendBusy || isConnecting
-                }
-                compactDisabledReason={resolvedCompactDisabledReason}
-              />
-            </span>
-          ) : reserveContextWindowMeter ? (
-            <span data-resting-fixed-control className="flex shrink-0 items-center">
-              <ContextWindowMeterPlaceholder />
-            </span>
-          ) : null}
-        </>
-      ) : null}
-      <ProviderModelPicker
-        compact={false}
-        isComposerOwned
-        disabled={providerCatalogPending || isSendBusy}
-        {...(routeKind === "draft" && supportsMultipleModels
-          ? {
-              ...(multipleModelSelections !== null
-                ? { selectedModels: multipleModelSelections }
-                : {}),
-              onToggleModel: (instanceId: ProviderInstanceId, model: string) => {
-                const current = multipleModelSelections ?? [selectedModelSelection];
-                const matchesModel = (selection: ModelSelection) => {
-                  if (selection.instanceId !== instanceId) return false;
-                  const entry = providerInstanceEntries.find(
-                    (entry) => entry.instanceId === selection.instanceId,
-                  );
-                  const resolvedModel = resolveModelPickerSelectedModel({
-                    driverKind: entry?.driverKind,
-                    model: selection.model,
-                    options: modelOptionsByInstance.get(selection.instanceId) ?? [],
-                  });
-                  return (resolvedModel?.slug ?? selection.model) === model;
-                };
-                const exists = current.some(matchesModel);
-                const next = exists
-                  ? current.filter((selection) => !matchesModel(selection))
-                  : [...current, createModelSelection(instanceId, model)];
-                if (next.length > 1) {
-                  setMultipleModelSelections(next);
-                } else {
-                  setMultipleModelSelections(null);
-                  const remaining = next[0] ?? selectedModelSelection;
-                  onProviderModelSelect(remaining.instanceId, remaining.model, {
-                    focusComposer: false,
-                  });
-                }
-              },
-            }
-          : {})}
-        activeInstanceId={
-          providerCatalogPending
-            ? (activeThreadModelSelection?.instanceId ?? selectedInstanceId)
-            : selectedInstanceId
-        }
-        model={
-          providerCatalogPending
-            ? (activeThreadModelSelection?.model ?? selectedModelForPickerWithCustomFallback)
-            : selectedModelForPickerWithCustomFallback
-        }
-        lockedProvider={lockedProvider}
-        lockedContinuationGroupKey={lockedContinuationGroupKey}
-        instanceEntries={providerInstanceEntries}
-        keybindings={keybindings}
-        modelOptionsByInstance={modelOptionsByInstance}
-        size={composerControlsCollapsed ? "xs" : "sm"}
-        triggerClassName={
-          composerControlsCollapsed
-            ? cn(
-                "min-w-13 shrink text-xs!",
-                !showInlineRestingControls &&
-                  "@max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none",
-              )
-            : "min-w-13"
-        }
-        {...(expandedFooterLayout ? { popupAlign: "end" as const } : {})}
-        terminalOpen={terminalOpen}
-        open={isComposerModelPickerOpen}
-        instanceIndicatorBackground={
-          composerControlsCollapsed
-            ? "color-mix(in srgb, var(--chat-composer-glass-surface) var(--glass-opacity), transparent)"
-            : "var(--contrast-input)"
-        }
-        {...(composerProviderState.modelPickerIconClassName || composerControlsCollapsed
-          ? {
-              activeProviderIconClassName: cn(
-                composerProviderState.modelPickerIconClassName,
-                composerControlsCollapsed &&
-                  "fill-muted-foreground/70! text-muted-foreground/70! [&_path]:fill-muted-foreground/70! [&_rect]:fill-muted-foreground/70! [&_[data-icon-detail]]:fill-transparent!",
-              ),
-            }
-          : {})}
-        onOpenChange={setIsComposerModelPickerOpen}
-        getModelDisabledReason={getModelDisabledReason}
-        onInstanceModelChange={(instanceId, model) => {
-          setMultipleModelSelections(null);
-          onProviderModelSelect(instanceId, model);
-        }}
-        onOpenProviderSetup={onOpenProviderSetup}
-      />
-
-      <>
-        {restingBlockDefs.map((def, index) => {
-          const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
-          return (
-            <div
-              key={def.id}
-              data-resting-block={def.id}
-              data-composer-block-icon-only={
-                index >= restingBlockDefs.length - iconOnlyBlockCount ? "true" : "false"
-              }
-              aria-hidden={hidden || undefined}
-              inert={hidden || undefined}
-              className={cn(
-                "flex w-max min-w-max shrink-0 items-center gap-1",
-                expandedFooterLayout && def.id === "mode" && "order-first",
-                hidden && "pointer-events-none invisible absolute",
-                index >= restingBlockDefs.length - iconOnlyBlockCount &&
-                  "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
-              )}
-            >
-              {def.content}
-            </div>
-          );
-        })}
-        <div
-          data-resting-controls-overflow
-          aria-hidden={hiddenRestingBlockIds.length === 0 || undefined}
-          inert={hiddenRestingBlockIds.length === 0 || undefined}
-          className={cn(
-            "min-w-0 shrink-0",
-            expandedFooterLayout && "order-first",
-            hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
-          )}
-        >
-          <CompactComposerControlsMenu
-            interactionMode={interactionMode}
-            runtimeMode={compatibleRuntimeMode}
-            runtimeModeOptions={compatibleRuntimeModeOptions}
-            size={composerControlsCollapsed ? "xs" : "sm"}
-            hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
-            showInteractionModeToggle={planModeUiEnabled && hiddenRestingBlockIds.includes("mode")}
-            traitsMenuContent={
-              hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
-            }
-            onToggleInteractionMode={toggleInteractionMode}
-            onRuntimeModeChange={handleRuntimeModeChange}
-          />
-        </div>
-      </>
-    </>
-  );
   const showTasksTab =
     !hasBannerItems &&
     !showComposerTopDrawer &&
@@ -6698,6 +6478,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   // Render
   // ------------------------------------------------------------------
+
   const composerAttachAction = showComposerAttachAction ? (
     <>
       <input
@@ -6735,7 +6516,196 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       </Tooltip>
     </>
   ) : null;
+  const composerControls = showProviderUnavailable ? (
+    <ComposerControl
+      type="button"
+      disabled={!providerSetupInstanceId}
+      onClick={() => {
+        if (providerSetupInstanceId) {
+          onOpenProviderSetup(providerSetupInstanceId);
+        }
+      }}
+      data-chat-provider-unavailable="true"
+      className="shrink-0"
+    >
+      <CircleAlertIcon className="size-4" />
+      {providerSetupInstanceId ? "Open provider settings" : "No provider available"}
+    </ComposerControl>
+  ) : (
+    <>
+      {composerControlsCollapsed &&
+      restingControlsHost !== null &&
+      restingControlsHaveLeadingContext ? (
+        <ComposerControlSeparator
+          size="xs"
+          className="order-first @max-[400px]/composer-surface:hidden"
+          data-resting-controls-separator="true"
+        />
+      ) : null}
+      {composerControlsCollapsed && composerAttachAction ? (
+        <span data-resting-fixed-control className="order-first flex shrink-0 items-center">
+          {composerAttachAction}
+        </span>
+      ) : null}
+      <>
+        <span aria-hidden="true" data-resting-controls-spacer className="-order-1 min-w-2 flex-1" />
+        {activeContextWindowForMeter ? (
+          <span data-resting-fixed-control className="flex shrink-0 items-center">
+            <ContextWindowMeter
+              usage={activeContextWindowForMeter}
+              modelDisplayName={activeThreadModelDisplayName}
+              onCompact={compactCommandAvailable ? compactThreadContext : undefined}
+              compactDisabled={compactDisabled || noProviderAvailable || isSendBusy || isConnecting}
+              compactDisabledReason={resolvedCompactDisabledReason}
+            />
+          </span>
+        ) : reserveContextWindowMeter ? (
+          <span data-resting-fixed-control className="flex shrink-0 items-center">
+            <ContextWindowMeterPlaceholder />
+          </span>
+        ) : null}
+      </>
+      <ProviderModelPicker
+        compact={false}
+        isComposerOwned
+        disabled={providerCatalogPending || isSendBusy}
+        {...(routeKind === "draft" && supportsMultipleModels
+          ? {
+              ...(multipleModelSelections !== null
+                ? { selectedModels: multipleModelSelections }
+                : {}),
+              onToggleModel: (instanceId: ProviderInstanceId, model: string) => {
+                const current = multipleModelSelections ?? [selectedModelSelection];
+                const matchesModel = (selection: ModelSelection) => {
+                  if (selection.instanceId !== instanceId) return false;
+                  const entry = providerInstanceEntries.find(
+                    (entry) => entry.instanceId === selection.instanceId,
+                  );
+                  const resolvedModel = resolveModelPickerSelectedModel({
+                    driverKind: entry?.driverKind,
+                    model: selection.model,
+                    options: modelOptionsByInstance.get(selection.instanceId) ?? [],
+                  });
+                  return (resolvedModel?.slug ?? selection.model) === model;
+                };
+                const exists = current.some(matchesModel);
+                const next = exists
+                  ? current.filter((selection) => !matchesModel(selection))
+                  : [...current, createModelSelection(instanceId, model)];
+                if (next.length > 1) {
+                  setMultipleModelSelections(next);
+                } else {
+                  setMultipleModelSelections(null);
+                  const remaining = next[0] ?? selectedModelSelection;
+                  onProviderModelSelect(remaining.instanceId, remaining.model, {
+                    focusComposer: false,
+                  });
+                }
+              },
+            }
+          : {})}
+        activeInstanceId={
+          providerCatalogPending
+            ? (activeThreadModelSelection?.instanceId ?? selectedInstanceId)
+            : selectedInstanceId
+        }
+        model={
+          providerCatalogPending
+            ? (activeThreadModelSelection?.model ?? selectedModelForPickerWithCustomFallback)
+            : selectedModelForPickerWithCustomFallback
+        }
+        lockedProvider={lockedProvider}
+        lockedContinuationGroupKey={lockedContinuationGroupKey}
+        instanceEntries={providerInstanceEntries}
+        keybindings={keybindings}
+        modelOptionsByInstance={modelOptionsByInstance}
+        size={composerControlsCollapsed ? "xs" : "sm"}
+        triggerClassName={
+          composerControlsCollapsed
+            ? cn(
+                "min-w-13 shrink text-xs!",
+                !showInlineRestingControls &&
+                  "@max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none",
+              )
+            : "min-w-13"
+        }
+        popupAlign="end"
+        terminalOpen={terminalOpen}
+        open={isComposerModelPickerOpen}
+        instanceIndicatorBackground={
+          composerControlsCollapsed
+            ? "color-mix(in srgb, var(--chat-composer-glass-surface) var(--glass-opacity), transparent)"
+            : "var(--contrast-input)"
+        }
+        {...(composerProviderState.modelPickerIconClassName || composerControlsCollapsed
+          ? {
+              activeProviderIconClassName: cn(
+                composerProviderState.modelPickerIconClassName,
+                composerControlsCollapsed &&
+                  "fill-muted-foreground/70! text-muted-foreground/70! [&_path]:fill-muted-foreground/70! [&_rect]:fill-muted-foreground/70! [&_[data-icon-detail]]:fill-transparent!",
+              ),
+            }
+          : {})}
+        onOpenChange={setIsComposerModelPickerOpen}
+        getModelDisabledReason={getModelDisabledReason}
+        onInstanceModelChange={(instanceId, model) => {
+          setMultipleModelSelections(null);
+          onProviderModelSelect(instanceId, model);
+        }}
+        onOpenProviderSetup={onOpenProviderSetup}
+      />
 
+      <>
+        {restingBlockDefs.map((def, index) => {
+          const hidden = index >= restingBlockDefs.length - restingHiddenBlockCount;
+          return (
+            <div
+              key={def.id}
+              data-resting-block={def.id}
+              data-composer-block-icon-only={
+                index >= restingBlockDefs.length - iconOnlyBlockCount ? "true" : "false"
+              }
+              aria-hidden={hidden || undefined}
+              inert={hidden || undefined}
+              className={cn(
+                "flex w-max min-w-max shrink-0 items-center gap-1",
+                def.id === "mode" && "order-first",
+                hidden && "pointer-events-none invisible absolute",
+                index >= restingBlockDefs.length - iconOnlyBlockCount &&
+                  "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
+              )}
+            >
+              {def.content}
+            </div>
+          );
+        })}
+        <div
+          data-resting-controls-overflow
+          aria-hidden={hiddenRestingBlockIds.length === 0 || undefined}
+          inert={hiddenRestingBlockIds.length === 0 || undefined}
+          className={cn(
+            "min-w-0 shrink-0",
+            "order-first",
+            hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
+          )}
+        >
+          <CompactComposerControlsMenu
+            interactionMode={interactionMode}
+            runtimeMode={compatibleRuntimeMode}
+            runtimeModeOptions={compatibleRuntimeModeOptions}
+            size={composerControlsCollapsed ? "xs" : "sm"}
+            hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
+            showInteractionModeToggle={planModeUiEnabled && hiddenRestingBlockIds.includes("mode")}
+            traitsMenuContent={
+              hiddenRestingBlockIds.includes("traits") ? providerTraitsMenuContent : undefined
+            }
+            onToggleInteractionMode={toggleInteractionMode}
+            onRuntimeModeChange={handleRuntimeModeChange}
+          />
+        </div>
+      </>
+    </>
+  );
   return (
     <form
       ref={composerFormRef}
@@ -6768,10 +6738,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         ) {
           onTypingGuardFocus();
         }
-        if (
-          (composerControlsCollapsed || isComposerResting) &&
-          isInsideRestingComposerControlScope(activeElement)
-        ) {
+        if (composerControlsCollapsed && isInsideRestingComposerControlScope(activeElement)) {
           return;
         }
         if (isInsideCollapsedComposerControls(activeElement)) {
@@ -6826,7 +6793,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               aria-hidden={restingControlsVisible ? undefined : true}
               inert={restingControlsVisible ? undefined : true}
               className={cn(
-                "relative flex w-max min-w-0 max-w-full items-center gap-1 font-normal text-muted-foreground/70 [&_button]:text-xs!",
+                "relative flex w-full min-w-0 items-center gap-1 font-normal text-muted-foreground/70 [&_button]:text-xs!",
                 !restingControlsVisible && "invisible",
               )}
             >
@@ -7082,9 +7049,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   }}
                 >
                   {showResumeAction ? (
-                    <PlayIcon className="size-3.5 fill-current" aria-hidden="true" />
+                    <PlayIcon className="size-3 fill-current" aria-hidden="true" />
                   ) : (
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
                       <path
                         d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
                         stroke="currentColor"
@@ -7516,14 +7483,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
 
               <div
-                ref={setRestingPromptRowElement}
                 className={cn("relative", isComposerResting && "flex min-w-0 items-center gap-1")}
                 style={
-                  isComposerResting && restingPromptInsets !== null
-                    ? {
-                        paddingInlineStart: `calc(${restingPromptInsets.start}px + 0.5rem)`,
-                        paddingInlineEnd: `calc(${restingPromptInsets.end}px + 0.5rem)`,
-                      }
+                  isComposerResting && restingActionsWidth !== null
+                    ? { paddingRight: `calc(${restingActionsWidth}px + 1rem)` }
                     : undefined
                 }
               >
@@ -7684,26 +7647,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingUserInputs.length > 0 && "pt-2",
                   isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
                   showMobilePendingAnswerActions && "hidden sm:flex",
-                  // Resting lays the same footer over the one-line prompt. Only its controls
-                  // take pointers; the gap between the groups belongs to the prompt.
                   isComposerResting &&
-                    "pointer-events-none absolute inset-x-px bottom-px z-10 h-12 py-0 sm:py-0",
+                    "absolute right-px z-10 h-12 w-auto gap-0 py-0 sm:gap-0 sm:py-0",
+                  isComposerResting &&
+                    (showInlineRestingControls ? "bottom-[calc(2rem+1px)]" : "bottom-px"),
                 )}
               >
-                {composerAttachAction ? (
-                  <span className="pointer-events-auto flex shrink-0 items-center">
-                    {composerAttachAction}
-                  </span>
-                ) : null}
+                {composerControlsCollapsed ? null : composerAttachAction}
                 <div
                   ref={expandedControlsLayout.attachControls}
                   data-chat-composer-controls="left"
                   data-chat-composer-footer-controls="true"
-                  data-chat-composer-resting-controls={isComposerResting ? "true" : undefined}
                   className={cn(
                     "relative -m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
                     composerAttachAction ? "ms-0" : "-ms-3.5 ps-3.5",
-                    isComposerResting && "*:pointer-events-auto",
+                    isComposerResting && "hidden",
                   )}
                 >
                   {composerControlsCollapsed ? null : composerControls}
@@ -7711,12 +7669,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
                 {/* Right side: send / stop button */}
                 <div
+                  ref={setRestingActionsElement}
                   data-chat-composer-actions="right"
                   data-chat-composer-transition-actions="true"
                   data-chat-composer-primary-actions-compact={
                     isComposerPrimaryActionsCompact ? "true" : "false"
                   }
-                  className="pointer-events-auto flex shrink-0 flex-nowrap items-center justify-end gap-2"
+                  className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
                 >
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
@@ -7777,7 +7736,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     aria-hidden={restingControlsVisible ? undefined : true}
                     inert={restingControlsVisible ? undefined : true}
                     className={cn(
-                      "relative flex w-max min-w-0 max-w-full items-center gap-1 text-muted-foreground/70 [&_button]:text-xs!",
+                      "relative flex w-full min-w-0 items-center gap-1 text-muted-foreground/70 [&_button]:text-xs!",
                       !restingControlsVisible && "invisible",
                     )}
                   >
