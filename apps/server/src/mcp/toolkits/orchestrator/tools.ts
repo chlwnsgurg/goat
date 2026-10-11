@@ -280,7 +280,7 @@ const WATCH_REPORTS =
 
 const ThreadWatchTool = Tool.make("goat_thread_watch", {
   description:
-    "Watch a T3 thread so the calling thread is told when it finishes, instead of polling with goat_thread_wait. The thread's active run is followed; when it is idle, its latest run is reported if this caller was not told about it yet, otherwise the watch waits for the caller's next goat_thread_send. Use it to resume a watch after goat_thread_unwatch, or after a launch whose response was lost (find the thread with goat_thread_list first). Needs an agent running inside a T3 thread." +
+    "Watch a GOAT thread so the calling thread is told when it finishes, instead of polling with goat_thread_wait. The thread's active run is followed; when it is idle, its latest run is reported if this caller was not told about it yet, otherwise the watch waits for the caller's next goat_thread_send. Use it to resume a watch after goat_thread_unwatch, or after a launch whose response was lost (find the thread with goat_thread_list first). Needs an agent running inside a GOAT thread." +
     WATCH_REPORTS +
     ON_ANOTHER_MACHINE,
   parameters: OrchestratorMcpThreadWatchInput,
@@ -289,20 +289,20 @@ const ThreadWatchTool = Tool.make("goat_thread_watch", {
   failureMode: "return",
   dependencies: hostThreadDependencies,
 })
-  .annotate(Tool.Title, "Watch a T3 thread")
+  .annotate(Tool.Title, "Watch a GOAT thread")
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
 const ThreadUnwatchTool = Tool.make("goat_thread_unwatch", {
   description:
-    "Stop the calling thread's watch on a T3 thread: no more messages about its runs, questions or host. removed is false when there was no watch. The thread itself keeps running.",
+    "Stop the calling thread's watch on a GOAT thread: no more messages about its runs, questions or host. removed is false when there was no watch. The thread itself keeps running.",
   parameters: OrchestratorMcpThreadWatchInput,
   success: OrchestratorMcpThreadUnwatchResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
   dependencies: hostThreadDependencies,
 })
-  .annotate(Tool.Title, "Stop watching a T3 thread")
+  .annotate(Tool.Title, "Stop watching a GOAT thread")
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
@@ -316,7 +316,7 @@ const ThreadWatchListTool = Tool.make("goat_thread_watch_list", {
   failureMode: "return",
   dependencies: hostThreadDependencies,
 })
-  .annotate(Tool.Title, "List watched T3 threads")
+  .annotate(Tool.Title, "List watched GOAT threads")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);

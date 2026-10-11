@@ -436,7 +436,7 @@ describe("LaunchWatchService", () => {
           yield* watchRemote(service, run1);
           const outage = yield* advanceUntil(Queue.take(world.delivered));
           const done = yield* advanceUntil(Queue.take(world.delivered));
-          expect(outage.text).toMatch(/^host_unavailable: T3 Code cannot reach host box/);
+          expect(outage.text).toMatch(/^host_unavailable: GOAT cannot reach host box/);
           expect(outage.notification?.outcome).toBe("unknown");
           expect(done.text).toContain("(threadId target, host box) finished run run-1");
           expect(done.text).toContain("Remote fix pushed.");

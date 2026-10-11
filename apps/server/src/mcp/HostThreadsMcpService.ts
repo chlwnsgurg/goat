@@ -229,7 +229,7 @@ const make = Effect.gen(function* () {
       ? Effect.fail(
           failure(
             "invalid_request",
-            "Watching a thread needs an agent running inside a T3 thread.",
+            "Watching a thread needs an agent running inside a GOAT thread.",
           ),
         )
       : Effect.succeed(scope.thread.threadId);

@@ -132,7 +132,7 @@ const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
     notifyOnCompletion: Schema.optional(
       Schema.Boolean.annotate({
         description:
-          "Default true for a calling T3 thread: this machine follows the remote thread over SSH and wakes the caller with a message when its run ends, waits on a question, or its host stays unreachable. Pass false to follow it yourself.",
+          "Default true for a calling GOAT thread: this machine follows the remote thread over SSH and wakes the caller with a message when its run ends, waits on a question, or its host stays unreachable. Pass false to follow it yourself.",
       }),
     ),
   }),

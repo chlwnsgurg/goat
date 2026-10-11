@@ -341,7 +341,7 @@ export function questionWake(input: {
       ? `It can be answered in that thread from a client connected to ${watch.host}.`
       : input.kind === "user_input"
         ? `Read it with goat_pending_request_read {threadId: "${watch.threadId}", requestId: "${input.requestId}"} and answer with goat_pending_request_respond if you can decide, or leave it to the user.`
-        : "An approval can only be given in that thread from a T3 client, so tell the user.";
+        : "An approval can only be given in that thread from a GOAT client, so tell the user.";
   return {
     ...wakeIds(watch, `question:${questionKey(input.runId, input.requestId)}`),
     text: `${name} (${identity(watch)}) is waiting on ${request} (${input.requestId}) in run ${input.runId} and cannot continue until it is answered. ${answer} ${STOP_HINT}`,
@@ -360,7 +360,7 @@ export function outageWake(input: {
   const { watch, outage } = input;
   return {
     ...wakeIds(watch, `outage:${watch.incarnation}:${outage.episode}`),
-    text: `host_unavailable: T3 Code cannot reach ${where(watch)} to follow ${named(watch, null).toLowerCase()} (${identity(watch)}). ${outage.failures} attempts failed, the last with: ${truncate(outage.lastError, 500)} It keeps retrying with backoff and reports the run once it reaches the host again; the thread itself may still be running there. ${STOP_HINT}`,
+    text: `host_unavailable: GOAT cannot reach ${where(watch)} to follow ${named(watch, null).toLowerCase()} (${identity(watch)}). ${outage.failures} attempts failed, the last with: ${truncate(outage.lastError, 500)} It keeps retrying with backoff and reports the run once it reaches the host again; the thread itself may still be running there. ${STOP_HINT}`,
     notification: {
       source: { kind: "background_task" },
       outcome: "unknown",
@@ -380,7 +380,7 @@ export function goneWake(input: {
   const name = named(watch, null);
   return {
     ...wakeIds(watch, `gone:${watch.incarnation}`),
-    text: `${name} (${identity(watch)}) can no longer be followed: ${input.reason} T3 Code stopped watching it.`,
+    text: `${name} (${identity(watch)}) can no longer be followed: ${input.reason} GOAT stopped watching it.`,
     notification: {
       source: { kind: "background_task" },
       outcome: "unknown",

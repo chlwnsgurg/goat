@@ -152,7 +152,7 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
     notifyOnCompletion: Schema.optional(
       Schema.Boolean.annotate({
         description:
-          "Default true for a calling T3 thread: it is woken with a message when the new thread's run ends, waits on a question, or later runs you start with goat_thread_send end. Pass false to follow it yourself.",
+          "Default true for a calling GOAT thread: it is woken with a message when the new thread's run ends, waits on a question, or later runs you start with goat_thread_send end. Pass false to follow it yourself.",
       }),
     ),
   }),
