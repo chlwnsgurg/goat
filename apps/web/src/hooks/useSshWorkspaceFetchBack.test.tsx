@@ -230,6 +230,54 @@ describe("useSshWorkspaceFetchBack", () => {
     });
     expect(actions.at(-1)?.isPending).toBe(false);
   });
+  it("keeps a fetch pending across unmounting all subscribers and returning", async () => {
+    const tasks: Array<() => void> = [];
+    state.registry!.dispose();
+    state.registry = AtomRegistry.make({
+      scheduleTask: (task) => {
+        tasks.push(task);
+        return () => {};
+      },
+    });
+    // The app owns these context atoms independently of the fetch UI.
+    state.registry.mount(state.primary!);
+    state.registry.mount(state.catalog!);
+    state.registry.mount(state.thread!);
+    state.registry.mount(state.project!);
+    state.registry.mount(state.permitted!);
+    const result = deferred<ReturnType<typeof AsyncResult.success<typeof fetched>>>();
+    state.execute.mockReturnValue(result.promise);
+    const action = await mount(ref, 2);
+    let running!: Promise<void>;
+    await act(() => {
+      running = action.run();
+    });
+    expect(state.execute).toHaveBeenCalledTimes(1);
+    expect(actions.at(-1)?.isPending).toBe(true);
+    try {
+      await act(() => {
+        renderer!.unmount();
+        renderer = undefined;
+      });
+      // Drain deferred registry cleanup so the remount cannot reuse an idle atom.
+      for (let task = tasks.shift(); task !== undefined; task = tasks.shift()) task();
+      const returned = await mount(ref, 2);
+      await act(() => {
+        void returned.run();
+      });
+      expect(state.execute).toHaveBeenCalledTimes(1);
+      expect(actions.at(-1)?.isPending).toBe(true);
+      expect(actions.at(-1)?.disabled).toBe(true);
+      expect(actions.at(-1)?.label).toBe("Fetching branch to this device...");
+    } finally {
+      await act(async () => {
+        result.resolve(AsyncResult.success(fetched));
+        await running;
+      });
+    }
+    expect(actions.at(-1)?.isPending).toBe(false);
+    expect(actions.at(-1)?.disabled).toBe(false);
+  });
   it("rechecks a revoked local grant and never dispatches from a retained callback", async () => {
     const action = await mount();
     await act(() => state.registry!.set(state.permitted!, false));
@@ -296,7 +344,7 @@ describe("useSshWorkspaceFetchBack", () => {
       ],
       [
         new SshWorkspaceError({ stage: "validate", code: "project_read_failed", host: "build" }),
-        "Could not read the local project. Check access before sending again.",
+        "Could not read the local project. Check access before trying again.",
       ],
       [
         new SshWorkspaceError({ stage: "validate", code: "invalid_branch", host: "build" }),
@@ -308,11 +356,11 @@ describe("useSshWorkspaceFetchBack", () => {
       ],
       [
         new SshWorkspaceError({ stage: "fetch", code: "host_unavailable", host: "build" }),
-        "Could not reach build. Check its SSH connection before sending again.",
+        "Could not reach build. Check its SSH connection before trying again.",
       ],
       [
         new SshWorkspaceError({ stage: "fetch", code: "invalid_remote_response", host: "build" }),
-        "build returned an invalid response. Check its server before sending again.",
+        "build returned an invalid response. Check its server before trying again.",
       ],
       [
         new SshWorkspaceError({ stage: "fetch", code: "foreign_path", host: "build" }),

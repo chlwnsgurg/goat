@@ -121,6 +121,8 @@ export function useSshWorkspaceFetchBack(threadRef: ScopedThreadRef | null) {
       });
       return;
     }
+    // Retain the guard even when navigation unmounts every menu/palette subscriber.
+    const releasePending = appAtomRegistry.mount(pendingAtom);
     appAtomRegistry.set(pendingAtom, true);
     try {
       const result = await execute(target);
@@ -176,6 +178,7 @@ export function useSshWorkspaceFetchBack(threadRef: ScopedThreadRef | null) {
       }
     } finally {
       appAtomRegistry.set(pendingAtom, false);
+      releasePending();
     }
   }, [execute, pendingAtom, refreshLocalStatus, threadRef]);
   return {
