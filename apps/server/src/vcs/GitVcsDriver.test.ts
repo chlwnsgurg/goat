@@ -1190,3 +1190,305 @@ it.effect("GitVcsDriver flushes checkpoint objects and refs to disk before publi
     ),
   );
 });
+
+it.effect("workspace snapshot captures HEAD plus current tracked and untracked disk content", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    yield* fs.writeFileString(path.join(cwd, "deleted.txt"), "deleted");
+    yield* git(["add", "deleted.txt"]);
+    yield* git(["commit", "-m", "tracked deletion"]);
+    yield* fs.remove(path.join(cwd, "deleted.txt"));
+    yield* fs.writeFileString(path.join(cwd, "untracked.txt"), "new");
+    yield* fs.writeFileString(path.join(cwd, ".gitignore"), ".env\n");
+    yield* fs.writeFileString(path.join(cwd, ".env"), "ignored fixture");
+    const head = (yield* git(["rev-parse", "HEAD"])).stdout;
+    const result = yield* driver.captureWorkspaceSnapshot({
+      cwd,
+      snapshotRef: "refs/goat/snapshots/test",
+    });
+    assert.strictEqual((yield* git(["show", `${result.commitOid}:file.txt`])).stdout, "unstaged\n");
+    assert.strictEqual((yield* git(["show", `${result.commitOid}:untracked.txt`])).stdout, "new");
+    assert.strictEqual(
+      (yield* git(["ls-tree", "-r", result.commitOid, "--", ".env", "deleted.txt"])).stdout,
+      "",
+    );
+    assert.strictEqual((yield* git(["rev-parse", `${result.commitOid}^`])).stdout, head);
+    assert.sameMembers([...result.addedUntrackedPaths], [".gitignore", "untracked.txt"]);
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("workspace snapshot preserves index HEAD working tree and merge state", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    const head = (yield* git(["rev-parse", "HEAD"])).stdout;
+    const index = yield* fs.readFile(path.join(cwd, ".git/index"));
+    yield* fs.writeFileString(path.join(cwd, ".git/MERGE_HEAD"), head);
+    yield* fs.writeFileString(path.join(cwd, ".git/MERGE_MSG"), "merge state");
+    yield* driver.captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" });
+    assert.deepEqual(yield* fs.readFile(path.join(cwd, ".git/index")), index);
+    assert.strictEqual((yield* git(["rev-parse", "HEAD"])).stdout, head);
+    assert.strictEqual(yield* fs.readFileString(path.join(cwd, "file.txt")), "unstaged\n");
+    assert.strictEqual(yield* fs.readFileString(path.join(cwd, ".git/MERGE_HEAD")), head);
+    assert.strictEqual(yield* fs.readFileString(path.join(cwd, ".git/MERGE_MSG")), "merge state");
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("workspace snapshot rejects unresolved index conflicts", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    const oid = (yield* git(["rev-parse", "HEAD:file.txt"])).stdout.trim();
+    yield* driver.execute({
+      operation: "test",
+      cwd,
+      args: ["update-index", "--index-info"],
+      stdin: `0 ${"0".repeat(40)}\tfile.txt\n100644 ${oid} 1\tfile.txt\n100644 ${oid} 2\tfile.txt\n100644 ${oid} 3\tfile.txt\n`,
+    });
+    const error = yield* driver
+      .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+      .pipe(Effect.flip);
+    assert.deepInclude(error, { _tag: "GitWorkspaceSnapshotError", code: "unsupported_snapshot" });
+    assert.strictEqual(
+      (yield* git(["show-ref", "--verify", "refs/goat/snapshots/test"]).pipe(Effect.result))._tag,
+      "Failure",
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("workspace snapshot refuses unborn local repository", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    yield* driver.execute({ operation: "test", cwd, args: ["init"] });
+    assert.deepInclude(
+      yield* driver
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.flip),
+      { code: "unsupported_snapshot" },
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("workspace snapshot refuses embedded repositories and gitlinks", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    yield* git(["init", "nested"]);
+    assert.deepInclude(
+      yield* driver
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.flip),
+      { code: "unsupported_snapshot" },
+    );
+    yield* git([
+      "-C",
+      "nested",
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@test.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "nested",
+    ]);
+    assert.deepInclude(
+      yield* driver
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.flip),
+      { code: "unsupported_snapshot" },
+    );
+    yield* fs.remove(path.join(cwd, "nested"), { recursive: true });
+    const oid = (yield* git(["rev-parse", "HEAD"])).stdout.trim();
+    yield* git(["update-index", "--add", "--cacheinfo", `160000,${oid},submodule`]);
+    assert.deepInclude(
+      yield* driver
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.flip),
+      { code: "unsupported_snapshot" },
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("workspace snapshot rejects HEAD movement before publishing", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const process = yield* VcsProcess.VcsProcess;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    const entered = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    const snapshot = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) =>
+          process
+            .run(input)
+            .pipe(
+              Effect.tap(() =>
+                input.args.includes("write-tree")
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(resume)),
+                    )
+                  : Effect.void,
+              ),
+            ),
+      }),
+    );
+    const fiber = yield* snapshot
+      .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+      .pipe(Effect.flip, Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* git(["commit", "--allow-empty", "-m", "HEAD moves"]);
+    yield* Deferred.succeed(resume, undefined);
+    assert.deepInclude(yield* Fiber.join(fiber), { code: "head_changed" });
+    assert.strictEqual(
+      (yield* git(["show-ref", "--verify", "refs/goat/snapshots/test"]).pipe(Effect.result))._tag,
+      "Failure",
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect.each(
+  ["--others", "ls-tree"].map(
+    (command) => [`workspace snapshot rejects truncated path scans: ${command}`, command] as const,
+  ),
+)("%s", ([_name, command]) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const process = yield* VcsProcess.VcsProcess;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    yield* makeCheckpointFixture(driver, cwd);
+    const snapshot = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) =>
+          process
+            .run(input)
+            .pipe(
+              Effect.map((result) =>
+                input.args.includes(command) ? { ...result, stdoutTruncated: true } : result,
+              ),
+            ),
+      }),
+    );
+    assert.deepInclude(
+      yield* snapshot
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.flip),
+      { code: "unsupported_snapshot" },
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("workspace snapshot cleans private index and lock on Git failure and interruption", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const process = yield* VcsProcess.VcsProcess;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    yield* makeCheckpointFixture(driver, cwd);
+    yield* driver.execute({
+      operation: "test",
+      cwd,
+      args: ["config", "filter.reject.clean", "false"],
+    });
+    yield* driver.execute({
+      operation: "test",
+      cwd,
+      args: ["config", "filter.reject.required", "true"],
+    });
+    yield* fs.writeFileString(path.join(cwd, ".gitattributes"), "*.txt filter=reject\n");
+    assert.strictEqual(
+      (yield* driver
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.result))._tag,
+      "Failure",
+    );
+    assert.isFalse(
+      (yield* fs.readDirectory(path.join(cwd, ".git"))).some((name) =>
+        name.startsWith("t3-checkpoint-index"),
+      ),
+    );
+    yield* fs.remove(path.join(cwd, ".gitattributes"));
+    const entered = yield* Deferred.make<void>();
+    const snapshot = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) =>
+          input.args.includes("write-tree")
+            ? Effect.gen(function* () {
+                yield* fs.writeFileString(`${input.env?.GIT_INDEX_FILE}.lock`, "fixture");
+                yield* Deferred.succeed(entered, undefined);
+                return yield* Effect.never;
+              })
+            : process.run(input),
+      }),
+    );
+    const fiber = yield* snapshot
+      .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    yield* Fiber.interrupt(fiber);
+    assert.isFalse(
+      (yield* fs.readDirectory(path.join(cwd, ".git"))).some((name) =>
+        name.startsWith("t3-checkpoint-index"),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect("strict snapshot uses create-only refs", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    const ref = "refs/goat/snapshots/test";
+    yield* git(["update-ref", ref, "HEAD"]);
+    const before = (yield* git(["rev-parse", ref])).stdout;
+    assert.strictEqual(
+      (yield* driver.captureWorkspaceSnapshot({ cwd, snapshotRef: ref }).pipe(Effect.result))._tag,
+      "Failure",
+    );
+    assert.strictEqual((yield* git(["rev-parse", ref])).stdout, before);
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+it.effect(
+  "workspace snapshot preserves cone sparse paths and refuses unsupported non-cone recovery",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fs.makeTempDirectoryScoped();
+      const { git } = yield* makeCheckpointFixture(driver, cwd);
+      yield* fs.makeDirectory(path.join(cwd, "in"));
+      yield* fs.makeDirectory(path.join(cwd, "out"));
+      yield* fs.writeFileString(path.join(cwd, "in/file"), "in");
+      yield* fs.writeFileString(path.join(cwd, "out/file"), "out");
+      yield* git(["add", "."]);
+      yield* git(["commit", "-m", "sparse fixture"]);
+      yield* git(["sparse-checkout", "init", "--cone"]);
+      yield* git(["sparse-checkout", "set", "in"]);
+      const result = yield* driver.captureWorkspaceSnapshot({
+        cwd,
+        snapshotRef: "refs/goat/snapshots/cone",
+      });
+      assert.strictEqual((yield* git(["show", `${result.commitOid}:out/file`])).stdout, "out");
+      yield* git(["sparse-checkout", "set", "--no-cone", "/in/"]);
+      yield* fs.remove(path.join(cwd, ".git/index"));
+      assert.strictEqual(
+        (yield* driver
+          .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/noncone" })
+          .pipe(Effect.result))._tag,
+        "Failure",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
