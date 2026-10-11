@@ -21,10 +21,13 @@ import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
-export interface ThreadDetailsPanelProps extends Pick<
-  ComponentProps<typeof ThreadDetailsCard>,
-  "anchor" | "handle" | "onPresentationChange"
-> {
+export interface ThreadDetailsPanelProps
+  extends
+    Pick<ComponentProps<typeof ThreadDetailsCard>, "anchor" | "handle" | "onPresentationChange">,
+    Pick<
+      ComponentProps<typeof BranchToolbar>,
+      "sshDestination" | "sshOptions" | "sshDisabledReason" | "onSshDestinationChange"
+    > {
   forceNewWorktree?: boolean;
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -64,6 +67,10 @@ export interface ThreadDetailsPanelProps extends Pick<
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
   const branchToolbarProps = {
     showGitControls: props.isGitRepo,
+    sshDestination: props.sshDestination,
+    sshOptions: props.sshOptions,
+    sshDisabledReason: props.sshDisabledReason,
+    onSshDestinationChange: props.onSshDestinationChange,
     environmentId: props.environmentId,
     threadId: props.threadId,
     ...(props.draftId ? { draftId: props.draftId } : {}),

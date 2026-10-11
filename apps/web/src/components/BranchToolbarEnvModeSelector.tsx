@@ -1,20 +1,30 @@
-import { ComposerSelectControl } from "./chat/ComposerControl";
+import type { DraftSshDestination } from "../composerDraftStore";
+import { findSavedSshWorktreeOption, type SavedSshWorktreeOption } from "../lib/sshWorktree";
+import { WorkspaceMenuItems } from "./WorkspaceMenuItems";
+import { ComposerControl } from "./chat/ComposerControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
-import { memo, useMemo, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, type MouseEvent as ReactMouseEvent } from "react";
 
 import {
   resolveCurrentWorkspaceLabel,
-  resolveEnvModeLabel,
   resolveWorkspaceChipLabel,
+  resolveSshWorkspaceLabel,
   type EnvironmentOption,
   type EnvMode,
 } from "./BranchToolbar.logic";
 import { useComposerMenuProps } from "./chat/composerEventScope";
-import { Select, SelectGroup, SelectGroupLabel, SelectItem, SelectPopup } from "./ui/select";
+import { Menu, MenuTrigger, MenuPopup } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
+const EMPTY_SSH_OPTIONS: ReadonlyArray<SavedSshWorktreeOption> = [];
+
 interface BranchToolbarEnvModeSelectorProps {
+  sshDestination?: DraftSshDestination | null | undefined;
+  sshOptions?: ReadonlyArray<SavedSshWorktreeOption> | undefined;
+  sshDisabledReason?: string | null | undefined;
+  onSshDestinationChange?: ((destination: DraftSshDestination) => void) | undefined;
+
   forceNewWorktree?: boolean;
   envLocked: boolean;
   effectiveEnvMode: EnvMode;
@@ -30,21 +40,22 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   activeWorktreePath,
   onEnvModeChange,
   activeEnvironment = null,
+  sshDestination = null,
+  sshOptions = EMPTY_SSH_OPTIONS,
+  sshDisabledReason = null,
+  onSshDestinationChange,
 }: BranchToolbarEnvModeSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
-  const workspaceLabel = resolveWorkspaceChipLabel({
-    forceNewWorktree,
-    effectiveEnvMode,
-    activeWorktreePath,
-    activeEnvironment,
+  const workspaceLabel = resolveSshWorkspaceLabel({
+    sshSelected: sshDestination !== null,
+    savedLabel: findSavedSshWorktreeOption(sshOptions, sshDestination)?.label ?? null,
+    workspaceLabel: resolveWorkspaceChipLabel({
+      forceNewWorktree,
+      effectiveEnvMode,
+      activeWorktreePath,
+      activeEnvironment,
+    }),
   });
-  const envModeItems = useMemo(
-    () => [
-      { value: "local", label: resolveCurrentWorkspaceLabel(activeWorktreePath) },
-      { value: "worktree", label: resolveEnvModeLabel("worktree") },
-    ],
-    [activeWorktreePath],
-  );
 
   const stopContextMenuMouseDown = (event: ReactMouseEvent) => {
     if (event.button !== 0 || event.ctrlKey) {
@@ -80,20 +91,12 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   }
 
   return (
-    <Select
-      modal={false}
-      value={effectiveEnvMode}
-      onValueChange={(value: string | null) => {
-        if (value === "local" || value === "worktree") onEnvModeChange(value);
-      }}
-      items={envModeItems}
-    >
+    <Menu>
       <Tooltip>
         <TooltipTrigger
           render={
-            <ComposerSelectControl
-              size="xs"
-              className="min-w-0 shrink"
+            <MenuTrigger
+              render={<ComposerControl size="xs" />}
               aria-label="Workspace"
               data-composer-shortcut="composer.workspace"
               data-composer-context-control
@@ -112,27 +115,19 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         </TooltipTrigger>
         <TooltipPopup>{workspaceLabel}</TooltipPopup>
       </Tooltip>
-      <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-        <SelectGroup>
-          <SelectGroupLabel>Workspace</SelectGroupLabel>
-          <SelectItem value="local">
-            <span className="inline-flex items-center gap-1.5">
-              {activeWorktreePath ? (
-                <FolderGitIcon className="size-3" />
-              ) : (
-                <FolderIcon className="size-3" />
-              )}
-              {resolveCurrentWorkspaceLabel(activeWorktreePath)}
-            </span>
-          </SelectItem>
-          <SelectItem value="worktree">
-            <span className="inline-flex items-center gap-1.5">
-              <FolderGit2Icon className="size-3" />
-              {resolveEnvModeLabel("worktree")}
-            </span>
-          </SelectItem>
-        </SelectGroup>
-      </SelectPopup>
-    </Select>
+      <MenuPopup align="start" side="top" {...composerFloatingLayerProps}>
+        <WorkspaceMenuItems
+          envMode={effectiveEnvMode}
+          locked={envLocked}
+          forceNewWorktree={forceNewWorktree}
+          localLabel={resolveCurrentWorkspaceLabel(activeWorktreePath)}
+          sshDestination={sshDestination}
+          sshOptions={sshOptions}
+          sshDisabledReason={sshDisabledReason}
+          onEnvModeChange={onEnvModeChange}
+          onSshDestinationChange={(destination) => onSshDestinationChange?.(destination)}
+        />
+      </MenuPopup>
+    </Menu>
   );
 });

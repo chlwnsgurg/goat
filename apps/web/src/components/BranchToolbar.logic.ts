@@ -287,3 +287,13 @@ export function shouldIncludeBranchPickerItem(input: {
     lowerItemValue.includes(sanitizedQuery)
   );
 }
+
+export function resolveSshWorkspaceLabel(input: {
+  workspaceLabel: string;
+  sshSelected: boolean;
+  savedLabel: string | null;
+}): string {
+  return input.sshSelected
+    ? `Worktree · ${input.savedLabel ?? "unavailable SSH connection"}`
+    : input.workspaceLabel;
+}

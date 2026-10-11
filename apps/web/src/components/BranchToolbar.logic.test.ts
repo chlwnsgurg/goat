@@ -837,3 +837,26 @@ describe("resolveWorkspaceChipLabel", () => {
     );
   });
 });
+
+import { resolveSshWorkspaceLabel } from "./BranchToolbar.logic";
+it("shows the saved SSH label before transfer", () => {
+  expect(
+    resolveSshWorkspaceLabel({
+      workspaceLabel: "New worktree · Source",
+      sshSelected: true,
+      savedLabel: "Saved host",
+    }),
+  ).toBe("Worktree · Saved host");
+  expect(
+    resolveSshWorkspaceLabel({ workspaceLabel: "Local", sshSelected: false, savedLabel: null }),
+  ).toBe("Local");
+});
+it("shows unavailable SSH rather than a local worktree after profile removal", () => {
+  expect(
+    resolveSshWorkspaceLabel({
+      workspaceLabel: "New worktree",
+      sshSelected: true,
+      savedLabel: null,
+    }),
+  ).toBe("Worktree · unavailable SSH connection");
+});
