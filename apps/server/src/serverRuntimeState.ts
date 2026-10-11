@@ -5,11 +5,17 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import packageJson from "../package.json" with { type: "json" };
 import type * as ServerConfig from "./config.ts";
 import { formatHostForUrl, isWildcardHost } from "./startupAccess.ts";
 
 export const PersistedServerRuntimeState = Schema.Struct({
   version: Schema.Literal(1),
+  serverVersion: Schema.optionalKey(Schema.String),
+  sshRuntimeProtocolVersion: Schema.optionalKey(Schema.Int),
+  orchestrationProtocolVersion: Schema.optionalKey(Schema.Int),
   pid: Schema.Int,
   host: Schema.optional(Schema.String),
   port: Schema.Int,
@@ -60,6 +66,9 @@ export const makePersistedServerRuntimeState = (input: {
 }): Effect.Effect<PersistedServerRuntimeState> =>
   Effect.map(DateTime.now, (now) => ({
     version: 1,
+    serverVersion: packageJson.version,
+    sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
+    orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     pid: process.pid,
     ...(input.config.host ? { host: input.config.host } : {}),
     port: input.port,

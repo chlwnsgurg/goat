@@ -1,5 +1,6 @@
 // Execute the generated remote script without contacting SSH or a release server.
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -39,6 +40,14 @@ describe("remote MCP session script", () => {
 
   const fakeCli = (rejectCeiling: boolean, issuedToken = token) => `#!/bin/sh
 set -eu
+if [ "$1" = --version ]; then printf 'goat v${archiveVersion}\\n'; exit 0; fi
+if [ "$1" = __ssh-helper ] && [ "$2" = protocol ]; then
+  case " $* " in
+    *" --runtime-file "*) printf 'none unknown unknown unknown 0 0\\n' ;;
+    *) printf '${archiveVersion} 1 2 0 0\\n' ;;
+  esac
+  exit 0
+fi
 if [ -f "$HOME/call-1.args" ]; then
   ARGS="$HOME/call-2.args"
 else
@@ -47,6 +56,7 @@ fi
 printf '%s\\n' "$@" > "$ARGS"
 for ARG in "$@"; do
   if [ "$ARG" = "--runtime-mode-ceiling" ] && [ "${rejectCeiling ? "1" : "0"}" = "1" ]; then
+    if [ -f "$HOME/change-runner" ]; then printf '# changed during auth\\n' >> "$HOME/.goat/ssh-launch/${stateKey}/run-t3.sh"; fi
     printf 'unknown option: --runtime-mode-ceiling\\n' >&2
     exit 2
   fi
@@ -58,13 +68,28 @@ JSON
 
   const installFakeRunner = (rejectCeiling: boolean) => {
     const script = fakeCli(rejectCeiling);
-    NodeFS.writeFileSync(runner, script, { mode: 0o700 });
-    return script;
+    const directory = NodePath.join(home, ".goat/runtime/goat/versions", archiveVersion);
+    NodeFS.mkdirSync(directory, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(directory, "goat"), script, { mode: 0o700 });
+    NodeFS.writeFileSync(NodePath.join(directory, ".install-complete"), archiveVersion);
+    const url = new URL("./tunnel.ts", import.meta.url).href;
+    const bytes = NodeChildProcess.execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import * as t from ${JSON.stringify(url)}; process.stdout.write(t.buildRemoteT3RunnerScript({archiveVersion:${JSON.stringify(archiveVersion)}}));`,
+      ],
+      { encoding: "utf8" },
+    );
+    NodeFS.writeFileSync(runner, bytes, { mode: 0o700 });
+    return bytes;
   };
 
   const runSession = (
     keepExistingRunner = true,
     runtimeModeCeiling: string | null = options.runtimeModeCeiling,
+    retainedSha = NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(runner)).digest("hex"),
   ) => {
     const stdout = NodeChildProcess.execFileSync("/bin/sh", [], {
       input: buildRemoteMcpSessionScript(
@@ -73,6 +98,15 @@ JSON
         {
           archiveVersion,
           keepExistingRunner,
+        },
+        {
+          runner: { archiveVersion, keepExistingRunner },
+          version: archiveVersion,
+          requestedVersion: archiveVersion,
+          source: "retained",
+          requireInstalled: true,
+          mayUpgradeOwnedServer: false,
+          retainedRunnerSha256: retainedSha,
         },
       ),
       cwd: home,
@@ -166,7 +200,42 @@ JSON
         options.runtimeModeCeiling,
       ]);
       expect(() => receivedArgs(2)).toThrow();
-      expect(NodeFS.existsSync(NodePath.join(home, ".goat", "runtime"))).toBe(false);
+      expect(
+        NodeFS.readFileSync(
+          NodePath.join(home, ".goat/runtime/goat/versions", archiveVersion, ".install-complete"),
+          "utf8",
+        ),
+      ).toBe(archiveVersion);
     }),
   );
+  it("rejects changed selected bytes before publishing or issuing auth", () => {
+    const original = installFakeRunner(false);
+    const sha = NodeCrypto.createHash("sha256").update(original).digest("hex");
+    NodeFS.appendFileSync(runner, "\n# replacement\n");
+    expect(() => runSession(true, options.runtimeModeCeiling, sha)).toThrow("changed since probe");
+    expect(() => receivedArgs(1)).toThrow();
+    expect(NodeFS.readFileSync(runner, "utf8")).toBe(original + "\n# replacement\n");
+    expect(
+      NodeFS.readdirSync(NodePath.dirname(runner)).filter(
+        (name) => name.includes(".next.") || name.endsWith(".pin"),
+      ),
+    ).toEqual([]);
+  });
+  it("rechecks selected bytes before retrying a rejected ceiling", () => {
+    const original = installFakeRunner(true);
+    NodeFS.writeFileSync(NodePath.join(home, "change-runner"), "1");
+    expect(() => runSession()).toThrow("changed since probe");
+    expect(receivedArgs(1)).toEqual([
+      ...baseArgs(),
+      "--runtime-mode-ceiling",
+      options.runtimeModeCeiling,
+    ]);
+    expect(() => receivedArgs(2)).toThrow();
+    expect(NodeFS.readFileSync(runner, "utf8")).toBe(original + "# changed during auth\n");
+    expect(
+      NodeFS.readdirSync(NodePath.dirname(runner)).filter(
+        (name) => name.includes(".next.") || name.endsWith(".pin"),
+      ),
+    ).toEqual([]);
+  });
 });

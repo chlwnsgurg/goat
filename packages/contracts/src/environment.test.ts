@@ -14,6 +14,15 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("keeps legacy SSH signals absent and preserves explicit integers", () => {
+    expect(decodeDescriptor(descriptor).sshRuntimeProtocolVersion).toBeUndefined();
+    expect(
+      decodeDescriptor({ ...descriptor, sshRuntimeProtocolVersion: 1 }).sshRuntimeProtocolVersion,
+    ).toBe(1);
+    for (const value of ["1", 1.5, null]) {
+      expect(() => decodeDescriptor({ ...descriptor, sshRuntimeProtocolVersion: value })).toThrow();
+    }
+  });
   it("decodes old, recognized and future manual installation descriptors", () => {
     expect(decodeDescriptor(descriptor).capabilities.serverInstallation).toBeUndefined();
     for (const installation of [{ kind: "npx" }, { kind: "npm-global", prefix: "/opt/node" }]) {

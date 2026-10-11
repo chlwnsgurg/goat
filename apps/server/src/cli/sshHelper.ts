@@ -8,7 +8,13 @@ import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
 
 import * as Effect from "effect/Effect";
-import { Argument, Command } from "effect/cli";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import { Argument, Command, Flag } from "effect/cli";
+import { ExecutionEnvironmentDescriptor, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import packageJson from "../../package.json" with { type: "json" };
 
 /**
  * Small helpers the SSH launch script needs on the remote host. The script
@@ -120,7 +126,268 @@ const runtimePort = Command.make("runtime-port", {
   ),
 );
 
+const decodeRuntimeState = Schema.decodeUnknownSync(PersistedServerRuntimeState);
+const decodeEnvironmentDescriptor = Schema.decodeUnknownSync(ExecutionEnvironmentDescriptor);
+
+export const ownSshRuntimeProtocol = () => ({
+  serverVersion: packageJson.version,
+  sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
+  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+});
+
+const readProtocolDescriptor = (port: number) =>
+  new Promise<unknown>((resolve, reject) => {
+    let settled = false;
+    const finish = (cause?: unknown, value?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (cause !== undefined) reject(cause);
+      else resolve(value);
+    };
+    const request = NodeHttp.get(
+      { hostname: "127.0.0.1", port, path: "/.well-known/t3/environment", timeout: 1000 },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 65536) {
+            const cause = new Error("SSH runtime descriptor exceeds 64 KiB");
+            response.destroy(cause);
+            request.destroy(cause);
+            finish(cause);
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.once("error", finish);
+        response.once("end", () => {
+          try {
+            if (response.statusCode !== 200) throw new Error("SSH runtime descriptor unavailable");
+            // The live descriptor is decoded by the caller.
+            finish(undefined, JSON.parse(Buffer.concat(chunks).toString("utf8")));
+          } catch (cause) {
+            finish(cause);
+          }
+        });
+      },
+    );
+    const deadline = setTimeout(() => {
+      const cause = new Error("SSH descriptor deadline exceeded");
+      request.destroy(cause);
+      finish(cause);
+    }, 1500);
+    request.once("timeout", () => {
+      const cause = new Error("SSH descriptor timed out");
+      request.destroy(cause);
+      finish(cause);
+    });
+    request.once("error", finish);
+  });
+
+const protocolVersion = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(
+    value,
+  );
+const protocolInteger = (value: unknown) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const processExists = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return cause instanceof Error && "code" in cause && cause.code === "EPERM";
+  }
+};
+const hasLoopbackListener = (port: number) =>
+  new Promise<boolean>((resolve) => {
+    const socket = NodeNet.createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    const finish = (present: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(present);
+    };
+    const deadline = setTimeout(() => finish(false), 1000);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+const rememberedInteger = (file: string | undefined) => {
+  if (file === undefined || !NodeFS.existsSync(file)) return 0;
+  const raw = NodeFS.readFileSync(file, "utf8").trim();
+  if (!/^[1-9][0-9]*$/.test(raw)) throw new Error("Invalid remembered SSH identity");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) throw new Error("Invalid remembered SSH identity");
+  return value;
+};
+
+export const readLiveSshRuntimeProtocol = async (
+  runtimeFile: string,
+  portFile?: string,
+  pidFile?: string,
+) => {
+  let pid = 0;
+  let port = 0;
+  let record: typeof PersistedServerRuntimeState.Type | undefined;
+  let damaged = false;
+  try {
+    if (NodeFS.existsSync(runtimeFile)) {
+      // Decode the persisted shape before treating it as identity.
+      record = decodeRuntimeState(JSON.parse(NodeFS.readFileSync(runtimeFile, "utf8")));
+      const origin = new URL(record.origin);
+      if (
+        !Number.isSafeInteger(record.pid) ||
+        record.pid <= 0 ||
+        !Number.isSafeInteger(record.port) ||
+        record.port < 1 ||
+        record.port > 65535 ||
+        origin.protocol !== "http:" ||
+        !["127.0.0.1", "localhost"].includes(origin.hostname) ||
+        Number(origin.port || "80") !== record.port
+      )
+        throw new Error("Invalid runtime identity");
+      pid = !record.serviceManaged && processExists(record.pid) ? record.pid : 0;
+      port = record.port;
+    }
+  } catch {
+    record = undefined;
+    damaged = true;
+  }
+  let rememberedPid = 0;
+  try {
+    if (port === 0) port = rememberedInteger(portFile);
+    rememberedPid = rememberedInteger(pidFile);
+    const rememberedPort = rememberedInteger(portFile);
+    if (
+      record !== undefined &&
+      ((rememberedPort > 0 && rememberedPort !== record.port) ||
+        (rememberedPid > 0 && rememberedPid !== record.pid))
+    )
+      damaged = true;
+    if (port > 65535) throw new Error("Invalid remembered port");
+  } catch {
+    damaged = true;
+    port = 0;
+  }
+  const rememberedAlive = rememberedPid > 0 && processExists(rememberedPid);
+  const unknown = { status: "unknown", pid, port } as const;
+  if (port === 0)
+    return damaged || rememberedAlive ? unknown : ({ status: "none", pid: 0, port: 0 } as const);
+  let raw: unknown;
+  try {
+    raw = await readProtocolDescriptor(port);
+  } catch {
+    // A root HTTP response or living PID is not compatibility evidence.
+    if (damaged || pid > 0 || rememberedAlive || (await hasLoopbackListener(port))) return unknown;
+    return { status: "none", pid: 0, port: 0 } as const;
+  }
+  try {
+    const descriptor = decodeEnvironmentDescriptor(raw);
+    if (!protocolVersion(descriptor.serverVersion)) return unknown;
+    for (const field of ["sshRuntimeProtocolVersion", "orchestrationProtocolVersion"] as const) {
+      const value = descriptor[field];
+      if (value !== undefined && !protocolInteger(value)) return unknown;
+    }
+    if (damaged) return unknown;
+    if (record !== undefined) {
+      for (const field of [
+        "serverVersion",
+        "sshRuntimeProtocolVersion",
+        "orchestrationProtocolVersion",
+      ] as const) {
+        // Old format-1 absence is allowed; disagreement with a present field is not.
+        if (record[field] !== undefined && record[field] !== descriptor[field]) return unknown;
+      }
+    }
+    // Reread after HTTP: a changed persisted PID/port/version cannot authorize ownership.
+    if (record !== undefined) {
+      const current = decodeRuntimeState(JSON.parse(NodeFS.readFileSync(runtimeFile, "utf8")));
+      for (const field of [
+        "pid",
+        "port",
+        "origin",
+        "startedAt",
+        "serviceManaged",
+        "serverVersion",
+        "sshRuntimeProtocolVersion",
+        "orchestrationProtocolVersion",
+      ] as const) {
+        if (current[field] !== record[field]) return unknown;
+      }
+      // Historical records still support live exact-version reuse, but do not grant kill authority.
+      if (record.serverVersion === undefined || !processExists(record.pid)) pid = 0;
+    }
+    // No record/dead/unversioned PID means an answering port is external.
+    return {
+      status: "live",
+      pid,
+      port,
+      serverVersion: descriptor.serverVersion,
+      sshRuntimeProtocolVersion: descriptor.sshRuntimeProtocolVersion,
+      orchestrationProtocolVersion: descriptor.orchestrationProtocolVersion,
+    } as const;
+  } catch {
+    return unknown;
+  }
+};
+
+const protocol = Command.make("protocol", {
+  shell: Flag.Boolean("shell").pipe(Flag.withDefault(false)),
+  runtimeFile: Flag.String("runtime-file").pipe(Flag.optional),
+  portFile: Flag.String("port-file").pipe(Flag.optional),
+  pidFile: Flag.String("pid-file").pipe(Flag.optional),
+}).pipe(
+  Command.withHandler(({ shell, runtimeFile, portFile, pidFile }) =>
+    Effect.promise(async () => {
+      try {
+        const signals = Option.isSome(runtimeFile)
+          ? await readLiveSshRuntimeProtocol(
+              runtimeFile.value,
+              Option.getOrUndefined(portFile),
+              Option.getOrUndefined(pidFile),
+            )
+          : ownSshRuntimeProtocol();
+        if (!shell) {
+          // @effect-diagnostics-next-line preferSchemaOverJson:off - internal helper JSON output.
+          process.stdout.write(JSON.stringify(signals) + "\n");
+          return;
+        }
+        if ("serverVersion" in signals && !protocolVersion(signals.serverVersion)) {
+          throw new Error("Invalid SSH protocol version token");
+        }
+        const version = "serverVersion" in signals ? signals.serverVersion : "unknown";
+        const integer = (value: unknown) => (protocolInteger(value) ? String(value) : "unknown");
+        const fields = [
+          version,
+          integer(
+            "sshRuntimeProtocolVersion" in signals ? signals.sshRuntimeProtocolVersion : undefined,
+          ),
+          integer(
+            "orchestrationProtocolVersion" in signals
+              ? signals.orchestrationProtocolVersion
+              : undefined,
+          ),
+          "pid" in signals ? signals.pid : 0,
+          "port" in signals ? signals.port : 0,
+        ];
+        process.stdout.write(
+          ("status" in signals ? signals.status + " " : "") + fields.join(" ") + "\n",
+        );
+      } catch (cause) {
+        process.stderr.write(
+          (cause instanceof Error ? cause.message : "Cannot inspect SSH protocol") + "\n",
+        );
+        process.exitCode = 1;
+      }
+    }),
+  ),
+);
+
 export const sshHelperCommand = Command.make("__ssh-helper").pipe(
   Command.unlisted,
-  Command.withSubcommands([pickPort, waitReady, runtimePort]),
+  Command.withSubcommands([pickPort, waitReady, runtimePort, protocol]),
 );

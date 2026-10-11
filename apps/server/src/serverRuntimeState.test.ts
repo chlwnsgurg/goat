@@ -9,6 +9,10 @@ import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import packageJson from "../package.json" with { type: "json" };
+
 import * as ServerRuntimeState from "./serverRuntimeState.ts";
 
 const isServerRuntimeStateError = Schema.is(ServerRuntimeState.ServerRuntimeStateError);
@@ -19,6 +23,24 @@ interface CapturedLog {
 }
 
 describe("serverRuntimeState", () => {
+  it.effect("records build protocols without changing format 1", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const state = yield* ServerRuntimeState.makePersistedServerRuntimeState({
+        config: { host: undefined, devUrl: undefined },
+        port: 13773,
+      });
+      assert.equal(state.version, 1);
+      assert.equal(state.serverVersion, packageJson.version);
+      assert.equal(state.sshRuntimeProtocolVersion, SSH_RUNTIME_PROTOCOL_VERSION);
+      assert.equal(state.orchestrationProtocolVersion, ORCHESTRATION_PROTOCOL_VERSION);
+      const path = `${root}/server-runtime.json`;
+      yield* ServerRuntimeState.persistServerRuntimeState({ path, state });
+      const read = yield* ServerRuntimeState.readPersistedServerRuntimeState(path);
+      assert.deepEqual(Option.getOrThrow(read), state);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   it.effect("persists and reads the runtime state", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -127,6 +149,34 @@ describe("serverRuntimeState", () => {
         assert.equal(error.message, `Failed to decode server runtime state at ${statePath}.`);
         assert.deepInclude(error.cause, { _tag: "SchemaError" });
       }
+    }).pipe(
+      Effect.provide(
+        Layer.merge(NodeServices.layer, Logger.layer([logger], { mergeWithExisting: false })),
+      ),
+    );
+  });
+
+  it.effect("treats malformed optional protocol metadata as a decode failure", () => {
+    const logs: CapturedLog[] = [];
+    const logger = Logger.make(({ fiber, message }) => {
+      logs.push({ message, annotations: fiber.getRef(References.CurrentLogAnnotations) });
+    });
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const path = `${root}/runtime.json`;
+      for (const value of ['"1"', "1.5", "null"]) {
+        yield* fs.writeFileString(
+          path,
+          `{"version":1,"pid":123,"port":3773,"origin":"http://127.0.0.1:3773","startedAt":"2026-10-11T00:00:00.000Z","sshRuntimeProtocolVersion":${value}}`,
+        );
+        assert.isTrue(
+          Option.isNone(yield* ServerRuntimeState.readPersistedServerRuntimeState(path)),
+        );
+      }
+      assert.equal(logs.length, 3);
+      for (const log of logs)
+        assert.equal(log.message, `Failed to decode server runtime state at ${path}.`);
     }).pipe(
       Effect.provide(
         Layer.merge(NodeServices.layer, Logger.layer([logger], { mergeWithExisting: false })),

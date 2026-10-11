@@ -2,6 +2,8 @@ import type {
   DesktopSshEnvironmentBootstrap,
   DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
 import {
   describeReadinessCause,
   waitForHttpReady as waitForHttpReadyShared,
@@ -103,6 +105,78 @@ export interface RemoteT3RunnerOptions {
   readonly keepExistingRunner?: boolean | null;
 }
 
+export interface PreparedRemoteRuntime {
+  readonly runner: RemoteT3RunnerOptions;
+  readonly version: string | null;
+  readonly requestedVersion: string | null;
+  readonly source: "requested" | "retained" | "live";
+  readonly requireInstalled: boolean;
+  readonly mayUpgradeOwnedServer: boolean;
+  /** SHA-256 of the retained run-t3.sh observed by preparation; null for other sources. */
+  readonly retainedRunnerSha256: string | null;
+}
+const requestedRuntime = (runner: RemoteT3RunnerOptions | undefined): PreparedRemoteRuntime => ({
+  runner: { ...runner },
+  version: isNodeScriptRunner(runner) ? null : runner?.archiveVersion?.trim() || null,
+  requestedVersion: isNodeScriptRunner(runner) ? null : runner?.archiveVersion?.trim() || null,
+  source: "requested",
+  requireInstalled: false,
+  retainedRunnerSha256: null,
+  mayUpgradeOwnedServer: runner?.keepExistingRunner !== true,
+});
+const RuntimeSignals = Schema.Struct({
+  serverVersion: Schema.String,
+  sshRuntimeProtocolVersion: Schema.optionalKey(Schema.Int),
+  orchestrationProtocolVersion: Schema.optionalKey(Schema.Int),
+  invalid: Schema.optionalKey(Schema.Boolean),
+});
+const matchesSignals = (signals: typeof RuntimeSignals.Type, requested: string) =>
+  !signals.invalid &&
+  ((signals.sshRuntimeProtocolVersion === SSH_RUNTIME_PROTOCOL_VERSION &&
+    signals.orchestrationProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION) ||
+    (signals.serverVersion === requested &&
+      (signals.sshRuntimeProtocolVersion === undefined ||
+        signals.sshRuntimeProtocolVersion === SSH_RUNTIME_PROTOCOL_VERSION) &&
+      (signals.orchestrationProtocolVersion === undefined ||
+        signals.orchestrationProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION)));
+
+const REMOTE_PROTOCOL_TOKEN_SCRIPT = `valid_version() {
+  printf '%s\\n' "$1" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$'
+}
+valid_uint() {
+  printf '%s\\n' "$1" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)$' || return 1
+  [ "\${#1}" -le 16 ] && awk -v n="$1" 'BEGIN { exit !(n <= 9007199254740991) }'
+}
+valid_positive() { valid_uint "$1" && [ "$1" != 0 ]; }
+valid_port() { valid_uint "$1" && [ "$1" -le 65535 ]; }
+valid_protocol_field() { [ "$1" = unknown ] || valid_positive "$1"; }
+valid_own_tokens() {
+  [ "$#" = 5 ] && valid_version "$1" && valid_protocol_field "$2" &&
+    valid_protocol_field "$3" && valid_uint "$4" && valid_port "$5" || return 1
+  # Own advertisement is normally not running: 0 0 is a valid pair.
+  { [ "$4" = 0 ] && [ "$5" = 0 ]; } ||
+    { valid_positive "$4" && valid_positive "$5"; }
+}
+valid_live_tokens() {
+  [ "$#" = 6 ] && valid_uint "$5" && valid_port "$6" || return 1
+  case "$1" in
+    live) valid_version "$2" && valid_protocol_field "$3" &&
+      valid_protocol_field "$4" && valid_positive "$6" ;;
+    none) [ "$2 $3 $4 $5 $6" = 'unknown unknown unknown 0 0' ] ;;
+    unknown) [ "$2 $3 $4" = 'unknown unknown unknown' ] ;;
+    *) return 1 ;;
+  esac
+}
+runner_sha256() {
+  if command -v shasum >/dev/null 2>&1; then digest="$(shasum -a 256 "$1")" || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then digest="$(sha256sum "$1")" || return 1
+  else printf 'Install shasum or sha256sum to verify the retained GOAT runner.\\n' >&2; return 1; fi
+  digest="\${digest%% *}"
+  printf '%s\\n' "$digest" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 1
+  printf '%s' "$digest"
+}
+`;
+
 export interface SshEnvironmentManagerOptions {
   readonly resolveCliRunner?: Effect.Effect<RemoteT3RunnerOptions>;
   /**
@@ -114,6 +188,7 @@ export interface SshEnvironmentManagerOptions {
 }
 
 interface SshTunnelEntry {
+  readonly selectedRuntime: PreparedRemoteRuntime;
   readonly key: string;
   readonly target: DesktopSshEnvironmentTarget;
   readonly remotePort: number;
@@ -615,35 +690,209 @@ exec "$T3_RUNTIME_DIR/goat" "$@"
 
 // Publishing a runner is the switch boundary. Execute the candidate first;
 // auth commands keep an existing runner so they match its running server.
+const REMOTE_PROTOCOL_GUARD_SCRIPT = `compatible_fields() {
+  # version ssh orchestration; full matching integers OR exact legacy.
+  [ "$2" = "@@T3_SSH_PROTOCOL@@" ] && [ "$3" = "@@T3_ORCHESTRATION_PROTOCOL@@" ] && return 0
+  [ -n "$REQUESTED_VERSION" ] && [ "$1" = "$REQUESTED_VERSION" ] &&
+    { [ "$2" = unknown ] || [ "$2" = "@@T3_SSH_PROTOCOL@@" ]; } &&
+    { [ "$3" = unknown ] || [ "$3" = "@@T3_ORCHESTRATION_PROTOCOL@@" ]; }
+}
+check_candidate_protocol() {
+  if [ -n "$SELECTED_VERSION" ] &&
+     [ "$("$CHECK_RUNNER" --version 2>/dev/null || true)" != "goat v$SELECTED_VERSION" ]; then
+    printf 'Selected executable changed before protocol use.\\n' >&2; exit 1
+  fi
+  if own="$("$CHECK_RUNNER" __ssh-helper protocol --shell 2>/dev/null)"; then
+    set -f; set -- $own
+    if ! valid_own_tokens "$@"; then printf 'Malformed candidate protocol output.\\n' >&2; exit 1; fi
+    if [ -n "$SELECTED_VERSION" ] && [ "$1" != "$SELECTED_VERSION" ]; then
+      printf 'Selected version and binary protocol identity disagree.\\n' >&2; exit 1
+    fi
+    if ! compatible_fields "$1" "$2" "$3"; then
+      printf 'Candidate signals %s incompatible with SSH=%s orchestration=%s.\\n' "$own" "@@T3_SSH_PROTOCOL@@" "@@T3_ORCHESTRATION_PROTOCOL@@" >&2; exit 1
+    fi
+  elif [ -z "$SELECTED_VERSION" ] || [ "$SELECTED_VERSION" != "$REQUESTED_VERSION" ] ||
+       [ "$("$CHECK_RUNNER" --version 2>/dev/null || true)" != "goat v$REQUESTED_VERSION" ]; then
+    printf 'No protocol signals; only an independently proven exact release is allowed.\\n' >&2; exit 1
+  fi
+}
+check_live_protocol() {
+  LIVE_STATUS=none; LIVE_PID=0; LIVE_PORT=0; LIVE_VERSION=unknown
+  LIVE_COMPATIBLE=0; LIVE_OWNED=0; NEEDS_OWNED_UPGRADE=0
+  if live="$("$CHECK_RUNNER" __ssh-helper protocol --runtime-file "$DEFAULT_RUNTIME_FILE" --port-file "$PORT_FILE" --pid-file "$PID_FILE" --shell 2>/dev/null)"; then
+    set -f; set -- $live
+    if ! valid_live_tokens "$@"; then printf 'Malformed live protocol output.\\n' >&2; exit 1; fi
+    LIVE_STATUS="$1"; LIVE_VERSION="$2"; LIVE_PID="$5"; LIVE_PORT="$6"
+    stored_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    stored_kind="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
+    stored_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
+    # Only the helper's verified live identity can corroborate persisted ownership.
+    if [ "$LIVE_STATUS" = live ] && valid_positive "$LIVE_PID" &&
+       [ "$stored_kind" = managed ] && [ "$stored_pid" = "$LIVE_PID" ] &&
+       [ "$stored_port" = "$LIVE_PORT" ]; then LIVE_OWNED=1; fi
+    if [ "$LIVE_STATUS" = live ] && compatible_fields "$2" "$3" "$4" &&
+       { [ -z "$SELECTED_VERSION" ] || [ "$2" = "$SELECTED_VERSION" ]; }; then LIVE_COMPATIBLE=1; fi
+  else
+    # An old helper may be absent, but identity files cannot be guessed away.
+    if [ -e "$DEFAULT_RUNTIME_FILE" ] || [ -e "$PORT_FILE" ] || [ -e "$PID_FILE" ]; then LIVE_STATUS=unknown; fi
+  fi
+  if [ "$LIVE_STATUS" = unknown ]; then
+    printf 'Cannot verify live GOAT PID=%s port=%s: descriptor unavailable or persisted identity disagrees. Repair the remote runtime metadata/descriptor and reconnect; runner and process were preserved.\\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+  fi
+  if [ "$LIVE_STATUS" != none ] && [ "$LIVE_COMPATIBLE" != 1 ]; then
+    if [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] && [ "$ALLOW_OWNED_UPGRADE" = 1 ] &&
+       { [ -z "$SELECTED_VERSION" ] || [ "$SELECTED_VERSION" = "$REQUESTED_VERSION" ]; }; then
+      NEEDS_OWNED_UPGRADE=1
+    else
+      printf 'Live GOAT PID=%s port=%s signals=%s incompatible or missing; expected SSH=%s orchestration=%s. It was left running. Upgrade with the owning client or reconnect.\\n' "$LIVE_PID" "$LIVE_PORT" "\${live:-unavailable}" "@@T3_SSH_PROTOCOL@@" "@@T3_ORCHESTRATION_PROTOCOL@@" >&2; exit 1
+    fi
+  else NEEDS_OWNED_UPGRADE=0; fi
+}
+recheck_selected_before_use() {
+  check_retained_runner
+  # Never let a vanished ready selection become a network install.
+  if [ "$REQUIRE_INSTALLED" = 1 ] && [ -n "$SELECTED_VERSION" ]; then
+    selected_dir="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
+    if [ ! -x "$selected_dir/goat" ] || [ "$(cat "$selected_dir/.install-complete" 2>/dev/null)" != "$SELECTED_VERSION" ]; then
+      printf 'Selected GOAT runtime disappeared before use.\\n' >&2; exit 1
+    fi
+  fi
+  if [ "$PRESERVE_SELECTED_RUNNER" = 1 ] &&
+     [ "$(sed -n "s/^T3_ARCHIVE_VERSION='\\([^']*\\)'$/\\1/p" "$RUNNER_FILE")" != "$SELECTED_VERSION" ]; then
+    printf 'Selected runner changed before use.\\n' >&2; exit 1
+  fi
+  # Subsequent reads use the published bytes, rechecking binary identity and live state.
+  if ! cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_FILE"; then
+    printf 'Published selected runner changed before use.\\n' >&2; exit 1
+  fi
+  CHECK_RUNNER="$RUNNER_FILE"
+  check_candidate_protocol
+  check_live_protocol
+  CHECK_RUNNER="$RUNNER_CANDIDATE_FILE"
+}
+`;
+
 const REMOTE_RUNNER_SETUP_SCRIPT = `RUNNER_FILE="$STATE_DIR/run-t3.sh"
 RUNNER_NEXT="$STATE_DIR/run-t3.next.$$"
+RUNNER_CANDIDATE_FILE="$RUNNER_NEXT"
+CHECK_RUNNER="$RUNNER_NEXT"
+DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
+PORT_FILE="$STATE_DIR/port"
+PID_FILE="$STATE_DIR/pid"
+MANAGED_FILE="$STATE_DIR/managed"
 REQUESTED_RUNNER=@@T3_REQUESTED_RUNNER@@
 EXPECTED_ARCHIVE_VERSION=@@T3_EXPECTED_ARCHIVE_VERSION@@
-mkdir -p "$STATE_DIR"
-cleanup_runner_next() {
-  rm -f "$RUNNER_NEXT"
+SELECTED_VERSION=@@T3_SELECTED_VERSION@@
+REQUESTED_VERSION=@@T3_REQUESTED_VERSION@@
+REQUIRE_INSTALLED=@@T3_REQUIRE_INSTALLED@@
+PRESERVE_SELECTED_RUNNER=@@T3_PRESERVE_SELECTED_RUNNER@@
+ALLOW_OWNED_UPGRADE=@@T3_ALLOW_OWNED_UPGRADE@@
+EXPECTED_RETAINED_SHA256=@@T3_RETAINED_RUNNER_SHA256@@
+@@T3_PROTOCOL_TOKENS@@
+check_retained_runner() {
+  if [ "$PRESERVE_SELECTED_RUNNER" = 1 ]; then
+    if [ -z "$EXPECTED_RETAINED_SHA256" ] || [ ! -f "$RUNNER_FILE" ] ||
+       [ "$(runner_sha256 "$RUNNER_FILE")" != "$EXPECTED_RETAINED_SHA256" ]; then
+      printf 'Selected retained GOAT runner bytes changed since probe; reconnect to prepare again.\\n' >&2; exit 1
+    fi
+  fi
 }
+mkdir -p "$STATE_DIR"
+cleanup_runner_next() { rm -f "$RUNNER_CANDIDATE_FILE" "$RUNNER_CANDIDATE_FILE.pin"; }
 trap cleanup_runner_next EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-cat >"$RUNNER_NEXT" <<'SH'
+if [ "$REQUIRE_INSTALLED" = 1 ] && [ -n "$SELECTED_VERSION" ]; then
+  selected_dir="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
+  if [ ! -x "$selected_dir/goat" ] || [ "$(cat "$selected_dir/.install-complete" 2>/dev/null)" != "$SELECTED_VERSION" ]; then
+    printf 'Selected GOAT %s disappeared; reconnect to prepare again.\\n' "$SELECTED_VERSION" >&2; exit 1
+  fi
+fi
+check_retained_runner
+if [ "$PRESERVE_SELECTED_RUNNER" = 1 ]; then
+  # Use copied retained bytes and verify the parsed selected version again.
+  if [ ! -f "$RUNNER_FILE" ] ||
+     [ "$(sed -n "s/^T3_ARCHIVE_VERSION='\\([^']*\\)'$/\\1/p" "$RUNNER_FILE")" != "$SELECTED_VERSION" ] ||
+     [ -n "$(sed -n "s/^T3_NODE_SCRIPT_PATH='\\(.*\\)'$/\\1/p" "$RUNNER_FILE")" ]; then
+    printf 'Selected retained runner changed; reconnect to prepare again.\\n' >&2; exit 1
+  fi
+  cp "$RUNNER_FILE" "$RUNNER_NEXT"
+else
+  cat >"$RUNNER_NEXT" <<'SH'
 @@T3_RUNNER_SCRIPT@@
 SH
-verify_runner_next() {
-  chmod 700 "$RUNNER_NEXT"
-  if ! RUNNER_VERSION_OUTPUT="$("$RUNNER_NEXT" --version)"; then
-    printf 'Cannot prepare %s on this host. The existing runner and server have been left unchanged. Supply a valid archive for the requested version in the local SSH runtime archive directory, or configure a release mirror containing that version, then retry.\\n' "$REQUESTED_RUNNER" >&2
-    exit 1
+fi
+chmod 700 "$RUNNER_NEXT"
+# Verify copied bytes before executing or pinning, closing a same-version replacement race.
+check_retained_runner
+if [ "$PRESERVE_SELECTED_RUNNER" = 1 ] &&
+   [ "$(runner_sha256 "$RUNNER_NEXT")" != "$EXPECTED_RETAINED_SHA256" ]; then
+  printf 'Retained GOAT runner changed while copying; reconnect.\\n' >&2; exit 1
+fi
+cp "$RUNNER_NEXT" "$RUNNER_CANDIDATE_FILE.pin"
+if ! RUNNER_VERSION_OUTPUT="$("$RUNNER_NEXT" --version)"; then
+  printf 'Cannot validate %s; existing runner and server were preserved.\\n' "$REQUESTED_RUNNER" >&2; exit 1
+fi
+if [ -n "$EXPECTED_ARCHIVE_VERSION" ] && [ "$RUNNER_VERSION_OUTPUT" != "goat v$EXPECTED_ARCHIVE_VERSION" ]; then
+  printf 'Expected goat v%s, observed %s; existing runner and server were preserved.\\n' "$EXPECTED_ARCHIVE_VERSION" "$RUNNER_VERSION_OUTPUT" >&2; exit 1
+fi
+if [ -n "$SELECTED_VERSION" ]; then
+  # Cold mirrors installed this exact archive during validation; pin future use too.
+  selected_dir="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
+  if [ ! -x "$selected_dir/goat" ] || [ "$(cat "$selected_dir/.install-complete" 2>/dev/null)" != "$SELECTED_VERSION" ]; then
+    printf 'Validated selected archive is not complete.\\n' >&2; exit 1
   fi
-  if [ -n "$EXPECTED_ARCHIVE_VERSION" ] && [ "$RUNNER_VERSION_OUTPUT" != "goat v$EXPECTED_ARCHIVE_VERSION" ]; then
-    printf 'Cannot prepare %s: expected goat v%s, but the candidate reported "%s". The existing runner and server have been left unchanged. Supply the correct requested archive in the local SSH runtime archive directory or release mirror, and have the owning client clear the rejected version cache at %s before retrying.\\n' "$REQUESTED_RUNNER" "$EXPECTED_ARCHIVE_VERSION" "$RUNNER_VERSION_OUTPUT" "$HOME/.goat/runtime/goat/versions/$EXPECTED_ARCHIVE_VERSION" >&2
-    exit 1
-  fi
-}
+  REQUIRE_INSTALLED=1
+fi
 RUNNER_CHANGED=0
-@@T3_RUNNER_INSTALL@@
+@@T3_PROTOCOL_GUARD@@
+check_candidate_protocol
+check_live_protocol
+if ! cmp -s "$RUNNER_CANDIDATE_FILE.pin" "$RUNNER_NEXT"; then
+  printf 'Candidate runner changed during validation; reconnect.\\n' >&2; exit 1
+fi
+# Last read-only checks immediately before publication; unknown never grants upgrade.
+check_retained_runner
+check_live_protocol
+UPGRADE_PID="$LIVE_PID"; UPGRADE_PORT="$LIVE_PORT"; UPGRADE_VERSION="$LIVE_VERSION"
+@@T3_VERIFY_OWNED_BEFORE_PUBLICATION@@@@T3_RUNNER_INSTALL@@
 `;
+
+// PID existence and protocol metadata are not authority to signal a process.
+// Both termination paths must corroborate the complete invocation we launch.
+const REMOTE_OWNED_IDENTITY_SCRIPT = `verify_owned_identity() {
+  owned_pid="$1"; owned_port="$2"
+  valid_positive "$owned_pid" && valid_positive "$owned_port" && valid_port "$owned_port" || return 1
+  [ "$(cat "$MANAGED_FILE" 2>/dev/null || true)" = managed ] || return 1
+  [ -f "$STATE_DIR/identity" ] || return 1
+  owned_identity="$(cat "$STATE_DIR/identity" 2>/dev/null)" || return 1
+  [ -n "$owned_identity" ] || return 1
+  case "$owned_identity" in
+    *" --port $owned_port --base-dir $DEFAULT_SERVER_HOME") ;;
+    *) return 1 ;;
+  esac
+  owned_command="$(ps -o command= -p "$owned_pid" 2>/dev/null)" || return 1
+  case "$owned_identity" in
+    "$HOME/.goat/runtime/goat/versions/"*)
+      # An archive's identity includes its executable, so no prefix is allowed.
+      [ "$owned_command" = "$owned_identity" ] || return 1 ;;
+    *)
+      # Node shims can exec a different binary; the persisted entry and arguments own it.
+      case "$owned_command" in *" $owned_identity") ;; *) return 1 ;; esac ;;
+  esac
+  # Ownership and the running server's identity must still match after inspection.
+  [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$owned_pid" ] &&
+    [ "$(cat "$PORT_FILE" 2>/dev/null || true)" = "$owned_port" ] &&
+    [ "$(cat "$MANAGED_FILE" 2>/dev/null || true)" = managed ] &&
+    [ "$(cat "$STATE_DIR/identity" 2>/dev/null || true)" = "$owned_identity" ]
+}
+`;
+
+const VERIFY_OWNED_BEFORE_PUBLICATION = `if [ "$LIVE_OWNED" = 1 ] && ! verify_owned_identity "$LIVE_PID" "$LIVE_PORT"; then
+  printf 'GOAT ownership could not be verified for PID %s: persisted launch identity is missing or mismatched; process, runner and ownership files were preserved.\\n' "$LIVE_PID" >&2
+  exit 1
+fi`;
 
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
@@ -655,17 +904,20 @@ PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
 MANAGED_FILE="$STATE_DIR/managed"
 LOG_FILE="$STATE_DIR/server.log"
+@@T3_OWNED_IDENTITY@@
 @@T3_RUNNER_SETUP@@
+IDENTITY_NEXT="$STATE_DIR/identity.next.$$"
+trap 'cleanup_runner_next; rm -f "$IDENTITY_NEXT"' EXIT
 T3_ARCHIVE_MODE=@@T3_ARCHIVE_MODE@@
-if [ "$T3_ARCHIVE_MODE" = "1" ]; then
-  # The archive ships the helpers below inside the executable; the remote
-  # needs no Node at all. Resolving the runner once here also downloads the
-  # archive before the port and readiness probes rely on it.
-  "$RUNNER_FILE" --version >/dev/null
-elif ! ensure_remote_node_path; then
-  printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
-  exit 1
+T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
+if [ "$T3_ARCHIVE_MODE" = 0 ]; then
+  # Protocol token parsing disabled globbing; version-manager discovery needs it.
+  case "$-" in *f*) NODE_RESTORE_NOGLOB=1 ;; *) NODE_RESTORE_NOGLOB=0 ;; esac
+  set +f
+  ensure_remote_node_path || true
+  [ "$NODE_RESTORE_NOGLOB" = 0 ] || set -f
 fi
+recheck_selected_before_use
 pick_port() {
   if [ "$T3_ARCHIVE_MODE" = "1" ]; then
     "$RUNNER_FILE" __ssh-helper pick-port "$PORT_FILE" "@@T3_DEFAULT_REMOTE_PORT@@" "@@T3_REMOTE_PORT_SCAN_WINDOW@@"
@@ -692,93 +944,52 @@ wait_for_pid_exit() {
     sleep 0.1
   done
 }
-resolve_default_runtime_port() {
-  if [ "$T3_ARCHIVE_MODE" = "1" ]; then
-    "$RUNNER_FILE" __ssh-helper runtime-port "$DEFAULT_RUNTIME_FILE"
-    return
-  fi
-  node - "$DEFAULT_RUNTIME_FILE" <<'NODE'
-const fs = require("node:fs");
-const runtimePath = process.argv[2] ?? "";
-try {
-	  const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
-	  const pid = Number(runtime.pid);
-	  const port = Number(runtime.port);
-	  if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(port)) {
-	    process.exit(1);
-	  }
-  const origin = new URL(String(runtime.origin ?? ""));
-  if (origin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(origin.hostname)) {
-    process.exit(1);
-  }
-  process.kill(pid, 0);
-  process.stdout.write(\`\${pid} \${port}\`);
-} catch {
-  process.exit(1);
-}
-NODE
-}
-REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-REMOTE_MANAGED="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
-DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port 2>/dev/null || true)"
-DEFAULT_RUNTIME_PID=""
-DEFAULT_REMOTE_PORT=""
-if [ -n "$DEFAULT_RUNTIME_INFO" ]; then
-  DEFAULT_RUNTIME_PID="\${DEFAULT_RUNTIME_INFO%% *}"
-  DEFAULT_REMOTE_PORT="\${DEFAULT_RUNTIME_INFO#* }"
-fi
-if [ -n "$DEFAULT_REMOTE_PORT" ]; then
-  REMOTE_PORT="$DEFAULT_REMOTE_PORT"
-  if wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    @@T3_OWN_RUNTIME_CHECK@@if [ "$REMOTE_MANAGED" = "managed" ]; then
-      PID_TO_STOP="\${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"
-      if [ -n "$PID_TO_STOP" ] && kill -0 "$PID_TO_STOP" 2>/dev/null; then
-        kill "$PID_TO_STOP" 2>/dev/null || true
-        wait_for_pid_exit "$PID_TO_STOP"
-      fi
-      REMOTE_PID=""
-      REMOTE_PORT="$DEFAULT_REMOTE_PORT"
-      REMOTE_MANAGED="external"
-      rm -f "$PID_FILE"
-      printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
-      printf 'external\\n' >"$MANAGED_FILE"
-    else
-      printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
-      printf 'external\\n' >"$MANAGED_FILE"
-      REMOTE_PID=""
-      REMOTE_MANAGED="external"
+recheck_selected_before_use
+REMOTE_PID=""
+REMOTE_PORT=""
+REMOTE_MANAGED=""
+if [ "$LIVE_STATUS" != none ]; then
+  if [ "$LIVE_COMPATIBLE" = 1 ]; then
+    REMOTE_PORT="$LIVE_PORT"
+    if ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
+      printf 'Selected live server did not answer; it was left running.\\n' >&2; exit 1
     fi
+    recheck_selected_before_use
+    if [ "$LIVE_COMPATIBLE" != 1 ]; then
+      printf 'Live server compatibility changed during readiness; reconnect.\\n' >&2; exit 1
+    fi
+    if [ "$LIVE_OWNED" = 1 ]; then
+      REMOTE_PID="$LIVE_PID"
+      REMOTE_MANAGED=managed
+    else
+      REMOTE_MANAGED=external
+      rm -f "$PID_FILE" "$STATE_DIR/identity"
+      printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
+      printf 'external\\n' >"$MANAGED_FILE"
+    fi
+  elif [ "$NEEDS_OWNED_UPGRADE" = 1 ]; then
+    # Recompute retained hash and verify the same live identity immediately before kill.
+    recheck_selected_before_use
+    if [ "$LIVE_STATUS" != live ] || [ "$LIVE_OWNED" != 1 ] ||
+       [ "$NEEDS_OWNED_UPGRADE" != 1 ] || [ "$LIVE_PID" != "$UPGRADE_PID" ] ||
+       [ "$LIVE_PORT" != "$UPGRADE_PORT" ] || [ "$LIVE_VERSION" != "$UPGRADE_VERSION" ]; then
+      printf 'Owned GOAT identity changed before termination; process was left running.\\n' >&2; exit 1
+    fi
+    PID_TO_STOP="$LIVE_PID"
+    if ! verify_owned_identity "$PID_TO_STOP" "$LIVE_PORT"; then
+      printf 'GOAT ownership could not be verified for PID %s; process and ownership files were preserved.\\n' "$PID_TO_STOP" >&2
+      exit 1
+    fi
+    kill "$PID_TO_STOP" 2>/dev/null || true
+    wait_for_pid_exit "$PID_TO_STOP"
+    if kill -0 "$PID_TO_STOP" 2>/dev/null; then
+      printf 'Owned server did not stop; ownership files were preserved.\\n' >&2
+      exit 1
+    fi
+    rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
   else
-    REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-    REMOTE_MANAGED="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
+    printf 'Live GOAT compatibility changed; reconnect.\\n' >&2; exit 1
   fi
-fi
-if [ "$REMOTE_MANAGED" = "external" ]; then
-  if [ -z "$REMOTE_PORT" ] || ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    REMOTE_PID=""
-    REMOTE_PORT=""
-    REMOTE_MANAGED=""
-  fi
-elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
-  if [ "$RUNNER_CHANGED" -eq 1 ]; then
-    kill "$REMOTE_PID" 2>/dev/null || true
-    wait_for_pid_exit "$REMOTE_PID"
-    REMOTE_PID=""
-    REMOTE_PORT=""
-    REMOTE_MANAGED=""
-  elif ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    @@T3_BUSY_SERVER_GUARD@@kill "$REMOTE_PID" 2>/dev/null || true
-    wait_for_pid_exit "$REMOTE_PID"
-    REMOTE_PID=""
-    REMOTE_PORT=""
-    REMOTE_MANAGED=""
-  fi
-else
-  REMOTE_PID=""
-  REMOTE_PORT=""
-  REMOTE_MANAGED=""
 fi
 if [ -z "$REMOTE_PORT" ]; then
   REMOTE_PORT="$(pick_port)" || true
@@ -790,8 +1001,20 @@ if [ -z "$REMOTE_PORT" ]; then
     fi
     exit 1
   fi
+  recheck_selected_before_use
+  if [ "$LIVE_STATUS" != none ]; then
+    printf 'A server appeared before launch; reconnect without replacing it.\\n' >&2; exit 1
+  fi
+  if [ "$T3_ARCHIVE_MODE" = 1 ]; then
+    T3_RUNTIME_DIR="$HOME/.goat/runtime/goat/versions/$SELECTED_VERSION"
+    SPAWN_IDENTITY="$T3_RUNTIME_DIR/goat"
+  else
+    SPAWN_IDENTITY="$T3_NODE_SCRIPT_PATH"
+  fi
   nohup env T3CODE_NO_BROWSER=1 "$RUNNER_FILE" serve --host 127.0.0.1 --port "$REMOTE_PORT" --base-dir "$DEFAULT_SERVER_HOME" >>"$LOG_FILE" 2>&1 < /dev/null &
   REMOTE_PID="$!"
+  printf '%s\\n' "$SPAWN_IDENTITY serve --host 127.0.0.1 --port $REMOTE_PORT --base-dir $DEFAULT_SERVER_HOME" >"$IDENTITY_NEXT"
+  mv "$IDENTITY_NEXT" "$STATE_DIR/identity"
   printf '%s\\n' "$REMOTE_PID" >"$PID_FILE"
   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
   printf 'managed\\n' >"$MANAGED_FILE"
@@ -804,7 +1027,7 @@ if [ -z "$REMOTE_PORT" ]; then
     fi
     kill "$REMOTE_PID" 2>/dev/null || true
     wait_for_pid_exit "$REMOTE_PID"
-    rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"
+    rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
     exit 1
   fi
 fi
@@ -816,52 +1039,20 @@ STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
 DEFAULT_SERVER_HOME="$HOME/.goat"
 @@T3_RUNNER_SETUP@@
 PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
+recheck_selected_before_use
 "$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json
 `;
 
-// Matching bytes preserve the installed file and do not restart a server.
 const REPLACE_RUNNER_INSTALL = `if [ -f "$RUNNER_FILE" ] && cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
   rm -f "$RUNNER_NEXT"
 else
-  verify_runner_next
   mv "$RUNNER_NEXT" "$RUNNER_FILE"
   RUNNER_CHANGED=1
 fi`;
-// A second client of the host keeps whatever runner is already there, so it
-// never restarts a server another client launched.
-const KEEP_EXISTING_RUNNER_INSTALL = `if [ -f "$RUNNER_FILE" ]; then
-  rm -f "$RUNNER_NEXT"
-else
-  verify_runner_next
-  mv "$RUNNER_NEXT" "$RUNNER_FILE"
-fi`;
-
-// A managed server also writes the default runtime descriptor. Keep its
-// ownership here; the later RUNNER_CHANGED branch alone decides replacement.
-const REPLACE_OWN_RUNTIME_CHECK = `if [ "$REMOTE_MANAGED" = "managed" ] && [ -n "$REMOTE_PID" ] && [ "$REMOTE_PID" = "$DEFAULT_RUNTIME_PID" ]; then
-      REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-    el`;
-
-// A managed server started with the default base dir records itself as the
-// default runtime, so a later launch would read its own server as a separate
-// default one, stop it and start another. That cuts off every client already
-// connected. The second-client path never takes the stopping branch: it keeps
-// a live managed server, or else uses the answering default one as it is
-// without touching the state files. The "el" prefix turns the stopping "if"
-// into an unreachable "elif".
-const KEEP_OWN_RUNTIME_CHECK = `if [ "$REMOTE_MANAGED" = "managed" ]; then
-      if [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
-        REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-      else
-        REMOTE_PID=""
-        REMOTE_MANAGED="external"
-      fi
-    el`;
-// The second-client path never stops a server another client may be using:
-// an unresponsive one fails this launch instead.
-const KEEP_BUSY_SERVER_GUARD = `echo "The T3 server on this host did not answer in time; leaving it running for its clients." >&2
-    exit 1
-    `;
+const KEEP_EXISTING_RUNNER_INSTALL = `if [ ! -f "$RUNNER_FILE" ] || ! cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
+  printf 'Selected retained runner changed before publication; reconnect.\\n' >&2; exit 1
+fi
+rm -f "$RUNNER_NEXT"`;
 
 // Issues an `mcp-client` bearer session, the only kind the remote's `/mcp`
 // admits from outside a thread. `--runtime-mode-ceiling` is newer than some
@@ -872,34 +1063,51 @@ DEFAULT_SERVER_HOME="$HOME/.goat"
 @@T3_RUNNER_SETUP@@
 set -- auth session issue --base-dir "$DEFAULT_SERVER_HOME" --subject mcp-client --scope orchestration:read --scope orchestration:operate --ttl @@T3_TTL@@ --label @@T3_LABEL@@ --json
 CEILING=@@T3_CEILING@@
+recheck_selected_before_use
 if [ -n "$CEILING" ] && OUTPUT="$("$RUNNER_FILE" "$@" --runtime-mode-ceiling "$CEILING" 2>/dev/null)"; then
   printf 'T3_CEILING=applied\\n%s\\n' "$OUTPUT"
 else
+  recheck_selected_before_use
   OUTPUT="$("$RUNNER_FILE" "$@")"
   printf 'T3_CEILING=default\\n%s\\n' "$OUTPUT"
 fi
 `;
 
 const REMOTE_STOP_SCRIPT = `set -eu
+DEFAULT_SERVER_HOME="$HOME/.goat"
 STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
 MANAGED_FILE="$STATE_DIR/managed"
 REMOTE_MANAGED="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
 REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-if [ "$REMOTE_MANAGED" != "external" ] && [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
-  kill "$REMOTE_PID" 2>/dev/null || true
-  WAIT_COUNT=0
-  while kill -0 "$REMOTE_PID" 2>/dev/null && [ "$WAIT_COUNT" -lt 20 ]; do
-    WAIT_COUNT=$((WAIT_COUNT + 1))
-    sleep 0.1
-  done
+REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
+@@T3_PROTOCOL_TOKENS@@
+ownership_unverified() {
+  printf 'GOAT ownership could not be verified for PID %s; process and ownership files were preserved.\\n' "$REMOTE_PID" >&2
+  exit 1
+}
+@@T3_OWNED_IDENTITY@@
+if [ "$REMOTE_MANAGED" = managed ] && [ -n "$REMOTE_PID" ]; then
+  valid_positive "$REMOTE_PID" || ownership_unverified
   if kill -0 "$REMOTE_PID" 2>/dev/null; then
-    printf 'Remote T3 server with PID %s did not stop within 2 seconds. Its ownership files were kept.\\n' "$REMOTE_PID" >&2
-    exit 1
+    verify_owned_identity "$REMOTE_PID" "$REMOTE_PORT" || ownership_unverified
+    kill "$REMOTE_PID" 2>/dev/null || true
+    WAIT_COUNT=0
+    while kill -0 "$REMOTE_PID" 2>/dev/null && [ "$WAIT_COUNT" -lt 20 ]; do
+      WAIT_COUNT=$((WAIT_COUNT + 1))
+      sleep 0.1
+    done
+    if kill -0 "$REMOTE_PID" 2>/dev/null; then
+      printf 'Remote T3 server with PID %s did not stop within 2 seconds. Its ownership files were kept.\\n' "$REMOTE_PID" >&2
+      exit 1
+    fi
   fi
+elif [ "$REMOTE_MANAGED" != external ] && [ -n "$REMOTE_PID" ]; then
+  valid_positive "$REMOTE_PID" || ownership_unverified
+  if kill -0 "$REMOTE_PID" 2>/dev/null; then ownership_unverified; fi
 fi
-rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"
+rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE" "$STATE_DIR/identity"
 printf '{"stopped":true}\\n'
 `;
 
@@ -973,26 +1181,46 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
 
 function buildRemoteRunnerSetupScript(
   input: RemoteT3RunnerOptions | undefined,
-  keepExistingRunner: boolean,
+  selection: PreparedRemoteRuntime,
+  verifyOwnedBeforePublication = false,
 ): string {
-  const requestedRunner = isNodeScriptRunner(input)
-    ? `Node script ${input?.nodeScriptPath?.trim()}`
-    : `GOAT ${input?.archiveVersion?.trim()}`;
+  const preserve = selection.source === "retained";
   return applyScriptPlaceholders(REMOTE_RUNNER_SETUP_SCRIPT, {
-    T3_REQUESTED_RUNNER: shellSingleQuote(requestedRunner),
-    T3_EXPECTED_ARCHIVE_VERSION: shellSingleQuote(
-      isNodeScriptRunner(input) ? "" : input?.archiveVersion?.trim() || "",
+    T3_REQUESTED_RUNNER: shellSingleQuote(
+      isNodeScriptRunner(input)
+        ? `Node script ${input?.nodeScriptPath?.trim()}`
+        : `GOAT ${selection.requestedVersion}`,
     ),
+    T3_EXPECTED_ARCHIVE_VERSION: shellSingleQuote(selection.version ?? ""),
+    T3_SELECTED_VERSION: shellSingleQuote(selection.version ?? ""),
+    T3_REQUESTED_VERSION: shellSingleQuote(selection.requestedVersion ?? ""),
+    T3_REQUIRE_INSTALLED: selection.requireInstalled ? "1" : "0",
+    T3_PRESERVE_SELECTED_RUNNER: preserve ? "1" : "0",
+    T3_ALLOW_OWNED_UPGRADE: selection.mayUpgradeOwnedServer ? "1" : "0",
+    T3_RETAINED_RUNNER_SHA256: shellSingleQuote(selection.retainedRunnerSha256 ?? ""),
+    T3_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
-    T3_RUNNER_INSTALL: keepExistingRunner ? KEEP_EXISTING_RUNNER_INSTALL : REPLACE_RUNNER_INSTALL,
+    T3_PROTOCOL_GUARD: applyScriptPlaceholders(REMOTE_PROTOCOL_GUARD_SCRIPT, {
+      T3_SSH_PROTOCOL: String(SSH_RUNTIME_PROTOCOL_VERSION),
+      T3_ORCHESTRATION_PROTOCOL: String(ORCHESTRATION_PROTOCOL_VERSION),
+    }),
+    T3_VERIFY_OWNED_BEFORE_PUBLICATION: verifyOwnedBeforePublication
+      ? VERIFY_OWNED_BEFORE_PUBLICATION + "\n"
+      : "",
+    T3_RUNNER_INSTALL: preserve ? KEEP_EXISTING_RUNNER_INSTALL : REPLACE_RUNNER_INSTALL,
   });
 }
 
-export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
+export function buildRemoteLaunchScript(
+  input?: RemoteT3RunnerOptions,
+  selection = requestedRuntime(input),
+): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
+    T3_NODE_SCRIPT_PATH: shellSingleQuote(input?.nodeScriptPath?.trim() || ""),
+    T3_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
-    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, input?.keepExistingRunner === true),
+    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, selection, true),
     T3_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
     T3_WAIT_READY_SCRIPT: stripTrailingNewlines(REMOTE_WAIT_READY_SCRIPT),
     T3_DEFAULT_REMOTE_PORT: String(DEFAULT_REMOTE_PORT),
@@ -1000,10 +1228,6 @@ export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
     T3_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     T3_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     T3_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
-    T3_OWN_RUNTIME_CHECK: input?.keepExistingRunner
-      ? KEEP_OWN_RUNTIME_CHECK
-      : REPLACE_OWN_RUNTIME_CHECK,
-    T3_BUSY_SERVER_GUARD: input?.keepExistingRunner ? KEEP_BUSY_SERVER_GUARD : "",
   });
 }
 
@@ -1011,13 +1235,17 @@ export function buildRemoteMcpSessionScript(
   stateKey: string,
   options: RemoteMcpClientSessionOptions,
   input?: RemoteT3RunnerOptions,
+  selection = requestedRuntime(input),
 ): string {
   return applyScriptPlaceholders(REMOTE_MCP_SESSION_SCRIPT, {
     T3_STATE_KEY: stateKey,
     T3_TTL: shellSingleQuote(options.ttl),
     T3_LABEL: shellSingleQuote(options.label),
     T3_CEILING: shellSingleQuote(options.runtimeModeCeiling ?? ""),
-    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, true),
+    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, {
+      ...selection,
+      mayUpgradeOwnedServer: false,
+    }),
   });
 }
 
@@ -1037,10 +1265,17 @@ export const decodeRemoteMcpSessionOutput = Effect.fn("ssh/tunnel.decodeRemoteMc
   },
 );
 
-export function buildRemotePairingScript(stateKey: string, input?: RemoteT3RunnerOptions): string {
+export function buildRemotePairingScript(
+  stateKey: string,
+  input?: RemoteT3RunnerOptions,
+  selection = requestedRuntime(input),
+): string {
   return applyScriptPlaceholders(REMOTE_PAIRING_SCRIPT, {
     T3_STATE_KEY: stateKey,
-    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, true),
+    T3_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, {
+      ...selection,
+      mayUpgradeOwnedServer: false,
+    }),
   });
 }
 
@@ -1097,48 +1332,95 @@ sh -c ${shellSingleQuote(installer)} -- --version
 export function buildRemoteRuntimeProbeScript(
   version: string,
   stateKey?: string,
-  keepExistingRunner = false,
+  _keepExistingRunner = false,
 ): string {
   return `set -eu
 V=${shellSingleQuote(version)}
 state_key=${shellSingleQuote(stateKey ?? "")}
-retained_fields=
-runner="$HOME/.goat/ssh-launch/$state_key/run-t3.sh"
-if [ "${keepExistingRunner ? "1" : "0"}" = 1 ] && [ -n "$state_key" ] && [ -f "$runner" ]; then
-  node_script_path="$(sed -n "s/^T3_NODE_SCRIPT_PATH='\\(.*\\)'$/\\1/p" "$runner")"
-  retained_version=
-  retained=ready
-  if [ -z "$node_script_path" ]; then
-    retained_version="$(sed -n "s/^T3_ARCHIVE_VERSION='\\([^']*\\)'$/\\1/p" "$runner")"
-    case "$retained_version" in
-      ''|*[!0-9A-Za-z.-]*) printf 'The retained runner has an invalid exact archive version.\\n' >&2; exit 1 ;;
-    esac
-    if ! printf '%s\\n' "$retained_version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$'; then
-      printf 'The retained runner has an invalid exact archive version.\\n' >&2; exit 1
-    fi
-    retained_runtime="$HOME/.goat/runtime/goat/versions/$retained_version"
-    if [ ! -x "$retained_runtime/goat" ] || [ "$(cat "$retained_runtime/.install-complete" 2>/dev/null)" != "$retained_version" ]; then
-      retained=missing
-    fi
+state="$HOME/.goat/ssh-launch/$state_key"
+runtime_file="$HOME/.goat/userdata/server-runtime.json"
+${REMOTE_PROTOCOL_TOKEN_SCRIPT}
+ready_version() {
+  valid_version "$1" && [ -x "$HOME/.goat/runtime/goat/versions/$1/goat" ] &&
+    [ "$(cat "$HOME/.goat/runtime/goat/versions/$1/.install-complete" 2>/dev/null)" = "$1" ]
+}
+signals_json() {
+  # Positional parameters are scoped to this function, not the enclosing script.
+  version="$1"; ssh="$2"; orch="$3"
+  valid_version "$version" || return 1
+  fields=
+  for pair in "sshRuntimeProtocolVersion:$ssh" "orchestrationProtocolVersion:$orch"; do
+    key="\${pair%%:*}"; value="\${pair#*:}"
+    if [ "$value" = unknown ]; then continue; fi
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+    valid_positive "$value" || return 1
+    fields="$fields,\\"$key\\":$value"
+  done
+  printf '{"serverVersion":"%s"%s}' "$version" "$fields"
+}
+binary_json() {
+  v="$1"; exe="$HOME/.goat/runtime/goat/versions/$v/goat"
+  if ! ready_version "$v" || [ "$("$exe" --version 2>/dev/null || true)" != "goat v$v" ]; then return 1; fi
+  if own="$("$exe" __ssh-helper protocol --shell 2>/dev/null)"; then
+    set -f; set -- $own
+    if ! valid_own_tokens "$@" || [ "$1" != "$v" ]; then printf '{"serverVersion":"%s","invalid":true}' "$v"; return; fi
+    if signals="$(signals_json "$1" "$2" "$3")"; then printf '%s' "$signals";
+    else printf '{"serverVersion":"%s","invalid":true}' "$v"; fi
+  else
+    # Exact legacy fallback has independent --version evidence above.
+    printf '{"serverVersion":"%s"}' "$v"
   fi
-  retained_fields="$(printf ',\"retained\":\"%s\",\"retainedVersion\":\"%s\"' "$retained" "$retained_version")"
+}
+retained_version=
+retained_sha256=
+if [ -n "$state_key" ] && [ -f "$state/run-t3.sh" ]; then
+  retained_sha256="$(runner_sha256 "$state/run-t3.sh")" || exit 1
+  node_path="$(sed -n "s/^T3_NODE_SCRIPT_PATH='\\(.*\\)'$/\\1/p" "$state/run-t3.sh")"
+  if [ -z "$node_path" ]; then
+    retained_version="$(sed -n "s/^T3_ARCHIVE_VERSION='\\([^']*\\)'$/\\1/p" "$state/run-t3.sh")"
+  fi
 fi
-case "$(uname -s)" in
-  Darwin) platform=darwin ;;
-  Linux) platform=linux ;;
-  *) printf 'Unsupported SSH runtime OS.\\n' >&2; exit 1 ;;
-esac
-case "$(uname -m)" in
-  arm64|aarch64) arch=arm64 ;;
-  x86_64|amd64) arch=x64 ;;
-  *) printf 'Unsupported SSH runtime architecture.\\n' >&2; exit 1 ;;
-esac
-runtime="$HOME/.goat/runtime/goat/versions/$V"
+retained_fields=
+if ready_version "$retained_version"; then
+  retained_signals="$(binary_json "$retained_version" || true)"
+  if [ -n "$retained_signals" ]; then
+    [ "$(runner_sha256 "$state/run-t3.sh")" = "$retained_sha256" ] || {
+      printf 'Retained GOAT runner changed during probe; reconnect.\\n' >&2; exit 1;
+    }
+    retained_fields="$(printf ',"retained":"ready","retainedVersion":"%s","retainedSignals":%s,"retainedRunnerSha256":"%s"' "$retained_version" "$retained_signals" "$retained_sha256")"
+  fi
+fi
+# Persisted version is a path hint only. The live descriptor proves identity.
+live_hint="$(sed -n 's/.*"serverVersion"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' "$runtime_file" 2>/dev/null || true)"
+live_fields=
+for candidate in "$live_hint" "$retained_version" "$V"; do
+  if ! ready_version "$candidate"; then continue; fi
+  exe="$HOME/.goat/runtime/goat/versions/$candidate/goat"
+  if live="$("$exe" __ssh-helper protocol --runtime-file "$runtime_file" --port-file "$state/port" --pid-file "$state/pid" --shell 2>/dev/null)"; then
+    set -f; set -- $live
+    if ! valid_live_tokens "$@"; then
+      printf 'Malformed live GOAT protocol tokens; fix the remote helper and reconnect.\\n' >&2; exit 1
+    fi
+    live_fields="$(printf ',"liveStatus":"%s"' "$1")"
+    if [ "$1" = live ] && valid_version "$2"; then
+      live_version="$2"
+      live_signals="$(signals_json "$2" "$3" "$4" || true)"
+      live_binary="$(binary_json "$live_version" || true)"
+      if [ -n "$live_signals" ]; then
+        live_fields="$live_fields$(printf ',"liveVersion":"%s","liveSignals":%s' "$live_version" "$live_signals")"
+        if [ -n "$live_binary" ]; then
+          live_fields="$live_fields$(printf ',"liveBinarySignals":%s' "$live_binary")"
+        fi
+      fi
+    fi
+    break
+  fi
+done
+case "$(uname -s)" in Darwin) platform=darwin ;; Linux) platform=linux ;; *) exit 1 ;; esac
+case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=x64 ;; *) exit 1 ;; esac
 ready=false
-if [ -x "$runtime/goat" ] && [ "$(cat "$runtime/.install-complete" 2>/dev/null)" = "$V" ]; then
-  ready=true
-fi
-printf '{"platform":"%s","arch":"%s","ready":%s%s}\\n' "$platform" "$arch" "$ready" "$retained_fields"
+if ready_version "$V"; then ready=true; fi
+printf '{"platform":"%s","arch":"%s","ready":%s%s%s}\\n' "$platform" "$arch" "$ready" "$retained_fields" "$live_fields"
 `;
 }
 
@@ -1150,6 +1432,14 @@ const decodeRemoteRuntimeProbe = Schema.decodeEffect(
       ready: Schema.Boolean,
       retained: Schema.optionalKey(Schema.Literals(["ready", "missing"])),
       retainedVersion: Schema.optionalKey(Schema.String),
+      retainedSignals: Schema.optionalKey(RuntimeSignals),
+      retainedRunnerSha256: Schema.optionalKey(
+        Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+      ),
+      liveStatus: Schema.optionalKey(Schema.Literals(["none", "live", "unknown"])),
+      liveVersion: Schema.optionalKey(Schema.String),
+      liveSignals: Schema.optionalKey(RuntimeSignals),
+      liveBinarySignals: Schema.optionalKey(RuntimeSignals),
     }),
   ),
 );
@@ -1170,13 +1460,12 @@ export const prepareRemoteRuntime = (
   stateKey?: string,
 ) =>
   Effect.gen(function* () {
-    const mayRetainRunner = runner?.keepExistingRunner && stateKey !== undefined;
-    if (isNodeScriptRunner(runner) && !mayRetainRunner) return;
+    const exact = requestedRuntime(runner);
+    if (isNodeScriptRunner(runner)) return exact;
     const directory = runner?.archiveDirectory?.trim() ?? "";
     const bundleDirectory = runner?.bundledArchiveDirectory?.trim() ?? "";
     const mirror = runner?.releaseBaseUrl?.trim() ?? "";
-    // Explicit mirrors retain the existing path without a local cache.
-    if (directory === "" && bundleDirectory === "" && mirror !== "" && !mayRetainRunner) return;
+    // Observe a compatible installed runtime before any acquisition, including mirrors.
     const version = runner?.archiveVersion?.trim() ?? "";
     yield* Effect.annotateCurrentSpan({
       "ssh.target": target.alias,
@@ -1194,26 +1483,56 @@ export const prepareRemoteRuntime = (
     const probe = yield* decodeRemoteJsonOutput(result.stdout, decodeRemoteRuntimeProbe).pipe(
       Effect.mapError(runtimePreparationError),
     );
-    if (probe.retained === "ready") {
-      yield* Effect.annotateCurrentSpan("t3.runtime.source", "retained-runner");
-      return;
+    const liveCompatible =
+      probe.liveVersion !== undefined &&
+      probe.liveSignals !== undefined &&
+      probe.liveBinarySignals !== undefined &&
+      probe.liveSignals.serverVersion === probe.liveVersion &&
+      probe.liveBinarySignals.serverVersion === probe.liveVersion &&
+      matchesSignals(probe.liveSignals, version) &&
+      matchesSignals(probe.liveBinarySignals, version);
+    const retainedCompatible =
+      probe.liveStatus === "none" &&
+      probe.retained === "ready" &&
+      probe.retainedVersion !== undefined &&
+      probe.retainedSignals !== undefined &&
+      probe.retainedRunnerSha256 !== undefined &&
+      probe.retainedSignals.serverVersion === probe.retainedVersion &&
+      matchesSignals(probe.retainedSignals, version);
+    const selectedVersion = liveCompatible
+      ? probe.liveVersion
+      : retainedCompatible
+        ? probe.retainedVersion
+        : undefined;
+    if (selectedVersion !== undefined) {
+      const retained =
+        selectedVersion === probe.retainedVersion &&
+        probe.retainedSignals !== undefined &&
+        probe.retainedSignals.serverVersion === selectedVersion &&
+        matchesSignals(probe.retainedSignals, version) &&
+        probe.retainedRunnerSha256 !== undefined;
+      yield* Effect.annotateCurrentSpan(
+        "t3.runtime.source",
+        retained ? "retained-runner" : "live-runtime",
+      );
+      return {
+        ...exact,
+        version: selectedVersion,
+        source: retained ? "retained" : "live",
+        requireInstalled: true,
+        runner: { ...runner, archiveVersion: selectedVersion },
+        retainedRunnerSha256: retained ? (probe.retainedRunnerSha256 ?? null) : null,
+      } satisfies PreparedRemoteRuntime;
     }
-    if (probe.retained === "missing") {
-      return yield* new SshLaunchError({
-        message: `The retained runner ~/.goat/ssh-launch/${stateKey}/run-t3.sh selects goat ${probe.retainedVersion}, which is not installed on ${target.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
-        stdout: "",
-      });
-    }
-    if (isNodeScriptRunner(runner)) return;
     if (probe.ready) {
       yield* Effect.annotateCurrentSpan("t3.runtime.source", "ready");
-      return;
+      return { ...exact, requireInstalled: true };
     }
     const platformKey = cliArchivePlatformKey(probe.platform, probe.arch);
     if (platformKey === undefined) {
       if (mirror !== "") {
         yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
-        return;
+        return exact;
       }
       const asset =
         platformKey === undefined
@@ -1238,7 +1557,7 @@ export const prepareRemoteRuntime = (
           );
     if (bundledArchive === null && localArchive === null && mirror !== "") {
       yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
-      return;
+      return exact;
     }
     if (bundledArchive === null && localArchive === null) {
       const path = yield* Path.Path;
@@ -1277,6 +1596,7 @@ export const prepareRemoteRuntime = (
       timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
     });
     yield* Effect.annotateCurrentSpan("t3.runtime.upload.installComplete", true);
+    return { ...exact, requireInstalled: true };
   }).pipe(
     Effect.mapError((error) =>
       error instanceof SshLaunchError
@@ -1293,6 +1613,8 @@ export const prepareRemoteRuntime = (
 export function buildRemoteStopScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
     T3_STATE_KEY: stateKey,
+    T3_PROTOCOL_TOKENS: REMOTE_PROTOCOL_TOKEN_SCRIPT,
+    T3_OWNED_IDENTITY: REMOTE_OWNED_IDENTITY_SCRIPT,
   });
 }
 
@@ -1308,7 +1630,11 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     input?: SshAuth.SshAuthOptions,
     runner?: RemoteT3RunnerOptions,
   ): Effect.fn.Return<
-    { readonly remotePort: number; readonly remoteServerKind: "external" | "managed" | null },
+    {
+      readonly remotePort: number;
+      readonly remoteServerKind: "external" | "managed" | null;
+      readonly selectedRuntime: PreparedRemoteRuntime;
+    },
     SshCommandError | SshInvalidTargetError | SshLaunchError,
     ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
   > {
@@ -1318,11 +1644,13 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshRunnerLogFields(runner),
       stateKey,
     });
-    yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey);
+    const selected = yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey);
+    yield* Effect.annotateCurrentSpan("t3.runtime.selectedVersion", selected.version);
+    yield* Effect.annotateCurrentSpan("t3.runtime.requestedVersion", selected.requestedVersion);
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
-      stdin: buildRemoteLaunchScript(runner),
-      timeoutMs: isNodeScriptRunner(runner)
+      stdin: buildRemoteLaunchScript(selected.runner, selected),
+      timeoutMs: isNodeScriptRunner(selected.runner)
         ? REMOTE_LAUNCH_TIMEOUT_MS
         : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
       ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
@@ -1355,11 +1683,14 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       ...sshTargetLogFields(target),
       remotePort: parsed.remotePort,
       remoteServerKind: parsed.serverKind ?? null,
+      selectedVersion: selected.version,
+      requestedVersion: selected.requestedVersion,
       stateKey,
     });
     return {
       remotePort: parsed.remotePort,
       remoteServerKind: parsed.serverKind ?? null,
+      selectedRuntime: { ...selected, requireInstalled: !isNodeScriptRunner(selected.runner) },
     };
   },
 );
@@ -1368,6 +1699,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
   target: DesktopSshEnvironmentTarget,
   input?: SshAuth.SshAuthOptions,
   runner?: RemoteT3RunnerOptions,
+  prepared?: PreparedRemoteRuntime,
 ): Effect.fn.Return<
   {
     readonly credential: string;
@@ -1380,18 +1712,23 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     ...sshTargetLogFields(target),
     stateKey,
   });
-  yield* prepareRemoteRuntime(
-    target,
-    input ?? {},
-    { ...runner, keepExistingRunner: true },
-    stateKey,
-  );
+  const selected =
+    prepared ??
+    (yield* prepareRemoteRuntime(
+      target,
+      input ?? {},
+      { ...runner, keepExistingRunner: true },
+      stateKey,
+    ));
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
-    stdin: buildRemotePairingScript(stateKey, runner),
+    stdin: buildRemotePairingScript(stateKey, selected.runner, {
+      ...selected,
+      mayUpgradeOwnedServer: false,
+    }),
     // Pairing may be the first command on a cold remote, so it can install
     // the archive on the way.
-    ...(isNodeScriptRunner(runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
+    ...(isNodeScriptRunner(selected.runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
     ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
     ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
@@ -1419,6 +1756,9 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     });
   }
   yield* Effect.logDebug("ssh.remoteServer.pairingToken.created", {
+    selectedVersion: selected.version,
+    requestedVersion: selected.requestedVersion,
+    source: selected.source,
     ...sshTargetLogFields(target),
     stateKey,
   });
@@ -1433,23 +1773,31 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
     sessionOptions: RemoteMcpClientSessionOptions,
     input?: SshAuth.SshAuthOptions,
     runner?: RemoteT3RunnerOptions,
+    prepared?: PreparedRemoteRuntime,
   ): Effect.fn.Return<
     RemoteMcpClientSession,
     SshCommandError | SshInvalidTargetError | SshPairingError | SshLaunchError,
     ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
   > {
     const stateKey = yield* remoteStateKey(target);
-    yield* prepareRemoteRuntime(
-      target,
-      input ?? {},
-      { ...runner, keepExistingRunner: true },
-      stateKey,
-    );
+    const selected =
+      prepared ??
+      (yield* prepareRemoteRuntime(
+        target,
+        input ?? {},
+        { ...runner, keepExistingRunner: true },
+        stateKey,
+      ));
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-s"],
-      stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, runner),
+      stdin: buildRemoteMcpSessionScript(stateKey, sessionOptions, selected.runner, {
+        ...selected,
+        mayUpgradeOwnedServer: false,
+      }),
       // Like pairing, this may be the first command on a cold remote.
-      ...(isNodeScriptRunner(runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
+      ...(isNodeScriptRunner(selected.runner)
+        ? {}
+        : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
       ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
       ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
       ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
@@ -1471,6 +1819,9 @@ export const issueRemoteMcpClientSession = Effect.fn("ssh/tunnel.issueRemoteMcpC
       });
     }
     yield* Effect.logInfo("ssh.remoteServer.mcpSession.issued", {
+      selectedVersion: selected.version,
+      requestedVersion: selected.requestedVersion,
+      source: selected.source,
       ...sshTargetLogFields(target),
       stateKey,
       runtimeModeCeilingApplied: session.runtimeModeCeilingApplied,
@@ -1498,7 +1849,15 @@ const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
     ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
     ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
-  });
+  }).pipe(
+    Effect.tapError((cause) =>
+      Effect.logWarning("ssh.remoteServer.stop.failed", {
+        ...sshTargetLogFields(target),
+        stateKey,
+        message: cause.message,
+      }),
+    ),
+  );
   yield* Effect.logInfo("ssh.remoteServer.stop.succeeded", {
     ...sshTargetLogFields(target),
     stateKey,
@@ -1601,6 +1960,7 @@ const reserveLocalTunnelPort = Effect.fn("ssh/tunnel.reserveLocalTunnelPort")(fu
 });
 
 const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: {
+  readonly selectedRuntime: PreparedRemoteRuntime;
   readonly key: string;
   readonly resolvedTarget: DesktopSshEnvironmentTarget;
   readonly remotePort: number;
@@ -1710,6 +2070,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     httpBaseUrl: input.httpBaseUrl,
   });
   const tunnelEntry: SshTunnelEntry = {
+    selectedRuntime: input.selectedRuntime,
     key: input.key,
     target: input.resolvedTarget,
     remotePort: input.remotePort,
@@ -2035,6 +2396,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           wsBaseUrl,
           authOptions,
           remoteServerKind: remoteLaunch.remoteServerKind,
+          selectedRuntime: remoteLaunch.selectedRuntime,
           scope: entryScope,
         }),
     }).pipe(
@@ -2203,7 +2565,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
               key,
               target: entry.target,
               operation: (authOptions) =>
-                issueRemotePairingToken(entry.target, authOptions, runner),
+                issueRemotePairingToken(entry.target, authOptions, runner, entry.selectedRuntime),
             })
           : null;
         const pairingToken = pairingResult?.credential ?? null;
@@ -2300,7 +2662,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         key,
         target: resolvedTarget,
         operation: (authOptions) =>
-          issueRemoteMcpClientSession(resolvedTarget, sessionOptions, authOptions, runner),
+          issueRemoteMcpClientSession(
+            resolvedTarget,
+            sessionOptions,
+            authOptions,
+            runner,
+            tunnels.get(key)?.selectedRuntime,
+          ),
       }),
     );
   });

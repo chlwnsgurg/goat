@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
 import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/http";
@@ -124,7 +125,10 @@ const makeUploadFixture = Effect.fn("test.makeUploadFixture")(function* () {
   const directory = `${root}/mirror/v${ARCHIVE.archiveVersion}`;
   yield* fs.makeDirectory(stage, { recursive: true });
   yield* fs.makeDirectory(directory, { recursive: true });
-  yield* fs.writeFileString(`${stage}/goat`, `#!/bin/sh\necho goat v${ARCHIVE.archiveVersion}\n`);
+  yield* fs.writeFileString(
+    `${stage}/goat`,
+    `#!/bin/sh\nif [ "$1" = --version ]; then echo goat v${ARCHIVE.archiveVersion}; else exit 2; fi\n`,
+  );
   yield* fs.chmod(`${stage}/goat`, 0o700);
   const child = yield* spawner.spawn(
     ChildProcess.make("tar", ["-czf", `${directory}/${stem}.tar.gz`, "-C", `${root}/stage`, stem]),
@@ -146,15 +150,47 @@ const recordSpans = (spans: Tracer.Span[]) =>
     },
   });
 
+// These transport-only tests model an installed exact requested archive.
+const makeProtocolTestSpawner = (spawn: Parameters<typeof ChildProcessSpawner.make>[0]) =>
+  ChildProcessSpawner.make((command) =>
+    Effect.gen(function* () {
+      const stdin = command._tag === "StandardCommand" ? command.options.stdin : undefined;
+      if (
+        stdin !== undefined &&
+        typeof stdin === "object" &&
+        "stream" in stdin &&
+        Stream.isStream(stdin.stream)
+      ) {
+        const bytes = yield* stdin.stream.pipe(Stream.runCollect);
+        const script = new TextDecoder().decode(
+          new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))),
+        );
+        if (script.includes("ready=false"))
+          return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: true }));
+        if (command._tag === "StandardCommand")
+          return yield* spawn({
+            ...command,
+            options: {
+              ...command.options,
+              stdin: { ...stdin, stream: Stream.fromIterable(bytes) },
+            },
+          });
+      }
+      return yield* spawn(command);
+    }),
+  );
+
 // Vite reformats Function.toString(); persistent script bytes use native Node.
 const nativeScripts = Effect.fn("test.nativeScripts")(function* (
   input: SshTunnel.RemoteT3RunnerOptions,
+  selection?: SshTunnel.PreparedRemoteRuntime,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const moduleUrl = new URL("./tunnel.ts", import.meta.url).href;
   const script = `import * as t from ${JSON.stringify(moduleUrl)};
 const input = ${JSON.stringify(input)};
-console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input), pairing: t.buildRemotePairingScript("711bc738002d72fd", input), mcp: t.buildRemoteMcpSessionScript("711bc738002d72fd", { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }));`;
+const selection = ${JSON.stringify(selection)};
+console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch: t.buildRemoteLaunchScript(input, selection), pairing: t.buildRemotePairingScript("711bc738002d72fd", input, selection), mcp: t.buildRemoteMcpSessionScript("711bc738002d72fd", { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, input, selection), probe: t.buildRemoteRuntimeProbeScript(input.archiveVersion ?? "", "711bc738002d72fd", true), upload: input.nodeScriptPath ? null : t.buildRemoteT3UploadInstallerScript(input, "A".repeat(64)) }));`;
   const child = yield* spawner.spawn(
     ChildProcess.make(process.execPath, ["--input-type=module", "-e", script]),
   );
@@ -167,13 +203,40 @@ console.log(JSON.stringify({ runner: t.buildRemoteT3RunnerScript(input), launch:
     { concurrency: "unbounded" },
   );
   assert.equal(result.code, 0, result.stderr);
-  return JSON.parse(result.stdout) as {
+  const scripts = JSON.parse(result.stdout) as {
     runner: string;
     launch: string;
     pairing: string;
     mcp: string;
     upload: string | null;
+    probe: string;
   };
+  for (const entry of ["launch", "pairing", "mcp", "probe"] as const)
+    assert.notMatch(scripts[entry], /@@T3_[A-Z_]+@@/);
+  return scripts;
+});
+
+// Archive doubles are Node scripts; emulate archive ps output only for the captured seed child.
+const installArchivePsDouble = Effect.fn("test.installArchivePsDouble")(function* (
+  home: string,
+  pid: number,
+  port: number,
+  version: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const bin = `${home}/.test/identity-bin`;
+  yield* fs.makeDirectory(bin, { recursive: true });
+  yield* fs.writeFileString(
+    `${bin}/ps`,
+    `#!/bin/sh
+if [ "$1 $2 $3 $4" = '-o command= -p ${pid}' ]; then
+  printf '%s\\n' "$HOME/.goat/runtime/goat/versions/${version}/goat serve --host 127.0.0.1 --port ${port} --base-dir $HOME/.goat"
+else
+  exec /bin/ps "$@"
+fi
+`,
+  );
+  yield* fs.chmod(`${bin}/ps`, 0o700);
 });
 
 describe("ssh tunnel scripts", () => {
@@ -323,7 +386,7 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, "T3_RELEASE_BASE_URL='https://mirror.example/goat'");
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper pick-port "$PORT_FILE"');
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT"');
-    assert.include(launch, '"$RUNNER_FILE" __ssh-helper runtime-port "$DEFAULT_RUNTIME_FILE"');
+    assert.include(launch, "__ssh-helper protocol --runtime-file");
     assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "T3_ARCHIVE_MODE=0");
   });
 
@@ -406,13 +469,10 @@ describe("ssh tunnel scripts", () => {
       nodeEngineRange: TEST_NODE_ENGINE_RANGE,
     });
 
-    assert.include(
-      launch,
-      '[ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null',
-    );
+    assert.include(launch, '[ "$LIVE_STATUS" = live ] && valid_positive "$LIVE_PID"');
     assert.include(launch, "RUNNER_CHANGED=1");
     assert.include(launch, "ensure_remote_node_path()");
-    assert.include(launch, "if ! ensure_remote_node_path; then");
+    assert.include(launch, "ensure_remote_node_path || true");
     assert.include(devLaunch, `T3_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
     assert.include(devLaunch, "does not satisfy required range ");
     assert.include(launch, 'kill "$REMOTE_PID" 2>/dev/null || true');
@@ -440,7 +500,7 @@ describe("ssh tunnel scripts", () => {
     );
     assert.include(
       SshTunnel.buildRemoteStopScript(stateKey),
-      'if [ "$REMOTE_MANAGED" != "external" ] && [ -n "$REMOTE_PID" ]',
+      'if [ "$REMOTE_MANAGED" = managed ] && [ -n "$REMOTE_PID" ]; then',
     );
     assert.include(
       SshTunnel.buildRemoteStopScript(stateKey),
@@ -454,21 +514,15 @@ describe("ssh tunnel scripts", () => {
       launch,
       'DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"',
     );
-    assert.include(launch, "resolve_default_runtime_port()");
-    assert.include(launch, 'DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port');
-    assert.include(launch, "if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(port))");
-    assert.include(launch, 'PID_TO_STOP="${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"');
-    assert.include(launch, 'REMOTE_PORT="$DEFAULT_REMOTE_PORT"');
+    assert.include(launch, "check_live_protocol()");
+    assert.include(launch, 'PID_TO_STOP="$LIVE_PID"');
+    assert.include(launch, 'REMOTE_PORT="$LIVE_PORT"');
     assert.include(launch, 'rm -f "$PID_FILE"');
     assert.include(launch, "printf 'external\\n' >\"$MANAGED_FILE\"");
     assert.include(launch, 'if [ -z "$REMOTE_PORT" ]; then');
     assert.isBelow(
-      launch.indexOf('if [ "$REMOTE_MANAGED" = "managed" ]'),
-      launch.indexOf("printf 'external\\n' >\"$MANAGED_FILE\""),
-    );
-    assert.isBelow(
-      launch.indexOf('DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port'),
-      launch.indexOf('elif [ -n "$REMOTE_PID" ]'),
+      launch.indexOf("check_live_protocol\n"),
+      launch.indexOf('mv "$RUNNER_NEXT" "$RUNNER_FILE"'),
     );
   });
 
@@ -480,7 +534,7 @@ describe("ssh tunnel scripts", () => {
       port: 2222,
     } as const;
     const spawnedCommands: Array<ReadonlyArray<string>> = [];
-    const spawner = ChildProcessSpawner.make((command) =>
+    const spawner = makeProtocolTestSpawner((command) =>
       Effect.sync(() => {
         spawnedCommands.push(commandArgs(command));
         return makeSuccessfulProcess('loaded nvm default\n{"remotePort":3774}\n');
@@ -507,7 +561,7 @@ describe("ssh tunnel scripts", () => {
       username: "julius",
       port: 2222,
     } as const;
-    const spawner = ChildProcessSpawner.make(() =>
+    const spawner = makeProtocolTestSpawner(() =>
       Effect.succeed(makeDelayedSuccessfulProcess('{"remotePort":3774}\n', 75_000)),
     );
     const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
@@ -532,7 +586,7 @@ describe("ssh tunnel scripts", () => {
       username: "julius",
       port: 2222,
     } as const;
-    const spawner = ChildProcessSpawner.make(() =>
+    const spawner = makeProtocolTestSpawner(() =>
       Effect.succeed(makeDelayedSuccessfulProcess('{"remotePort":3774}\n', 800_000)),
     );
     const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
@@ -606,7 +660,7 @@ describe("ssh tunnel scripts", () => {
       username: "julius",
       port: 2222,
     } as const;
-    const spawner = ChildProcessSpawner.make((command) =>
+    const spawner = makeProtocolTestSpawner((command) =>
       Effect.gen(function* () {
         const input = command._tag === "StandardCommand" ? command.options.stdin : undefined;
         const bytes =
@@ -647,7 +701,7 @@ describe("ssh tunnel scripts", () => {
       username: "julius",
       port: 2222,
     } as const;
-    const spawner = ChildProcessSpawner.make((command) =>
+    const spawner = makeProtocolTestSpawner((command) =>
       Effect.gen(function* () {
         const input = command._tag === "StandardCommand" ? command.options.stdin : undefined;
         const bytes =
@@ -693,7 +747,7 @@ describe("ssh tunnel scripts", () => {
         let remoteRunning = true;
         let stale = false;
         const probeStarted = yield* Deferred.make<void>();
-        const spawner = ChildProcessSpawner.make((command) =>
+        const spawner = makeProtocolTestSpawner((command) =>
           Effect.sync(() => {
             const args = commandArgs(command);
             if (args.includes("-G"))
@@ -771,7 +825,7 @@ describe("ssh tunnel scripts", () => {
       const spawnedCommands: Array<ReadonlyArray<string>> = [];
       let tunnelKillCount = 0;
       let stopCommandCount = 0;
-      const spawner = ChildProcessSpawner.make((command) =>
+      const spawner = makeProtocolTestSpawner((command) =>
         Effect.sync(() => {
           const args = commandArgs(command);
           spawnedCommands.push(args);
@@ -882,7 +936,7 @@ describe("ssh tunnel scripts", () => {
         let stops = 0;
         let remoteRunning = false;
         const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
-        const spawner = ChildProcessSpawner.make((command) =>
+        const spawner = makeProtocolTestSpawner((command) =>
           Effect.gen(function* () {
             const args = commandArgs(command);
             const isTarget = args.includes(target.alias);
@@ -1018,13 +1072,6 @@ describe("runtime preparation", () => {
         yield* fs.writeFileString(`${state}/run-t3.sh`, retainedScript);
         yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
       }
-      const retainedMissing = [
-        "missing",
-        "upstream-only",
-        "marker-only",
-        "non-executable",
-        "wrong-marker",
-      ].some((value) => value === mode);
       const upstream = `${root}/.t3/runtime/versions/${retainedVersion}`;
       if (mode === "upstream-only") {
         yield* fs.makeDirectory(upstream, { recursive: true });
@@ -1041,7 +1088,15 @@ describe("runtime preparation", () => {
         const runtime = `${root}/.goat/runtime/goat/versions/${retainedVersion}`;
         yield* fs.makeDirectory(runtime, { recursive: true });
         if (mode !== "marker-only") {
-          yield* fs.writeFileString(`${runtime}/goat`, "#!/bin/sh\nexit 0\n");
+          yield* fs.writeFileString(
+            `${runtime}/goat`,
+            `#!/bin/sh
+if [ "$1" = --version ]; then printf 'goat v${retainedVersion}\\n';
+elif [ "$2" = protocol ]; then
+  case " $* " in *" --runtime-file "*) printf 'none unknown unknown unknown 0 0\\n';; *) printf '${retainedVersion} 1 2 0 0\\n';; esac
+else exit 2; fi
+`,
+          );
           yield* fs.chmod(`${runtime}/goat`, mode === "non-executable" ? 0o600 : 0o700);
         }
         yield* fs.writeFileString(
@@ -1113,7 +1168,7 @@ describe("runtime preparation", () => {
         ...ARCHIVE,
         archiveDirectory,
         keepExistingRunner: true,
-        ...(retainedMissing ? { releaseBaseUrl: "https://mirror.example/goat" } : {}),
+        ...(mode !== "ready" ? { releaseBaseUrl: "https://mirror.example/goat" } : {}),
       };
       const invocation =
         entry === "launch"
@@ -1137,47 +1192,21 @@ describe("runtime preparation", () => {
           Effect.withTracer(recordSpans(spans)),
         ),
       );
-      if (mode === "ready" || mode === "dev") {
-        assert.isTrue(Result.isSuccess(result));
-        assert.deepEqual(calls, ["probe", entry]);
-        assert.equal(cacheReads, 0);
-        assert.equal(
-          spans
-            .find((span) => span.name === "ssh.prepareRemoteRuntime")
-            ?.attributes.get("t3.runtime.source"),
-          "retained-runner",
-        );
+      assert.isTrue(Result.isSuccess(result));
+      assert.deepEqual(calls, ["probe", entry]);
+      assert.equal(
+        spans
+          .find((span) => span.name === "ssh.prepareRemoteRuntime")
+          ?.attributes.get("t3.runtime.source"),
+        mode === "ready" ? "retained-runner" : "download",
+      );
+      assert.equal(yield* fs.exists(archiveDirectory), false);
+      if (mode === "ready") assert.equal(cacheReads, 0);
+      else assert.isAbove(cacheReads, 0);
+      if (mode !== "none")
         assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), retainedScript);
-        assert.isFalse(yield* fs.exists(archiveDirectory));
-      } else if (retainedMissing || mode === "invalid") {
-        assert.isTrue(Result.isFailure(result));
-        if (Result.isFailure(result)) {
-          assert.instanceOf(result.failure, SshLaunchError);
-          if (retainedMissing) {
-            assert.include(
-              result.failure.message,
-              `The retained runner ~/.goat/ssh-launch/${stateKey}/run-t3.sh selects goat ${retainedVersion}, which is not installed on ${uploadTarget.alias}. This client reuses that runner and will not replace it; reconnect from the client that owns it, or remove the runner to let this client install its own runtime.`,
-            );
-            assert.include(result.failure.message, ARCHIVE.archiveVersion);
-          }
-        }
-        assert.deepEqual(calls, ["probe"]);
-        assert.equal(cacheReads, 0);
-        assert.isFalse(yield* fs.exists(archiveDirectory));
-        assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), retainedScript);
-        if (mode === "upstream-only") {
-          assert.equal(yield* fs.readFileString(`${upstream}/t3`), "#!/bin/sh\nexit 97\n");
-          assert.equal(yield* fs.readFileString(`${upstream}/.install-complete`), retainedVersion);
-        }
-      } else {
-        assert.isTrue(Result.isFailure(result));
-        if (Result.isFailure(result)) {
-          assert.instanceOf(result.failure, SshLaunchError);
-          assert.include(result.failure.message, "Local gh release download failed");
-        }
-        assert.deepEqual(calls, ["probe", "gh"]);
-        assert.isAbove(cacheReads, 0);
-      }
+      if (mode === "upstream-only")
+        assert.equal(yield* fs.readFileString(`${upstream}/t3`), "#!/bin/sh\nexit 97\n");
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
@@ -1196,22 +1225,35 @@ describe("runtime preparation", () => {
         `#!${process.execPath}
 import * as fs from "node:fs";
 import * as net from "node:net";
+import * as http from "node:http";
 const args = process.argv.slice(2);
-if (args[0] === "--version") { console.log("t3 v${ARCHIVE.archiveVersion}"); }
+if (args[0] === "--version") { console.log("goat v${ARCHIVE.archiveVersion}"); }
 else if (args[0] === "__ssh-helper") {
+  if (args[1] === "protocol") {
+    if (!args.includes("--runtime-file")) console.log("${ARCHIVE.archiveVersion} 1 2 0 0");
+    else {
+            const at = args.indexOf("--runtime-file");
+      const value = await (await import(${JSON.stringify(new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url).href)})).readLiveSshRuntimeProtocol(args[at+1]);
+      console.log((value.status+" ") + [value.serverVersion ?? "unknown",value.sshRuntimeProtocolVersion ?? "unknown",value.orchestrationProtocolVersion ?? "unknown",value.pid ?? 0,value.port ?? 0].join(" "));
+    }
+  }
   if (args[1] === "runtime-port") process.exit(1);
   if (args[1] === "pick-port") console.log(3773);
   if (args[1] === "wait-ready") {
-    const socket = net.connect(Number(args[2]), "127.0.0.1");
-    socket.on("connect", () => { socket.destroy(); process.exit(0); });
-    socket.on("error", () => process.exit(1));
+    const request = http.get("http://127.0.0.1:"+args[2]+"/",response=>{response.resume();response.on("end",()=>process.exit(0));});
+    request.on("error",()=>process.exit(1));
   }
 } else if (args[0] === "auth") { console.log(JSON.stringify({ credential: "fixture-pairing" })); }
 else {
   fs.appendFileSync("${root}/starts", "start\\n");
-  const server = net.createServer(socket => socket.end());
+  const fields = {serverVersion:"${ARCHIVE.archiveVersion}",sshRuntimeProtocolVersion:1,orchestrationProtocolVersion:2};
+  const server = http.createServer((request,response) => response.end(request.url === "/.well-known/t3/environment" ? JSON.stringify({environmentId:"fixture",label:"Fixture",platform:{os:"linux",arch:"x64"},capabilities:{},...fields}) : "ok"));
   process.on("SIGTERM", () => { fs.appendFileSync("${root}/stops", "stop\\n"); server.close(); });
-  server.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ pid: process.pid, port: server.address().port })));
+  server.listen(0, "127.0.0.1", () => {
+    const record = {version:1,startedAt:"2026-10-11T00:00:00.000Z",...fields,pid:process.pid,port:server.address().port,origin:"http://127.0.0.1:"+server.address().port};
+    fs.mkdirSync("${root}/.goat/userdata",{recursive:true});fs.writeFileSync("${root}/.goat/userdata/server-runtime.json",JSON.stringify(record));
+    console.log(JSON.stringify(record));
+  });
 }
 `,
       );
@@ -1233,6 +1275,11 @@ else {
       yield* fs.writeFileString(`${state}/pid`, `${started.pid}\n`);
       yield* fs.writeFileString(`${state}/port`, `${started.port}\n`);
       yield* fs.writeFileString(`${state}/managed`, "managed\n");
+      yield* fs.writeFileString(
+        `${state}/identity`,
+        `${cli} serve --host 127.0.0.1 --port ${started.port} --base-dir ${root}/.goat\n`,
+      );
+      yield* installArchivePsDouble(root, started.pid, started.port, ARCHIVE.archiveVersion);
       // Use the persisted heredoc bytes, including existing placeholder escaping.
       const persistedRunner =
         baseline.archive.launch.split("<<'SH'\n")[1]!.split("\nSH\n")[0]! + "\n";
@@ -1251,7 +1298,10 @@ else {
             ? command.options.stdin
             : Stream.make(encoder.encode(scripts.pairing));
         return realSpawner.spawn(
-          ChildProcess.make("sh", remoteArgs, { env: { HOME: root }, stdin }),
+          ChildProcess.make("sh", remoteArgs, {
+            env: { HOME: root, PATH: `${root}/.test/identity-bin:${process.env.PATH ?? ""}` },
+            stdin,
+          }),
         );
       });
       const runner = { ...ARCHIVE, archiveDirectory: `${root}/missing` };
@@ -1272,7 +1322,7 @@ else {
       assert.equal((yield* fs.readFileString(`${state}/port`)).trim(), String(started.port));
       assert.equal(yield* fs.readFileString(`${root}/starts`), "start\n");
       assert.isFalse(yield* fs.exists(`${root}/stops`));
-      assert.isFalse(yield* fs.exists(`${root}/.goat/userdata/server-runtime.json`));
+      assert.isTrue(yield* fs.exists(`${root}/.goat/userdata/server-runtime.json`));
       assert.isTrue(yield* child.isRunning);
       yield* child.kill({ killSignal: "SIGTERM" });
       assert.equal(yield* child.exitCode, 0);
@@ -1509,7 +1559,7 @@ else {
       assert.equal(uploads, 2);
       assert.deepEqual(
         calls.map((call) => call.kind),
-        ["probe", "upload", "probe", "upload", "launch", "probe", "pairing"],
+        ["probe", "upload", "probe", "upload", "launch", "pairing"],
       );
       for (const call of calls.slice(0, 2))
         assert.deepEqual(
@@ -1622,7 +1672,7 @@ describe("archive runner script", () => {
     const script = [
       "set -eu",
       `mkdir -p '${stage}' '${release}'`,
-      `printf '#!/bin/sh\\necho goat v${archiveVersion}\\n' > '${stage}/goat'`,
+      `printf '#!/bin/sh\\nif [ "$1" = --version ]; then echo goat v${archiveVersion}; else exit 2; fi\\n' > '${stage}/goat'`,
       `chmod +x '${stage}/goat'`,
       `tar -czf '${release}/${stem}.tar.gz' -C '${root}/stage' '${stem}'`,
       `cd '${release}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
@@ -1805,7 +1855,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       home: string,
       script: string,
       args: string[] = [],
-      pathValue: string = process.env.PATH ?? "",
+      pathValue: string = `${home}/.test/identity-bin:${process.env.PATH ?? ""}`,
     ) {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
@@ -1828,6 +1878,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     // Written into the old runtime and the tiny release archive. This is a
     // behavioral double for the executable, not a duplicate of the installer.
     const executable = (version: string) => `#!${process.execPath}
+(async () => {
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -1851,7 +1902,11 @@ if (args[0] === "--version") {
   event("version", { runner, oldAlive: Boolean(old && alive(old.pid)) });
   console.log("goat v" + version);
 } else if (args[0] === "__ssh-helper") {
-  if (args[1] === "runtime-port") {
+  if (args[1] === "protocol") {
+    const flag = name => {const at = args.indexOf(name); return at < 0 ? undefined : args[at+1];};
+    const value = args.includes("--runtime-file") ? await (await import(${JSON.stringify(new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url).href)})).readLiveSshRuntimeProtocol(flag("--runtime-file"), flag("--port-file"), flag("--pid-file")) : {serverVersion:version,sshRuntimeProtocolVersion: version === ${JSON.stringify(nextVersion)} || config.compatible ? 1 : 99,orchestrationProtocolVersion:2};
+    console.log((value.status ? value.status+" " : "") + [value.serverVersion ?? "unknown",value.sshRuntimeProtocolVersion ?? "unknown",value.orchestrationProtocolVersion ?? "unknown",value.pid ?? 0,value.port ?? 0].join(" "));
+  } else if (args[1] === "runtime-port") {
     const current = runtime();
     if (!config.publishDefault || !current || !alive(current.pid)) process.exit(1);
     console.log(current.pid + " " + current.port);
@@ -1887,14 +1942,15 @@ if (args[0] === "--version") {
 } else if (args[0] === "serve") {
   const requested = args.indexOf("--port");
   const port = requested < 0 ? 0 : Number(args[requested + 1]);
-  const server = http.createServer((_request, response) => response.end("ok"));
+  const fields = {serverVersion:version,sshRuntimeProtocolVersion:version === ${JSON.stringify(nextVersion)} || config.compatible ? 1 : 99,orchestrationProtocolVersion:2};
+  const server = http.createServer((request, response) => response.end(request.url === "/.well-known/t3/environment" ? JSON.stringify({environmentId:"fixture",label:"Fixture",platform:{os:"linux",arch:"x64"},capabilities:{},...fields}) : "ok"));
   process.on("SIGTERM", () => {
     event("stop");
     if (runtime()?.pid === process.pid) fs.unlinkSync(runtimeFile);
     server.close(() => process.exit(0));
   });
   server.listen(port, "127.0.0.1", () => {
-    const record = { pid: process.pid, port: server.address().port,
+    const record = { version:1, startedAt:"2026-10-11T00:00:00.000Z", ...fields, pid: process.pid, port: server.address().port,
       origin: "http://127.0.0.1:" + server.address().port };
     fs.mkdirSync(path.dirname(runtimeFile), { recursive: true });
     fs.writeFileSync(runtimeFile, JSON.stringify(record));
@@ -1911,11 +1967,17 @@ if (args[0] === "--version") {
     }
   });
 } else process.exit(2);
+})().catch(error => {console.error(error);process.exitCode=1;});
 `;
 
     const fixture = Effect.fn("test.runnerSwitch.fixture")(function* (
       failure: "none" | "missing-release" | "bad-checksum" | "broken-executable" | "wrong-version",
-      options: { seed?: boolean; identical?: boolean; publishDefault?: boolean } = {},
+      options: {
+        seed?: boolean;
+        identical?: boolean;
+        publishDefault?: boolean;
+        compatible?: boolean;
+      } = {},
     ) {
       const fs = yield* FileSystem.FileSystem;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -1936,6 +1998,7 @@ if (args[0] === "--version") {
         `${test}/config.json`,
         JSON.stringify({
           publishDefault: options.publishDefault !== false,
+          compatible: options.compatible === true,
         }),
       );
       const fifo = yield* spawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
@@ -1960,7 +2023,7 @@ if (args[0] === "--version") {
       );
       const mirror = `file://${home}/mirror`;
       const runner = { ...ARCHIVE, releaseBaseUrl: mirror };
-      const scripts = yield* nativeScripts(runner);
+      let scripts = yield* nativeScripts(runner);
       const oldScripts = yield* nativeScripts({ archiveVersion: previous, releaseBaseUrl: mirror });
       let oldProcess: ChildProcessSpawner.ChildProcessHandle | null = null;
       if (options.seed !== false) {
@@ -1985,16 +2048,22 @@ if (args[0] === "--version") {
           ),
         ) as { pid: number; port: number };
         assert.equal(ready.pid, oldProcess.pid);
+        yield* installArchivePsDouble(home, ready.pid, ready.port, previous);
         yield* fs.writeFileString(
           `${test}/config.json`,
           JSON.stringify({
             publishDefault: options.publishDefault !== false,
+            compatible: options.compatible === true,
             seedPid: ready.pid,
           }),
         );
         yield* fs.writeFileString(`${state}/pid`, `${ready.pid}\n`);
         yield* fs.writeFileString(`${state}/port`, `${ready.port}\n`);
         yield* fs.writeFileString(`${state}/managed`, "managed\n");
+        yield* fs.writeFileString(
+          `${state}/identity`,
+          `${oldRuntime}/goat serve --host 127.0.0.1 --port ${ready.port} --base-dir ${home}/.goat\n`,
+        );
       }
       const stem = `goat-${nextVersion}-${platform}-${arch}`;
       const release = `${home}/mirror/v${nextVersion}`;
@@ -2028,7 +2097,7 @@ if (args[0] === "--version") {
       );
       if (failure === "missing-release") yield* fs.remove(release, { recursive: true });
       const snapshot = Effect.gen(function* () {
-        const files = ["run-t3.sh", "pid", "port", "managed"];
+        const files = ["run-t3.sh", "pid", "port", "managed", "identity"];
         const values: Record<string, unknown> = {};
         for (const file of files)
           if (yield* fs.exists(`${state}/${file}`)) {
@@ -2077,6 +2146,22 @@ if (args[0] === "--version") {
           [],
         );
       });
+      if (options.compatible) {
+        const probe = yield* shell(home, scripts.probe);
+        assert.equal(probe.code, 0, probe.stderr);
+        const observed = JSON.parse(probe.stdout);
+        assert.equal(observed.retainedSignals.sshRuntimeProtocolVersion, 1);
+        const selectedRunner = { ...runner, archiveVersion: previous };
+        scripts = yield* nativeScripts(selectedRunner, {
+          runner: selectedRunner,
+          version: previous,
+          requestedVersion: nextVersion,
+          source: "retained",
+          requireInstalled: true,
+          mayUpgradeOwnedServer: false,
+          retainedRunnerSha256: observed.retainedRunnerSha256,
+        });
+      }
       return { home, state, runner, scripts, oldProcess, snapshot, events, cleanCandidates, fs };
     });
 
@@ -2090,7 +2175,10 @@ if (args[0] === "--version") {
       "retained-bundle-bypass",
     ] as const)("public bundle %s preserves the install-before-switch boundary", (mode) =>
       Effect.gen(function* () {
-        const f = yield* fixture("none", { seed: mode !== "mcp" });
+        const f = yield* fixture("none", {
+          seed: mode !== "mcp",
+          compatible: mode === "retained-bundle-bypass",
+        });
         const before = yield* f.snapshot;
         const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const bundle = `${f.home}/packaged resources/ssh-runtime/archives`;
@@ -2146,7 +2234,10 @@ console.log("goat v" + (count === 0 ? version : "9.9.9"));`,
                   ? ["-c", args.join(" ")]
                   : args.slice(1).filter((arg) => arg !== "-l"),
                 {
-                  env: { HOME: f.home, PATH: process.env.PATH ?? "" },
+                  env: {
+                    HOME: f.home,
+                    PATH: `${f.home}/.test/identity-bin:${process.env.PATH ?? ""}`,
+                  },
                   extendEnv: false,
                   stdin: command.options.stdin,
                 },
@@ -2274,6 +2365,7 @@ fs.copyFileSync(fileURLToPath(url), output);
           devScript,
           `
 if (process.argv[2] === "--version") console.log("dev build without archive version");
+else if (process.argv[2] === "__ssh-helper" && process.argv[3] === "protocol") console.log(process.argv.includes("--runtime-file") ? "none unknown unknown unknown 0 0" : "1.2.3 1 2 0 0");
 else if (process.argv[2] === "auth") console.log(JSON.stringify({ credential: "dev-pairing" }));
 else process.exit(2);
 `,
@@ -2303,7 +2395,7 @@ else process.exit(2);
           const remote = f.oldProcess!;
           let forwardKills = 0;
           let remoteStops = 0;
-          const spawner = ChildProcessSpawner.make((command) =>
+          const spawner = makeProtocolTestSpawner((command) =>
             Effect.gen(function* () {
               const args = commandArgs(command);
               if (args.includes("-G")) {
@@ -2562,9 +2654,9 @@ else process.exit(2);
       "keep-existing ignores a newer unavailable release and leaves the older runtime untouched",
       () =>
         Effect.gen(function* () {
-          const f = yield* fixture("missing-release");
+          const f = yield* fixture("missing-release", { compatible: true });
           const before = yield* f.snapshot;
-          const scripts = yield* nativeScripts({ ...f.runner, keepExistingRunner: true });
+          const scripts = f.scripts;
           const result = yield* shell(f.home, scripts.launch, [stateKey]);
           assert.equal(result.code, 0, result.stderr);
           assert.deepEqual(yield* f.snapshot, before);
@@ -2578,7 +2670,7 @@ else process.exit(2);
       "warm %s uses the retained runner even without a keep flag",
       (entry) =>
         Effect.gen(function* () {
-          const f = yield* fixture("missing-release");
+          const f = yield* fixture("missing-release", { compatible: true });
           const before = yield* f.snapshot;
           const result = yield* shell(f.home, f.scripts[entry]);
           assert.equal(result.code, 0, result.stderr);
@@ -2738,7 +2830,7 @@ describe("bundled runtime acquisition", () => {
         const cache = `${root}/cache`;
         const asset = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}.tar.gz`;
         const executable = (version: string, origin: string) =>
-          `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  printf 'goat v${version}\\n'\nelif [ "$1" = "auth" ] && [ "$2" = "pairing" ]; then\n  printf '{"credential":"${origin}-pairing"}\\n'\nelse\n  exit 64\nfi\n`;
+          `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  printf 'goat v${version}\\n'\nelif [ "$1" = "__ssh-helper" ] && [ "$2" = "protocol" ]; then\n  case " $* " in *" --runtime-file "*) printf 'none unknown unknown unknown 0 0\\n';; *) printf '${version} 1 2 0 0\\n';; esac\nelif [ "$1" = "auth" ] && [ "$2" = "pairing" ]; then\n  printf '{"credential":"${origin}-pairing"}\\n'\nelse\n  exit 64\nfi\n`;
         const makeArchive = (directory: string, origin: string) =>
           Effect.gen(function* () {
             const stem = asset.slice(0, -7);
@@ -2937,3 +3029,1619 @@ describe("bundled runtime acquisition", () => {
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "remote stop invocation ownership",
+  () => {
+    it.live.each([
+      "archive",
+      "node",
+      "absolute node",
+      "node path with spaces",
+      "quoted entry",
+      "archive other base dir",
+      "node other base dir",
+      "archive extra args",
+      "node extra args",
+      "tail node suffix",
+      "runner code",
+      "tail",
+      "find",
+      "different port",
+      "port prefix",
+      "missing identity",
+      "missing marker",
+      "empty marker",
+      "external",
+      "dead PID",
+      "dead unmarked PID",
+      "invalid port",
+      "different entry",
+      "invalid version",
+      "version newline",
+      "leading command",
+      "different identity with spaced argv0",
+      "different identity with multiline argv0",
+    ] as const)("handles %s without signaling unrelated processes", (mode) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-stop-" });
+        // These characters must stay literal in the generated shell's case patterns.
+        const home = `${root}/remote home[*?]`;
+        const state = `${home}/.goat/ssh-launch/stop-fixture`;
+        const bin = `${home}/.test/bin`;
+        yield* fs.makeDirectory(state, { recursive: true });
+        yield* fs.makeDirectory(bin, { recursive: true });
+        const pid = "424242";
+        const port = "3773";
+        const entry =
+          mode === "quoted entry" ? "/repo/dev's entry.mjs" : `${home}/source entry[*?].mjs`;
+        const nodeBin = `${home}/opt/node installation/bin`;
+        const node = mode === "node path with spaces" ? `${nodeBin}/node` : `${bin}/node`;
+        yield* fs.makeDirectory(nodeBin, { recursive: true });
+        const runner = `${state}/run-t3.sh`;
+        const runtime = `${home}/.goat/runtime/goat/versions/1.2.3/goat`;
+        const argumentsText = `serve --host 127.0.0.1 --port ${port} --base-dir ${home}/.goat`;
+        const commands: Partial<Record<typeof mode, string>> = {
+          node: `node ${entry} ${argumentsText}`,
+          "absolute node": `${node} ${entry} ${argumentsText}`,
+          "node path with spaces": `${process.execPath} ${entry} ${argumentsText}`,
+          "quoted entry": `node ${entry} ${argumentsText}`,
+          tail: `tail -f ${runner}`,
+          find: `find ${home}/.goat/runtime/goat/versions/1.2.3`,
+          "different port": `${runtime} serve --host 127.0.0.1 --port 4773 --base-dir ${home}/.goat`,
+          "port prefix": `${runtime} serve --host 127.0.0.1 --port ${port}0 --base-dir ${home}/.goat`,
+          "archive other base dir": `${runtime} serve --host 127.0.0.1 --port ${port} --base-dir /other/userdata`,
+          "node other base dir": `node ${entry} serve --host 127.0.0.1 --port ${port} --base-dir /other/userdata`,
+          "archive extra args": `${runtime} ${argumentsText} --extra`,
+          "node extra args": `node ${entry} ${argumentsText} --extra`,
+          "tail node suffix": `/bin/tail -f /x/node ${entry} ${argumentsText}`,
+          "runner code": `node ${entry} ${argumentsText}`,
+          "different entry": `node ${entry}.backup ${argumentsText}`,
+          "invalid version": `${home}/.goat/runtime/goat/versions/1.2.3 bad/goat ${argumentsText}`,
+          "version newline": `${home}/.goat/runtime/goat/versions/1.2.3\nextra/goat ${argumentsText}`,
+          "leading command": `tail -f ${runtime} ${argumentsText}`,
+          "different identity with spaced argv0": `/opt/node path/node ${entry} ${argumentsText}`,
+          "different identity with multiline argv0": `/opt/node\npath/node ${entry} ${argumentsText}`,
+        };
+        const command = commands[mode] ?? `${runtime} ${argumentsText}`;
+        yield* fs.writeFileString(
+          runner,
+          mode === "runner code"
+            ? "T3_NODE_SCRIPT_PATH='$(touch \"$HOME/.test/evaluated\")'\n"
+            : SshTunnel.buildRemoteT3RunnerScript({ nodeScriptPath: entry }),
+        );
+        const nodeIdentity = [
+          "node",
+          "absolute node",
+          "node path with spaces",
+          "quoted entry",
+          "node other base dir",
+          "node extra args",
+          "different entry",
+        ].includes(mode);
+        if (mode !== "missing identity")
+          yield* fs.writeFileString(
+            `${state}/identity`,
+            `${nodeIdentity ? entry : runtime} ${argumentsText}\n`,
+          );
+        yield* fs.writeFileString(`${state}/pid`, pid + "\n");
+        yield* fs.writeFileString(`${state}/port`, (mode === "invalid port" ? "0" : port) + "\n");
+        if (mode !== "missing marker" && mode !== "dead unmarked PID")
+          yield* fs.writeFileString(
+            `${state}/managed`,
+            mode === "empty marker" ? "" : mode === "external" ? "external\n" : "managed\n",
+          );
+        yield* fs.writeFileString(`${home}/.test/command`, command + "\n");
+        if (mode !== "dead PID" && mode !== "dead unmarked PID")
+          yield* fs.writeFileString(`${home}/.test/alive`, pid);
+        yield* fs.writeFileString(
+          `${bin}/ps`,
+          `#!/bin/sh
+[ "$1 $2 $3 $4" = '-o command= -p ${pid}' ] || exit 1
+cat "$HOME/.test/command"
+`,
+        );
+        yield* fs.chmod(`${bin}/ps`, 0o700);
+        const snapshot = Effect.forEach(
+          ["pid", "port", "managed", "identity", "run-t3.sh"],
+          (file) =>
+            Effect.gen(function* () {
+              return (yield* fs.exists(`${state}/${file}`))
+                ? yield* fs.readFileString(`${state}/${file}`)
+                : null;
+            }),
+        );
+        const before = yield* snapshot;
+        // Override sh's kill builtin; this test never sends an OS signal.
+        const killShim = `kill() {
+  if [ "$1" = -0 ]; then
+    [ "$2" = ${pid} ] && [ -f "$HOME/.test/alive" ]
+  else
+    [ "$#" = 1 ] && [ "$1" = ${pid} ] || return 1
+    printf '%s\\n' "$1" >> "$HOME/.test/killed"
+    rm -f "$HOME/.test/alive"
+  fi
+}
+`;
+        const child = yield* spawner.spawn(
+          ChildProcess.make("sh", ["-s"], {
+            env: { HOME: home, PATH: `${bin}:${nodeBin}:${process.env.PATH ?? ""}`, LC_ALL: "C" },
+            extendEnv: false,
+            stdin: {
+              stream: Stream.make(
+                encoder.encode(killShim + SshTunnel.buildRemoteStopScript("stop-fixture")),
+              ),
+              endOnDone: true,
+            },
+          }),
+        );
+        const result = yield* Effect.all(
+          {
+            code: child.exitCode.pipe(Effect.map(Number)),
+            stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+            stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+          },
+          { concurrency: "unbounded" },
+        );
+        const owned = [
+          "archive",
+          "node",
+          "absolute node",
+          "node path with spaces",
+          "quoted entry",
+        ].includes(mode);
+        assert.isFalse(yield* fs.exists(`${home}/.test/evaluated`));
+        const cleanup =
+          owned || mode === "external" || mode === "dead PID" || mode === "dead unmarked PID";
+        assert.equal(result.code === 0, cleanup, result.stderr);
+        assert.equal(yield* fs.exists(`${home}/.test/killed`), owned);
+        if (owned) assert.equal(yield* fs.readFileString(`${home}/.test/killed`), pid + "\n");
+        if (cleanup) {
+          assert.deepEqual((yield* snapshot).slice(0, 4), [null, null, null, null]);
+          assert.include(result.stdout, '{"stopped":true}');
+          if (mode === "external") assert.isTrue(yield* fs.exists(`${home}/.test/alive`));
+        } else {
+          assert.include(result.stderr, "ownership could not be verified");
+          assert.deepEqual(yield* snapshot, before);
+          assert.isTrue(yield* fs.exists(`${home}/.test/alive`));
+        }
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["stale PID", "missing identity", "identity changes after publication"] as const)(
+      "refuses an owned upgrade with %s despite matching protocol metadata",
+      (mode) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-upgrade-identity-" });
+          const key = "stale-upgrade";
+          const state = `${home}/.goat/ssh-launch/${key}`;
+          const runtime = `${home}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}`;
+          const bin = `${home}/.test/bin`;
+          const record = `${home}/.goat/userdata/server-runtime.json`;
+          for (const directory of [state, runtime, bin, `${home}/.goat/userdata`])
+            yield* fs.makeDirectory(directory, { recursive: true });
+          const pid = "424242";
+          const port = "1234";
+          yield* fs.writeFileString(`${state}/pid`, pid + "\n");
+          yield* fs.writeFileString(`${state}/port`, port + "\n");
+          yield* fs.writeFileString(`${state}/managed`, "managed\n");
+          yield* fs.writeFileString(
+            `${state}/run-t3.sh`,
+            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: "1.2.2" }),
+          );
+          if (mode !== "missing identity")
+            yield* fs.writeFileString(
+              `${state}/identity`,
+              `${home}/.goat/runtime/goat/versions/1.2.2/goat serve --host 127.0.0.1 --port ${port} --base-dir ${home}/.goat\n`,
+            );
+          const originalRunner = yield* fs.readFileString(`${state}/run-t3.sh`);
+          const metadata = JSON.stringify({
+            version: 1,
+            startedAt: "2026-10-11T00:00:00.000Z",
+            serverVersion: "1.2.2",
+            sshRuntimeProtocolVersion: 99,
+            orchestrationProtocolVersion: 2,
+            pid: Number(pid),
+            port: Number(port),
+            origin: `http://127.0.0.1:${port}`,
+          });
+          yield* fs.writeFileString(record, metadata);
+          // Reproduce the helper's stale-but-matching live report. Its report must never authorize a signal.
+          yield* fs.writeFileString(
+            `${runtime}/goat`,
+            `#!/bin/sh
+if [ "$1" = --version ]; then printf '%s\\n' 'goat v${ARCHIVE.archiveVersion}'; exit 0; fi
+if [ "$1 $2" = '__ssh-helper protocol' ]; then
+  case " $* " in
+    *' --runtime-file '*) printf '%s\\n' 'live 1.2.2 99 2 ${pid} ${port}' ;;
+    *) printf '%s\\n' '${ARCHIVE.archiveVersion} 1 2 0 0' ;;
+  esac
+  exit 0
+fi
+exit 2
+`,
+          );
+          yield* fs.chmod(`${runtime}/goat`, 0o700);
+          yield* fs.writeFileString(`${runtime}/.install-complete`, ARCHIVE.archiveVersion + "\n");
+          yield* fs.writeFileString(
+            `${bin}/ps`,
+            `#!/bin/sh
+[ "$1 $2 $3 $4" = '-o command= -p ${pid}' ] || exit 1
+printf 'inspected\\n' >> "$HOME/.test/inspected"
+if [ '${mode}' = 'identity changes after publication' ] && grep -F "T3_ARCHIVE_VERSION='1.2.2'" "$HOME/.goat/ssh-launch/${key}/run-t3.sh" >/dev/null; then
+  cat "$HOME/.goat/ssh-launch/${key}/identity"
+else
+  printf '%s\\n' '/bin/tail -f /unrelated/log'
+fi
+`,
+          );
+          yield* fs.chmod(`${bin}/ps`, 0o700);
+          const killShim = `kill() {
+  if [ "$1" = -0 ]; then [ "$2" = ${pid} ]; else
+    printf '%s\\n' "$*" >> "$HOME/.test/signals"
+    return 1
+  fi
+}
+`;
+          const child = yield* spawner.spawn(
+            ChildProcess.make("sh", ["-s", "--", key], {
+              env: { HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, LC_ALL: "C" },
+              extendEnv: false,
+              stdin: {
+                stream: Stream.make(
+                  encoder.encode(killShim + SshTunnel.buildRemoteLaunchScript(ARCHIVE)),
+                ),
+                endOnDone: true,
+              },
+            }),
+          );
+          const result = yield* Effect.all(
+            {
+              code: child.exitCode.pipe(Effect.map(Number)),
+              stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+              stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+            },
+            { concurrency: "unbounded" },
+          );
+          assert.notEqual(result.code, 0);
+          assert.include(result.stderr, "ownership could not be verified");
+          assert.equal(result.stdout, "");
+          if (mode === "missing identity")
+            assert.isFalse(yield* fs.exists(`${home}/.test/inspected`));
+          else
+            assert.equal(
+              yield* fs.readFileString(`${home}/.test/inspected`),
+              mode === "stale PID" ? "inspected\n" : "inspected\ninspected\n",
+            );
+          assert.isFalse(yield* fs.exists(`${home}/.test/signals`));
+          if (mode === "identity changes after publication")
+            assert.include(
+              yield* fs.readFileString(`${state}/run-t3.sh`),
+              `T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'`,
+            );
+          else assert.equal(yield* fs.readFileString(`${state}/run-t3.sh`), originalRunner);
+          assert.equal(yield* fs.readFileString(record), metadata);
+          assert.equal(yield* fs.readFileString(`${state}/pid`), pid + "\n");
+          assert.equal(yield* fs.readFileString(`${state}/port`), port + "\n");
+          assert.equal(yield* fs.readFileString(`${state}/managed`), "managed\n");
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  },
+);
+
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "SSH runtime protocol selection",
+  () => {
+    const protocolExecutable = (
+      version: string,
+      signals: {
+        ssh?: number;
+        orchestration?: number;
+        missingCommand?: boolean;
+        ownTokens?: string;
+        liveTokens?: string;
+        descriptor404?: boolean;
+        nodeReadiness?: boolean;
+      },
+      state: string,
+    ) => {
+      const helperUrl = new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url).href;
+      // From packages/ssh/src, ../../../apps resolves the repository apps directory.
+      return `#!${process.execPath}
+(async () => {
+const fs = require("node:fs");
+const http = require("node:http");
+const net = require("node:net");
+const path = require("node:path");
+const version = ${JSON.stringify(version)};
+const fields = { serverVersion: version,
+  ...${JSON.stringify(signals.ssh === undefined ? {} : { sshRuntimeProtocolVersion: signals.ssh })},
+  ...${JSON.stringify(signals.orchestration === undefined ? {} : { orchestrationProtocolVersion: signals.orchestration })} };
+const home = process.env.HOME;
+const state = ${JSON.stringify(state)};
+const test = path.join(home, ".test");
+const runtimeFile = path.join(home, ".goat/userdata/server-runtime.json");
+const args = process.argv.slice(2);
+function event(type, extra = {}) { fs.appendFileSync(path.join(test, "events"), JSON.stringify({type, version, ...extra}) + "\\n"); }
+if (args[0] === "--version") {
+  event("version", { published: fs.existsSync(path.join(state, "run-t3.sh")) ? fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") : "" });
+  console.log("goat v" + version);
+} else if (args[0] === "__ssh-helper" && args[1] === "protocol") {
+  if (${JSON.stringify(signals.missingCommand ?? false)}) process.exit(2);
+  const at = args.indexOf("--runtime-file");
+  const flag = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i+1]; };
+  const value = at < 0 ? fields : await (await import(${JSON.stringify(helperUrl)})).readLiveSshRuntimeProtocol(args[at+1], flag("--port-file"), flag("--pid-file"));
+  event("protocol", { live: at >= 0, status: value.status });
+  if (args.includes("--shell")) {
+    const injected = at < 0 ? ${JSON.stringify(signals.ownTokens ?? null)} : ${JSON.stringify(signals.liveTokens ?? null)};
+    if (injected !== null) { console.log(injected); return; }
+    console.log((value.status ? value.status + " " : "") + [value.serverVersion ?? "unknown",
+      value.sshRuntimeProtocolVersion ?? "unknown", value.orchestrationProtocolVersion ?? "unknown",
+      value.pid ?? 0, value.port ?? 0].join(" "));
+  } else console.log(JSON.stringify(value));
+} else if (args[0] === "__ssh-helper" && args[1] === "pick-port") {
+  const socket = net.createServer(); socket.listen(0, "127.0.0.1", () => {
+    const port = socket.address().port; socket.close(() => console.log(port));
+  });
+} else if (args[0] === "__ssh-helper" && args[1] === "wait-ready") {
+  // Fixture readiness uses an event, not polling or a delay.
+  let record = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile, "utf8")) : null;
+  if (!record || !fs.existsSync(path.join(test, "accepted-ready-" + record.pid))) {
+    const fd = fs.openSync(path.join(test, "ready.fifo"), "r");
+    fs.readSync(fd, Buffer.alloc(32), 0, 32, null); fs.closeSync(fd);
+    record = JSON.parse(fs.readFileSync(runtimeFile, "utf8"));
+    fs.writeFileSync(path.join(test, "accepted-ready-" + record.pid), "ready");
+  }
+  const req = http.get("http://127.0.0.1:" + args[2] + "/", res => {
+    res.resume(); res.on("end", () => process.exit(res.statusCode === 200 ? 0 : 1));
+  }); req.on("error", () => process.exit(1));
+} else if (args[0] === "auth") {
+  event("auth", { args });
+  if (args.includes("--runtime-mode-ceiling") && fs.existsSync(path.join(test, "reject-ceiling"))) process.exit(2);
+  console.log(JSON.stringify(args[1] === "pairing" ? {credential: version} : {token: version, expiresAt: null}));
+} else if (args[0] === "serve") {
+  const at = args.indexOf("--port"); const requested = at < 0 ? 0 : Number(args[at+1]);
+  const descriptor = {environmentId: "fixture", label: "Fixture", platform: {os: "linux", arch: "x64"}, capabilities: {}, ...fields};
+  const server = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/.well-known/t3/environment" && (${JSON.stringify(signals.descriptor404 ?? false)} || fs.existsSync(path.join(test, "descriptor404")))) {
+      res.statusCode = 404; res.end("{}"); return;
+    }
+    res.end(req.url === "/.well-known/t3/environment" ? JSON.stringify(descriptor) : "ok");
+  });
+  process.on("SIGTERM", () => {
+    event("stop");
+    if (fs.existsSync(runtimeFile) && JSON.parse(fs.readFileSync(runtimeFile, "utf8")).pid === process.pid) fs.unlinkSync(runtimeFile);
+    server.close(() => process.exit(0));
+  });
+  server.listen(requested, "127.0.0.1", () => {
+    const record = {version: 1, pid: process.pid, port: server.address().port,
+      origin: "http://127.0.0.1:" + server.address().port, startedAt: new Date().toISOString(), ...fields};
+    fs.mkdirSync(path.dirname(runtimeFile), {recursive: true}); fs.writeFileSync(runtimeFile, JSON.stringify(record));
+    fs.appendFileSync(path.join(test, "pids"), process.pid + "\\n");
+    event("start", { runner: fs.readFileSync(path.join(state, "run-t3.sh"), "utf8") });
+    if (args.includes("--test-seed")) {
+      fs.writeFileSync(path.join(test, "accepted-ready-" + process.pid), "ready");
+      console.log(JSON.stringify(record));
+    }
+    else if (!${JSON.stringify(signals.nodeReadiness ?? false)}) { const fd = fs.openSync(path.join(test, "ready.fifo"), "w"); fs.writeSync(fd, "ready\\n"); fs.closeSync(fd); }
+  });
+} else process.exit(97);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+`;
+    };
+
+    const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* (input: {
+      live: boolean;
+      kind: "managed" | "external";
+      oldVersion: string;
+      ssh?: number;
+      orchestration?: number;
+      missingCommand?: boolean;
+      ownTokens?: string;
+      liveTokens?: string;
+      descriptor404?: boolean;
+    }) {
+      const fs = yield* FileSystem.FileSystem;
+      const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-protocol-" });
+      const key = yield* remoteStateKey(uploadTarget);
+      const state = `${home}/.goat/ssh-launch/${key}`;
+      const test = `${home}/.test`;
+      const old = `${home}/.goat/runtime/goat/versions/${input.oldVersion}`;
+      const cache = `${home}/cache`;
+      for (const dir of [state, test, old, cache])
+        yield* fs.makeDirectory(dir, { recursive: true });
+      yield* fs.writeFileString(`${test}/events`, "");
+      yield* fs.writeFileString(`${test}/pids`, "");
+      const fifo = yield* realSpawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
+      assert.equal(Number(yield* fifo.exitCode), 0);
+      yield* fs.writeFileString(`${old}/goat`, protocolExecutable(input.oldVersion, input, state));
+      yield* fs.chmod(`${old}/goat`, 0o700);
+      yield* fs.writeFileString(`${old}/.install-complete`, input.oldVersion + "\n");
+      const oldRunner = (yield* nativeScripts({ archiveVersion: input.oldVersion })).runner + "\n";
+      yield* fs.writeFileString(`${state}/run-t3.sh`, oldRunner);
+      yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
+      yield* Effect.addFinalizer(() =>
+        fs.readFileString(`${test}/pids`).pipe(
+          Effect.flatMap((data) =>
+            Effect.sync(() => {
+              for (const pid of data.trim().split("\n").filter(Boolean).map(Number)) {
+                try {
+                  process.kill(pid, "SIGKILL");
+                } catch {
+                  /* captured fixture child already exited */
+                }
+              }
+            }),
+          ),
+          Effect.ignore,
+        ),
+      );
+      let pid = 0;
+      let port = 0;
+      if (input.live) {
+        const child = yield* realSpawner.spawn(
+          ChildProcess.make(`${old}/goat`, ["serve", "--test-seed"], {
+            env: { HOME: home, PATH: process.env.PATH ?? "" },
+            extendEnv: false,
+          }),
+        );
+        const ready = JSON.parse(
+          yield* child.stdout.pipe(
+            Stream.decodeText(),
+            Stream.splitLines,
+            Stream.take(1),
+            Stream.mkString,
+          ),
+        ) as { pid: number; port: number };
+        assert.equal(ready.pid, Number(child.pid));
+        pid = ready.pid;
+        port = ready.port;
+        yield* installArchivePsDouble(home, pid, port, input.oldVersion);
+        yield* fs.writeFileString(`${state}/pid`, `${pid}\n`);
+        yield* fs.writeFileString(`${state}/port`, `${port}\n`);
+        yield* fs.writeFileString(`${state}/managed`, input.kind + "\n");
+        if (input.kind === "managed")
+          yield* fs.writeFileString(
+            `${state}/identity`,
+            `${old}/goat serve --host 127.0.0.1 --port ${port} --base-dir ${home}/.goat\n`,
+          );
+      }
+      const stem = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
+      const stage = `${home}/stage/${stem}`;
+      yield* fs.makeDirectory(stage, { recursive: true });
+      yield* fs.writeFileString(
+        `${stage}/goat`,
+        protocolExecutable(ARCHIVE.archiveVersion, { ssh: 1, orchestration: 2 }, state),
+      );
+      yield* fs.chmod(`${stage}/goat`, 0o700);
+      const packed = yield* realSpawner.spawn(
+        ChildProcess.make("tar", ["-czf", `${cache}/${stem}.tar.gz`, "-C", `${home}/stage`, stem]),
+      );
+      assert.equal(Number(yield* packed.exitCode), 0);
+      const crypto = yield* Crypto.Crypto;
+      const sha = Hex.encode(
+        yield* crypto.digest("SHA-256", yield* fs.readFile(`${cache}/${stem}.tar.gz`)),
+      );
+      yield* fs.writeFileString(`${cache}/${stem}.tar.gz.sha256`, `${sha}  ${stem}.tar.gz\n`);
+      const runner = { ...ARCHIVE, archiveDirectory: cache };
+      const remoteCommands: ChildProcess.Command[] = [];
+      let uploads = 0;
+      let gh = 0;
+      let cacheReads = 0;
+      const observedFs = FileSystem.FileSystem.of({
+        ...fs,
+        exists: (file) => {
+          if (file.startsWith(cache)) cacheReads++;
+          return fs.exists(file);
+        },
+        readFile: (file) => {
+          if (file.startsWith(cache)) cacheReads++;
+          return fs.readFile(file);
+        },
+        readFileString: (file) => {
+          if (file.startsWith(cache)) cacheReads++;
+          return fs.readFileString(file);
+        },
+      });
+      let remotePath = `${home}/.test/identity-bin:${process.env.PATH ?? ""}`;
+      const setRemotePath = (value: string) => {
+        remotePath = value;
+      };
+      let beforeCommand: ((script: string) => ReturnType<typeof fs.writeFileString>) | undefined;
+      const setBeforeCommand = (callback: typeof beforeCommand) => {
+        beforeCommand = callback;
+      };
+      const fixtureScope = yield* Scope.Scope;
+      const remoteSpawn = (command: ChildProcess.Command) =>
+        realSpawner.spawn(command).pipe(Effect.provideService(Scope.Scope, fixtureScope));
+      const transport = ChildProcessSpawner.make((command) => {
+        if (command._tag !== "StandardCommand") return remoteSpawn(command);
+        if (command.command === "gh") {
+          gh++;
+          return Effect.die("unexpected gh acquisition");
+        }
+        const at = command.args.indexOf("sh");
+        if (at < 0) {
+          if (command.args.includes("-G"))
+            return Effect.succeed(
+              makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n"),
+            );
+          if (command.args.includes("-N"))
+            return Effect.succeed(makeRunningProcess(() => undefined));
+          return Effect.die("Unexpected test transport command; real SSH is prohibited");
+        }
+        remoteCommands.push(command);
+        const args = command.args.slice(at + 1).filter((arg) => arg !== "-l");
+        if (args.includes("-c")) uploads++;
+        // Capture actual submitted bytes; inject races only at an observed command boundary.
+        return Effect.gen(function* () {
+          const stdin = command.options.stdin;
+          if (
+            args.includes("-c") ||
+            stdin === undefined ||
+            typeof stdin !== "object" ||
+            !("stream" in stdin) ||
+            !Stream.isStream(stdin.stream)
+          ) {
+            return yield* remoteSpawn(
+              ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
+                env: { HOME: home, PATH: remotePath, LC_ALL: "C" },
+                extendEnv: false,
+                ...(stdin === undefined ? {} : { stdin }),
+              }),
+            );
+          }
+          const script = yield* stdin.stream.pipe(Stream.decodeText(), Stream.mkString);
+          if (beforeCommand !== undefined) yield* beforeCommand(script);
+          return yield* remoteSpawn(
+            ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
+              env: { HOME: home, PATH: remotePath, LC_ALL: "C" },
+              extendEnv: false,
+              stdin: { ...stdin, stream: Stream.make(new TextEncoder().encode(script)) },
+            }),
+          );
+        });
+      });
+      const run = (entry: "launch" | "pairing" | "mcp", secondary = false) => {
+        const inputRunner = { ...runner, keepExistingRunner: secondary };
+        const action =
+          entry === "launch"
+            ? SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, inputRunner).pipe(
+                Effect.map((result) => ({
+                  version: result.selectedRuntime.version,
+                  port: result.remotePort,
+                })),
+              )
+            : entry === "pairing"
+              ? SshTunnel.issueRemotePairingToken(uploadTarget, {}, inputRunner).pipe(
+                  Effect.map((result) => ({ version: result.credential, port: 0 })),
+                )
+              : SshTunnel.issueRemoteMcpClientSession(
+                  uploadTarget,
+                  { label: "fixture", ttl: "1h", runtimeModeCeiling: null },
+                  {},
+                  inputRunner,
+                ).pipe(Effect.map((result) => ({ version: result.token, port: 0 })));
+        return action.pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport),
+          Effect.provideService(FileSystem.FileSystem, observedFs),
+          Effect.result,
+        );
+      };
+      const snapshot = Effect.gen(function* () {
+        const files = ["run-t3.sh", "pid", "port", "managed", "identity"];
+        const values: Record<string, string | null> = {};
+        for (const file of files)
+          values[file] = (yield* fs.exists(`${state}/${file}`))
+            ? yield* fs.readFileString(`${state}/${file}`)
+            : null;
+        const runtime = `${home}/.goat/userdata/server-runtime.json`;
+        values.runtime = (yield* fs.exists(runtime)) ? yield* fs.readFileString(runtime) : null;
+        values.oldExecutable = yield* fs.readFileString(`${old}/goat`);
+        values.oldMarker = yield* fs.readFileString(`${old}/.install-complete`);
+        return values;
+      });
+      return {
+        home,
+        state,
+        test,
+        old,
+        pid,
+        port,
+        run,
+        snapshot,
+        fs,
+        realSpawner,
+        setBeforeCommand,
+        setRemotePath,
+        counters: () => ({ uploads, gh, cacheReads }),
+        remoteCommands,
+        transport,
+        runner,
+        observedFs,
+      };
+    });
+
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        [false, true].map((live) => ({ entry, live })),
+      ),
+    )("reuses older compatible $entry; live=$live", ({ entry, live }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live,
+          kind: "external",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isSuccess(result));
+        if (Result.isSuccess(result)) {
+          assert.equal(result.success.version, "1.2.2");
+          if (live && entry === "launch") assert.equal(result.success.port, f.port);
+        }
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const after = yield* f.snapshot;
+        assert.equal(after.oldExecutable, before.oldExecutable);
+        assert.equal(after.oldMarker, before.oldMarker);
+        if (live) assert.equal(after.runtime, before.runtime);
+        const events = (yield* f.fs.readFileString(`${f.test}/events`))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        assert.isFalse(events.some((event) => event.type === "stop"));
+        if (entry !== "launch")
+          assert.equal(events.findLast((event) => event.type === "auth")?.version, "1.2.2");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
+      "preserves incompatible shared server for $entry",
+      ({ entry }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 99,
+            orchestration: 2,
+          });
+          const before = yield* f.snapshot;
+          const result = yield* f.run(entry, true);
+          assert.isTrue(Result.isFailure(result));
+          assert.deepEqual(yield* f.snapshot, before);
+          const response = yield* Effect.promise(() =>
+            // @effect-diagnostics-next-line globalFetchInEffect:off - real fixture loopback observation.
+            fetch(`http://127.0.0.1:${f.port}/.well-known/t3/environment`),
+          );
+          assert.equal(response.status, 200);
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          assert.notInclude(events, '"type":"stop"');
+          assert.notInclude(events, '"type":"auth"');
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["stale metadata", "descriptor 404"] as const).map((failure) => ({ failure })))(
+      "owning launch preserves an unknown server: $failure",
+      ({ failure }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 99,
+            orchestration: 2,
+            descriptor404: failure === "descriptor 404",
+          });
+          if (failure === "stale metadata") {
+            const file = `${f.home}/.goat/userdata/server-runtime.json`;
+            const record = JSON.parse(yield* f.fs.readFileString(file));
+            yield* f.fs.writeFileString(
+              file,
+              JSON.stringify({ ...record, serverVersion: "1.2.1" }),
+            );
+          }
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch", false);
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result))
+            assert.include(String(result.failure), "Cannot verify live GOAT");
+          assert.deepEqual(yield* f.snapshot, before); // Includes runner publication/ownership/runtime bytes.
+          yield* Effect.sync(() => process.kill(f.pid, 0)); // Captured fixture PID still alive.
+          // @effect-diagnostics-next-line globalFetchInEffect:off - real fixture loopback observation.
+          const root = yield* Effect.promise(() => fetch(`http://127.0.0.1:${f.port}/`));
+          assert.equal(root.status, 200);
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          assert.notInclude(events, '"type":"stop"');
+          assert.notInclude(events, '"type":"auth"');
+          assert.equal(events.split('"type":"start"').length - 1, 1); // Only the seeded process.
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
+      "refuses same-version retained runner replacement before $entry",
+      ({ entry }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          let replaced = false;
+          f.setBeforeCommand((script) => {
+            if (replaced || !script.includes('RUNNER_FILE="$STATE_DIR/run-t3.sh"'))
+              return Effect.void;
+            replaced = true;
+            return Effect.gen(function* () {
+              const file = `${f.state}/run-t3.sh`;
+              const original = yield* f.fs.readFileString(file);
+              // Keep exactly the same archive version; if executed, log a distinct side effect.
+              const replacement = original.replace(
+                "#!/bin/sh\n",
+                `#!/bin/sh\nprintf 'replacement-executed\\n' >> '${f.test}/events'\n`,
+              );
+              assert.notEqual(replacement, original);
+              yield* f.fs.writeFileString(file, replacement);
+            });
+          });
+          const before = yield* f.snapshot;
+          const result = yield* f.run(entry);
+          assert.isTrue(replaced);
+          assert.isTrue(Result.isFailure(result));
+          if (Result.isFailure(result))
+            assert.include(String(result.failure), "changed since probe");
+          const after = yield* f.snapshot;
+          assert.notEqual(after["run-t3.sh"], before["run-t3.sh"]); // Only our injected replacement persists.
+          assert.deepEqual({ ...after, "run-t3.sh": before["run-t3.sh"] ?? null }, before);
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+          const events = yield* f.fs.readFileString(`${f.test}/events`);
+          assert.notInclude(events, "replacement-executed");
+          assert.notInclude(events, '"type":"stop"');
+          assert.notInclude(events, '"type":"auth"');
+          assert.equal(events.split('"type":"start"').length - 1, 1);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        (
+          [
+            "unknown 1 2 0 0",
+            "1.2.3 1 2 garbage garbage",
+            "1.2.3 0 2 0 0",
+            "1.2.3 1 -2 0 0",
+            "1.2.3 01 2 0 0",
+            "1.2.3-01 1 2 0 0",
+            "1.2.3 1 2 0 1234",
+          ] as const
+        ).map((tokens) => ({ entry, tokens })),
+      ),
+    )("rejects malformed own tokens before $entry: $tokens", ({ entry, tokens }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: ARCHIVE.archiveVersion,
+          ssh: 1,
+          orchestration: 2,
+          ownTokens: tokens,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result))
+          assert.include(String(result.failure), "Malformed candidate protocol output");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["auth", "serve", "start", "stop"])
+          assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
+      "accepts own not-running tokens and exact legacy fallback for $entry",
+      ({ entry }) =>
+        Effect.gen(function* () {
+          for (const missingCommand of [false, true]) {
+            const f = yield* makeProtocolFixture({
+              live: false,
+              kind: "managed",
+              oldVersion: ARCHIVE.archiveVersion,
+              ssh: 1,
+              orchestration: 2,
+              missingCommand,
+            });
+            // A legacy helper cannot inspect remembered state; test cold absence with no runtime/identity files.
+            const result = yield* f.run(entry);
+            assert.isTrue(Result.isSuccess(result));
+            assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        [
+          { ownTokens: "unknown 1 2 0 0" },
+          { ownTokens: "1.2.3 1 2 garbage garbage" },
+          { liveTokens: "live unknown 1 2 0 1234" },
+          { liveTokens: "live 1.2.3 1 2 garbage garbage" },
+        ].map((injected) => ({ entry, injected })),
+      ),
+    )("rejects malformed Node $entry tokens: $injected", ({ entry, injected }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        const cli = `${f.home}/fixture-cli.cjs`;
+        yield* f.fs.writeFileString(
+          cli,
+          protocolExecutable(
+            "1.2.3",
+            {
+              ssh: 1,
+              orchestration: 2,
+              ...injected,
+            },
+            f.state,
+          ),
+        );
+        const scripts = yield* nativeScripts({ nodeScriptPath: cli });
+        const key = f.state.slice(f.state.lastIndexOf("/") + 1);
+        // nativeScripts' default key is an existing fixture constant; preserve all other script bytes.
+        const script = scripts[entry].split("711bc738002d72fd").join(key);
+        const before = yield* f.snapshot;
+        const child = yield* f.realSpawner.spawn(
+          ChildProcess.make("sh", ["-s", "--", key], {
+            env: { HOME: f.home, PATH: process.env.PATH ?? "", LC_ALL: "C" },
+            extendEnv: false,
+            stdin: { stream: Stream.make(new TextEncoder().encode(script)), endOnDone: true },
+          }),
+        );
+        const stderr = yield* child.stderr.pipe(Stream.decodeText(), Stream.mkString);
+        assert.notEqual(Number(yield* child.exitCode), 0);
+        assert.include(stderr, "Malformed");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["auth", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        ["live unknown 1 2 0 1234", "live 1.2.3 1 2 garbage garbage"].map((liveTokens) => ({
+          entry,
+          liveTokens,
+        })),
+      ),
+    )("rejects malformed archive live tokens before $entry: $liveTokens", ({ entry, liveTokens }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: ARCHIVE.archiveVersion,
+          ssh: 1,
+          orchestration: 2,
+          liveTokens,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isFailure(result));
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["auth", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        ([{ missingCommand: true }, { ssh: 1 }, { ssh: 99, orchestration: 2 }] as const).map(
+          (metadata) => ({ entry, metadata }),
+        ),
+      ),
+    )("acquires exact $entry for dormant incompatible metadata $metadata", ({ entry, metadata }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ...metadata,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isSuccess(result));
+        if (Result.isSuccess(result)) assert.equal(result.success.version, ARCHIVE.archiveVersion);
+        assert.equal(f.counters().uploads, 1);
+        assert.equal(f.counters().gh, 0);
+        assert.isAbove(f.counters().cacheReads, 0);
+        const after = yield* f.snapshot;
+        assert.equal(after.oldExecutable, before.oldExecutable);
+        assert.equal(after.oldMarker, before.oldMarker);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
+      "rejects explicit protocol mismatch at the exact requested $entry",
+      ({ entry }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: ARCHIVE.archiveVersion,
+            ssh: 99,
+            orchestration: 2,
+          });
+          const before = yield* f.snapshot;
+          assert.isTrue(Result.isFailure(yield* f.run(entry)));
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        (["goat", ".install-complete"] as const).map((remove) => ({ entry, remove })),
+      ),
+    )("rejects selected $remove disappearance before $entry", ({ entry, remove }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        const before = yield* f.snapshot;
+        let removed = false;
+        f.setBeforeCommand((script) => {
+          if (removed || !script.includes('RUNNER_FILE="$STATE_DIR/run-t3.sh"')) return Effect.void;
+          removed = true;
+          return f.fs.remove(`${f.old}/${remove}`);
+        });
+        assert.isTrue(Result.isFailure(yield* f.run(entry)));
+        assert.isTrue(removed);
+        for (const file of ["run-t3.sh", "pid", "port", "managed"])
+          assert.equal(yield* f.fs.readFileString(`${f.state}/${file}`), before[file]);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        assert.notInclude(events, '"type":"auth"');
+        assert.notInclude(events, '"type":"stop"');
+        const files = yield* f.fs.readDirectory(f.state);
+        assert.isFalse(files.some((file) => file.includes(".next.") || file.endsWith(".pin")));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+    it.live(
+      "validates and publishes the requested runtime before stopping its verified owned PID",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 99,
+            orchestration: 2,
+          });
+          const before = yield* f.snapshot;
+          const result = yield* f.run("launch");
+          assert.isTrue(Result.isSuccess(result));
+          if (Result.isSuccess(result))
+            assert.equal(result.success.version, ARCHIVE.archiveVersion);
+          const after = yield* f.snapshot;
+          assert.notEqual(after.pid, before.pid);
+          assert.equal(after.oldExecutable, before.oldExecutable);
+          assert.equal(after.oldMarker, before.oldMarker);
+          const events = (yield* f.fs.readFileString(`${f.test}/events`))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          const validation = events.findIndex(
+            (event) => event.type === "version" && event.version === ARCHIVE.archiveVersion,
+          );
+          const stop = events.findIndex((event) => event.type === "stop");
+          const start = events.findLastIndex((event) => event.type === "start");
+          assert.isBelow(validation, stop);
+          assert.isBelow(stop, start);
+          assert.include(events[start].runner, `T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'`);
+          assert.equal(f.counters().uploads, 1);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+    it.live(
+      "cached manager auth pins its compatible release across resolver changes and rechecks both MCP attempts",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          let current = { ...f.runner, archiveVersion: String(f.runner.archiveVersion) };
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.sync(() => current),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+            current = { ...f.runner, archiveVersion: "9.9.9" };
+            assert.equal(
+              (yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true }))
+                .pairingToken,
+              "1.2.2",
+            );
+            yield* f.fs.writeFileString(`${f.test}/reject-ceiling`, "1");
+            const session = yield* manager.issueMcpClientSession(uploadTarget, {
+              label: "fixture",
+              ttl: "1h",
+              runtimeModeCeiling: "approval-required",
+            });
+            assert.equal(session.token, "1.2.2");
+            assert.isFalse(session.runtimeModeCeilingApplied);
+            const events = (yield* f.fs.readFileString(`${f.test}/events`))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            const auth = events
+              .map((event, i) => ({ event, i }))
+              .filter(({ event }) => event.type === "auth");
+            assert.equal(auth.length, 3);
+            for (const { event } of auth) assert.equal(event.version, "1.2.2");
+            assert.isTrue(
+              events
+                .slice(auth[1]!.i + 1, auth[2]!.i)
+                .some((event) => event.type === "protocol" && event.live),
+            );
+            yield* f.fs.remove(`${f.old}/goat`);
+            assert.isTrue(
+              Result.isFailure(
+                yield* Effect.result(
+                  manager.issueMcpClientSession(uploadTarget, {
+                    label: "fixture",
+                    ttl: "1h",
+                    runtimeModeCeiling: null,
+                  }),
+                ),
+              ),
+            );
+          }).pipe(Effect.provide(layer), Effect.scoped);
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["goat", ".install-complete"] as const)(
+      "cold-mirror manager pins the installed archive before cached auth when %s disappears",
+      (missing) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 9,
+            orchestration: 9,
+          });
+          yield* f.fs.remove(`${f.state}/run-t3.sh`);
+          const stem = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
+          const mirror = `${f.home}/mirror/v${ARCHIVE.archiveVersion}`;
+          yield* f.fs.makeDirectory(mirror, { recursive: true });
+          yield* f.fs.writeFile(
+            `${mirror}/${stem}.tar.gz`,
+            yield* f.fs.readFile(`${f.home}/cache/${stem}.tar.gz`),
+          );
+          yield* f.fs.writeFileString(
+            `${mirror}/SHA256SUMS`,
+            yield* f.fs.readFileString(`${f.home}/cache/${stem}.tar.gz.sha256`),
+          );
+          const bin = `${f.test}/bin`;
+          yield* f.fs.makeDirectory(bin);
+          const curl = yield* f.realSpawner.spawn(
+            ChildProcess.make("sh", ["-c", "command -v curl"]),
+          );
+          const curlPath = (yield* curl.stdout.pipe(Stream.decodeText(), Stream.mkString)).trim();
+          assert.equal(Number(yield* curl.exitCode), 0);
+          yield* f.fs.writeFileString(
+            `${bin}/curl`,
+            `#!/bin/sh\nprintf 'download\\n' >> "$HOME/.test/downloads"\nexec ${JSON.stringify(curlPath)} "$@"\n`,
+          );
+          yield* f.fs.chmod(`${bin}/curl`, 0o700);
+          f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
+          let current = {
+            archiveVersion: String(ARCHIVE.archiveVersion),
+            releaseBaseUrl: `file://${f.home}/mirror`,
+          };
+          const layer = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+            Layer.succeed(FileSystem.FileSystem, f.observedFs),
+            Layer.succeed(HttpClient.HttpClient, testHttpClient),
+            Layer.succeed(NetService.NetService, testNetService),
+            SshAuth.SshPasswordPrompt.disabledLayer,
+            SshTunnel.SshEnvironmentManager.layer({
+              resolveCliRunner: Effect.sync(() => current),
+              leaveRemoteServerRunning: true,
+            }),
+          );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+            const downloads = yield* f.fs.readFileString(`${f.test}/downloads`);
+            assert.equal(downloads.trim().split("\n").length, 2);
+            current = { ...current, archiveVersion: "9.9.9" };
+            yield* f.fs.remove(
+              `${f.home}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}/${missing}`,
+            );
+            const before = yield* f.snapshot;
+            assert.isTrue(
+              Result.isFailure(
+                yield* Effect.result(
+                  manager.ensureEnvironment(uploadTarget, { issuePairingToken: true }),
+                ),
+              ),
+            );
+            assert.isTrue(
+              Result.isFailure(
+                yield* Effect.result(
+                  manager.issueMcpClientSession(uploadTarget, {
+                    label: "fixture",
+                    ttl: "1h",
+                    runtimeModeCeiling: null,
+                  }),
+                ),
+              ),
+            );
+            assert.deepEqual(yield* f.snapshot, before);
+            assert.equal(yield* f.fs.readFileString(`${f.test}/downloads`), downloads);
+            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"auth"');
+            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+            assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+            assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/9.9.9`));
+          }).pipe(Effect.provide(layer), Effect.scoped);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (
+        [
+          "runtime command",
+          "descriptor without PID identity",
+          "unrelated PID",
+          "unknown descriptor",
+        ] as const
+      ).flatMap((mode) =>
+        (["disconnect", "shutdown"] as const).map((action) => ({ mode, action })),
+      ),
+    )("$action verifies ownership through $mode before stopping", ({ mode, action }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        const unrelated =
+          mode === "unrelated PID"
+            ? yield* f.realSpawner.spawn(
+                ChildProcess.make(process.execPath, [
+                  "-e",
+                  'require("net").createServer().listen(0, "127.0.0.1", () => console.log("ready"))',
+                ]),
+              )
+            : undefined;
+        if (unrelated !== undefined)
+          assert.equal(
+            yield* unrelated.stdout.pipe(
+              Stream.decodeText(),
+              Stream.splitLines,
+              Stream.take(1),
+              Stream.mkString,
+            ),
+            "ready",
+          );
+        const layer = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+          Layer.succeed(FileSystem.FileSystem, f.observedFs),
+          Layer.succeed(HttpClient.HttpClient, testHttpClient),
+          Layer.succeed(NetService.NetService, testNetService),
+          SshAuth.SshPasswordPrompt.disabledLayer,
+          SshTunnel.SshEnvironmentManager.layer({
+            resolveCliRunner: Effect.succeed(f.runner),
+            leaveRemoteServerRunning: false,
+          }),
+        );
+        let before: Effect.Success<typeof f.snapshot> | undefined;
+        const result = yield* Effect.result(
+          Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+            if (mode !== "unrelated PID") {
+              const bin = `${f.test}/bin`;
+              yield* f.fs.makeDirectory(bin);
+              yield* f.fs.writeFileString(
+                `${bin}/ps`,
+                mode === "runtime command"
+                  ? `#!/bin/sh\nprintf '%s\\n' "$HOME/.goat/runtime/goat/versions/1.2.2/goat serve --host 127.0.0.1 --port ${f.port} --base-dir $HOME/.goat"\n`
+                  : "#!/bin/sh\nprintf 'unavailable command identity\\n'\n",
+              );
+              yield* f.fs.chmod(`${bin}/ps`, 0o700);
+              f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
+            }
+            if (mode === "unknown descriptor")
+              yield* f.fs.writeFileString(`${f.test}/descriptor404`, "1");
+            if (unrelated !== undefined)
+              yield* f.fs.writeFileString(`${f.state}/pid`, `${unrelated.pid}\n`);
+            before = yield* f.snapshot;
+            if (action === "disconnect") yield* manager.disconnectEnvironment(uploadTarget);
+          }).pipe(Effect.provide(layer), Effect.scoped),
+        );
+        const verified = mode === "runtime command";
+        assert.equal(Result.isSuccess(result), verified || action === "shutdown");
+        if (verified) {
+          assert.notExists((yield* f.snapshot).pid);
+          assert.include(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+        } else {
+          if (Result.isFailure(result))
+            assert.include(result.failure.message, "ownership could not be verified");
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+          if (unrelated !== undefined) assert.isTrue(yield* unrelated.isRunning);
+          yield* Effect.sync(() => process.kill(f.pid, 0));
+        }
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(
+      (["disconnect", "shutdown"] as const).flatMap((action) =>
+        [false, true].map((shim) => ({ action, shim })),
+      ),
+    )(
+      "$action stops an old-entry Node server after reconnecting with a new entry; shim=$shim",
+      ({ action, shim }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          const entry = `${f.home}/dev's old entry.cjs`;
+          const nextEntry = `${f.home}/new entry.cjs`;
+          for (const file of [entry, nextEntry])
+            yield* f.fs.writeFileString(
+              file,
+              protocolExecutable(
+                "1.2.3",
+                { ssh: 1, orchestration: 2, nodeReadiness: true },
+                f.state,
+              ),
+            );
+          if (shim) {
+            const nodeBin = `${f.home}/.nvm/versions/node/v${process.versions.node} installation/bin`;
+            yield* f.fs.makeDirectory(nodeBin, { recursive: true });
+            yield* f.fs.writeFileString(
+              `${nodeBin}/node`,
+              `#!/bin/sh
+if [ "$1" = - ] && [ "\${2:-}" = '${f.state}/port' ]; then printf 'pick-port\\n' >> "$HOME/.test/discovered-helpers"; fi
+exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
+`,
+            );
+            yield* f.fs.chmod(`${nodeBin}/node`, 0o700);
+            // This glob runs in both the runner and the launch parent's discovery.
+            yield* f.fs.writeFileString(
+              `${f.home}/.nvm/nvm.sh`,
+              `for node_bin in "$HOME"/.nvm/versions/node/*/bin; do
+PATH="$node_bin:$PATH"
+done
+export PATH
+`,
+            );
+            f.setRemotePath("/usr/bin:/bin");
+          }
+          const layer = (nodeScriptPath: string, leaveRemoteServerRunning: boolean) =>
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+              Layer.succeed(FileSystem.FileSystem, f.observedFs),
+              Layer.succeed(HttpClient.HttpClient, testHttpClient),
+              Layer.succeed(NetService.NetService, testNetService),
+              SshAuth.SshPasswordPrompt.disabledLayer,
+              SshTunnel.SshEnvironmentManager.layer({
+                resolveCliRunner: Effect.succeed({
+                  nodeScriptPath,
+                  nodeEngineRange: TEST_NODE_ENGINE_RANGE,
+                }),
+                leaveRemoteServerRunning,
+              }),
+            );
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+          }).pipe(Effect.provide(layer(entry, true)), Effect.scoped);
+          const pid = (yield* f.fs.readFileString(`${f.state}/pid`)).trim();
+          const port = (yield* f.fs.readFileString(`${f.state}/port`)).trim();
+          const identity = `${entry} serve --host 127.0.0.1 --port ${port} --base-dir ${f.home}/.goat\n`;
+          assert.equal(yield* f.fs.readFileString(`${f.state}/identity`), identity);
+          // Read real ps: the shim execs the native binary, not its own pathname.
+          const ps = yield* f.realSpawner.spawn(
+            ChildProcess.make("/bin/ps", ["-o", "command=", "-p", pid]),
+          );
+          const command = (yield* ps.stdout.pipe(Stream.decodeText(), Stream.mkString)).trim();
+          assert.equal(Number(yield* ps.exitCode), 0);
+          assert.equal(command, `${shim ? process.execPath : "node"} ${identity.trim()}`);
+          if (shim)
+            assert.equal(yield* f.fs.readFileString(`${f.test}/discovered-helpers`), "pick-port\n");
+          yield* Effect.gen(function* () {
+            const manager = yield* SshTunnel.SshEnvironmentManager;
+            yield* manager.ensureEnvironment(uploadTarget);
+            assert.equal(yield* f.fs.readFileString(`${f.state}/pid`), pid + "\n");
+            assert.equal(yield* f.fs.readFileString(`${f.state}/identity`), identity);
+            assert.include(yield* f.fs.readFileString(`${f.state}/run-t3.sh`), nextEntry);
+            if (action === "disconnect") yield* manager.disconnectEnvironment(uploadTarget);
+          }).pipe(Effect.provide(layer(nextEntry, false)), Effect.scoped);
+          for (const file of ["pid", "port", "managed", "identity"])
+            assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
+          assert.include(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([false, true])(
+      "checks an old Node entry before publishing an upgrade; missing identity=%s",
+      (missingIdentity) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          const entry = `${f.home}/old entry.cjs`;
+          const nextEntry = `${f.home}/new entry.cjs`;
+          const executable = protocolExecutable(
+            "1.2.3",
+            { ssh: 1, orchestration: 2, nodeReadiness: true },
+            f.state,
+          );
+          yield* f.fs.writeFileString(
+            entry,
+            executable.replace(
+              "JSON.stringify(descriptor)",
+              'JSON.stringify({...descriptor, sshRuntimeProtocolVersion: fs.existsSync(path.join(test, "incompatible-live")) ? 99 : 1})',
+            ),
+          );
+          yield* f.fs.writeFileString(nextEntry, executable);
+          const layer = (nodeScriptPath: string, leaveRemoteServerRunning: boolean) =>
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, f.transport),
+              Layer.succeed(FileSystem.FileSystem, f.observedFs),
+              Layer.succeed(HttpClient.HttpClient, testHttpClient),
+              Layer.succeed(NetService.NetService, testNetService),
+              SshAuth.SshPasswordPrompt.disabledLayer,
+              SshTunnel.SshEnvironmentManager.layer({
+                resolveCliRunner: Effect.succeed({
+                  nodeScriptPath,
+                  nodeEngineRange: TEST_NODE_ENGINE_RANGE,
+                }),
+                leaveRemoteServerRunning,
+              }),
+            );
+          yield* Effect.gen(function* () {
+            yield* (yield* SshTunnel.SshEnvironmentManager).ensureEnvironment(uploadTarget);
+          }).pipe(Effect.provide(layer(entry, true)), Effect.scoped);
+          const pid = (yield* f.fs.readFileString(`${f.state}/pid`)).trim();
+          const record = `${f.home}/.goat/userdata/server-runtime.json`;
+          const metadata = JSON.parse(yield* f.fs.readFileString(record));
+          metadata.sshRuntimeProtocolVersion = 99;
+          yield* f.fs.writeFileString(record, JSON.stringify(metadata));
+          yield* f.fs.writeFileString(`${f.test}/incompatible-live`, "1");
+          if (missingIdentity) yield* f.fs.remove(`${f.state}/identity`);
+          const before = yield* f.snapshot;
+          const bin = `${f.test}/real-ps-bin`;
+          yield* f.fs.makeDirectory(bin);
+          yield* f.fs.writeFileString(
+            `${bin}/ps`,
+            `#!${process.execPath}
+const fs = require('node:fs');
+const cp = require('node:child_process');
+const args = process.argv.slice(2);
+if (args[3] === ${JSON.stringify(pid)}) fs.appendFileSync(${JSON.stringify(`${f.test}/inspections`)}, JSON.stringify({ runner: fs.readFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)}, 'utf8'), identity: fs.readFileSync(${JSON.stringify(`${f.state}/identity`)}, 'utf8'), command: cp.execFileSync('/bin/ps', args, {encoding:'utf8'}).trim() }) + '\\n');
+process.stdout.write(cp.execFileSync('/bin/ps', args));
+`,
+          );
+          yield* f.fs.chmod(`${bin}/ps`, 0o700);
+          f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
+          const result = yield* Effect.result(
+            Effect.gen(function* () {
+              yield* (yield* SshTunnel.SshEnvironmentManager).ensureEnvironment(uploadTarget);
+            }).pipe(Effect.provide(layer(nextEntry, missingIdentity)), Effect.scoped),
+          );
+          if (missingIdentity) {
+            assert.isTrue(Result.isFailure(result));
+            if (Result.isFailure(result))
+              assert.include(
+                result.failure.message,
+                "persisted launch identity is missing or mismatched",
+              );
+            assert.deepEqual(yield* f.snapshot, before);
+            assert.isFalse(yield* f.fs.exists(`${f.test}/inspections`));
+            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+            yield* Effect.sync(() => process.kill(Number(pid), 0));
+          } else {
+            assert.isTrue(Result.isSuccess(result));
+            const inspections = (yield* f.fs.readFileString(`${f.test}/inspections`))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            assert.lengthOf(inspections, 2);
+            assert.include(inspections[0].runner, entry);
+            assert.notInclude(inspections[0].runner, nextEntry);
+            assert.include(inspections[1].runner, nextEntry);
+            for (const inspection of inspections) {
+              assert.equal(inspection.identity, before.identity);
+              assert.equal(inspection.command, `node ${before.identity!.trim()}`);
+            }
+            const events = (yield* f.fs.readFileString(`${f.test}/events`))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            assert.lengthOf(
+              events.filter((event) => event.type === "start"),
+              2,
+            );
+            assert.lengthOf(
+              events.filter((event) => event.type === "stop"),
+              2,
+            );
+            for (const file of ["pid", "port", "managed", "identity"])
+              assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
+      "reuses an exact live legacy descriptor for $entry",
+      ({ entry }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: true,
+            kind: "managed",
+            oldVersion: ARCHIVE.archiveVersion,
+          });
+          const before = yield* f.snapshot;
+          const result = yield* f.run(entry);
+          assert.isTrue(Result.isSuccess(result));
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+          assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+    it.live.each(
+      (["launch", "pairing", "mcp"] as const).flatMap((entry) =>
+        (
+          ["external", "missing record", "broken record", "different PID", "nonloopback"] as const
+        ).map((mode) => ({ entry, mode })),
+      ),
+    )("preserves incompatible $mode identity before $entry", ({ entry, mode }) =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: true,
+          kind: mode === "external" ? "external" : "managed",
+          oldVersion: "1.2.2",
+          ssh: 99,
+          orchestration: 2,
+        });
+        const file = `${f.home}/.goat/userdata/server-runtime.json`;
+        if (mode === "missing record") yield* f.fs.remove(file);
+        if (mode === "broken record") yield* f.fs.writeFileString(file, "{");
+        if (mode === "different PID")
+          yield* f.fs.writeFileString(`${f.state}/pid`, `${f.pid + 1}\n`);
+        if (mode === "nonloopback") {
+          const record = JSON.parse(yield* f.fs.readFileString(file));
+          yield* f.fs.writeFileString(
+            file,
+            JSON.stringify({ ...record, origin: `http://example.invalid:${f.port}` }),
+          );
+        }
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isFailure(result));
+        assert.deepEqual(yield* f.snapshot, before);
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        assert.notInclude(events, '"type":"stop"');
+        assert.notInclude(events, '"type":"auth"');
+        yield* Effect.sync(() => process.kill(f.pid, 0));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each((["launch", "pairing", "mcp"] as const).map((entry) => ({ entry })))(
+      "runs explicit matching Node $entry with an ambient upstream home",
+      ({ entry }) =>
+        Effect.gen(function* () {
+          const f = yield* makeProtocolFixture({
+            live: false,
+            kind: "managed",
+            oldVersion: "1.2.2",
+            ssh: 1,
+            orchestration: 2,
+          });
+          const upstream = `${f.home}/.t3`;
+          yield* f.fs.makeDirectory(upstream, { recursive: true });
+          yield* f.fs.writeFileString(`${upstream}/sentinel`, "upstream bytes");
+          const cli = `${f.home}/dev.cjs`;
+          yield* f.fs.writeFileString(
+            cli,
+            protocolExecutable("1.2.3", { ssh: 1, orchestration: 2, nodeReadiness: true }, f.state),
+          );
+          const scripts = yield* nativeScripts({ nodeScriptPath: cli });
+          const key = f.state.slice(f.state.lastIndexOf("/") + 1);
+          const child = yield* f.realSpawner.spawn(
+            ChildProcess.make("sh", ["-s", "--", key], {
+              env: {
+                HOME: f.home,
+                PATH: process.env.PATH ?? "",
+                LC_ALL: "C",
+                T3CODE_HOME: upstream,
+              },
+              extendEnv: false,
+              stdin: {
+                stream: Stream.make(
+                  new TextEncoder().encode(scripts[entry].split("711bc738002d72fd").join(key)),
+                ),
+                endOnDone: true,
+              },
+            }),
+          );
+          const output = yield* Effect.all(
+            {
+              stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+              stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+              code: child.exitCode,
+            },
+            { concurrency: "unbounded" },
+          );
+          assert.equal(Number(output.code), 0, output.stderr);
+          assert.equal(yield* f.fs.readFileString(`${upstream}/sentinel`), "upstream bytes");
+          assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+          const events = (yield* f.fs.readFileString(`${f.test}/events`))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          if (entry !== "launch") {
+            const auth = events.findLast((event) => event.type === "auth");
+            assert.equal(auth.version, "1.2.3");
+            assert.equal(auth.args[auth.args.indexOf("--base-dir") + 1], `${f.home}/.goat`);
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  },
+);

@@ -1,0 +1,288 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeHttp from "node:http";
+import * as NodeChildProcess from "node:child_process";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import packageJson from "../../package.json" with { type: "json" };
+import { readLiveSshRuntimeProtocol } from "./sshHelper.ts";
+
+const startDescriptor = async (value: unknown) => {
+  const server = NodeHttp.createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/.well-known/t3/environment") response.end(JSON.stringify(value));
+    else response.end("ok");
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("No loopback port");
+  return {
+    port: address.port,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+        server.closeAllConnections();
+      }),
+  };
+};
+const descriptor = {
+  environmentId: "helper-fixture",
+  label: "Fixture",
+  platform: { os: "linux", arch: "x64" },
+  capabilities: {},
+  serverVersion: packageJson.version,
+  sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
+  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+};
+
+describe("SSH runtime protocol", () => {
+  it("registers the protocol command and prints only build JSON", async () => {
+    const moduleUrl = new URL("./sshHelper.ts", import.meta.url).href;
+    // Module specifier resolution originates in this real source directory, not HOME.
+    const effectUrl = import.meta.resolve("effect/Effect");
+    const cliUrl = import.meta.resolve("effect/cli");
+    const script = `import * as Effect from ${JSON.stringify(effectUrl)};
+import {Command} from ${JSON.stringify(cliUrl)};
+import {sshHelperCommand} from ${JSON.stringify(moduleUrl)};
+await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['protocol']));`;
+    const stdout = await new Promise<string>((resolve, reject) => {
+      NodeChildProcess.execFile(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        { timeout: 10000 },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (stderr.trim()) {
+            reject(new Error(stderr));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    });
+    expect(JSON.parse(stdout)).toEqual({
+      serverVersion: packageJson.version,
+      sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
+      orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+    });
+  });
+
+  it.each((["matching", "legacy", "disagreeing", "malformed"] as const).map((mode) => ({ mode })))(
+    "checks a live loopback descriptor: $mode",
+    async ({ mode }) => {
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-helper-"));
+      const liveDescriptor =
+        mode === "legacy"
+          ? {
+              ...descriptor,
+              sshRuntimeProtocolVersion: undefined,
+              orchestrationProtocolVersion: undefined,
+            }
+          : mode === "malformed"
+            ? { ...descriptor, sshRuntimeProtocolVersion: "1" }
+            : descriptor;
+      const server = await startDescriptor(liveDescriptor);
+      try {
+        const file = NodePath.join(home, "server-runtime.json");
+        NodeFS.writeFileSync(
+          file,
+          JSON.stringify({
+            version: 1,
+            pid: process.pid,
+            port: server.port,
+            origin: `http://127.0.0.1:${server.port}`,
+            startedAt: "2026-10-11T00:00:00.000Z",
+            ...(mode === "legacy"
+              ? {}
+              : {
+                  serverVersion: packageJson.version,
+                  sshRuntimeProtocolVersion:
+                    mode === "disagreeing" ? 99 : SSH_RUNTIME_PROTOCOL_VERSION,
+                  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+                }),
+          }),
+        );
+        const result = await readLiveSshRuntimeProtocol(file);
+        expect(result.status).toBe(mode === "matching" || mode === "legacy" ? "live" : "unknown");
+        if (result.status === "live") {
+          expect(result.serverVersion).toBe(packageJson.version);
+          expect(result.sshRuntimeProtocolVersion).toBe(
+            mode === "legacy" ? undefined : SSH_RUNTIME_PROTOCOL_VERSION,
+          );
+        }
+      } finally {
+        await server.close();
+        NodeFS.rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("SSH live identity and bounded responses", () => {
+  it.each(
+    (
+      [
+        "missing",
+        "broken",
+        "remembered alive",
+        "dead PID",
+        "service",
+        "stale version",
+        "stale protocol",
+        "remembered mismatch",
+        "origin",
+        "origin port",
+        "string",
+        "fraction",
+        "negative",
+        "unsafe",
+        "version",
+        "root only",
+        "oversized",
+        "held",
+        "malformed JSON",
+        "split UTF8",
+      ] as const
+    ).map((mode) => ({ mode })),
+  )("observes $mode", async ({ mode }) => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-helper-identity-"));
+    const value = {
+      ...descriptor,
+      ...(mode === "string" ? { sshRuntimeProtocolVersion: "1" } : {}),
+      ...(mode === "fraction" ? { sshRuntimeProtocolVersion: 1.5 } : {}),
+      ...(mode === "negative" ? { orchestrationProtocolVersion: -1 } : {}),
+      ...(mode === "unsafe" ? { orchestrationProtocolVersion: 9007199254740992 } : {}),
+      ...(mode === "version" ? { serverVersion: "1.2.3-01" } : {}),
+      ...(mode === "split UTF8" ? { label: "한글" } : {}),
+    };
+    const server = NodeHttp.createServer((request, response) => {
+      if (mode === "root only" && request.url !== "/") {
+        response.writeHead(404);
+        response.end("{}");
+      } else if (mode === "oversized") response.end("x".repeat(65537));
+      else if (mode === "held") response.write("{");
+      else if (mode === "malformed JSON") response.end("{");
+      else if (mode === "split UTF8") {
+        const bytes = Buffer.from(JSON.stringify(value));
+        const split = bytes.indexOf(Buffer.from("한")) + 1;
+        response.write(bytes.subarray(0, split), () => response.end(bytes.subarray(split)));
+      } else response.end(JSON.stringify(value));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("No port");
+    const port = address.port;
+    const file = NodePath.join(home, "runtime.json"),
+      ports = NodePath.join(home, "port"),
+      pids = NodePath.join(home, "pid");
+    try {
+      const state = {
+        version: 1,
+        pid: mode === "dead PID" ? 2147483647 : process.pid,
+        port,
+        origin:
+          mode === "origin"
+            ? `http://example.invalid:${port}`
+            : mode === "origin port"
+              ? `http://127.0.0.1:${port === 65535 ? 65534 : port + 1}`
+              : `http://127.0.0.1:${port}`,
+        startedAt: "2026-10-11T00:00:00.000Z",
+        serverVersion: mode === "stale version" ? "0.0.1" : packageJson.version,
+        sshRuntimeProtocolVersion: mode === "stale protocol" ? 99 : SSH_RUNTIME_PROTOCOL_VERSION,
+        orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+        ...(mode === "service" ? { serviceManaged: true } : {}),
+      };
+      if (!["missing", "remembered alive"].includes(mode))
+        NodeFS.writeFileSync(file, mode === "broken" ? "{" : JSON.stringify(state));
+      NodeFS.writeFileSync(ports, String(port));
+      if (mode === "remembered alive" || mode === "remembered mismatch")
+        NodeFS.writeFileSync(
+          pids,
+          String(mode === "remembered mismatch" ? process.pid + 1 : process.pid),
+        );
+      const started = performance.now();
+      const result = await readLiveSshRuntimeProtocol(file, ports, pids);
+      const live = ["missing", "remembered alive", "dead PID", "service", "split UTF8"].includes(
+        mode,
+      );
+      expect(result.status).toBe(live ? "live" : "unknown");
+      if (live && mode !== "split UTF8") expect(result.pid).toBe(0);
+      if (mode === "held" || mode === "oversized")
+        expect(performance.now() - started).toBeLessThan(3500);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+        server.closeAllConnections();
+      });
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  });
+  it("returns none without a record or remembered identity", async () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-helper-none-"));
+    try {
+      expect(await readLiveSshRuntimeProtocol(NodePath.join(home, "absent"))).toEqual({
+        status: "none",
+        pid: 0,
+        port: 0,
+      });
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+it("bounds an active incomplete response by its total deadline", async () => {
+  const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-helper-trickle-"));
+  let send: NodeHttp.ServerResponse | undefined;
+  let received: (() => void) | undefined;
+  const requestReceived = new Promise<void>((resolve) => {
+    received = resolve;
+  });
+  const server = NodeHttp.createServer((_request, response) => {
+    send = response;
+    response.write("{", () => received?.());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No port");
+  const file = NodePath.join(home, "runtime.json");
+  NodeFS.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      port: address.port,
+      origin: `http://127.0.0.1:${address.port}`,
+      startedAt: "2026-10-11T00:00:00.000Z",
+      serverVersion: packageJson.version,
+    }),
+  );
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const observed = readLiveSshRuntimeProtocol(file);
+    await requestReceived;
+    await vi.advanceTimersByTimeAsync(900);
+    await new Promise<void>((resolve) => send?.write(" ", () => resolve()));
+    await vi.advanceTimersByTimeAsync(600);
+    expect((await observed).status).toBe("unknown");
+  } finally {
+    vi.useRealTimers();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+      server.closeAllConnections();
+    });
+    NodeFS.rmSync(home, { recursive: true, force: true });
+  }
+});

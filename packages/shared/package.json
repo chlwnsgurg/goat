@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sshRuntimeProtocol": {
+      "types": "./src/sshRuntimeProtocol.ts",
+      "import": "./src/sshRuntimeProtocol.ts"
+    },
     "./authScopeOptions": {
       "types": "./src/authScopeOptions.ts",
       "import": "./src/authScopeOptions.ts"
