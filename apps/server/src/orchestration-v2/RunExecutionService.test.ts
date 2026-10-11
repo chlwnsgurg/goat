@@ -1,3 +1,8 @@
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as SqlClient from "effect/sql/SqlClient";
+import Migration0063 from "../persistence/Migrations/063_RemoteDispatches.ts";
+import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
+import { framePendingReports } from "../remoteReports/reportFrame.ts";
 import { assert, it, vi } from "@effect/vitest";
 import {
   CheckpointScopeId,
@@ -56,6 +61,7 @@ const layerRunExecutionTest = RunExecutionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       McpAppModelContext.layerEmpty,
+      RemoteReportInbox.layerEmpty,
       Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
       Layer.mock(EventSink.EventSinkV2)({}),
       IdAllocator.layer,
@@ -645,6 +651,7 @@ it.effect("passes the thread's MCP app context to the provider under a safe key"
       RunExecutionService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            RemoteReportInbox.layerEmpty,
             Layer.mock(McpAppModelContext.McpAppModelContext)({
               forThread: () =>
                 Effect.succeed([
@@ -685,6 +692,7 @@ it.effect("fails the run when its ownership check cannot be read before calling 
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
+          RemoteReportInbox.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             writeIfRunCurrent: (input) =>
@@ -959,6 +967,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
+          RemoteReportInbox.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({
             captureBaseline: () =>
               Effect.fail(
@@ -1077,6 +1086,7 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
         Layer.provide(
           Layer.mergeAll(
             McpAppModelContext.layerEmpty,
+            RemoteReportInbox.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () =>
                 scenario === "start-guard" ? Effect.void : Effect.die("not reached"),
@@ -1248,6 +1258,7 @@ it.effect("keeps ingesting owned child events after the root turn terminalizes",
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
+          RemoteReportInbox.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: () => Effect.succeed([]),
@@ -1674,6 +1685,7 @@ it.effect(
         Layer.provide(
           Layer.mergeAll(
             McpAppModelContext.layerEmpty,
+            RemoteReportInbox.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
             }),
@@ -1892,6 +1904,7 @@ it.effect("drops late root provider-thread writes from a superseded attempt", ()
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
+          RemoteReportInbox.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: () => Effect.succeed([]),
@@ -2097,6 +2110,7 @@ it.effect(
         Layer.provide(
           Layer.mergeAll(
             McpAppModelContext.layerEmpty,
+            RemoteReportInbox.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
             }),
@@ -2269,6 +2283,7 @@ it.effect(
         Layer.provide(
           Layer.mergeAll(
             McpAppModelContext.layerEmpty,
+            RemoteReportInbox.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
             }),
@@ -2439,6 +2454,7 @@ it.effect(
         Layer.provide(
           Layer.mergeAll(
             McpAppModelContext.layerEmpty,
+            RemoteReportInbox.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
             }),
@@ -2813,6 +2829,7 @@ it.effect(
         Layer.provide(
           Layer.mergeAll(
             McpAppModelContext.layerEmpty,
+            RemoteReportInbox.layerEmpty,
             Layer.mock(CheckpointService.CheckpointServiceV2)({
               captureBaseline: () => Effect.void,
             }),
@@ -3539,6 +3556,7 @@ function captureRootRunTermination(input: {
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
+          RemoteReportInbox.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: (payload) =>
@@ -4020,6 +4038,7 @@ function runBackgroundItemScenario(
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
+          RemoteReportInbox.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: () => Effect.succeed([]),
@@ -4156,4 +4175,132 @@ it.effect("releases ingestion after idle subagent rows and items settle", () =>
       "root-finalized",
     ]);
   }),
+);
+
+it.effect.each(["accepted", "rejected", "skipped", "compact"] as const)(
+  "remote inbox survives %s correctly",
+  (scenario) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* Migration0063;
+      const ids = backgroundScenarioIds(`remote-inbox-${scenario}`);
+      const instanceId = ProviderInstanceId.make("codex");
+      const seen = yield* Ref.make<ReadonlyArray<string>>([]);
+      const started = yield* Deferred.make<void>();
+      const closed = yield* Deferred.make<void>();
+      yield* sql`INSERT INTO remote_report_inbox
+        (origin_thread_id,correlation_id,kind,text,created_at)
+        VALUES (${ids.threadId},'fixture','completed','quoted remote facts','2026-10-12')`;
+      const testLayer = RunExecutionService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            RemoteReportInbox.layer,
+            McpAppModelContext.layerEmpty,
+            Layer.mock(CheckpointService.CheckpointServiceV2)({
+              captureBaseline: () => Effect.void,
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              write: () => Effect.succeed([]),
+              writeWithEffects: () => Effect.succeed([]),
+              writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+            }),
+            IdAllocator.layer,
+            Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              ingestNormalized: () => Effect.succeed([]),
+            }),
+            ServerSettings.layerTest(),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* RunExecutionService.RunExecutionServiceV2;
+        const inbox = yield* RemoteReportInbox.RemoteReportInbox;
+        const accept = (text: string) =>
+          Ref.update(seen, (values) => [...values, text]).pipe(
+            Effect.andThen(
+              scenario === "rejected"
+                ? Effect.fail(
+                    new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver,
+                      threadId: ids.threadId,
+                      providerThreadId: ids.providerThreadId,
+                      runId: ids.runId,
+                      cause: "fixture refusal",
+                    }),
+                  )
+                : Deferred.succeed(started, undefined),
+            ),
+            Effect.asVoid,
+          );
+        yield* service.startRootRun({
+          commandId: CommandId.make("remote-inbox"),
+          appThread: { id: ids.threadId } as OrchestrationV2AppThread,
+          providerSessionId: ProviderSessionId.make("remote-inbox"),
+          session: {
+            events: Stream.empty,
+            subscribeEvents: Effect.succeed({
+              events: Stream.fromEffect(Deferred.await(started)).pipe(
+                Stream.flatMap(() => Stream.succeed(rootTerminalEvent(ids, "completed"))),
+              ),
+              close: Deferred.succeed(closed, undefined),
+            }),
+            startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              accept(input.message.text),
+            compactThread: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              accept(input.message.text),
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          run: {
+            id: ids.runId,
+            threadId: ids.threadId,
+            ordinal: 1,
+            providerInstanceId: instanceId,
+          } as OrchestrationV2Run,
+          rootNode: { id: ids.rootNodeId } as OrchestrationV2ExecutionNode,
+          checkpointScope: {
+            id: CheckpointScopeId.make("remote-inbox"),
+          } as OrchestrationV2CheckpointScope,
+          providerThread: { id: ids.providerThreadId, driver } as OrchestrationV2ProviderThread,
+          attempt: {
+            id: ids.attemptId,
+            providerTurnId: ids.rootProviderTurnId,
+          } as OrchestrationV2RunAttempt,
+          attemptId: ids.attemptId,
+          providerTurnOrdinal: 1,
+          shouldStartProviderTurn: () => Effect.succeed(scenario !== "skipped"),
+          message: {
+            messageId: MessageId.make("remote-inbox"),
+            text: scenario === "compact" ? "/compact" : "human request",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+          modelSelection: { instanceId, model: "gpt-5.4" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/fixture",
+            approvalPolicy: "never",
+            sandboxPolicy: {
+              type: "readOnly",
+              access: { type: "fullAccess" },
+              networkAccess: false,
+            },
+          },
+        });
+        if (scenario === "accepted" || scenario === "compact") yield* Deferred.await(closed);
+        const pending = yield* inbox.pending(ids.threadId);
+        assert.equal(pending.texts.length, scenario === "accepted" ? 0 : 1);
+        const inputs = yield* Ref.get(seen);
+        assert.deepEqual(
+          inputs,
+          scenario === "skipped"
+            ? []
+            : [
+                scenario === "compact"
+                  ? "/compact"
+                  : `${framePendingReports(["quoted remote facts"])}\n\nhuman request`,
+              ],
+        );
+      }).pipe(Effect.provide(Layer.merge(testLayer, RemoteReportInbox.layer)));
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

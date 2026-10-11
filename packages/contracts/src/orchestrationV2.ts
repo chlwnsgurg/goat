@@ -688,6 +688,13 @@ export const OrchestrationV2ExecutionNode = Schema.Struct({
 });
 export type OrchestrationV2ExecutionNode = typeof OrchestrationV2ExecutionNode.Type;
 
+export const OrchestrationV2RemoteSubagent = Schema.Struct({
+  host: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  threadId: Schema.NullOr(ThreadId),
+  correlationId: TrimmedNonEmptyString,
+});
+export type OrchestrationV2RemoteSubagent = typeof OrchestrationV2RemoteSubagent.Type;
+
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -699,6 +706,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   providerThreadId: Schema.NullOr(ProviderThreadId),
   childThreadId: Schema.NullOr(ThreadId),
+  remote: Schema.optional(OrchestrationV2RemoteSubagent),
   nativeTaskRef: Schema.NullOr(OrchestrationV2ProviderRef),
   prompt: Schema.String,
   title: Schema.NullOr(Schema.String),
@@ -3123,6 +3131,42 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.register"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    parentRunId: RunId,
+    parentNodeId: NodeId,
+    task: TrimmedNonEmptyString,
+    title: Schema.optional(TrimmedNonEmptyString),
+    modelSelection: ModelSelection,
+    driver: ProviderDriverKind,
+    runtimeMode: RuntimeMode,
+    interactionMode: ProviderInteractionMode,
+    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    remote: OrchestrationV2RemoteSubagent,
+    createdAt: Schema.optional(Schema.DateTimeUtc),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.progress"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    correlationId: TrimmedNonEmptyString,
+    remoteThreadId: Schema.NullOr(ThreadId),
+    summary: Schema.optional(Schema.String.check(Schema.isMaxLength(4_000))),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.result"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    correlationId: TrimmedNonEmptyString,
+    status: Schema.Literals(["completed", "failed", "cancelled", "interrupted"]),
+    summary: Schema.String.check(Schema.isMaxLength(4_000)),
+  }),
+
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is

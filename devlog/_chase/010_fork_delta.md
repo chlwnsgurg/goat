@@ -104,6 +104,12 @@ G13 `goat-copy`, G14 `launch-watch`.
 - 경로: `ProjectScriptsControl.tsx`, `settings/ProjectActionsSettings.tsx`, `chat/ThreadDetailsPanel.tsx`, `hooks/useT3ProjectFileScripts.ts`
 - 정책: t3.json 액션 가져오기 메뉴("Import scripts", "From t3.json")는 다시 들이지 않는다. 같은 파일의 다른 upstream 변경은 받는다. upstream이 `ThreadDetailsPanel.test.tsx`를 고치면 삭제를 유지한다. t3.json 기본값, iconPath, 깨진 파일 경고, V1→V2 스레드 마이그레이션은 upstream 그대로다.
 
+### `remote-reports` 원격 보고와 원격 위임
+
+- 커밋: #5 #10 #6
+- 경로: `apps/server/src/remoteReports`, `apps/server/src/mcp/toolkits/{remoteReport,ssh}`, `apps/server/src/persistence/Migrations/06{2,3}_*`, `packages/contracts/src/remoteReports.ts`
+- 정책: GOAT 전용. 마이그레이션 062·063은 다시 실행해도 안전하게 써서(`IF NOT EXISTS`) upstream이 그 id를 가져가면 옮길 수 있다. upstream의 SSH·MCP 변경은 받고 출발지 보고, 원격 위임, 첨부 전달을 다시 얹는다.
+
 ### `server-activity` 서버 activity와 마이그레이션 61
 
 - 커밋: `c96310a1a` `d18f83e4e`

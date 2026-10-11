@@ -1,4 +1,9 @@
 import {
+  AttachmentCreateUploadUrlInput,
+  AttachmentCreateUploadUrlResult,
+  ChatAttachmentId,
+  ChatFileAttachment,
+  ChatImageAttachment,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -9,11 +14,12 @@ import {
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2ThreadLauncher,
   type ProviderInteractionMode,
+  type RemoteReportBindingInput,
   type RuntimeMode,
+  type SshLaunchWorkspace,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { targetConnectionKey } from "@t3tools/ssh/command";
-import * as Schema from "effect/Schema";
 import * as SshAuth from "@t3tools/ssh/auth";
 import { discoverSshHosts } from "@t3tools/ssh/config";
 import { SshPasswordPromptError } from "@t3tools/ssh/errors";
@@ -25,14 +31,18 @@ import * as Data from "effect/Data";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import type * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
-import type { HttpClient } from "effect/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import type { ChildProcessSpawner } from "effect/process";
 
 import packageJson from "../../package.json" with { type: "json" };
+import { resolveAttachmentPath, resolveAttachmentPathById } from "../attachmentStore.ts";
+import { ATTACHMENT_UPLOAD_ROUTE_PREFIX } from "../assets/AttachmentUpload.ts";
+import * as Claims from "../orchestration-v2/AttachmentClaims.ts";
 import * as ServerConfig from "../config.ts";
 import { AcpMcpBridgeError, callAcpMcpTool, listAcpMcpTools } from "../mcp/AcpMcpStdioBridge.ts";
 import {
@@ -90,23 +100,10 @@ export interface SshBrowseResult {
   readonly truncated: boolean;
 }
 
-export type SshLaunchWorkspace =
-  | { readonly type: "cwd" }
-  | {
-      readonly type: "worktree";
-      readonly branch: string;
-      readonly baseRef?: string | undefined;
-      readonly startFromOrigin?: boolean | undefined;
-    }
-  | {
-      readonly type: "existing_worktree";
-      readonly worktreePath: string;
-      readonly branch?: string | undefined;
-    };
-
 /**
- * How long a launch waits to learn whether the remote accepts launchedBy. The probe is
- * optional, so a remote that does not answer in time gets the launch without lineage.
+ * How long a launch waits to learn which goat_thread_launch arguments the remote declares.
+ * The probe is optional: a remote that does not answer in time gets the launch without
+ * lineage, and with the report binding the coordinator retries without if refused.
  */
 export const LAUNCH_LINEAGE_PROBE_TIMEOUT = "5 seconds";
 
@@ -128,6 +125,10 @@ export type SshLaunchInput = SshDispatchDestination & {
    */
   readonly callerRuntimeMode: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode | undefined;
+  readonly attachments?: ReadonlyArray<ChatImageAttachment | ChatFileAttachment> | undefined;
+  readonly report?: RemoteReportBindingInput | undefined;
+  /** Appended to message only when report is sent, telling the agent how to report back. */
+  readonly reportNote?: string | undefined;
   /** Accept a folder that broadWorkspaceRoot rejects; only when the user asked for it. */
   readonly allowBroadWorkspaceRoot?: boolean | undefined;
   /**
@@ -143,6 +144,7 @@ export interface SshLaunchResult {
   readonly projectId: string;
   readonly projectCreated: boolean;
   readonly threadId: string;
+  readonly reportsSupported: boolean;
   /** The thread's first run, when a message started one. */
   readonly runId: string | null;
   readonly workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
@@ -187,6 +189,13 @@ export class SshRemoteDispatch extends Context.Service<
       readonly showHidden?: boolean | undefined;
       readonly limit?: number | undefined;
     }) => Effect.Effect<SshBrowseResult, SshRemoteDispatchError>;
+    /** Local preflight before the coordinator records a dispatch; no remote side effects. */
+    readonly validateLaunchAttachments: (
+      requested: ReadonlyArray<ChatImageAttachment | ChatFileAttachment>,
+    ) => Effect.Effect<
+      ReadonlyArray<ChatImageAttachment | ChatFileAttachment>,
+      SshRemoteDispatchError
+    >;
     /** `beforeLaunch` re-checks the caller right before the remote thread starts. */
     readonly launchThread: <E, R>(
       input: SshLaunchInput,
@@ -230,6 +239,9 @@ const SESSION_TTL = "12h";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const SESSION_REFRESH_MARGIN_MS = 10 * 60 * 1000;
 const BROWSE_TIMEOUT_MS = 20_000;
+const ATTACHMENT_PREPARE_TIMEOUT_MS = 20_000;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
+const ATTACHMENT_DISCARD_TIMEOUT_MS = 5_000;
 const PROBE_TIMEOUT_MS = 8_000;
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 1000;
@@ -363,16 +375,68 @@ export function readRemoteToolResult(
   return { ok: true, value: payload };
 }
 
+const SshLaunchAttachments = Schema.Array(
+  Schema.Union([ChatImageAttachment, ChatFileAttachment]),
+).check(Schema.isMaxLength(8));
+
+const decodeLaunchAttachments = Schema.decodeUnknownEffect(SshLaunchAttachments);
+const decodeUploadInput = Schema.decodeUnknownEffect(AttachmentCreateUploadUrlInput);
+const decodePreparedIdentity = Schema.decodeUnknownEffect(
+  Schema.Struct({ attachmentId: ChatAttachmentId }),
+);
+const decodePreparedUpload = Schema.decodeUnknownEffect(AttachmentCreateUploadUrlResult);
+
+const validateSshLaunchAttachments = Effect.fn("SshRemoteDispatch.validateSshLaunchAttachments")(
+  function* (requested: ReadonlyArray<ChatImageAttachment | ChatFileAttachment>) {
+    const attachments = yield* decodeLaunchAttachments(requested).pipe(
+      Effect.mapError(() => failure("invalid_request", "Invalid SSH attachment references.")),
+    );
+    // Match local goat_thread_launch: callers may supply any pending id they know.
+    // Web uploads have no MCP owner entry; SSH does not add a separate ownership rule.
+    if (attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment))) {
+      return yield* failure(
+        "invalid_request",
+        "A remote thread accepts only pending attachment uploads.",
+      );
+    }
+    if (new Set(attachments.map((attachment) => attachment.id)).size !== attachments.length) {
+      return yield* failure("invalid_request", "Duplicate attachment ids are not allowed.");
+    }
+    yield* Claims.validateAttachmentLimits(attachments).pipe(
+      Effect.mapError((error) => failure("invalid_request", error.message)),
+    );
+    return yield* Effect.forEach(attachments, (attachment) =>
+      decodeUploadInput({
+        type: attachment.type,
+        name: attachment.name,
+        mimeType: attachment.mimeType.toLowerCase(),
+        sizeBytes: attachment.sizeBytes,
+      }).pipe(
+        Effect.mapError(() =>
+          failure(
+            "invalid_request",
+            `Attachment '${attachment.name}' has invalid upload metadata.`,
+          ),
+        ),
+        Effect.map((upload) => ({ ...attachment, mimeType: upload.mimeType })),
+      ),
+    );
+  },
+);
+
 const make = Effect.gen(function* () {
   const manager = yield* SshTunnel.SshEnvironmentManager;
   const runtime = yield* Effect.context<RuntimeServices>();
+  const config = yield* ServerConfig.ServerConfig;
+  const fileSystem = Context.get(runtime, FileSystem.FileSystem);
+  const httpClient = Context.get(runtime, HttpClient.HttpClient);
   const sessions = new Map<
     string,
     { readonly token: string; readonly expiresAt: number; readonly ceilingApplied: boolean }
   >();
-  // Per session key: whether that remote's goat_thread_launch declares launchedBy.
+  // Per session key: the arguments that remote's goat_thread_launch declares.
   // Cleared with each new session, since the remote may have been updated meanwhile.
-  const launchLineageSupport = new Map<string, boolean>();
+  const launchArguments = new Map<string, ReadonlySet<string>>();
   const connected = new Set<string>();
 
   const withRuntime = <A, E>(
@@ -482,15 +546,16 @@ const make = Effect.gen(function* () {
       ceilingApplied: issued.runtimeModeCeilingApplied,
     };
     sessions.set(key, session);
-    launchLineageSupport.delete(key);
+    launchArguments.delete(key);
     return session;
   });
 
   /**
-   * Whether the remote's goat_thread_launch accepts launchedBy. A failed listing
-   * counts as no, uncached, so the launch still goes out once without it.
+   * The arguments the remote's goat_thread_launch declares, or null when the listing
+   * failed. Only a listing that declares report is cached; a failure or an older remote
+   * is asked again on the next launch, so an upgrade takes effect without a new session.
    */
-  const remoteAcceptsLaunchLineage = Effect.fn("SshRemoteDispatch.remoteAcceptsLaunchLineage")(
+  const remoteLaunchArguments = Effect.fn("SshRemoteDispatch.remoteLaunchArguments")(
     function* (remote: {
       readonly target: DesktopSshEnvironmentTarget;
       readonly httpBaseUrl: string;
@@ -498,22 +563,22 @@ const make = Effect.gen(function* () {
       readonly token: string;
     }) {
       const key = `${remote.target.alias}\u0000${remote.ceiling}`;
-      const known = launchLineageSupport.get(key);
+      const known = launchArguments.get(key);
       if (known !== undefined) return known;
       // Effect.exit also catches defects, so even a malformed listing only
-      // drops the optional launchedBy argument and never fails the launch.
+      // leaves the optional launch arguments undecided and never fails the launch.
       const listed = yield* Effect.exit(
         listAcpMcpTools({
           endpoint: new URL("mcp", remote.httpBaseUrl).toString(),
           authorization: `Bearer ${remote.token}`,
         }).pipe(Effect.timeout(LAUNCH_LINEAGE_PROBE_TIMEOUT)),
       );
-      if (Exit.isFailure(listed)) return false;
-      const accepts = listed.value.some(
-        (tool) => tool.name === "goat_thread_launch" && tool.argumentNames.includes("launchedBy"),
+      if (Exit.isFailure(listed)) return null;
+      const declared = new Set(
+        listed.value.find((tool) => tool.name === "goat_thread_launch")?.argumentNames ?? [],
       );
-      launchLineageSupport.set(key, accepts);
-      return accepts;
+      if (declared.has("report")) launchArguments.set(key, declared);
+      return declared;
     },
   );
 
@@ -521,21 +586,33 @@ const make = Effect.gen(function* () {
    * Calls one remote tool with an already issued session. It never issues one
    * itself: issuance happens only right after the caller was re-checked.
    */
-  const callRemote = Effect.fn("SshRemoteDispatch.callRemote")(function* (input: {
+  const callRemote = Effect.fn("SshRemoteDispatch.callRemote")(function* <
+    E = never,
+    R = never,
+  >(input: {
     readonly target: DesktopSshEnvironmentTarget;
     readonly httpBaseUrl: string;
     readonly ceiling: RuntimeMode;
     readonly token: string;
     readonly tool: string;
     readonly arguments: Readonly<Record<string, unknown>>;
+    readonly beforeToolCall?: Effect.Effect<void, E, R> | undefined;
   }) {
     const raw = yield* callAcpMcpTool({
       endpoint: new URL("mcp", input.httpBaseUrl).toString(),
       authorization: `Bearer ${input.token}`,
       tool: input.tool,
       arguments: input.arguments,
+      ...(input.beforeToolCall === undefined ? {} : { beforeToolCall: input.beforeToolCall }),
     }).pipe(
       Effect.mapError((error) => {
+        if (!(error instanceof AcpMcpBridgeError)) return error;
+        if (input.tool === "goat_attachment_prepare_upload" && error.kind === "rpc") {
+          return failure(
+            "remote_refused",
+            `GOAT on ${input.target.alias} cannot prepare attachment uploads. Update it to a version with goat_attachment_prepare_upload; no thread was launched.`,
+          );
+        }
         if (describe(error).includes("HTTP 401")) {
           // Revoked or expired on the remote: forget it so the next call issues a fresh one.
           sessions.delete(`${targetConnectionKey(input.target)}\u0000${input.ceiling}`);
@@ -555,6 +632,194 @@ const make = Effect.gen(function* () {
     if (!result.ok) return yield* failure("remote_refused", result.message);
     return result.value;
   });
+
+  const resolveLaunchAttachmentSources = Effect.fn(
+    "SshRemoteDispatch.resolveLaunchAttachmentSources",
+  )(function* (requested: ReadonlyArray<ChatImageAttachment | ChatFileAttachment>) {
+    const attachments = yield* validateSshLaunchAttachments(requested);
+    return yield* Effect.forEach(
+      attachments,
+      (attachment) =>
+        Effect.gen(function* () {
+          const path = resolveAttachmentPathById({
+            attachmentsDir: config.attachmentsDir,
+            attachmentId: attachment.id,
+          });
+          const expected = resolveAttachmentPath({
+            attachmentsDir: config.attachmentsDir,
+            attachment,
+          });
+          if (path === null || path !== expected) {
+            return yield* failure(
+              "invalid_request",
+              `Attachment '${attachment.name}' is missing or does not match its pending upload.`,
+            );
+          }
+          const info = yield* fileSystem
+            .stat(path)
+            .pipe(
+              Effect.mapError(() =>
+                failure("invalid_request", `Attachment '${attachment.name}' cannot be read.`),
+              ),
+            );
+          if (info.type !== "File" || Number(info.size) !== attachment.sizeBytes) {
+            return yield* failure(
+              "invalid_request",
+              `Attachment '${attachment.name}' has a stored size or file type mismatch.`,
+            );
+          }
+          return { attachment, path };
+        }),
+      { concurrency: 1 },
+    );
+  });
+  const validateLaunchAttachments = Effect.fn("SshRemoteDispatch.validateLaunchAttachments")(
+    function* (requested: ReadonlyArray<ChatImageAttachment | ChatFileAttachment>) {
+      const sources = yield* resolveLaunchAttachmentSources(requested);
+      return sources.map(({ attachment }) => attachment);
+    },
+  );
+
+  interface RemoteConnection {
+    readonly target: DesktopSshEnvironmentTarget;
+    readonly httpBaseUrl: string;
+    readonly ceiling: RuntimeMode;
+    readonly token: string;
+  }
+
+  const discardPreparedAttachments = Effect.fn("SshRemoteDispatch.discardPreparedAttachments")(
+    function* (remote: RemoteConnection, ids: ReadonlyArray<string>) {
+      yield* Effect.forEach(
+        ids,
+        (attachmentId) =>
+          callRemote({
+            ...remote,
+            tool: "goat_attachment_discard",
+            arguments: { attachmentId },
+          }).pipe(Effect.timeoutOption(ATTACHMENT_DISCARD_TIMEOUT_MS), Effect.ignore),
+        { concurrency: 1, discard: true },
+      );
+    },
+  );
+
+  const uploadPendingAttachments = Effect.fn("SshRemoteDispatch.uploadPendingAttachments")(
+    function* <E, R>(
+      remote: RemoteConnection,
+      sources: ReadonlyArray<{
+        readonly attachment: ChatImageAttachment | ChatFileAttachment;
+        readonly path: string;
+      }>,
+      preparedIds: string[],
+      beforeLaunch: Effect.Effect<void, E, R>,
+    ) {
+      const uploaded: Array<ChatImageAttachment | ChatFileAttachment> = [];
+      for (const { attachment, path } of sources) {
+        yield* beforeLaunch;
+        const answer = yield* callRemote({
+          ...remote,
+          tool: "goat_attachment_prepare_upload",
+          arguments: {
+            upload: {
+              type: attachment.type,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+            },
+          },
+          beforeToolCall: beforeLaunch,
+        }).pipe(Effect.timeoutOption(ATTACHMENT_PREPARE_TIMEOUT_MS));
+        if (Option.isNone(answer)) {
+          return yield* failure(
+            "host_unavailable",
+            `Preparing an attachment on ${remote.target.alias} timed out.`,
+          );
+        }
+        // Track a valid id before decoding the URL, so malformed metadata still rolls it back.
+        const identity = yield* decodePreparedIdentity(answer.value).pipe(
+          Effect.mapError(() =>
+            failure(
+              "remote_refused",
+              "The remote upload preparation returned no valid attachment id.",
+            ),
+          ),
+        );
+        if (!Claims.attachmentIsPendingUpload({ ...attachment, id: identity.attachmentId })) {
+          return yield* failure(
+            "remote_refused",
+            "The remote upload preparation returned a non-pending id.",
+          );
+        }
+        preparedIds.push(identity.attachmentId);
+        const prepared = yield* decodePreparedUpload(answer.value).pipe(
+          Effect.mapError(() =>
+            failure(
+              "remote_refused",
+              "The remote upload preparation returned invalid URL metadata.",
+            ),
+          ),
+        );
+        const url = yield* Effect.try({
+          try: () => new URL(prepared.relativeUrl, remote.httpBaseUrl),
+          catch: () => failure("remote_refused", "The remote upload URL is malformed."),
+        });
+        if (
+          !prepared.relativeUrl.startsWith(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`) ||
+          url.origin !== new URL(remote.httpBaseUrl).origin ||
+          !url.pathname.startsWith(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`) ||
+          url.username !== "" ||
+          url.password !== ""
+        ) {
+          return yield* failure(
+            "remote_refused",
+            "The remote upload URL is not on the forwarded attachment route.",
+          );
+        }
+        yield* beforeLaunch;
+        const remainingMs = prepared.expiresAt - (yield* Clock.currentTimeMillis);
+        if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+          return yield* failure("remote_refused", "The remote attachment upload URL has expired.");
+        }
+        const request = HttpClientRequest.post(url.toString()).pipe(
+          HttpClientRequest.bodyStream(fileSystem.stream(path), {
+            contentType: attachment.mimeType,
+            contentLength: attachment.sizeBytes,
+          }),
+        );
+        // HttpClient's automatic span records url.full/url.path, which contain the
+        // signed upload capability. Keep this request out of URL-bearing telemetry.
+        const response = yield* Effect.scoped(httpClient.execute(request)).pipe(
+          Effect.provideService(HttpClient.TracerDisabledWhen, () => true),
+          Effect.mapError(() =>
+            failure(
+              "host_unavailable",
+              `Uploading an attachment to ${remote.target.alias} failed.`,
+            ),
+          ),
+          Effect.timeoutOption(Math.min(ATTACHMENT_UPLOAD_TIMEOUT_MS, remainingMs)),
+        );
+        if (Option.isNone(response)) {
+          return yield* failure(
+            "host_unavailable",
+            `Uploading an attachment to ${remote.target.alias} timed out.`,
+          );
+        }
+        if (response.value.status !== 204) {
+          return yield* failure(
+            "remote_refused",
+            `The remote attachment upload returned HTTP ${response.value.status}; expected 204.`,
+          );
+        }
+        uploaded.push({
+          type: attachment.type,
+          id: identity.attachmentId,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+        });
+      }
+      return uploaded;
+    },
+  );
 
   const findProject = Effect.fn("SshRemoteDispatch.findProject")(function* (
     remote: {
@@ -694,6 +959,7 @@ const make = Effect.gen(function* () {
     input: SshLaunchInput,
     beforeLaunch: Effect.Effect<void, E, R>,
   ) {
+    const sources = yield* resolveLaunchAttachmentSources(input.attachments ?? []);
     const target = input.target ?? (yield* resolveHost(input.host!));
     const folder = yield* browseTarget(target, { path: input.cwd, limit: 0 });
     const broad = input.allowBroadWorkspaceRoot === true ? null : broadWorkspaceRoot(folder);
@@ -764,6 +1030,13 @@ const make = Effect.gen(function* () {
       );
     }
 
+    if (sources.length > 0 && !session.ceilingApplied) {
+      return yield* failure(
+        "remote_refused",
+        `GOAT on ${target.alias} cannot apply the caller's ceiling to attachment writes. Update it before launching with attachments.`,
+      );
+    }
+
     yield* beforeLaunch;
     let project = yield* findProject(remote, folder);
     let projectCreated = false;
@@ -797,50 +1070,90 @@ const make = Effect.gen(function* () {
       notes.push(`Registered ${folder.path} as a new project on ${target.alias}.`);
     }
 
+    const declared =
+      input.launchedBy === undefined && input.report === undefined
+        ? null
+        : yield* remoteLaunchArguments(remote);
     const forwardLaunchedBy =
-      input.launchedBy !== undefined && (yield* remoteAcceptsLaunchLineage(remote));
-    // The caller's run may have ended, or its modes changed, while SSH ran.
-    yield* beforeLaunch;
-    const rawLaunched = yield* callRemote({
-      ...remote,
-      tool: "goat_thread_launch",
-      arguments: {
-        projectId: project.id,
-        title: input.title,
+      input.launchedBy !== undefined && declared?.has("launchedBy") === true;
+    // A remote whose goat_thread_launch declares arguments but not report would drop the
+    // binding and leave its agent told to report. An unknown or schemaless listing still
+    // sends it, and a remote that refuses it is relaunched without it by the coordinator.
+    const forwardReport =
+      input.report !== undefined &&
+      (declared === null || declared.size === 0 || declared.has("report"));
+    const message =
+      forwardReport && input.reportNote !== undefined && input.message?.trim()
+        ? `${input.message}\n\n${input.reportNote}`
+        : input.message;
+    const projectId = project.id;
+    const preparedIds: string[] = [];
+    return yield* Effect.gen(function* () {
+      yield* beforeLaunch;
+      const attachments = yield* uploadPendingAttachments(
+        remote,
+        sources,
+        preparedIds,
+        beforeLaunch,
+      );
+      // Authority may have changed while the last upload completed.
+      yield* beforeLaunch;
+      const rawLaunched = yield* callRemote({
+        ...remote,
+        tool: "goat_thread_launch",
+        beforeToolCall: beforeLaunch,
+        arguments: {
+          projectId,
+          title: input.title,
+          workspaceStrategy,
+          runtimeMode: input.runtimeMode,
+          ...(input.interactionMode === undefined
+            ? {}
+            : { interactionMode: input.interactionMode }),
+          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+          ...(message === undefined ? {} : { message }),
+          ...(forwardLaunchedBy ? { launchedBy: input.launchedBy } : {}),
+          ...(attachments.length === 0 ? {} : { attachments }),
+          ...(forwardReport ? { report: input.report } : {}),
+        },
+      });
+      const launched = yield* decodeRemoteThread(rawLaunched).pipe(
+        Effect.mapError(
+          () =>
+            new SshRemoteDispatchError({
+              reason: "remote_refused",
+              launchMayHaveStarted: true,
+              message:
+                "The remote launch returned no thread acknowledgement; inspect its threads before retrying.",
+            }),
+        ),
+      );
+      const launchedReport = (rawLaunched as { readonly report?: unknown } | null)?.report as
+        | { readonly correlationId?: string }
+        | null
+        | undefined;
+      notes.push(
+        `The thread lives in the GOAT environment on ${target.alias}. Read it with goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
+      );
+      return {
+        host: target.alias,
+        cwd: folder.path,
+        projectId,
+        projectCreated,
+        threadId: launched.threadId,
+        runId: launched.runId ?? null,
+        reportsSupported:
+          forwardReport && launchedReport?.correlationId === input.report?.correlationId,
         workspaceStrategy,
         runtimeMode: input.runtimeMode,
-        ...(input.interactionMode === undefined ? {} : { interactionMode: input.interactionMode }),
-        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-        ...(input.message === undefined ? {} : { message: input.message }),
-        ...(forwardLaunchedBy ? { launchedBy: input.launchedBy } : {}),
-      },
-    });
-    const launched = yield* decodeRemoteThread(rawLaunched).pipe(
-      Effect.mapError(
-        () =>
-          new SshRemoteDispatchError({
-            reason: "remote_refused",
-            launchMayHaveStarted: true,
-            message:
-              "The remote launch returned no thread acknowledgement; inspect its threads before retrying.",
-          }),
+        remoteServerKind: bootstrap.remoteServerKind ?? null,
+        notes,
+      } satisfies SshLaunchResult;
+    }).pipe(
+      Effect.onExit((exit) =>
+        Exit.isFailure(exit) ? discardPreparedAttachments(remote, preparedIds) : Effect.void,
       ),
     );
-    notes.push(
-      `The thread lives in the GOAT environment on ${target.alias}. Read it with goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
-    );
-    return {
-      host: target.alias,
-      cwd: folder.path,
-      projectId: project.id,
-      projectCreated,
-      threadId: launched.threadId,
-      runId: typeof launched.runId === "string" ? launched.runId : null,
-      workspaceStrategy,
-      runtimeMode: input.runtimeMode,
-      remoteServerKind: bootstrap.remoteServerKind ?? null,
-      notes,
-    } satisfies SshLaunchResult;
   });
 
   const unavailable = (alias: string) =>
@@ -944,6 +1257,7 @@ const make = Effect.gen(function* () {
   return SshRemoteDispatch.of({
     listHosts,
     browse,
+    validateLaunchAttachments,
     launchThread,
     callHostTool,
     connectedHosts,

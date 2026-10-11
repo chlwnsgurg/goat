@@ -1,3 +1,4 @@
+import * as RemoteReportInbox from "../../remoteReports/RemoteReportInbox.ts";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -372,6 +373,7 @@ export function layerWithRegistry<Error>(
     Layer.provide(
       Layer.mergeAll(
         McpAppModelContext.layerEmpty,
+        RemoteReportInbox.layerEmpty,
         layerCheckpointServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,

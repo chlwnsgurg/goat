@@ -1,6 +1,6 @@
+import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import {
   OrchestratorMcpFailure,
-  OrchestratorMcpFailureCode,
   OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -26,6 +26,7 @@ import * as Schema from "effect/Schema";
 
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { hostFailure } from "./hostFailure.ts";
 import type { LaunchWatch } from "./launchWatch.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
@@ -50,31 +51,6 @@ const WAIT_ANSWER_MARGIN_MS = 60_000;
 
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message: Array.from(message).slice(0, 2000).join("") });
-
-const isFailureCode = Schema.is(OrchestratorMcpFailureCode);
-
-/** How an agent hears about a failed call on another machine. */
-export function hostFailure(
-  error: SshRemoteDispatch.SshRemoteDispatchError,
-): OrchestratorMcpFailure {
-  switch (error.reason) {
-    case "invalid_request":
-    case "host_unknown":
-      return failure("invalid_request", error.message);
-    case "ssh_failed":
-    case "host_unavailable":
-      return failure("host_unavailable", error.message);
-    case "caller_changed":
-      return failure("runtime_mode_escalation_denied", error.message);
-    case "remote_refused":
-      return failure(
-        error.remoteCode !== undefined && isFailureCode(error.remoteCode)
-          ? error.remoteCode
-          : "orchestration_error",
-        error.message,
-      );
-  }
-}
 
 type ListItem = OrchestratorMcpThreadListItem;
 
@@ -220,6 +196,7 @@ const authorize = (writes: boolean) =>
 const make = Effect.gen(function* () {
   const local = yield* OrchestratorMcpService.OrchestratorMcpService;
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+  const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const launchWatches = yield* LaunchWatchService.LaunchWatchService;
 
@@ -426,6 +403,21 @@ const make = Effect.gen(function* () {
     if (input.host === undefined && input.threadId === launcherThreadId) {
       return yield* failure("invalid_request", "A thread cannot watch itself.");
     }
+    if (
+      input.host !== undefined &&
+      (yield* coordinator
+        .isTaskThread(input.host, input.threadId)
+        .pipe(
+          Effect.mapError(() =>
+            failure("orchestration_error", "Unable to read remote task ownership."),
+          ),
+        ))
+    ) {
+      return yield* failure(
+        "invalid_request",
+        "This remote thread backs a delegated task. Use task_status and task_cancel; its completion is already delivered to its parent.",
+      );
+    }
     // Reading the thread checks the caller may see it, here or on the host.
     const read = yield* readThread(scope, {
       threadId: input.threadId,
@@ -484,7 +476,19 @@ const make = Effect.gen(function* () {
             },
             decodeSend,
           )
-      ).pipe(Effect.tap((result) => rearmAfterSend(scope, input, result))),
+      ).pipe(
+        Effect.tap((result) => rearmAfterSend(scope, input, result)),
+        // A send to a remote thread this one launched follows its reports again.
+        Effect.tap(() =>
+          input.host === undefined
+            ? Effect.void
+            : coordinator
+                .resume(input.host, input.threadId)
+                .pipe(
+                  Effect.catch(() => Effect.logWarning("Could not resume SSH report observation.")),
+                ),
+        ),
+      ),
     interruptThread: (scope, input) =>
       input.host === undefined
         ? local.interruptThread(scope, input)

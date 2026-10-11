@@ -97,6 +97,35 @@ export const OrchestratorMcpTargetOptions = Schema.Union([
 ]);
 export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.Type;
 
+/**
+ * Another machine's SSH host alias. Threads are keyed by (host, threadId): a
+ * thread id belongs to the environment that created it.
+ */
+export const OrchestratorMcpHost = TrimmedNonEmptyString.check(Schema.isMaxLength(255)).annotate({
+  description:
+    "Another machine's SSH host alias, from goat_ssh_host_list or the host goat_ssh_thread_launch returned. Omit for this environment.",
+});
+
+export const SshLaunchWorkspace = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("cwd") }),
+  Schema.Struct({
+    type: Schema.Literal("worktree"),
+    branch: TrimmedNonEmptyString,
+    baseRef: Schema.optional(TrimmedNonEmptyString),
+    startFromOrigin: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("existing_worktree"),
+    worktreePath: TrimmedNonEmptyString,
+    branch: Schema.optional(TrimmedNonEmptyString),
+  }),
+]).annotate({
+  description:
+    "cwd runs in the folder itself. worktree creates a new Git worktree of the folder's repository on the remote, on a new branch from baseRef (default: the folder's checked-out branch). existing_worktree reuses one of the worktrees goat_ssh_browse reported. Default cwd.",
+});
+
+export type SshLaunchWorkspace = typeof SshLaunchWorkspace.Type;
+
 export const OrchestratorMcpTarget = Schema.Struct({
   providerInstanceId: Schema.optional(
     ProviderInstanceId.annotate({
@@ -127,6 +156,11 @@ export const OrchestratorMcpTarget = Schema.Struct({
   ),
 });
 export type OrchestratorMcpTarget = typeof OrchestratorMcpTarget.Type;
+
+export const OrchestratorMcpDelegateTarget = Schema.Struct({
+  ...OrchestratorMcpTarget.fields,
+  host: Schema.optional(OrchestratorMcpHost),
+});
 
 export const OrchestratorMcpRuntimeMode = Schema.Union([Schema.Literal("inherit"), RuntimeMode]);
 export type OrchestratorMcpRuntimeMode = typeof OrchestratorMcpRuntimeMode.Type;
@@ -171,7 +205,10 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
   }),
-  target: Schema.optional(OrchestratorMcpTarget),
+  target: Schema.optional(OrchestratorMcpDelegateTarget),
+  remote: Schema.optional(
+    Schema.Struct({ cwd: TrimmedNonEmptyString, workspace: Schema.optional(SshLaunchWorkspace) }),
+  ),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   mode: Schema.optional(
@@ -192,7 +229,8 @@ export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTas
 
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
-  childThreadId: ThreadId,
+  host: Schema.optional(Schema.String),
+  childThreadId: Schema.NullOr(ThreadId),
   childRunId: Schema.NullOr(RunId),
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus,
@@ -287,15 +325,6 @@ const OrchestratorMcpProjectTarget = Schema.optional(
       "Project to act on. Omit for the calling thread's project; required when the caller is not a GOAT thread.",
   }),
 );
-
-/**
- * Another machine's SSH host alias. Threads are keyed by (host, threadId): a
- * thread id belongs to the environment that created it.
- */
-export const OrchestratorMcpHost = TrimmedNonEmptyString.check(Schema.isMaxLength(255)).annotate({
-  description:
-    "Another machine's SSH host alias, from goat_ssh_host_list or the host goat_ssh_thread_launch returned. Omit for this environment.",
-});
 
 /** Set on results that came from another machine; absent for this environment. */
 const OrchestratorMcpResultHost = Schema.optional(Schema.String);

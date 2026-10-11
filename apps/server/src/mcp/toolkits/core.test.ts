@@ -1,3 +1,4 @@
+import * as RemoteDispatchCoordinator from "../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -49,6 +50,7 @@ import { PreviewControlsToolkit } from "./previewControls/tools.ts";
 import { EnvironmentToolkit } from "./environment/tools.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
 import { ProjectToolkit } from "./project/tools.ts";
+import { RemoteReportToolkit } from "./remoteReport/tools.ts";
 import { AttachmentToolkit } from "./attachment/tools.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
@@ -96,6 +98,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     HtmlToolkit,
     SshToolkit,
     ConnectionToolkit,
+    RemoteReportToolkit,
   ]) {
     for (const tool of Object.values(toolkit.tools)) {
       expect(names.has(tool.name)).toBe(false);
@@ -126,6 +129,8 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_connection_remove",
     "goat_environment_preferences_update",
     "goat_environment_read",
+    "goat_origin_report",
+    "goat_origin_reports_wait",
     "goat_pending_request_list",
     "goat_pending_request_read",
     "goat_pending_request_respond",
@@ -145,6 +150,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_queue_reorder",
     "goat_ssh_browse",
     "goat_ssh_host_list",
+    "goat_ssh_reports",
     "goat_ssh_thread_launch",
     "goat_thread_configuration",
     "goat_thread_configure",
@@ -168,7 +174,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_worktree_list",
     "goat_worktree_status",
   ]);
-  expect(names.size).toBe(89);
+  expect(names.size).toBe(92);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
@@ -660,6 +666,9 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(
           Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
@@ -702,6 +711,9 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(
           Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
@@ -772,6 +784,9 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(
           Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),

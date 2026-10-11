@@ -103,14 +103,19 @@ function isNonterminalNodeStatus(status: string): boolean {
 function isAppOwnedDelegation(task: {
   readonly origin: OrchestrationV2Subagent["origin"];
   readonly childThreadId: ThreadId | null;
+  readonly remote?: OrchestrationV2Subagent["remote"];
 }): boolean {
-  return task.origin === "app_owned" && task.childThreadId !== null;
+  return task.origin === "app_owned" && (task.childThreadId !== null || task.remote !== undefined);
 }
 
 function isAppOwnedDelegationItem(
   item: OrchestrationV2ThreadProjection["turnItems"][number],
+  delegatedTaskNodeIds: ReadonlySet<string>,
 ): boolean {
-  return item.type === "subagent" && isAppOwnedDelegation(item);
+  return (
+    item.type === "subagent" &&
+    (isAppOwnedDelegation(item) || delegatedTaskNodeIds.has(item.subagentId))
+  );
 }
 
 function providerThreadHasPendingBackgroundTasks(
@@ -419,7 +424,7 @@ export const make = Effect.gen(function* () {
           (candidate) =>
             candidate.runId === run.id &&
             (candidate.nodeId === null || !messageRequestNodeIds.has(candidate.nodeId)) &&
-            !isAppOwnedDelegationItem(candidate) &&
+            !isAppOwnedDelegationItem(candidate, delegatedTaskNodeIds) &&
             (candidate.status === "pending" ||
               candidate.status === "running" ||
               candidate.status === "waiting"),
@@ -452,7 +457,10 @@ export const make = Effect.gen(function* () {
         if (!isBackgroundCapableTurnItemType(item.type)) {
           continue;
         }
-        if (!isNonterminalTurnItemStatus(item.status) || isAppOwnedDelegationItem(item)) {
+        if (
+          !isNonterminalTurnItemStatus(item.status) ||
+          isAppOwnedDelegationItem(item, delegatedTaskNodeIds)
+        ) {
           continue;
         }
         const providerInstanceId = resolveStaleBackgroundItemProviderInstanceId(item, projection);

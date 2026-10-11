@@ -6,6 +6,10 @@ import {
   ProjectId,
   ProjectCreatePayload,
   OrchestratorMcpFailure,
+  RuntimeMode,
+  ThreadId,
+  type ChatFileAttachment,
+  type ChatImageAttachment,
   type DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -14,23 +18,30 @@ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Ref from "effect/Ref";
+import * as Tracer from "effect/Tracer";
+import * as TestClock from "effect/testing/TestClock";
+import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as SshConfig from "@t3tools/ssh/config";
 import { SshCommandError } from "@t3tools/ssh/errors";
-import { RuntimeMode, ThreadId } from "@t3tools/contracts";
 import * as SshTunnel from "@t3tools/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
-import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
-import { FetchHttpClient } from "effect/http";
+import { FetchHttpClient, HttpClient } from "effect/http";
 import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
 
 import * as ServerConfig from "../config.ts";
-import { hostFailure } from "../mcp/HostThreadsMcpService.ts";
+import { hostFailure } from "../mcp/hostFailure.ts";
 import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
 import {
   broadWorkspaceRoot,
@@ -1194,9 +1205,21 @@ describe("SSH dispatch launch lineage", () => {
     threadTitle: "Orchestrator",
   };
 
+  const reportBinding = {
+    correlationId: "rr-lineage",
+    originLabel: "studio",
+    originThreadId: ThreadId.make("orchestrator"),
+    readKeyHash: "0".repeat(64),
+  };
+
   /** Launches against a fake remote and returns the arguments goat_thread_launch received. */
   const launchAgainst = (remote: {
     readonly declaresLaunchedBy: boolean;
+    readonly declaresReport?: boolean;
+    /** Launch with a report binding and its agent note. */
+    readonly withReport?: boolean;
+    /** Launch twice through one dispatch service; the remote declares report from the second. */
+    readonly upgradeBetweenLaunches?: boolean;
     readonly listFails?: boolean;
     /** The listing never answers until the caller gives up and aborts it. */
     readonly onListStalled?: () => void;
@@ -1205,6 +1228,7 @@ describe("SSH dispatch launch lineage", () => {
       const host = "lineage-host";
       const target = { alias: host, hostname: host, username: null, port: null };
       const launches: Array<Record<string, unknown>> = [];
+      let declaresReport = remote.declaresReport === true;
       const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
         const request = JSON.parse(String(init?.body)) as {
           id?: string;
@@ -1244,6 +1268,7 @@ describe("SSH dispatch launch lineage", () => {
                       properties: {
                         title: { type: "string" },
                         ...(remote.declaresLaunchedBy ? { launchedBy: { type: "object" } } : {}),
+                        ...(declaresReport ? { report: { type: "object" } } : {}),
                       },
                     },
                   },
@@ -1254,11 +1279,21 @@ describe("SSH dispatch launch lineage", () => {
             if (request.params?.name === "goat_thread_launch") {
               launches.push(request.params.arguments ?? {});
             }
+            const report = request.params?.arguments?.report as
+              | { readonly correlationId: string }
+              | undefined;
             return Response.json({
               jsonrpc: "2.0",
               id: request.id,
               result: {
-                structuredContent: { projects: [], id: "new-project", threadId: "new-thread" },
+                structuredContent: {
+                  projects: [],
+                  id: "new-project",
+                  threadId: "new-thread",
+                  ...(report === undefined
+                    ? {}
+                    : { report: { correlationId: report.correlationId } }),
+                },
               },
             });
           }
@@ -1299,7 +1334,7 @@ describe("SSH dispatch launch lineage", () => {
       try {
         const result = yield* Effect.gen(function* () {
           const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
-          return yield* dispatch.launchThread(
+          const launch = dispatch.launchThread(
             {
               host,
               cwd: "/home/agent/repo",
@@ -1308,9 +1343,16 @@ describe("SSH dispatch launch lineage", () => {
               runtimeMode: "approval-required",
               callerRuntimeMode: "approval-required",
               launchedBy: launcher,
+              ...(remote.withReport === true
+                ? { message: "Do the work", report: reportBinding, reportNote: "Report back." }
+                : {}),
             },
             Effect.void,
           );
+          if (remote.upgradeBetweenLaunches !== true) return yield* launch;
+          yield* launch;
+          declaresReport = true;
+          return yield* launch;
         }).pipe(
           Effect.provide(
             SshRemoteDispatch.layer.pipe(
@@ -1334,6 +1376,35 @@ describe("SSH dispatch launch lineage", () => {
       expect(result.threadId).toBe("new-thread");
       expect(launches).toHaveLength(1);
       expect(launches[0]?.launchedBy).toEqual(launcher);
+    }),
+  );
+
+  it.effect("sends the report binding and its note only to a remote that may take it", () =>
+    Effect.gen(function* () {
+      for (const [remote, sent] of [
+        [{ declaresLaunchedBy: true, declaresReport: true }, true],
+        [{ declaresLaunchedBy: true, declaresReport: false }, false],
+        // An unknown listing still sends it; a refusal is retried by the coordinator.
+        [{ declaresLaunchedBy: true, listFails: true }, true],
+      ] as const) {
+        const { result, launches } = yield* launchAgainst({ ...remote, withReport: true });
+        expect(launches).toHaveLength(1);
+        expect(launches[0]?.report).toEqual(sent ? reportBinding : undefined);
+        expect(launches[0]?.message).toBe(sent ? "Do the work\n\nReport back." : "Do the work");
+        expect(result.reportsSupported).toBe(sent);
+      }
+    }),
+  );
+
+  it.effect("sends the report binding once an older remote is upgraded in the same session", () =>
+    Effect.gen(function* () {
+      const { result, launches } = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        withReport: true,
+        upgradeBetweenLaunches: true,
+      });
+      expect(launches.map((launch) => launch.report)).toEqual([undefined, reportBinding]);
+      expect(result.reportsSupported).toBe(true);
     }),
   );
 
@@ -1367,5 +1438,1150 @@ describe("SSH dispatch launch lineage", () => {
       expect(launches).toHaveLength(1);
       expect(launches[0]).not.toHaveProperty("launchedBy");
     }),
+  );
+});
+it.effect.each(["matching", "missing", "wrong"] as const)(
+  "report support requires %s echo",
+  (echo) =>
+    Effect.gen(function* () {
+      const host = "report-box";
+      const target = { alias: host, hostname: host, username: null, port: null };
+      const binding = {
+        correlationId: "rr-fixture",
+        originLabel: "fixture",
+        originThreadId: ThreadId.make("origin"),
+        readKeyHash: "a".repeat(64),
+      };
+      let sent: Record<string, unknown> | undefined;
+      const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as {
+          id?: string;
+          method: string;
+          params?: { name?: string; arguments?: Record<string, unknown> };
+        };
+        if (request.method === "initialize")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              protocolVersion: "2025-06-18",
+              capabilities: { tools: {} },
+              serverInfo: { name: "GOAT", version: "fixture" },
+            },
+          });
+        if (request.method === "notifications/initialized")
+          return new Response(null, { status: 202 });
+        if (request.method === "tools/list")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              tools: ["goat_project_list", "goat_thread_launch"].map((name) => ({ name })),
+            },
+          });
+        const content =
+          request.params?.name === "goat_project_list"
+            ? {
+                projects: [{ id: "project", workspaceRoot: "/projects/fixture" }],
+                nextCursor: null,
+              }
+            : (() => {
+                sent = request.params?.arguments;
+                return {
+                  threadId: "remote",
+                  runId: "run-a",
+                  ...(echo === "missing"
+                    ? {}
+                    : {
+                        report: {
+                          correlationId: echo === "matching" ? binding.correlationId : "another",
+                        },
+                      }),
+                };
+              })();
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { structuredContent: content },
+        });
+      });
+      const manager = SshTunnel.SshEnvironmentManager.of({
+        ensureEnvironment: () =>
+          Effect.succeed({
+            target,
+            httpBaseUrl: "http://projects/fixture.invalid/",
+            wsBaseUrl: "ws://projects/fixture.invalid/",
+            pairingToken: null,
+          }),
+        disconnectEnvironment: () => Effect.void,
+        revalidateTunnels: () => Effect.void,
+        issueMcpClientSession: () =>
+          Effect.succeed({ token: "fixture", expiresAt: null, runtimeModeCeilingApplied: true }),
+        runRemoteScript: () =>
+          Effect.succeed({
+            stdout:
+              "T3B\t1\nHOME\t/home/projects/fixture\nOS\tLinux\nPATH\t/projects/fixture\nREAL\t/projects/fixture\n",
+            stderr: "",
+          }),
+      });
+      const hosts = vi
+        .spyOn(SshConfig, "discoverSshHosts")
+        .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+      const managerLayer = vi
+        .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+        .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+      vi.stubGlobal("fetch", fetchEndpoint);
+      try {
+        const result = yield* Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          return yield* dispatch.launchThread(
+            {
+              host,
+              cwd: "/projects/fixture",
+              title: "fixture",
+              workspace: { type: "cwd" },
+              runtimeMode: "approval-required",
+              callerRuntimeMode: "approval-required",
+              report: binding,
+            },
+            Effect.void,
+          );
+        }).pipe(
+          Effect.provide(
+            SshRemoteDispatch.layer.pipe(
+              Layer.provide(
+                ServerConfig.layerTest("/projects/fixture", { prefix: "report-echo-test-" }),
+              ),
+              Layer.provide(FetchHttpClient.layer),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        expect(sent?.report).toEqual(binding);
+        expect(result.reportsSupported).toBe(echo === "matching");
+        expect(result.runId).toBe("run-a");
+      } finally {
+        vi.unstubAllGlobals();
+        managerLayer.mockRestore();
+        hosts.mockRestore();
+      }
+    }),
+);
+
+// In-file fixture; deliberately serial because the existing harness stubs global fetch.
+describe("SshRemoteDispatch SSH attachments", () => {
+  type Attachment = ChatFileAttachment | ChatImageAttachment;
+  const originId = (n: number, ext: string) =>
+    `pending-00000000-0000-4000-8000-${String(n).padStart(12, "0")}-${ext}`;
+  const remoteId = (n: number, ext: string) =>
+    `pending-10000000-0000-4000-8000-${String(n).padStart(12, "0")}-${ext}`;
+  const inputs: Attachment[] = [
+    {
+      type: "file",
+      id: originId(1, "bin"),
+      name: "payload.bin",
+      mimeType: "application/octet-stream",
+      sizeBytes: 5,
+    },
+    {
+      type: "image",
+      id: originId(2, "png"),
+      name: "shot.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+    },
+  ];
+  const binaries = [new Uint8Array([0, 255, 128, 13, 10]), new Uint8Array([137, 0, 254, 127])];
+  const metadata = (a: Attachment) => ({
+    type: a.type,
+    name: a.name,
+    mimeType: a.mimeType.toLowerCase(),
+    sizeBytes: a.sizeBytes,
+  });
+  const refs = (as: ReadonlyArray<Attachment>) =>
+    as.map((a, i) => ({
+      ...metadata(a),
+      id: remoteId(i + 1, a.type === "image" ? "png" : "bin"),
+    }));
+  const binding = {
+    correlationId: "attachment-correlation",
+    originLabel: "fixture",
+    originThreadId: ThreadId.make("origin"),
+    readKeyHash: "a".repeat(64),
+  };
+  const project = "goat_project_list";
+  const prepare = "goat_attachment_prepare_upload";
+  const discard = "goat_attachment_discard";
+  const launchTool = "goat_thread_launch";
+  type Options = {
+    sources?: ReadonlyArray<Attachment>;
+    bytes?: ReadonlyArray<Uint8Array>;
+    missingProject?: boolean;
+    ceilingApplied?: boolean;
+    sourceFault?:
+      | "missing"
+      | "wrong metadata extension"
+      | "stat failure"
+      | "directory"
+      | "stored-size mismatch";
+    streamFailure?: boolean;
+    prepareEncoding?: "structuredContent" | "JSON text";
+    missingPrepare?: boolean;
+    prepareRefusal?: boolean;
+    preparePatch?: Readonly<Record<string, unknown>>;
+    uploadStatus?: number;
+    uploadThrows?: boolean;
+    receiverLengthDelta?: number;
+    launchFailure?: "structured refusal" | "lost HTTP response" | "response missing threadId";
+    discardFailure?: "refusal" | "transport failure" | "timeout";
+    expiresIn?: number;
+    blockPrepare?: number;
+    blockUpload?: number;
+    blockInitialize?: number;
+    onPrepared?: (n: number) => void;
+    onUploaded?: (n: number) => void;
+    onProject?: () => void;
+  };
+  const withAttachments = <A, E>(
+    options: Options,
+    body: (f: {
+      sources: ReadonlyArray<Attachment>;
+      record: {
+        events: string[];
+        tools: Array<{
+          name: string;
+          arguments: Record<string, unknown>;
+          authorization: string | null;
+        }>;
+        uploads: Array<{
+          index: number;
+          bytes: Uint8Array;
+          authorization: string | null;
+          status: number;
+        }>;
+        browse: number;
+        bootstrap: number;
+        sessions: number;
+      };
+      started: Deferred.Deferred<void>;
+      release: Deferred.Deferred<void>;
+      run: <E1 = never, R1 = never>(
+        patch?: Partial<SshRemoteDispatch.SshLaunchInput>,
+        check?: Effect.Effect<void, E1, R1>,
+      ) => Effect.Effect<
+        SshRemoteDispatch.SshLaunchResult,
+        SshRemoteDispatch.SshRemoteDispatchError | E1,
+        R1
+      >;
+      assertTrace: (events: ReadonlyArray<string>) => void;
+    }) => Effect.Effect<A, E>,
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const now = yield* Clock.currentTimeMillis;
+        const sources = options.sources ?? inputs;
+        const bytes = options.bytes ?? binaries;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const never = yield* Deferred.make<void>();
+        const record = {
+          events: [] as string[],
+          tools: [] as Array<{
+            name: string;
+            arguments: Record<string, unknown>;
+            authorization: string | null;
+          }>,
+          uploads: [] as Array<{
+            index: number;
+            bytes: Uint8Array;
+            authorization: string | null;
+            status: number;
+          }>,
+          browse: 0,
+          bootstrap: 0,
+          sessions: 0,
+        };
+        const paths: string[] = [];
+        for (const [i, attachment] of sources.entries()) {
+          const path = resolveAttachmentPath({ attachmentsDir: config.attachmentsDir, attachment });
+          if (path === null) throw new Error("Fixture path must resolve");
+          paths.push(path);
+          yield* fs.writeFile(path, bytes[i]!);
+        }
+        if (options.sourceFault === "missing") yield* fs.remove(paths[0]!);
+        if (options.sourceFault === "directory") {
+          yield* fs.remove(paths[0]!);
+          yield* fs.makeDirectory(paths[0]!);
+        }
+        if (options.sourceFault === "stored-size mismatch")
+          yield* fs.writeFile(paths[0]!, new Uint8Array([7]));
+        // Snapshot the resulting sandbox files, so intentional fixture damage is not called rollback.
+        const snapshots = yield* Effect.forEach(paths, (path) =>
+          Effect.gen(function* () {
+            if (!(yield* fs.exists(path))) return { path, bytes: null };
+            const stat = yield* fs.stat(path);
+            return { path, bytes: stat.type === "File" ? yield* fs.readFile(path) : null };
+          }),
+        );
+        const testFs = FileSystem.FileSystem.of({
+          ...fs,
+          stat: (path) =>
+            options.sourceFault === "stat failure" && path === paths[0]
+              ? fs.stat(`${config.attachmentsDir}/absent-stat-fixture`)
+              : fs.stat(path),
+          stream: (path, settings) =>
+            options.streamFailure && path === paths[1]
+              ? Stream.unwrap(
+                  fs
+                    .stat(`${config.attachmentsDir}/absent-stream-fixture`)
+                    .pipe(Effect.map(() => fs.stream(path, settings))),
+                )
+              : fs.stream(path, settings),
+        });
+        const expectedByRoute = new Map<string, { index: number; bytes: Uint8Array }>();
+        let prepares = 0;
+        let initializes = 0;
+        let uploadStarts = 0;
+        const releaseFetch = Promise.withResolvers<void>();
+        yield* Deferred.await(release).pipe(
+          Effect.andThen(Effect.sync(() => releaseFetch.resolve())),
+          Effect.forkScoped,
+        );
+        // The fetch mock is a Promise boundary. Signal its milestone without starting a runtime;
+        // blocked requests settle only on the fixture release or the bridge's AbortSignal.
+        const waitFetch = (init?: RequestInit, waitForRelease = false) => {
+          Deferred.doneUnsafe(started, Effect.void);
+          return new Promise<void>((resolve, reject) => {
+            const signal = init?.signal;
+            const abort = () => reject(new DOMException("Fixture request aborted", "AbortError"));
+            if (signal?.aborted) return abort();
+            signal?.addEventListener("abort", abort, { once: true });
+            if (waitForRelease)
+              void releaseFetch.promise.then(() => {
+                signal?.removeEventListener("abort", abort);
+                resolve();
+              });
+          });
+        };
+        const fetchEndpoint = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          const parsed = new URL(String(url));
+          if (parsed.pathname.startsWith("/api/attachments/upload/")) {
+            expect(init?.method).toBe("POST");
+            const expected = expectedByRoute.get(parsed.pathname);
+            if (expected === undefined) throw new Error("Upload without a prepared token");
+            const data = new Uint8Array(await new Response(init?.body).arrayBuffer());
+            const status =
+              options.uploadStatus !== undefined && expected.index === 2
+                ? options.uploadStatus
+                : data.length ===
+                    expected.bytes.length +
+                      (expected.index === 2 ? (options.receiverLengthDelta ?? 0) : 0)
+                  ? 204
+                  : 400;
+            record.events.push(`post:${expected.index}`);
+            record.uploads.push({
+              index: expected.index,
+              bytes: data,
+              authorization: new Headers(init?.headers).get("authorization"),
+              status,
+            });
+            if (options.uploadThrows && expected.index === 2)
+              throw new TypeError("fixture broken fetch");
+            options.onUploaded?.(expected.index);
+            return new Response(null, { status });
+          }
+          expect(parsed.pathname).toBe("/mcp");
+          const request = JSON.parse(String(init?.body)) as {
+            id?: string;
+            method: string;
+            params?: { name?: string; arguments?: Record<string, unknown> };
+          };
+          const rpc = (result: unknown) =>
+            Response.json({ jsonrpc: "2.0", id: request.id, result });
+          if (request.method === "initialize") {
+            initializes += 1;
+            if (initializes === options.blockInitialize) await waitFetch(init, true);
+            return rpc({
+              protocolVersion: "2025-06-18",
+              capabilities: { tools: {} },
+              serverInfo: { name: "GOAT", version: "test" },
+            });
+          }
+          if (request.method === "notifications/initialized")
+            return new Response(null, { status: 202 });
+          if (request.method === "tools/list")
+            return rpc({
+              tools: [project, prepare, discard, launchTool].map((name) => ({ name })),
+            });
+          if (request.method !== "tools/call")
+            throw new Error(`Unexpected method ${request.method}`);
+          const name = request.params?.name ?? "";
+          const args = request.params?.arguments ?? {};
+          record.tools.push({
+            name,
+            arguments: args,
+            authorization: new Headers(init?.headers).get("authorization"),
+          });
+          if (name === project) {
+            record.events.push("project_list");
+            options.onProject?.();
+            return rpc({
+              structuredContent: {
+                projects: options.missingProject
+                  ? []
+                  : [{ id: "project-1", workspaceRoot: "/home/agent/repo" }],
+                nextCursor: null,
+              },
+            });
+          }
+          if (name === "goat_project_create") {
+            record.events.push("project_create");
+            return rpc({ structuredContent: { id: "created-project" } });
+          }
+          if (name === prepare) {
+            const n = ++prepares;
+            record.events.push(`prepare:${n}`);
+            if (n === options.blockPrepare) await waitFetch(init);
+            if (options.missingPrepare)
+              return Response.json({
+                jsonrpc: "2.0",
+                id: request.id,
+                error: { code: -32602, message: `Unknown tool: ${prepare}` },
+              });
+            if (options.prepareRefusal)
+              return rpc({
+                isError: true,
+                structuredContent: { message: "fixture prepare denied" },
+              });
+            const attachment = sources[n - 1]!;
+            const relativeUrl = `/api/attachments/upload/token-${n}`;
+            expectedByRoute.set(relativeUrl, { index: n, bytes: bytes[n - 1]! });
+            const value = {
+              attachmentId: remoteId(n, attachment.type === "image" ? "png" : "bin"),
+              relativeUrl,
+              expiresAt: now + (options.expiresIn ?? 600_000),
+              ...options.preparePatch,
+            };
+            options.onPrepared?.(n);
+            return options.prepareEncoding === "JSON text"
+              ? rpc({ content: [{ type: "text", text: JSON.stringify(value) }] })
+              : rpc({ structuredContent: value });
+          }
+          if (name === discard) {
+            const n = refs(sources).findIndex((a) => a.id === args.attachmentId) + 1;
+            record.events.push(`discard:${n}`);
+            if (n === 1 && options.discardFailure === "timeout") await waitFetch(init);
+            if (n === 1 && options.discardFailure === "transport failure")
+              throw new TypeError("discard failed");
+            return rpc(
+              n === 1 && options.discardFailure === "refusal"
+                ? { isError: true, structuredContent: { message: "discard denied" } }
+                : { structuredContent: { discarded: true } },
+            );
+          }
+          if (name === launchTool) {
+            record.events.push("launch");
+            if (options.launchFailure === "lost HTTP response")
+              throw new TypeError("launch response lost");
+            if (options.launchFailure === "structured refusal")
+              return rpc({
+                isError: true,
+                structuredContent: { message: "fixture launch denied" },
+              });
+            return rpc({
+              structuredContent:
+                options.launchFailure === "response missing threadId"
+                  ? {}
+                  : {
+                      threadId: "remote-thread",
+                      runId: "remote-run",
+                      report: { correlationId: binding.correlationId },
+                    },
+            });
+          }
+          throw new Error(`Unexpected tool ${name}`);
+        });
+        const host = "build-box";
+        const target = { alias: host, hostname: host, username: null, port: null };
+        const manager = SshTunnel.SshEnvironmentManager.of({
+          ensureEnvironment: () =>
+            Effect.sync(() => {
+              record.bootstrap += 1;
+              return {
+                target,
+                httpBaseUrl: "http://127.0.0.1:41000/",
+                wsBaseUrl: "ws://127.0.0.1:41000/",
+                pairingToken: null,
+              };
+            }),
+          disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
+          revalidateTunnels: () => Effect.void,
+          issueMcpClientSession: () =>
+            Effect.sync(() => {
+              record.sessions += 1;
+              return {
+                token: "attachment-session",
+                expiresAt: null,
+                runtimeModeCeilingApplied: options.ceilingApplied ?? true,
+              };
+            }),
+          runRemoteScript: () =>
+            Effect.sync(() => {
+              record.browse += 1;
+              return {
+                stderr: "",
+                stdout:
+                  "T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t/home/agent/repo\nREAL\t/home/agent/repo\n" +
+                  "GITROOT\t/home/agent/repo\nBRANCH\tmain\nWT\tworktree /home/agent/repo\n" +
+                  "WT\tbranch refs/heads/main\nWT\t\nWT\tworktree /home/agent/wt\nWT\tbranch refs/heads/feature\n",
+              };
+            }),
+        });
+        const discover = vi
+          .spyOn(SshConfig, "discoverSshHosts")
+          .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+        const managerLayer = vi
+          .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+          .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+        vi.stubGlobal("fetch", fetchEndpoint);
+        const http = yield* HttpClient.HttpClient.pipe(
+          Effect.provide(
+            FetchHttpClient.layer.pipe(
+              Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchEndpoint)),
+            ),
+          ),
+        );
+        const uploadHttp = HttpClient.transform(http, (effect, request) => {
+          if (!new URL(request.url).pathname.startsWith("/api/attachments/upload/")) return effect;
+          const n = ++uploadStarts;
+          if (n !== options.blockUpload) return effect;
+          return Effect.sync(() => record.events.push(`blocked:${n}`)).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.andThen(Deferred.await(never)),
+            Effect.andThen(effect),
+          );
+        });
+        try {
+          const value = yield* Effect.gen(function* () {
+            const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+            const run = <E1 = never, R1 = never>(
+              patch: Partial<Omit<SshRemoteDispatch.SshLaunchInput, "host" | "target">> = {},
+              check: Effect.Effect<void, E1, R1> = Effect.void,
+            ) =>
+              dispatch.launchThread(
+                {
+                  host,
+                  cwd: "/home/agent/repo",
+                  workspace: { type: "cwd" },
+                  title: "Attachments",
+                  message: "Inspect",
+                  runtimeMode: "full-access",
+                  callerRuntimeMode: "full-access",
+                  report: binding,
+                  attachments: sources,
+                  ...patch,
+                },
+                check,
+              );
+            const assertTrace = (events: ReadonlyArray<string>) => {
+              expect(record.events).toEqual(events);
+              expect(record.tools.map((c) => c.name)).toEqual(
+                events.flatMap((event) =>
+                  event === "project_list"
+                    ? [project]
+                    : event === "project_create"
+                      ? ["goat_project_create"]
+                      : event.startsWith("prepare:")
+                        ? [prepare]
+                        : event.startsWith("discard:")
+                          ? [discard]
+                          : event === "launch"
+                            ? [launchTool]
+                            : [],
+                ),
+              );
+              expect(record.uploads.map((u) => u.index)).toEqual(
+                events.filter((e) => e.startsWith("post:")).map((e) => Number(e.split(":")[1])),
+              );
+              for (const upload of record.uploads) {
+                expect(
+                  Buffer.from(upload.bytes).equals(Buffer.from(bytes[upload.index - 1]!)),
+                ).toBe(true);
+                expect(upload.authorization).toBeNull();
+              }
+              for (const [i, call] of record.tools.filter((c) => c.name === prepare).entries())
+                expect(call.arguments).toEqual({ upload: metadata(sources[i]!) });
+              for (const call of record.tools)
+                expect(call.authorization).toBe("Bearer attachment-session");
+              expect(record.sessions).toBe(record.bootstrap === 0 ? 0 : 1);
+              const discarded = record.tools
+                .filter((c) => c.name === discard)
+                .map((c) => c.arguments.attachmentId);
+              expect(discarded).toEqual(
+                events
+                  .filter((e) => e.startsWith("discard:"))
+                  .map((e) => refs(sources)[Number(e.split(":")[1]) - 1]!.id),
+              );
+              expect(discarded.some((id) => sources.some((a) => a.id === id))).toBe(false);
+            };
+            return yield* body({ sources, record, started, release, run, assertTrace });
+          }).pipe(
+            Effect.provide(
+              SshRemoteDispatch.layer.pipe(
+                Layer.provide(Layer.succeed(ServerConfig.ServerConfig, config)),
+                Layer.provide(Layer.succeed(FileSystem.FileSystem, testFs)),
+                Layer.provide(Layer.succeed(HttpClient.HttpClient, uploadHttp)),
+                Layer.provide(NodeServices.layer),
+              ),
+            ),
+          );
+          for (const snapshot of snapshots)
+            if (snapshot.bytes !== null)
+              expect(
+                Buffer.from(yield* fs.readFile(snapshot.path)).equals(Buffer.from(snapshot.bytes)),
+              ).toBe(true);
+          return value;
+        } finally {
+          vi.unstubAllGlobals();
+          managerLayer.mockRestore();
+          discover.mockRestore();
+        }
+      }).pipe(
+        Effect.provide(
+          ServerConfig.layerTest("/fixture", { prefix: "ssh-attachments-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      ),
+    );
+
+  const failure = (reason: SshRemoteDispatch.SshRemoteDispatchError["reason"], message?: string) =>
+    Effect.fn(function* (
+      run: Effect.Effect<
+        SshRemoteDispatch.SshLaunchResult,
+        SshRemoteDispatch.SshRemoteDispatchError
+      >,
+    ) {
+      const result = yield* run.pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") throw new Error("Expected failure");
+      expect(result.failure.reason).toBe(reason);
+      if (message !== undefined) expect(result.failure.message).toContain(message);
+      return result.failure;
+    });
+  const complete = ["project_list", "prepare:1", "post:1", "prepare:2", "post:2", "launch"];
+  const rollback = [...complete.slice(0, -1), "discard:1", "discard:2"];
+  const callerError = new OrchestratorMcpFailure({
+    code: "parent_not_active",
+    message: "fixture caller ended",
+  });
+  const assertCaller = Effect.fn(function* (
+    run: Effect.Effect<
+      SshRemoteDispatch.SshLaunchResult,
+      SshRemoteDispatch.SshRemoteDispatchError | OrchestratorMcpFailure
+    >,
+  ) {
+    const result = yield* run.pipe(Effect.result);
+    expect(result._tag === "Failure" && result.failure).toBe(callerError);
+  });
+  const authority = (live: Ref.Ref<boolean>) =>
+    Ref.get(live).pipe(Effect.flatMap((ok) => (ok ? Effect.void : Effect.fail(callerError))));
+
+  it.effect.each([undefined, [] as Attachment[]])(
+    "launches without upload calls for attachments %s",
+    (attachments) =>
+      withAttachments({}, (f) =>
+        Effect.gen(function* () {
+          const value = yield* f.run({ attachments });
+          expect(value.threadId).toBe("remote-thread");
+          expect(value).toMatchObject({ reportsSupported: true, runId: "remote-run" });
+          f.assertTrace(["project_list", "launch"]);
+          expect(f.record.tools.at(-1)?.arguments).not.toHaveProperty("attachments");
+        }),
+      ),
+  );
+  it.effect("uploads binary files and images before launching with remote pending ids", () =>
+    withAttachments({}, (f) =>
+      Effect.gen(function* () {
+        const value = yield* f.run();
+        expect(value).toMatchObject({
+          threadId: "remote-thread",
+          reportsSupported: true,
+          runId: "remote-run",
+        });
+        f.assertTrace(complete);
+        expect(f.record.uploads.map((u) => u.status)).toEqual([204, 204]);
+        expect(f.record.tools.at(-1)?.arguments).toMatchObject({
+          projectId: "project-1",
+          attachments: refs(inputs),
+          report: binding,
+        });
+      }),
+    ),
+  );
+  it.effect("keeps signed upload capabilities out of traces and launch results", () =>
+    withAttachments({}, (f) =>
+      Effect.gen(function* () {
+        const spans: Tracer.Span[] = [];
+        const tracer = Tracer.make({
+          span: (options) => {
+            const span = new Tracer.NativeSpan(options);
+            spans.push(span);
+            return span;
+          },
+        });
+        const result = yield* f.run().pipe(Effect.withTracer(tracer));
+        f.assertTrace(complete);
+        const telemetry = JSON.stringify(
+          spans.map((span) => ({
+            name: span.name,
+            attributes: Object.fromEntries(span.attributes),
+          })),
+        );
+        for (const token of ["token-1", "token-2", "attachment-session"]) {
+          expect(telemetry).not.toContain(token);
+          expect(JSON.stringify(result)).not.toContain(token);
+        }
+      }),
+    ),
+  );
+  it.effect.each(["cwd", "worktree", "existing_worktree"] as const)(
+    "uploads attachments for workspace %s",
+    (type) =>
+      withAttachments({}, (f) =>
+        Effect.gen(function* () {
+          const workspace: SshRemoteDispatch.SshLaunchInput["workspace"] =
+            type === "cwd"
+              ? { type }
+              : type === "worktree"
+                ? { type, branch: "feature" }
+                : { type, worktreePath: "/home/agent/wt", branch: "feature" };
+          const expected =
+            type === "cwd"
+              ? { type: "root" }
+              : type === "worktree"
+                ? { type, baseRef: "main", branch: "feature", startFromOrigin: false }
+                : { type, worktreePath: "/home/agent/wt", branch: "feature" };
+          const value = yield* f.run({ workspace });
+          expect(value.workspaceStrategy).toEqual(expected);
+          f.assertTrace(complete);
+          expect(f.record.tools.at(-1)?.arguments).toMatchObject({
+            workspaceStrategy: expected,
+            attachments: refs(inputs),
+          });
+        }),
+      ),
+  );
+  it.effect("uploads only after a missing project has been registered", () =>
+    withAttachments({ missingProject: true }, (f) =>
+      Effect.gen(function* () {
+        const value = yield* f.run();
+        expect(value.projectCreated).toBe(true);
+        f.assertTrace(["project_list", "project_create", ...complete.slice(1)]);
+        expect(f.record.tools.at(-1)?.arguments.projectId).toBe("created-project");
+      }),
+    ),
+  );
+  const invalid = [
+    [
+      "count-nine",
+      Array.from({ length: 9 }, (_, n) => ({ ...inputs[0]!, id: originId(n + 1, "bin") })),
+    ],
+    ["duplicate-id", [inputs[0], inputs[0]]],
+    ["non-pending", [{ ...inputs[0], id: originId(1, "bin").replace("pending-", "caller-") }]],
+    ["malformed-id", [{ ...inputs[0], id: "../payload" }]],
+    ["unsupported-type", [{ ...inputs[0], type: "audio" }]],
+  ] as const;
+  it.effect.each(invalid.map(([name, attachments]) => ({ name, attachments })))(
+    "rejects direct attachment input $name before SSH",
+    ({ attachments }) =>
+      withAttachments({}, (f) =>
+        Effect.gen(function* () {
+          yield* failure("invalid_request")(
+            f.run({ attachments: attachments as unknown as Attachment[] }),
+          );
+          f.assertTrace([]);
+          expect([f.record.browse, f.record.bootstrap]).toEqual([0, 0]);
+        }),
+      ),
+  );
+  it.effect.each(
+    (
+      [
+        ["zero-size image", { ...inputs[1]!, sizeBytes: 0 }],
+        ["unsupported image MIME", { ...inputs[1]!, mimeType: "image/svg+xml" }],
+        ["image >10 MiB", { ...inputs[1]!, sizeBytes: 10 * 1024 * 1024 + 1 }],
+        ["file >50 MiB", { ...inputs[0]!, sizeBytes: 50 * 1024 * 1024 + 1 }],
+      ] as const
+    ).map(([name, attachment]) => ({ name, attachment })),
+  )("rejects upload metadata $name before SSH", ({ attachment }) =>
+    withAttachments({}, (f) =>
+      Effect.gen(function* () {
+        yield* failure("invalid_request")(f.run({ attachments: [attachment] }));
+        f.assertTrace([]);
+        expect([f.record.browse, f.record.bootstrap]).toEqual([0, 0]);
+      }),
+    ),
+  );
+  it.effect("rejects aggregate image bytes above eighty MiB before SSH", () =>
+    withAttachments({}, (f) =>
+      Effect.gen(function* () {
+        yield* failure("invalid_request")(
+          f.run({
+            attachments: [1, 2].map((n) => ({
+              ...inputs[0]!,
+              id: originId(n, "bin"),
+              mimeType: "image/png",
+              sizeBytes: 50 * 1024 * 1024,
+            })),
+          }),
+        );
+        f.assertTrace([]);
+        expect([f.record.browse, f.record.bootstrap]).toEqual([0, 0]);
+      }),
+    ),
+  );
+  it.effect("accepts image and file size boundaries", () => {
+    const sources = [
+      { ...inputs[0]!, sizeBytes: 50 * 1024 * 1024 },
+      { ...inputs[1]!, sizeBytes: 10 * 1024 * 1024 },
+    ];
+    const bytes = sources.map((a) => new Uint8Array(a.sizeBytes).fill(171));
+    return withAttachments({ sources, bytes }, (f) =>
+      Effect.gen(function* () {
+        yield* f.run();
+        f.assertTrace(complete);
+        expect(f.record.uploads.map((u) => [u.bytes.length, u.status])).toEqual([
+          [50 * 1024 * 1024, 204],
+          [10 * 1024 * 1024, 204],
+        ]);
+        expect(f.record.tools.at(-1)?.arguments.attachments).toEqual(refs(sources));
+      }),
+    );
+  });
+  it.effect.each([
+    "missing",
+    "wrong metadata extension",
+    "stat failure",
+    "directory",
+    "stored-size mismatch",
+  ] as const)("rejects pending source %s before prepare", (sourceFault) =>
+    withAttachments({ sourceFault, missingProject: true }, (f) =>
+      Effect.gen(function* () {
+        const attachments =
+          sourceFault === "wrong metadata extension"
+            ? [{ ...inputs[0]!, name: "payload.txt" }, inputs[1]!]
+            : inputs;
+        yield* failure("invalid_request")(f.run({ attachments }));
+        f.assertTrace([]);
+        expect([f.record.browse, f.record.bootstrap]).toEqual([0, 0]);
+      }),
+    ),
+  );
+  it.effect("refuses attachment writes when the remote cannot apply the caller ceiling", () =>
+    withAttachments({ ceilingApplied: false }, (f) =>
+      Effect.gen(function* () {
+        yield* failure(
+          "remote_refused",
+          "ceiling",
+        )(f.run({ runtimeMode: "approval-required" as const }));
+        f.assertTrace([]);
+      }),
+    ).pipe(
+      Effect.andThen(
+        withAttachments({ ceilingApplied: false }, (f) =>
+          Effect.gen(function* () {
+            yield* f.run({ runtimeMode: "approval-required", attachments: [] });
+            f.assertTrace(["project_list", "launch"]);
+          }),
+        ),
+      ),
+    ),
+  );
+  it.effect("refuses old remotes missing goat_attachment_prepare_upload", () =>
+    withAttachments({ missingPrepare: true }, (f) =>
+      Effect.gen(function* () {
+        yield* failure("remote_refused", "goat_attachment_prepare_upload")(f.run());
+        f.assertTrace(["project_list", "prepare:1"]);
+      }),
+    ),
+  );
+  it.effect("keeps structured preparation refusals", () =>
+    withAttachments({ prepareRefusal: true }, (f) =>
+      Effect.gen(function* () {
+        yield* failure("remote_refused", "fixture prepare denied")(f.run());
+        f.assertTrace(["project_list", "prepare:1"]);
+      }),
+    ),
+  );
+  it.effect.each(["structuredContent", "JSON text"] as const)(
+    "accepts preparation results encoded as %s",
+    (prepareEncoding) =>
+      withAttachments({ prepareEncoding }, (f) =>
+        Effect.gen(function* () {
+          yield* f.run();
+          f.assertTrace(complete);
+          expect(f.record.tools.at(-1)?.arguments.attachments).toEqual(refs(inputs));
+        }),
+      ),
+  );
+  it.effect.each(
+    (
+      [
+        ["absent id", { attachmentId: null }, false],
+        ["malformed id", { attachmentId: "../bad" }, false],
+        [
+          "non-pending id",
+          { attachmentId: remoteId(1, "bin").replace("pending-", "claimed-") },
+          false,
+        ],
+        ["missing URL", { relativeUrl: null }, true],
+        ["malformed expiry", { expiresAt: "later" }, true],
+      ] as const
+    ).map(([name, preparePatch, known]) => ({ name, preparePatch, known })),
+  )("rejects preparation result $name", ({ preparePatch, known }) =>
+    withAttachments({ preparePatch }, (f) =>
+      Effect.gen(function* () {
+        yield* failure("remote_refused")(f.run());
+        f.assertTrace(["project_list", "prepare:1", ...(known ? ["discard:1"] : [])]);
+      }),
+    ),
+  );
+  it.effect.each(
+    (
+      [
+        ["malformed URL", { relativeUrl: "http://[" }],
+        ["foreign origin", { relativeUrl: "https://foreign.invalid/api/attachments/upload/token" }],
+        [
+          "protocol-relative URL",
+          { relativeUrl: "//foreign.invalid/api/attachments/upload/token" },
+        ],
+        ["wrong route", { relativeUrl: "/api/wrong/token" }],
+        [
+          "normalized path escaping route",
+          { relativeUrl: "/api/attachments/upload/../../../wrong" },
+        ],
+        ["already expired", { expiresAt: 0 }],
+        ["non-finite expiry", { expiresAt: Infinity }],
+      ] as const
+    ).map(([name, preparePatch]) => ({ name, preparePatch })),
+  )("rejects upload URL $name and discards its prepared id", ({ preparePatch }) =>
+    withAttachments({ preparePatch }, (f) =>
+      Effect.gen(function* () {
+        yield* failure("remote_refused")(f.run());
+        f.assertTrace(["project_list", "prepare:1", "discard:1"]);
+      }),
+    ),
+  );
+  it.effect("times out attachment preparation without launching", () =>
+    withAttachments({ blockPrepare: 2 }, (f) =>
+      Effect.gen(function* () {
+        const fiber = yield* f.run().pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(f.started);
+        yield* TestClock.adjust(20_001);
+        const result = yield* Fiber.join(fiber);
+        expect(result._tag === "Failure" && result.failure.reason).toBe("host_unavailable");
+        f.assertTrace(["project_list", "prepare:1", "post:1", "prepare:2", "discard:1"]);
+      }),
+    ),
+  );
+  it.effect.each([-1, 1])(
+    "rejects receiver byte-count mismatch %s and discards both ids",
+    (receiverLengthDelta) =>
+      withAttachments({ receiverLengthDelta }, (f) =>
+        Effect.gen(function* () {
+          yield* failure("remote_refused", "HTTP 400; expected 204")(f.run());
+          f.assertTrace(rollback);
+          expect(f.record.uploads.map((u) => u.status)).toEqual([204, 400]);
+        }),
+      ),
+  );
+  it.effect.each([200, 400, 404, 500])(
+    "fails upload HTTP %s and discards all prepared ids",
+    (uploadStatus) =>
+      withAttachments({ uploadStatus }, (f) =>
+        Effect.gen(function* () {
+          yield* failure("remote_refused", "expected 204")(f.run());
+          f.assertTrace(rollback);
+        }),
+      ),
+  );
+  it.effect.each(["stream", "fetch"] as const)(
+    "fails a broken upload stream and retains local sources (%s)",
+    (fault) =>
+      withAttachments({ streamFailure: fault === "stream", uploadThrows: fault === "fetch" }, (f) =>
+        Effect.gen(function* () {
+          yield* failure("host_unavailable")(f.run());
+          f.assertTrace(
+            fault === "stream"
+              ? ["project_list", "prepare:1", "post:1", "prepare:2", "discard:1", "discard:2"]
+              : rollback,
+          );
+        }),
+      ),
+  );
+  it.effect.each(
+    (
+      [
+        ["60 s cap", 600_000, 60_001],
+        ["signed URL lifetime", 2_000, 2_001],
+      ] as const
+    ).map(([name, expiresIn, advance]) => ({ name, expiresIn, advance })),
+  )("times out the byte upload at the smaller deadline ($name)", ({ expiresIn, advance }) =>
+    withAttachments({ blockUpload: 2, expiresIn }, (f) =>
+      Effect.gen(function* () {
+        const fiber = yield* f.run().pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(f.started);
+        yield* TestClock.adjust(advance);
+        const result = yield* Fiber.join(fiber);
+        expect(result._tag === "Failure" && result.failure.reason).toBe("host_unavailable");
+        f.assertTrace([
+          "project_list",
+          "prepare:1",
+          "post:1",
+          "prepare:2",
+          "blocked:2",
+          "discard:1",
+          "discard:2",
+        ]);
+      }),
+    ),
+  );
+  it.effect("sends no prepare after the caller check fails", () =>
+    Effect.gen(function* () {
+      let live = true;
+      yield* withAttachments(
+        {
+          onProject: () => {
+            live = false;
+          },
+        },
+        (f) =>
+          Effect.gen(function* () {
+            yield* assertCaller(
+              f.run(
+                {},
+                Effect.suspend(() => (live ? Effect.void : Effect.fail(callerError))),
+              ),
+            );
+            f.assertTrace(["project_list"]);
+          }),
+      );
+    }),
+  );
+  it.effect.each(
+    (
+      [
+        ["sends no prepare after authority drops during initialize", 2, ["project_list"]],
+        ["does not launch after authority drops during final initialize", 5, rollback],
+      ] as const
+    ).map(([name, blockInitialize, expected]) => ({ name, blockInitialize, expected })),
+  )("$name", ({ blockInitialize, expected }) =>
+    Effect.gen(function* () {
+      const live = yield* Ref.make(true);
+      yield* withAttachments({ blockInitialize }, (f) =>
+        Effect.gen(function* () {
+          const fiber = yield* f.run({}, authority(live)).pipe(Effect.result, Effect.forkChild);
+          yield* Deferred.await(f.started);
+          yield* Ref.set(live, false);
+          yield* Deferred.succeed(f.release, undefined);
+          const result = yield* Fiber.join(fiber);
+          expect(result._tag === "Failure" && result.failure).toBe(callerError);
+          f.assertTrace(expected);
+        }),
+      );
+    }),
+  );
+  it.effect.each(
+    (
+      [
+        [
+          "discards preparation when authority drops before the byte POST",
+          "prepare",
+          1,
+          ["project_list", "prepare:1", "discard:1"],
+        ],
+        [
+          "does not prepare later files after authority drops",
+          "upload",
+          1,
+          ["project_list", "prepare:1", "post:1", "discard:1"],
+        ],
+        ["does not launch after authority drops during the last upload", "upload", 2, rollback],
+      ] as const
+    ).map(([name, at, index, expected]) => ({ name, at, index, expected })),
+  )("$name", ({ at, index, expected }) =>
+    Effect.gen(function* () {
+      let live = true;
+      const drop = (n: number) => {
+        if (n === index) live = false;
+      };
+      yield* withAttachments(at === "prepare" ? { onPrepared: drop } : { onUploaded: drop }, (f) =>
+        Effect.gen(function* () {
+          yield* assertCaller(
+            f.run(
+              {},
+              Effect.suspend(() => (live ? Effect.void : Effect.fail(callerError))),
+            ),
+          );
+          f.assertTrace(expected);
+        }),
+      );
+    }),
+  );
+  it.effect.each([
+    "structured refusal",
+    "lost HTTP response",
+    "response missing threadId",
+  ] as const)("discards pending uploads after remote launch %s", (launchFailure) =>
+    withAttachments({ launchFailure }, (f) =>
+      Effect.gen(function* () {
+        const result = yield* f.run().pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+        if (result._tag !== "Failure") throw new Error("Expected failure");
+        expect(result.failure.message).toContain(
+          launchFailure === "structured refusal"
+            ? "fixture launch denied"
+            : launchFailure === "response missing threadId"
+              ? "no thread acknowledgement"
+              : "Calling goat_thread_launch",
+        );
+        f.assertTrace([...complete, "discard:1", "discard:2"]);
+        expect(f.record.tools.filter((c) => c.name === launchTool)).toHaveLength(1);
+      }),
+    ),
+  );
+  it.effect.each(["refusal", "transport failure", "timeout"] as const)(
+    "continues rollback after discard %s",
+    (discardFailure) =>
+      withAttachments({ discardFailure, uploadStatus: 500 }, (f) =>
+        Effect.gen(function* () {
+          const fiber = yield* f.run().pipe(Effect.result, Effect.forkChild);
+          if (discardFailure === "timeout") {
+            yield* Deferred.await(f.started);
+            yield* TestClock.adjust(5_001);
+          }
+          const result = yield* Fiber.join(fiber);
+          expect(result._tag === "Failure" && result.failure.reason).toBe("remote_refused");
+          expect(result._tag === "Failure" && result.failure.message).toContain(
+            "HTTP 500; expected 204",
+          );
+          f.assertTrace(rollback);
+        }),
+      ),
+  );
+  it.effect("rolls back known pending ids when the launch fiber is interrupted", () =>
+    withAttachments({ blockUpload: 1 }, (f) =>
+      Effect.gen(function* () {
+        const fiber = yield* f.run().pipe(Effect.forkChild);
+        yield* Deferred.await(f.started);
+        yield* Fiber.interrupt(fiber);
+        const exit = yield* Fiber.await(fiber);
+        expect(Exit.isFailure(exit) && exit.cause.reasons.some(Cause.isInterruptReason)).toBe(true);
+        f.assertTrace(["project_list", "prepare:1", "blocked:1", "discard:1"]);
+      }),
+    ),
   );
 });

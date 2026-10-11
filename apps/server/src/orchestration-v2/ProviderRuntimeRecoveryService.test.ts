@@ -1,3 +1,4 @@
+import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import { assert, it, vi } from "@effect/vitest";
 import {
   MessageId,
@@ -1485,3 +1486,100 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect.each(["startup", "shutdown"] as const)(
+  "preserves remote ownership during %s",
+  (trigger) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make(`remote-recovery-${trigger}`);
+      const remoteId = NodeId.make("remote-task");
+      const nativeId = NodeId.make("native-task");
+      const runId = RunId.make("settled-parent");
+      const task = (id: NodeId, remote: boolean) => ({
+        id,
+        threadId,
+        runId,
+        parentNodeId: NodeId.make("root"),
+        origin: remote ? "app_owned" : "provider_native",
+        childThreadId: null,
+        status: "running",
+        result: null,
+        driver: "codex",
+        providerInstanceId: "codex",
+        ...(remote
+          ? { remote: { host: "build-box", threadId: "remote", correlationId: "rr-A" } }
+          : {}),
+      });
+      const projection = {
+        ...idleThreadProjection(liveThreadShell(threadId)),
+        runs: [{ id: runId, status: "completed", providerInstanceId: "codex" }],
+        subagents: [task(remoteId, true), task(nativeId, false)],
+        nodes: [remoteId, nativeId].map((id) => ({
+          id,
+          runId,
+          kind: "subagent",
+          status: "running",
+        })),
+        turnItems: [remoteId, nativeId].map((id) => ({
+          id: TurnItemId.make(String(id)),
+          type: "subagent",
+          subagentId: id,
+          nodeId: id,
+          runId,
+          origin: id === remoteId ? "app_owned" : "provider_native",
+          childThreadId: null,
+          status: "running",
+          providerInstanceId: "codex",
+        })),
+      } as unknown as OrchestrationV2ThreadProjection;
+      const events = yield* Ref.make<
+        ReadonlyArray<
+          Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]["events"][number]
+        >
+      >([]);
+      const dependencies = Layer.mergeAll(
+        IdAllocator.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) =>
+            Ref.set(events, input.events).pipe(
+              Effect.as({ committed: true, cancelledEffectCount: 0 } as never),
+            ),
+        }),
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          listByCommandId: () => Effect.succeed([]),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+        yield* recovery.reconcile(trigger);
+      }).pipe(Effect.provide(ProviderRuntimeRecovery.layer.pipe(Layer.provide(dependencies))));
+      const updates = yield* Ref.get(events);
+      assert.isTrue(
+        updates.some((event) => event.type === "subagent.updated" && event.payload.id === nativeId),
+      );
+      assert.isFalse(
+        updates.some(
+          (event) =>
+            (event.type === "subagent.updated" || event.type === "node.updated") &&
+            event.payload.id === remoteId,
+        ),
+      );
+      assert.isFalse(
+        updates.some(
+          (event) =>
+            event.type === "turn-item.updated" &&
+            event.payload.type === "subagent" &&
+            event.payload.subagentId === remoteId,
+        ),
+      );
+    }),
+);

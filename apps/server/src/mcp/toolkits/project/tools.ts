@@ -16,6 +16,7 @@ import {
   ProjectId,
   OrchestratorMcpFailure,
   OrchestratorMcpHost,
+  RemoteReportBindingInput,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
 } from "@t3tools/contracts";
@@ -28,6 +29,7 @@ import { Tool, Toolkit } from "effect/ai";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
@@ -162,6 +164,12 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
           "Set by GOAT when it forwards a launch from another machine. Leave unset; a calling GOAT thread is recorded automatically.",
       }),
     ),
+    report: Schema.optional(
+      RemoteReportBindingInput.annotate({
+        description:
+          "Set only by another machine's GOAT when it launches this thread over SSH, so the thread can report back to its origin. Agents omit it.",
+      }),
+    ),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
@@ -171,6 +179,9 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
     status: Schema.NullOr(OrchestrationV2RunStatus),
     /** Whether the calling thread will be told when the new thread finishes. */
     watching: Schema.Boolean,
+    report: Schema.optional(
+      Schema.Struct({ correlationId: RemoteReportBindingInput.fields.correlationId }),
+    ),
   }),
   dependencies: [
     ...shared.dependencies,
@@ -180,6 +191,7 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
     FileSystem.FileSystem,
     ServerConfig.ServerConfig,
     LaunchWatchService.LaunchWatchService,
+    RemoteReportService.RemoteReportService,
   ],
 })
   .annotate(Tool.Destructive, true)

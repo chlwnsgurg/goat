@@ -1,3 +1,5 @@
+import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
+import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -168,7 +170,15 @@ describe("OrchestratorMcpService", () => {
         const commandIds = yield* Ref.get(acknowledgementCommandIds);
         assert.equal(commandIds.length, 2);
         assert.notEqual(commandIds[0], commandIds[1]);
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -264,7 +274,15 @@ describe("OrchestratorMcpService", () => {
         const settled = yield* service.taskStatus(scope, taskId);
         assert.equal(settled.status, "cancelled");
         assert.equal(yield* Ref.get(dispatched), 1);
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -339,7 +357,15 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "task_not_cancellable");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -418,7 +444,15 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop"],
         );
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -503,7 +537,15 @@ describe("OrchestratorMcpService", () => {
           (yield* Ref.get(dispatched)).map((command) => (command as { type: string }).type),
           ["thread.stop", "delegated_task.completion-delivery.dispose"],
         );
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -585,7 +627,15 @@ describe("OrchestratorMcpService", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "runtime_mode_escalation_denied");
         assert.deepEqual(yield* Ref.get(dispatched), []);
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -728,7 +778,15 @@ describe("OrchestratorMcpService", () => {
           dispatched: yield* Ref.get(dispatched),
           stoppedBelow: yield* Ref.get(stoppedBelow),
         };
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     });
 
   it.effect("refuses to cancel a task when a task under it now runs above the parent's modes", () =>
@@ -871,6 +929,63 @@ describe("OrchestratorMcpService provider resolution", () => {
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
 
+  it.effect("remote cancellation requests keep a running task and intact mailbox", () =>
+    Effect.gen(function* () {
+      let cancelled = 0;
+      let dispatched = 0;
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        origin: "app_owned",
+        childThreadId: null,
+        status: "running",
+        result: null,
+        providerInstanceId: codexInstanceId,
+        model: "gpt-5.4",
+        remote: { host: "build-box", threadId: "remote", correlationId: "rr-A" },
+        completionDelivery: { state: "pending" },
+      };
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (id) =>
+            id === parentThreadId
+              ? Effect.succeed(parentProjection([task]))
+              : Effect.die("remote ID must never load a local projection"),
+          getThreadShell: () => Effect.succeed(liveThreadShell(parentThreadId)),
+          dispatch: () =>
+            Effect.sync(() => {
+              dispatched += 1;
+              return {} as never;
+            }),
+        }),
+        Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({
+          cancel: (_id, authorize) =>
+            authorize.pipe(
+              Effect.map(() => {
+                cancelled += 1;
+                return "cancel_requested" as const;
+              }),
+            ),
+        }),
+        Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
+        providerRegistryLayer([]),
+        adapterRegistryLayer([]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.cancelTask(scope, { taskId });
+        assert.equal(result.status, "cancel_requested");
+        assert.equal(cancelled, 1);
+        assert.equal(dispatched, 0);
+        assert.equal((yield* service.taskStatus(scope, taskId)).status, "running");
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+    }),
+  );
   it.effect(
     "advertises orchestration capability from registered adapters rather than a driver allowlist",
     () =>
@@ -1011,7 +1126,13 @@ describe("OrchestratorMcpService provider resolution", () => {
             fork!.constraints.includes("Driver 'forkOnly' is not registered in this build."),
           );
         }).pipe(
-          Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))),
+          Effect.provide(
+            OrchestratorMcpService.layer.pipe(
+              Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+              Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+              Layer.provide(layerDependencies),
+            ),
+          ),
         );
       }),
   );
@@ -1110,7 +1231,13 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(request.modelSelection.instanceId, antigravityInstanceId);
           assert.equal(request.modelSelection.model, "ant-model");
         }).pipe(
-          Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))),
+          Effect.provide(
+            OrchestratorMcpService.layer.pipe(
+              Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+              Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+              Layer.provide(layerDependencies),
+            ),
+          ),
         );
       }),
   );
@@ -1203,7 +1330,15 @@ describe("OrchestratorMcpService provider resolution", () => {
         };
         assert.equal(request.modelSelection.instanceId, antigravityInstanceId);
         assert.equal(request.modelSelection.model, "ant-model");
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1260,7 +1395,15 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.isTrue(
           byDriver.message.includes("No V2 provider adapter is registered for driver forkOnly."),
         );
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1362,7 +1505,15 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(result.providerInstanceId, claudeInstanceId);
         assert.equal(yield* Ref.get(probes), 2);
         assert.equal(yield* Ref.get(dispatched), 1);
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1570,7 +1721,13 @@ describe("OrchestratorMcpService provider resolution", () => {
               assert.equal(request.modelSelection.model, "codex-alt-model", testCase.name);
             }
           }).pipe(
-            Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))),
+            Effect.provide(
+              OrchestratorMcpService.layer.pipe(
+                Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+                Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+                Layer.provide(layerDependencies),
+              ),
+            ),
           );
         }
       }),
@@ -1625,6 +1782,8 @@ describe("OrchestratorMcpService provider resolution", () => {
       upserted: Ref.Ref<number>,
     ) =>
       OrchestratorMcpService.layer.pipe(
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(
           Layer.mergeAll(
             NodeServices.layer,
@@ -1729,6 +1888,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           ),
           Effect.provide(
             OrchestratorMcpService.layer.pipe(
+              Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+              Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(
                 Layer.mergeAll(
                   NodeServices.layer,
@@ -1812,6 +1973,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
             OrchestratorMcpService.layer.pipe(
+              Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+              Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(
                 Layer.mergeAll(
                   NodeServices.layer,

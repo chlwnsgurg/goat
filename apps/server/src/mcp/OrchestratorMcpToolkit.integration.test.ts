@@ -1,3 +1,4 @@
+import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
@@ -682,6 +683,7 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(
               Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
             ),
+            Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provideMerge(McpServer.McpServer.layer),
             Layer.provideMerge(layerOrchestration),
             Layer.provide(layerRegistry),
@@ -1703,6 +1705,8 @@ describe("orchestrator MCP toolkit", () => {
             const delegated = yield* decodeDelegateTaskResult(delegatedCall.structuredContent).pipe(
               Effect.orDie,
             );
+            if (delegated.childThreadId === null)
+              return yield* Effect.die("Local delegation must return a child thread");
             const delegatedSource = yield* orchestrator.getThreadProjection(
               delegated.childThreadId,
             );
@@ -2026,6 +2030,8 @@ describe("orchestrator MCP toolkit", () => {
             const cancellable = yield* decodeDelegateTaskResult(
               cancellableCall.structuredContent,
             ).pipe(Effect.orDie);
+            if (cancellable.childThreadId === null)
+              return yield* Effect.die("Local delegation must return a child thread");
             expect(cancellable.status).toBe("running");
             // Original delegated run alone is not "later" work.
             expect(cancellable.hasPendingChildRuns).toBe(false);
@@ -2699,6 +2705,8 @@ describe("orchestrator MCP toolkit", () => {
             const upgradedDelegated = yield* decodeDelegateTaskResult(
               upgradedCall.structuredContent,
             ).pipe(Effect.orDie);
+            if (upgradedDelegated.childThreadId === null)
+              return yield* Effect.die("Local delegation must return a child thread");
             expect(upgradedDelegated.status).toBe("running");
             yield* waitForProjection(orchestrator, upgradedDelegated.childThreadId, (projection) =>
               projection.providerTurns.some((turn) => turn.status === "running"),
@@ -3851,6 +3859,7 @@ describe("orchestrator MCP toolkit", () => {
           Layer.provide(
             Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
           ),
+          Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(layerOrchestration),
           Layer.provide(
@@ -3981,6 +3990,8 @@ describe("orchestrator MCP toolkit", () => {
           const delegated = yield* decodeDelegateTaskResult(
             delegatedStatusCall.structuredContent,
           ).pipe(Effect.orDie);
+          if (delegated.childThreadId === null)
+            return yield* Effect.die("Local delegation must return a child thread");
           expect(delegated).toMatchObject({
             status: "completed",
             summary: delegatedResult,

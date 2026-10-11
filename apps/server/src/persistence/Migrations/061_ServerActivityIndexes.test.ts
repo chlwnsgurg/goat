@@ -13,7 +13,9 @@ it.effect("upgrades schema 60 and maintains indexed background roster flags", ()
     ('active-roster', 'claude', 'idle', '2026-10-11', '{"pendingBackgroundTasks":[{"taskId":"background","kind":"subagent"}]}'),
     ('empty-roster', 'claude', 'idle', '2026-10-11', '{}'),
     ('invalid-roster', 'claude', 'idle', '2026-10-11', 'invalid')`;
-    assert.deepStrictEqual(yield* runMigrations(), [[61, "ServerActivityIndexes"]]);
+    assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 61 }), [
+      [61, "ServerActivityIndexes"],
+    ]);
     const read = () => sql<{ provider_thread_id: string; has_pending_background_work: number }>`
     SELECT provider_thread_id, has_pending_background_work FROM orchestration_v2_projection_provider_threads ORDER BY provider_thread_id`;
     assert.deepStrictEqual(yield* read(), [
@@ -31,6 +33,7 @@ it.effect("upgrades schema 60 and maintains indexed background roster flags", ()
       name: string;
     }>`SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%_activity_idx'`;
     assert.strictEqual(indexes.length, 6);
+    yield* runMigrations();
     assert.deepStrictEqual(yield* runMigrations(), []);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

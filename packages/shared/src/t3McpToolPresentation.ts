@@ -156,6 +156,11 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["List", "Listing", "Listed", "watched GOAT threads"],
     "thread-watch-list",
   ),
+  goat_origin_report: tool(["Report", "Reporting", "Reported", "to the origin"], "thread-send"),
+  goat_origin_reports_wait: tool(
+    ["Wait", "Waiting", "Waited", "for origin reports"],
+    "thread-wait",
+  ),
   goat_thread_interrupt: tool(
     ["Interrupt", "Interrupting", "Requested an interrupt of", "a GOAT thread"],
     "thread-interrupt",
@@ -333,6 +338,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   goat_ssh_host_list: tool(["List", "Listing", "Listed", "SSH hosts"], "ssh-host-list"),
   goat_ssh_browse: tool(["Browse", "Browsing", "Browsed", "folders over SSH"], "ssh-browse"),
+  goat_ssh_reports: tool(["List", "Listing", "Listed", "remote thread reports"], "thread-list"),
   goat_ssh_thread_launch: tool(
     ["Start", "Starting", "Started", "a thread on another machine"],
     "ssh-thread-launch",

@@ -193,6 +193,7 @@ const fixture = Effect.gen(function* () {
                   projectId: "rp",
                   projectCreated: true,
                   threadId: "rt",
+                  reportsSupported: false,
                   runId: "run",
                   workspaceStrategy: { type: "root" as const },
                   runtimeMode: call.runtimeMode,

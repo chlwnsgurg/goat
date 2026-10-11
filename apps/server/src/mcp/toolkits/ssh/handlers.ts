@@ -1,4 +1,6 @@
+import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import { OrchestratorMcpFailure, RunId, ThreadId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
@@ -8,6 +10,8 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
 import { SshToolkit } from "./tools.ts";
+
+const isRemoteDispatchError = Schema.is(RemoteDispatchCoordinator.RemoteDispatchError);
 
 const toMcpFailure = (error: SshRemoteDispatch.SshRemoteDispatchError) =>
   new OrchestratorMcpFailure({
@@ -73,31 +77,55 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
                 threadTitle: launcher.title,
               })),
             );
-      const result = yield* dispatch
-        .launchThread(
+      const attachments = yield* dispatch
+        .validateLaunchAttachments(input.attachments ?? [])
+        .pipe(Effect.mapError(toMcpFailure));
+      const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
+      const launch: SshRemoteDispatch.SshLaunchInput = {
+        host: input.host,
+        cwd: input.cwd,
+        workspace: input.workspace ?? { type: "cwd" },
+        title: input.title,
+        message: input.message,
+        projectTitle: input.projectTitle,
+        // The remote project usually has no default model, so a thread caller's own
+        // model is the sensible default; an outside client must pass one.
+        modelSelection: input.modelSelection ?? caller.caller?.modelSelection,
+        runtimeMode,
+        callerRuntimeMode: caller.limits.runtimeMode,
+        interactionMode: input.interactionMode,
+        attachments,
+        allowBroadWorkspaceRoot: input.allowBroadWorkspaceRoot,
+        launchedBy,
+      };
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const result = yield* Effect.gen(function* () {
+        if (scope.thread === undefined) {
+          const value = yield* dispatch.launchThread(launch, check.pipe(Effect.asVoid));
+          return { ...value, correlationId: null };
+        }
+        const value = yield* coordinator.launch(
           {
-            host: input.host,
-            cwd: input.cwd,
-            workspace: input.workspace ?? { type: "cwd" },
-            title: input.title,
-            message: input.message,
-            projectTitle: input.projectTitle,
-            // The remote project usually has no default model, so a thread caller's own
-            // model is the sensible default; an outside client must pass one.
-            modelSelection: input.modelSelection ?? caller.caller?.modelSelection,
-            runtimeMode,
-            callerRuntimeMode: caller.limits.runtimeMode,
-            interactionMode: input.interactionMode,
-            allowBroadWorkspaceRoot: input.allowBroadWorkspaceRoot,
-            launchedBy,
+            kind: "thread",
+            originThreadId: scope.thread.threadId,
+            delivery: input.reportDelivery ?? "wake",
+            launch,
           },
           check.pipe(Effect.asVoid),
-        )
-        .pipe(
-          Effect.mapError((error) =>
-            error instanceof SshRemoteDispatch.SshRemoteDispatchError ? toMcpFailure(error) : error,
-          ),
         );
+        return { ...value.launch, correlationId: value.correlationId };
+      }).pipe(
+        Effect.mapError((error) =>
+          error instanceof SshRemoteDispatch.SshRemoteDispatchError
+            ? toMcpFailure(error)
+            : isRemoteDispatchError(error)
+              ? new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: "SSH report coordination failed.",
+                })
+              : error,
+        ),
+      );
       const watching =
         launcher !== undefined && input.notifyOnCompletion !== false
           ? yield* LaunchWatchService.LaunchWatchService.pipe(
@@ -131,8 +159,37 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
             ? [
                 `This machine follows the thread over SSH and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
               ]
-            : []),
+            : scope.thread !== undefined
+              ? [
+                  `${
+                    input.notifyOnCompletion === false
+                      ? "Run ends are not followed because completion notifications are disabled."
+                      : "Run ends are not followed because no launch watch was recorded."
+                  }${result.reportsSupported ? " Agent reports still arrive per reportDelivery." : ""}`,
+                ]
+              : []),
         ],
+      };
+    }),
+  ),
+  goat_ssh_reports: McpToolAccess.readsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const thread = yield* McpInvocationContext.requireThreadScope(scope, "goat_ssh_reports");
+      const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
+      const records = yield* coordinator
+        .listForOrigin(thread.thread.threadId, input.limit ?? 50)
+        .pipe(
+          Effect.mapError(
+            () =>
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: "Could not read SSH reports.",
+              }),
+          ),
+        );
+      return {
+        dispatches: records.map(RemoteDispatchCoordinator.dispatchView),
       };
     }),
   ),

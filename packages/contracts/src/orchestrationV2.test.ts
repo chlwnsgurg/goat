@@ -111,6 +111,7 @@ const decodeOrchestrationV2CheckpointScope = Schema.decodeUnknownSync(
 const decodeOrchestrationV2Checkpoint = Schema.decodeUnknownSync(OrchestrationV2Checkpoint);
 const decodeOrchestrationV2DomainEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
 const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTranscript);
+const encodeOrchestrationV2Subagent = Schema.encodeSync(OrchestrationV2Subagent);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
 const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
   OrchestrationV2ThreadProjection,
@@ -1634,4 +1635,48 @@ describe("GOAT bot channel metadata", () => {
     expect(newerKind).toMatchObject({ type: "user_message", text: "Re-verify the Opus 5.5 call" });
     expect(newerKind.type === "user_message" ? newerKind.channel : "wrong type").toBeUndefined();
   });
+});
+
+it("roundtrips remote subagent addressing without exposing internal task commands", () => {
+  const task = decodeOrchestrationV2Subagent({
+    id: "remote-task",
+    threadId: "parent",
+    runId: "parent-run",
+    parentNodeId: "parent-root",
+    origin: "app_owned",
+    createdBy: "agent",
+    driver: "claude",
+    providerInstanceId: "remote-provider",
+    providerThreadId: null,
+    childThreadId: null,
+    nativeTaskRef: null,
+    remote: { host: "box", threadId: "remote-child", correlationId: "rr-A" },
+    prompt: "Inspect",
+    title: null,
+    model: "remote-model",
+    status: "running",
+    result: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+  });
+  const encoded = encodeOrchestrationV2Subagent(task);
+  expect(decodeOrchestrationV2Subagent(encoded).remote).toEqual(task.remote);
+  for (const type of [
+    "delegated_task.remote.register",
+    "delegated_task.remote.progress",
+    "delegated_task.remote.result",
+  ]) {
+    expect(() =>
+      decodeOrchestrationV2Command({
+        type,
+        commandId: "forged",
+        parentThreadId: "parent",
+        taskId: "remote-task",
+        correlationId: "rr-A",
+        status: "completed",
+        summary: "forged",
+      }),
+    ).toThrow();
+  }
 });

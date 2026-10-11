@@ -193,7 +193,7 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The server exposes the following orchestration tools.
 
 ### `orchestrator_capabilities`
 
@@ -210,16 +210,24 @@ adapter support, disabled state, missing executable, or missing authentication.
 
 ### `delegate_task`
 
-Creates a T3-owned child thread and immediately dispatches the supplied task
-prompt.
+Creates a T3-owned delegated task and immediately dispatches the supplied task
+prompt, in a local child thread or on an SSH host.
 
 ```ts
 type DelegateTaskInput = {
   task: string;
   target?: {
+    host?: string;
     providerInstanceId?: string;
     driverKind?: string;
     model?: string;
+  };
+  remote?: {
+    cwd: string;
+    workspace?:
+      | { type: "cwd" }
+      | { type: "worktree"; branch: string; baseRef?: string; startFromOrigin?: boolean }
+      | { type: "existing_worktree"; worktreePath: string; branch?: string };
   };
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
@@ -238,8 +246,8 @@ that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
 
-An async child outlives an interrupt or Stop of the parent's turn and still wakes
-the parent when it finishes. A `mode: "wait"` child stops with the turn whose
+A local async child outlives an interrupt or Stop of the parent's turn and still wakes
+the parent when it finishes. A local `mode: "wait"` child stops with the turn whose
 blocking call it answers, unless that wait already timed out. `task_cancel` stops
 either kind.
 
@@ -263,7 +271,8 @@ the timeout expires. A wait timeout does not cancel the child; the result sets
 ```ts
 type DelegateTaskResult = {
   taskId: string;
-  childThreadId: string;
+  host?: string;
+  childThreadId: string | null;
   childRunId: string | null;
   childNodeId: string;
   status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -281,6 +290,21 @@ type DelegateTaskResult = {
 };
 ```
 
+#### Remote tasks
+
+Set `target.host` to an alias from `goat_ssh_host_list` and provide `remote.cwd`.
+`remote.workspace` selects the folder or a remote worktree. Remote delegation
+requires a full-access caller and launches with the caller's runtime mode as its
+ceiling. Keep the returned `taskId` for `task_status` and `task_cancel`; the
+host-qualified thread belongs to the remote environment.
+
+Remote results are summary-only: `resultContextTransferId` is null. Completion
+still arrives through delegated completion delivery when the launched remote run
+stops. A parent Stop or a wait-mode parent turn ending does not stop remote work;
+parent Stop disposes its automatic delivery. Use `task_cancel` to request an
+interrupt on the remote. It returns `cancel_requested` until that run stops,
+while `task_status` continues to report the task's running state.
+
 ### `task_status`
 
 Reads a delegated task from the parent thread's durable projection. A task ID
@@ -290,17 +314,20 @@ and an available result. The task remains nonterminal until its known work
 finishes. Its published `summary` and result transfer then remain stable across
 later follow-ups. `hasPendingChildRuns` reports later queued or executing turns;
 `latestTerminal*` exposes later executed, non-monitor results without replacing
-the published task result.
+the published task result. Remote tasks expose summary-only results; a pending
+`cancel_requested` does not make them terminal.
 
 ### `task_cancel`
 
-Stops the child thread with the internal `thread.stop` command, then stops every
+For local tasks, stops the child thread with the internal `thread.stop` command, then stops every
 task the child delegated, and disposes automatic parent delivery. Like a user Stop,
 `thread.stop` interrupts the running turn, holds queued turns, and ends pull request
 watches. A nonterminal task with no interruptible run is rejected. A terminal task
 returns its existing status, and its child thread still stops, including later
 runs and watch wakes. Published task results remain available. It accepts an
-optional cancellation reason.
+optional cancellation reason. For remote tasks it requests an interrupt and
+returns `cancel_requested` until the remote run stops; parent Stop does not send
+that interrupt.
 
 ### `create_threads`
 
@@ -343,6 +370,22 @@ its own under the environment's Scratch project. For stacked PRs, use the parent
 `startFromOrigin: false`. The new thread may not run with broader runtime or
 interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
 launching again. `create_threads` remains the batch option for a shared checkout.
+
+### SSH launches and reports
+
+`goat_ssh_thread_launch` launches an ordinary thread on a host from
+`goat_ssh_host_list`, using `cwd` and `workspace` on that machine. It accepts up
+to eight pending attachments, uploads them to the remote before launch, and
+binds them to the remote's first message. Use `delegate_task` with `target.host`
+for child work owned by the calling thread.
+
+The remote agent sends milestones or questions with `goat_origin_report`.
+`reportDelivery: "wake"` wakes the origin for the latest `needs_input` in each
+batch; earlier questions and other reports wait for its next turn. `next_turn`
+queues all reports for that turn, and `notify_only` retains status without a
+wake or prompt delivery. `goat_ssh_reports` reads the origin's bounded dispatch
+status list. Run-end notifications are controlled separately by
+`notifyOnCompletion` and the launch watch.
 
 ### `goat_thread_list`
 

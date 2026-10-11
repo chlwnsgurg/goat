@@ -1,0 +1,296 @@
+// @effect-diagnostics nodeBuiltinImport:off - read-key hashing needs a constant-time compare.
+import * as NodeCrypto from "node:crypto";
+import {
+  NonNegativeInt,
+  ThreadId,
+  RemoteReportBindingInput,
+  RemoteReport,
+  RemoteOriginReportInput,
+  RemoteOriginReportResult,
+  RemoteOriginReportsWaitInput,
+  RemoteOriginReportsWaitResult,
+  REMOTE_REPORT_SUMMARY_MAX_CHARS,
+} from "@t3tools/contracts";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import { isTerminalRunStatus } from "../orchestration-v2/ThreadManagementService.ts";
+
+export class RemoteReportError extends Schema.TaggedError<RemoteReportError>()(
+  "RemoteReportError",
+  {
+    reason: Schema.Literals([
+      "invalid_request",
+      "not_bound",
+      "access_denied",
+      "run_not_found",
+      "thread_deleted",
+      "unavailable",
+      "storage",
+    ]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return "Remote report operation failed.";
+  }
+}
+const BindingRow = Schema.Struct({
+  threadId: ThreadId,
+  ...RemoteReportBindingInput.fields,
+  lastSequence: NonNegativeInt,
+});
+const decodeBindingRows = Schema.decodeUnknownEffect(Schema.Array(BindingRow));
+const decodeBindingInput = Schema.decodeUnknownEffect(RemoteReportBindingInput);
+const decodeReportInput = Schema.decodeUnknownEffect(RemoteOriginReportInput);
+const decodeWaitInput = Schema.decodeUnknownEffect(RemoteOriginReportsWaitInput);
+const decodeReports = Schema.decodeUnknownEffect(Schema.Array(RemoteReport));
+const isRemoteReportError = Schema.is(RemoteReportError);
+
+export class RemoteReportService extends Context.Service<
+  RemoteReportService,
+  {
+    readonly bind: (
+      threadId: ThreadId,
+      input: RemoteReportBindingInput,
+    ) => Effect.Effect<void, RemoteReportError>;
+    readonly unbind: (threadId: ThreadId) => Effect.Effect<void, RemoteReportError>;
+    readonly report: (
+      threadId: ThreadId,
+      input: RemoteOriginReportInput,
+    ) => Effect.Effect<RemoteOriginReportResult, RemoteReportError>;
+    readonly wait: (
+      input: RemoteOriginReportsWaitInput,
+    ) => Effect.Effect<RemoteOriginReportsWaitResult, RemoteReportError>;
+  }
+>()("t3/remoteReports/RemoteReportService") {}
+const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const signals = yield* Effect.acquireRelease(PubSub.sliding<void>(1), PubSub.shutdown);
+  const storage = (cause: unknown) => new RemoteReportError({ reason: "storage", cause });
+  const unavailable = (cause: unknown) => new RemoteReportError({ reason: "unavailable", cause });
+  const invalid = (cause: unknown) => new RemoteReportError({ reason: "invalid_request", cause });
+  const decodeRows = decodeBindingRows;
+  const bindingForThread = (threadId: ThreadId) =>
+    sql`
+    SELECT thread_id AS "threadId", correlation_id AS "correlationId",
+      origin_label AS "originLabel", origin_thread_id AS "originThreadId",
+      read_key_hash AS "readKeyHash", last_sequence AS "lastSequence"
+    FROM remote_report_bindings WHERE thread_id = ${threadId}
+  `.pipe(Effect.mapError(storage), Effect.flatMap(decodeRows), Effect.mapError(storage));
+  const bindingForCorrelation = (correlationId: string) =>
+    sql`
+    SELECT thread_id AS "threadId", correlation_id AS "correlationId",
+      origin_label AS "originLabel", origin_thread_id AS "originThreadId",
+      read_key_hash AS "readKeyHash", last_sequence AS "lastSequence"
+    FROM remote_report_bindings WHERE correlation_id = ${correlationId}
+  `.pipe(Effect.mapError(storage), Effect.flatMap(decodeRows), Effect.mapError(storage));
+  const bind = Effect.fn("RemoteReportService.bind")(function* (
+    threadId: ThreadId,
+    input: RemoteReportBindingInput,
+  ) {
+    const value = yield* decodeBindingInput(input).pipe(Effect.mapError(invalid));
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    yield* sql`
+      INSERT INTO remote_report_bindings
+        (thread_id, correlation_id, origin_label, origin_thread_id, read_key_hash, created_at)
+      VALUES (${threadId}, ${value.correlationId}, ${value.originLabel}, ${value.originThreadId}, ${value.readKeyHash}, ${createdAt})
+    `.pipe(Effect.mapError(storage));
+  });
+  const unbind = Effect.fn("RemoteReportService.unbind")(function* (threadId: ThreadId) {
+    yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* sql`DELETE FROM remote_reports WHERE correlation_id IN
+        (SELECT correlation_id FROM remote_report_bindings WHERE thread_id = ${threadId})`;
+          yield* sql`DELETE FROM remote_report_bindings WHERE thread_id = ${threadId}`;
+        }),
+      )
+      .pipe(Effect.mapError(storage));
+    yield* PubSub.publish(signals, undefined);
+  });
+  const report = Effect.fn("RemoteReportService.report")(function* (
+    threadId: ThreadId,
+    input: RemoteOriginReportInput,
+  ) {
+    const value = yield* decodeReportInput(input).pipe(Effect.mapError(invalid));
+    const shell = yield* orchestrator.getThreadShell(threadId).pipe(Effect.mapError(unavailable));
+    if (shell === null || shell.deletedAt !== null)
+      return yield* new RemoteReportError({ reason: "thread_deleted" });
+    const runId = shell.activeRunId;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const result = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const binding = (yield* bindingForThread(threadId))[0];
+          if (binding === undefined) return yield* new RemoteReportError({ reason: "not_bound" });
+          const sequence = binding.lastSequence + 1;
+          yield* sql`UPDATE remote_report_bindings SET last_sequence = ${sequence} WHERE thread_id = ${threadId}`;
+          yield* sql`
+        INSERT INTO remote_reports (correlation_id, sequence, run_id, kind, summary, created_at)
+        VALUES (${binding.correlationId}, ${sequence}, ${runId}, ${value.status}, ${value.summary}, ${createdAt})
+      `;
+          // Keep the newest 200, preferring substantive reports over progress.
+          yield* sql`
+        DELETE FROM remote_reports WHERE correlation_id = ${binding.correlationId}
+          AND sequence IN (
+            SELECT sequence FROM remote_reports WHERE correlation_id = ${binding.correlationId}
+            ORDER BY CASE WHEN kind = 'progress' THEN 1 ELSE 0 END, sequence DESC
+            LIMIT -1 OFFSET 200
+          )
+      `;
+          return { sequence };
+        }),
+      )
+      .pipe(Effect.mapError((cause) => (isRemoteReportError(cause) ? cause : storage(cause))));
+    yield* PubSub.publish(signals, undefined);
+    return result;
+  });
+  const wait = Effect.fn("RemoteReportService.wait")(function* (
+    input: RemoteOriginReportsWaitInput,
+  ) {
+    const value = yield* decodeWaitInput(input).pipe(Effect.mapError(invalid));
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(signals);
+        const authorize = Effect.gen(function* () {
+          const binding = (yield* bindingForCorrelation(value.correlationId))[0];
+          const supplied = NodeCrypto.createHash("sha256").update(value.readKey, "utf8").digest();
+          // Compare equal-size buffers even when the correlation does not exist.
+          const expected = Buffer.from(binding?.readKeyHash ?? "0".repeat(64), "hex");
+          const matches = NodeCrypto.timingSafeEqual(supplied, expected);
+          if (binding === undefined || !matches)
+            return yield* new RemoteReportError({ reason: "access_denied" });
+          if (value.afterSequence > binding.lastSequence)
+            return yield* new RemoteReportError({ reason: "invalid_request" });
+          return binding;
+        });
+        const binding = yield* authorize;
+        const afterSequence = yield* orchestrator
+          .getThreadEventSequence(binding.threadId)
+          .pipe(Effect.mapError(unavailable));
+        const read = Effect.gen(function* () {
+          const reports = yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                yield* authorize;
+                yield* sql`DELETE FROM remote_reports WHERE correlation_id = ${value.correlationId} AND sequence <= ${value.afterSequence}`;
+                const rows = yield* sql`
+            SELECT sequence, run_id AS "runId", kind, summary, created_at AS "createdAt"
+            FROM remote_reports WHERE correlation_id = ${value.correlationId} AND sequence > ${value.afterSequence}
+            ORDER BY sequence LIMIT 51
+          `;
+                return yield* decodeReports(rows);
+              }),
+            )
+            .pipe(
+              Effect.mapError((cause) => (isRemoteReportError(cause) ? cause : storage(cause))),
+            );
+          const shell = yield* orchestrator
+            .getThreadShell(binding.threadId)
+            .pipe(Effect.mapError(unavailable));
+          if (shell === null || shell.deletedAt !== null)
+            return yield* new RemoteReportError({ reason: "thread_deleted" });
+          const runId = value.watchRunId ?? shell.latestRunId;
+          let observedRun: RemoteOriginReportsWaitResult["observedRun"] = null;
+          if (runId !== null) {
+            const records = yield* orchestrator
+              .getThreadRecords(binding.threadId, ["runs"], { runIds: [runId] })
+              .pipe(Effect.mapError(unavailable));
+            const run = records.runs.find((candidate) => candidate.id === runId);
+            if (run === undefined) return yield* new RemoteReportError({ reason: "run_not_found" });
+            let summary: string | null = null;
+            if (isTerminalRunStatus(run.status)) {
+              const messages = yield* orchestrator
+                .getThreadRecords(binding.threadId, ["messages"], {
+                  messageRoles: ["assistant"],
+                  messageRunIds: [runId],
+                })
+                .pipe(Effect.mapError(unavailable));
+              summary =
+                messages.messages
+                  .filter((message) => message.runId === runId && message.role === "assistant")
+                  .toSorted(
+                    (a, b) =>
+                      DateTime.toEpochMillis(a.createdAt) - DateTime.toEpochMillis(b.createdAt) ||
+                      a.id.localeCompare(b.id),
+                  )
+                  .at(-1)
+                  ?.text.slice(0, REMOTE_REPORT_SUMMARY_MAX_CHARS) ?? null;
+            }
+            observedRun = { runId, status: run.status, summary };
+          }
+          return {
+            threadId: binding.threadId,
+            reports: reports.slice(0, 50),
+            hasMore: reports.length > 50,
+            observedRun,
+            latestRunId: shell.latestRunId,
+            timedOut: false,
+          } satisfies RemoteOriginReportsWaitResult;
+        });
+        const changed = (result: RemoteOriginReportsWaitResult) =>
+          result.reports.length > 0 ||
+          (result.observedRun?.runId ?? null) !== (value.knownRun?.runId ?? null) ||
+          (result.observedRun?.status ?? null) !== (value.knownRun?.status ?? null);
+        const first = yield* read;
+        if (changed(first)) return first;
+        if (value.timeoutMs === 0) return { ...first, timedOut: true };
+        const events = Stream.merge(
+          orchestrator
+            .streamStoredEventsFrom({
+              threadId: binding.threadId,
+              afterSequence,
+              eventType: "run.updated",
+            })
+            .pipe(
+              Stream.filter(
+                (stored) =>
+                  value.watchRunId === null ||
+                  (stored.event.type === "run.updated" &&
+                    stored.event.payload.id === value.watchRunId),
+              ),
+            ),
+          Stream.merge(
+            orchestrator.streamStoredEventsFrom({
+              threadId: binding.threadId,
+              afterSequence,
+              eventType: "thread.deleted",
+            }),
+            // Following the latest run means a newly created run is a change too.
+            value.watchRunId === null
+              ? orchestrator.streamStoredEventsFrom({
+                  threadId: binding.threadId,
+                  afterSequence,
+                  eventType: "run.created",
+                })
+              : Stream.empty,
+          ),
+        ).pipe(
+          Stream.mapError(unavailable),
+          Stream.map(() => undefined),
+        );
+        const waited = yield* Stream.merge(Stream.fromSubscription(subscription), events).pipe(
+          Stream.mapEffect(() => read),
+          Stream.filter(changed),
+          Stream.runHead,
+          Effect.timeoutOption(value.timeoutMs),
+        );
+        const result = Option.flatten(waited);
+        if (Option.isSome(result)) return result.value;
+        const final = yield* read;
+        return { ...final, timedOut: !changed(final) };
+      }),
+    );
+  });
+  return RemoteReportService.of({ bind, unbind, report, wait });
+});
+export const layer = Layer.effect(RemoteReportService, make);

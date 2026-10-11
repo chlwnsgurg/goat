@@ -1,5 +1,6 @@
 import * as ConnectionHandlers from "./toolkits/connection/handlers.ts";
 import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
+import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -32,6 +33,9 @@ import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
+import { RemoteReportToolkit } from "./toolkits/remoteReport/tools.ts";
+import * as RemoteReportHandlers from "./toolkits/remoteReport/handlers.ts";
+import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
 import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
@@ -934,6 +938,11 @@ export const layerConnectionToolkit = toolkitRegistration(
   ConnectionHandlers.layer,
 );
 
+const layerRemoteReportRegistration = toolkitRegistration(
+  RemoteReportToolkit,
+  RemoteReportHandlers.layer,
+);
+
 const layerSshToolkitRegistration = toolkitRegistration(SshToolkit, SshHandlers.layer);
 
 export const layerAttachmentToolkit = toolkitRegistration(
@@ -983,9 +992,14 @@ export const layer = Layer.mergeAll(
   layerHtmlToolkit,
   layerSshToolkitRegistration,
   layerConnectionToolkit,
+  layerRemoteReportRegistration,
 ).pipe(
   // One launch-watch store for the launch, send and watch tools, following
   // threads with the same dispatch they use.
   Layer.provide(LaunchWatchService.layer),
+  // One report service for the launch binding and the report tools, so a
+  // report wakes the origin's waiting collector.
+  Layer.provide(RemoteReportService.layer),
+  Layer.provide(RemoteDispatchCoordinator.layer),
   Layer.provideMerge(layerMcpTransport),
 );

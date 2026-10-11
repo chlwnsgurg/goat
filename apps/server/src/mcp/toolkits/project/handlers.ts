@@ -8,6 +8,7 @@ import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageInt
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
@@ -97,6 +98,16 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             code: "invalid_request",
             message: "A new thread accepts only pending attachment uploads.",
           });
+        const report = input.report;
+        // Only another machine's GOAT, signed in as an outside client, binds an origin.
+        if (
+          report !== undefined &&
+          (context.scope.thread !== undefined || context.scope.client === undefined)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "An origin report binding may only be supplied by an outside client.",
+          });
         if (
           input.scratch === true &&
           (input.projectId !== undefined || input.workspaceStrategy !== undefined)
@@ -164,7 +175,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
-        const result = yield* ThreadMessageIntake.launchThread({
+        const launch = ThreadMessageIntake.launchThread({
           commandId,
           threadId,
           projectId,
@@ -207,6 +218,32 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               : unavailable(),
           ),
         );
+        const result =
+          report === undefined
+            ? yield* launch
+            : yield* Effect.gen(function* () {
+                const reports = yield* RemoteReportService.RemoteReportService;
+                // The binding commits before the agent can run. Only a launch that
+                // never created its thread loses it again; an accepted or uncertain
+                // launch keeps it, so the work it started can still report.
+                return yield* Effect.uninterruptibleMask((restore) =>
+                  reports.bind(threadId, report).pipe(
+                    Effect.mapError(unavailable),
+                    Effect.andThen(
+                      restore(launch).pipe(
+                        Effect.onError(() =>
+                          context.threads.getThreadShell(threadId).pipe(
+                            Effect.flatMap((shell) =>
+                              shell === null ? reports.unbind(threadId) : Effect.void,
+                            ),
+                            Effect.ignore,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              });
         const thread = result.projection.thread;
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
         const watching =
@@ -239,6 +276,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           runId: run?.id ?? null,
           status: run?.status ?? null,
           watching,
+          ...(report === undefined ? {} : { report: { correlationId: report.correlationId } }),
         };
       }),
   ),

@@ -1,3 +1,5 @@
+import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
+import type { OrchestrationV2ServerCommand } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
@@ -9,6 +11,7 @@ import {
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -508,5 +511,118 @@ it.effect.each([
     yield* service.settleAfterRun({ projectId, threadId, runId });
 
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
+  }),
+);
+
+it.effect.each([
+  "delegated_task.remote.register",
+  "delegated_task.remote.progress",
+  "delegated_task.remote.result",
+] as const)("hydrates only the parent for %s", (type) =>
+  Effect.gen(function* () {
+    const parent = ThreadId.make("remote-parent");
+    const seen: Array<ThreadId> = [];
+    const command =
+      type === "delegated_task.remote.register"
+        ? {
+            type,
+            commandId: CommandId.make("register"),
+            parentThreadId: parent,
+            parentRunId: RunId.make("parent-run"),
+            parentNodeId: NodeId.make("parent-root"),
+            task: "Inspect",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("remote"),
+              model: "remote-model",
+            },
+            driver: ProviderDriverKind.make("claude"),
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            createdBy: "agent" as const,
+            creationSource: "mcp" as const,
+            remote: { host: "box", threadId: null, correlationId: "rr-A" },
+          }
+        : type === "delegated_task.remote.progress"
+          ? {
+              type,
+              commandId: CommandId.make("progress"),
+              parentThreadId: parent,
+              taskId: NodeId.make("task"),
+              correlationId: "rr-A",
+              remoteThreadId: ThreadId.make("remote-child"),
+            }
+          : {
+              type,
+              commandId: CommandId.make("result"),
+              parentThreadId: parent,
+              taskId: NodeId.make("task"),
+              correlationId: "rr-A",
+              status: "completed" as const,
+              summary: "done",
+            };
+    const layer = ThreadManagementService.layerWithLegacyImporter.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            dispatch: (received) => {
+              expect(received).toEqual(command);
+              return Effect.succeed({ sequence: 0, storedEvents: [] });
+            },
+          }),
+          Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
+            ensureTranscript: (id) =>
+              Effect.sync(() => {
+                seen.push(id);
+                return { importedThreadCount: 0, importedMessageCount: 0 };
+              }),
+          }),
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      yield* service.dispatch(command satisfies OrchestrationV2ServerCommand);
+    }).pipe(Effect.provide(layer));
+    expect(seen).toEqual([parent]);
+  }),
+);
+
+it.effect("parent Stop does not traverse a remote delegated task (M11)", () =>
+  Effect.gen(function* () {
+    const parent = ThreadId.make("remote-stop-parent");
+    const projection = idleThreadProjection(liveThreadShell(parent));
+    let stops = 0;
+    const task = {
+      id: NodeId.make("remote-task"),
+      threadId: parent,
+      runId: RunId.make("parent-run"),
+      parentNodeId: NodeId.make("root"),
+      origin: "app_owned" as const,
+      createdBy: "agent" as const,
+      driver: ProviderDriverKind.make("claude"),
+      providerInstanceId: ProviderInstanceId.make("remote-provider"),
+      providerThreadId: null,
+      childThreadId: null,
+      nativeTaskRef: null,
+      remote: { host: "box", threadId: ThreadId.make("remote-child"), correlationId: "rr-A" },
+      prompt: "Inspect",
+      title: null,
+      model: null,
+      status: "running" as const,
+      result: null,
+      startedAt: projection.thread.createdAt,
+      completedAt: null,
+      updatedAt: projection.thread.updatedAt,
+    };
+    const stop = ThreadManagementService.makeStopDelegatedTasks({
+      getThreadRecords: () => Effect.succeed({ ...projection, subagents: [task] }),
+      dispatch: () =>
+        Effect.sync(() => {
+          stops++;
+          return { sequence: 0, storedEvents: [] };
+        }),
+    });
+    yield* stop({ threadId: parent, commandId: CommandId.make("parent-stop") });
+    expect(stops).toBe(0);
   }),
 );

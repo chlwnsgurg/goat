@@ -13,6 +13,9 @@ import {
 } from "./orchestratorMcp.ts";
 
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
+const decodeStrictCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput, {
+  onExcessProperty: "error",
+});
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
 const decodeThreadInterruptInput = Schema.decodeUnknownSync(OrchestratorMcpThreadInterruptInput);
@@ -163,4 +166,65 @@ describe("orchestrator MCP contracts", () => {
       }).reason,
     ).toBe("Loop converged.");
   });
+  it("decodes remote workspaces and a nullable host-qualified task handle", () => {
+    for (const workspace of [
+      { type: "cwd" },
+      { type: "worktree", branch: "feature/task" },
+      { type: "existing_worktree", worktreePath: "/workspace/task" },
+    ]) {
+      const input = decodeDelegateTaskInput({
+        task: "Inspect",
+        target: { host: "build-box" },
+        remote: { cwd: "/workspace/repo", workspace },
+      });
+      expect(input.remote?.workspace).toEqual(workspace);
+      expect(input.target?.host).toBe("build-box");
+    }
+    const result = decodeDelegateTaskResult({
+      taskId: "task",
+      host: "build-box",
+      childThreadId: null,
+      childRunId: null,
+      childNodeId: "task",
+      status: "failed",
+      workState: "result_available",
+      hasPendingChildRuns: false,
+      providerInstanceId: "codex",
+      model: null,
+      summary: "launch outcome unknown",
+      resultContextTransferId: null,
+      latestTerminalRunId: null,
+      latestTerminalStatus: "failed",
+      latestTerminalSummary: "launch outcome unknown",
+      latestTerminalResultContextTransferId: null,
+      waitTimedOut: false,
+    });
+    expect(result.childThreadId).toBeNull();
+    expect(() =>
+      decodeDelegateTaskInput({
+        task: "Inspect",
+        target: { host: " " },
+        remote: { cwd: "/workspace/repo" },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeDelegateTaskInput({
+        task: "Inspect",
+        target: { host: "build-box" },
+        remote: { cwd: " " },
+      }),
+    ).toThrow();
+  });
+});
+
+it("advertises host only for delegation targets, not create_threads", () => {
+  const createSchema = Schema.toJsonSchemaDocument(OrchestratorMcpCreateThreadsInput);
+  const delegateSchema = Schema.toJsonSchemaDocument(OrchestratorMcpDelegateTaskInput);
+  expect(JSON.stringify(createSchema)).not.toContain('"host"');
+  expect(JSON.stringify(delegateSchema)).toContain('"host"');
+  expect(() =>
+    decodeStrictCreateThreadsInput({
+      threads: [{ target: { host: "build-box" } }],
+    }),
+  ).toThrow();
 });

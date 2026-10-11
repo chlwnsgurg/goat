@@ -1,3 +1,5 @@
+import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
+import { framePendingReports } from "../remoteReports/reportFrame.ts";
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -546,6 +548,7 @@ export const layer: Layer.Layer<
   | ProviderEventIngestor.ProviderEventIngestorV2
   | ServerSettings.ServerSettingsService
   | McpAppModelContext.McpAppModelContext
+  | RemoteReportInbox.RemoteReportInbox
 > = Layer.effect(
   RunExecutionServiceV2,
   Effect.gen(function* () {
@@ -555,6 +558,7 @@ export const layer: Layer.Layer<
     const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
+    const remoteReportInbox = yield* RemoteReportInbox.RemoteReportInbox;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
 
     const writeFinalRunEvents = (input: {
@@ -1374,6 +1378,19 @@ export const layer: Layer.Layer<
             key: `mcp_app_${entry.itemId.replace(/[^\w.-]/g, "_")}`,
             text: entry.text,
           }));
+          const inbox = yield* remoteReportInbox.pending(input.run.threadId).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Failed to read remote report inbox.", { cause }).pipe(
+                Effect.as({
+                  texts: [] as ReadonlyArray<string>,
+                  throughId: null as number | null,
+                }),
+              ),
+            ),
+          );
+          const compact =
+            input.message.attachments.length === 0 &&
+            input.message.text.trim().toLowerCase() === "/compact";
           const turnInput = {
             appThread: input.appThread,
             threadId: input.run.threadId,
@@ -1391,14 +1408,17 @@ export const layer: Layer.Layer<
             attemptId: input.attemptId,
             rootNodeId: input.rootNode.id,
             providerThread: input.providerThread,
-            message: input.message,
+            message:
+              compact || inbox.texts.length === 0
+                ? input.message
+                : {
+                    ...input.message,
+                    text: `${framePendingReports(inbox.texts)}\n\n${input.message.text}`,
+                  },
             modelSelection: input.modelSelection,
             runtimePolicy: input.runtimePolicy,
             ...(appContext.length === 0 ? {} : { appContext }),
           };
-          const compact =
-            input.message.attachments.length === 0 &&
-            input.message.text.trim().toLowerCase() === "/compact";
           const startTurn = compact
             ? (input.session.compactThread?.(turnInput) ??
               Effect.fail(
@@ -1411,7 +1431,22 @@ export const layer: Layer.Layer<
                 }),
               ))
             : input.session.startTurn(turnInput);
-          yield* Effect.andThen(shouldStart, startTurn).pipe(
+          yield* Effect.andThen(
+            shouldStart,
+            startTurn.pipe(
+              Effect.tap(() =>
+                compact || inbox.throughId === null
+                  ? Effect.void
+                  : remoteReportInbox
+                      .consume(input.run.threadId, inbox.throughId)
+                      .pipe(
+                        Effect.catch((cause) =>
+                          Effect.logWarning("Failed to consume remote report inbox.", { cause }),
+                        ),
+                      ),
+              ),
+            ),
+          ).pipe(
             Effect.catchCause((cause) =>
               Effect.logError("orchestration V2 provider turn start failed", {
                 runId: input.run.id,

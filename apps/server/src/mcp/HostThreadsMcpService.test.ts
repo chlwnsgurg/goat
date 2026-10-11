@@ -1,3 +1,4 @@
+import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -88,6 +89,8 @@ const localList: OrchestratorMcpThreadListResult = {
 const runService = <A, E>(
   options: {
     readonly interactionMode: "default" | "plan";
+    readonly taskThread?: boolean;
+    readonly onResume?: (host: string, id: string) => void;
     readonly hosts?: ReadonlyArray<string>;
     readonly hostCall: (
       call: SshRemoteDispatch.SshHostToolCall,
@@ -101,6 +104,12 @@ const runService = <A, E>(
     Layer.provide(
       Layer.mock(LaunchWatchService.LaunchWatchService)({
         rearm: (input) => Effect.sync(() => void rearms.push(input)),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({
+        isTaskThread: () => Effect.succeed(options.taskThread ?? false),
+        resume: (host, id) => Effect.sync(() => options.onResume?.(host, id)),
       }),
     ),
     Layer.provide(
@@ -290,3 +299,55 @@ describe("HostThreadsMcpService", () => {
     }),
   );
 });
+
+it.effect("successful remote send resumes the same host and thread", () =>
+  Effect.gen(function* () {
+    const resumed: Array<[string, string]> = [];
+    const { result } = yield* runService(
+      {
+        interactionMode: "default",
+        onResume: (host, id) => {
+          resumed.push([host, id]);
+        },
+        hostCall: () =>
+          Effect.succeed({
+            host: "box",
+            threadId: "remote",
+            messageId: "message",
+            runId: "run-a",
+            status: "running",
+            delivery: "started",
+          }),
+      },
+      (service) =>
+        service.sendToThread(scope, {
+          host: "box",
+          threadId: ThreadId.make("remote"),
+          message: "continue",
+        }),
+    );
+    expect(result._tag).toBe("Success");
+    expect(resumed).toEqual([["box", "remote"]]);
+  }),
+);
+
+it.effect("refuses a launch watch for a remote delegated task", () =>
+  runService(
+    {
+      interactionMode: "default",
+      taskThread: true,
+      hostCall: () => Effect.die("Must not read the remote"),
+    },
+    (service) =>
+      Effect.gen(function* () {
+        const result = yield* service
+          .watchThread(scope, { host: "box", threadId: ThreadId.make("remote-task") })
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+        if (result._tag === "Failure") {
+          expect(result.failure.code).toBe("invalid_request");
+          expect(result.failure.message).toContain("task_status");
+        }
+      }),
+  ),
+);

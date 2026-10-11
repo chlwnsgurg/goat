@@ -1,3 +1,4 @@
+import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -29,6 +30,7 @@ import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
+import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -110,6 +112,7 @@ const launchFromThread = (params: {
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
         Layer.provide(NodeServices.layer),
@@ -255,6 +258,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
         ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
       }),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-scratch-launch-" }).pipe(
         Layer.provide(NodeServices.layer),
@@ -359,6 +363,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
           }),
       }),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-named-project-" }).pipe(
         Layer.provide(NodeServices.layer),
@@ -455,6 +460,7 @@ const clientLaunchHarness = (input: {
         ),
     }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+    Layer.mock(RemoteReportService.RemoteReportService)({}),
     NodeServices.layer,
   ).pipe(
     Layer.provideMerge(GitVcsDriver.layer),
@@ -661,12 +667,14 @@ it.effect("lists and reads another machine's projects through that machine's own
       Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      Layer.mock(RemoteReportService.RemoteReportService)({}),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-host-projects-" }).pipe(
         Layer.provide(NodeServices.layer),
       ),
     );
     const dependencies = HostThreadsMcpService.layer.pipe(
+      Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
       Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
       Layer.provide(
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
@@ -709,5 +717,180 @@ it.effect("lists and reads another machine's projects through that machine's own
       ["box", "goat_project_list", { limit: 5 }, false],
       ["box", "goat_project_read", { projectId: "project:remote" }, false],
     ]);
+  }),
+);
+
+const reportBinding = {
+  correlationId: "origin-correlation",
+  originLabel: "origin",
+  originThreadId: ThreadId.make("origin-thread"),
+  readKeyHash: "1".repeat(64),
+};
+const reportLaunch = (options: {
+  threadCaller?: boolean;
+  failBind?: boolean;
+  failLaunch?: boolean;
+  interruptLaunch?: boolean;
+  /** The launch created its thread before failing, so the thread exists afterwards. */
+  acceptedBeforeFailure?: boolean;
+}) =>
+  Effect.gen(function* () {
+    const callerId = ThreadId.make("caller");
+    const operations: string[] = [];
+    const bound: Array<{ threadId: ThreadId; input: typeof reportBinding }> = [];
+    const launched: ThreadLaunch.ThreadLaunchInput[] = [];
+    const base = clientLaunchHarness({ runtimeModeCeiling: "auto", launched });
+    const { projectId, modelSelection } = base;
+    const providerInstanceId = modelSelection.instanceId;
+    // Later mock layers override the base services for these cases only.
+    const dependencies = Layer.mergeAll(
+      base.dependencies,
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("remote-environment"),
+        requestNamespace: "report-launch",
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+        thread: options.threadCaller
+          ? { threadId: callerId, providerSessionId: "session", providerInstanceId }
+          : undefined,
+        client: options.threadCaller
+          ? undefined
+          : { sessionId: "client", label: "origin", access: "auto" as const },
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: (id) =>
+          Effect.succeed(
+            id !== callerId && !options.acceptedBeforeFailure
+              ? null
+              : ({
+                  id,
+                  projectId,
+                  providerInstanceId,
+                  modelSelection,
+                  runtimeMode: "auto",
+                  interactionMode: "default",
+                  activeRunId: "active",
+                  archivedAt: null,
+                  deletedAt: null,
+                } as OrchestrationV2ThreadShell),
+          ),
+      }),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({
+        launch: (input) => {
+          operations.push("launch");
+          launched.push(input);
+          if (options.interruptLaunch) return Effect.interrupt;
+          return options.failLaunch
+            ? Effect.fail(
+                new ThreadLaunch.ThreadLaunchError({
+                  operation: "create-thread",
+                  commandId: input.commandId,
+                  projectId,
+                  cause: new Error("fixture refusal"),
+                }),
+              )
+            : Effect.succeed({
+                threadId: input.threadId,
+                resumed: false,
+                projection: { thread: { id: input.threadId, projectId, modelSelection }, runs: [] },
+              } as unknown as ThreadLaunch.ThreadLaunchResult);
+        },
+      }),
+      Layer.mock(RemoteReportService.RemoteReportService)({
+        bind: (threadId, input) => {
+          operations.push("bind");
+          bound.push({ threadId, input });
+          return options.failBind
+            ? Effect.fail(new RemoteReportService.RemoteReportError({ reason: "storage" }))
+            : Effect.void;
+        },
+        unbind: () =>
+          Effect.sync(() => {
+            operations.push("unbind");
+          }),
+      }),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const handle = (report?: typeof reportBinding) =>
+      toolkit
+        .handle("goat_thread_launch", {
+          title: "Remote work",
+          projectId,
+          ...(report === undefined ? {} : { report }),
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    return { operations, bound, launched, handle };
+  });
+it.effect("a thread caller cannot supply an origin binding", () =>
+  Effect.gen(function* () {
+    const fixture = yield* reportLaunch({ threadCaller: true });
+    const result = yield* fixture.handle(reportBinding);
+    expect(result.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(fixture.operations).toEqual([]);
+  }),
+);
+it.effect("an outside client binds before intake and echoes only correlationId", () =>
+  Effect.gen(function* () {
+    const fixture = yield* reportLaunch({});
+    const result = (yield* fixture.handle(reportBinding)).at(-1)?.result;
+    expect(fixture.operations).toEqual(["bind", "launch"]);
+    expect(fixture.bound[0]?.threadId).toBe(fixture.launched[0]?.threadId);
+    expect(fixture.bound[0]?.input).toEqual(reportBinding);
+    expect(result).toMatchObject({
+      report: { correlationId: reportBinding.correlationId },
+      runId: null,
+    });
+    expect((result as { report: object }).report).toEqual({
+      correlationId: reportBinding.correlationId,
+    });
+    // A binding never creates a first message or starts an intentionally idle launch.
+    expect(fixture.launched[0]?.initialMessage).toBeUndefined();
+  }),
+);
+it.effect("launch without a report remains unbound and omits the echo", () =>
+  Effect.gen(function* () {
+    const fixture = yield* reportLaunch({});
+    const result = (yield* fixture.handle()).at(-1)?.result;
+    expect(fixture.operations).toEqual(["launch"]);
+    expect(result).not.toHaveProperty("report");
+  }),
+);
+it.effect(
+  "failed intake unbinds but failed binding never launches or deletes an existing binding",
+  () =>
+    Effect.gen(function* () {
+      const failedLaunch = yield* reportLaunch({ failLaunch: true });
+      expect((yield* failedLaunch.handle(reportBinding)).at(-1)?.result).toMatchObject({
+        code: "orchestration_error",
+      });
+      expect(failedLaunch.operations).toEqual(["bind", "launch", "unbind"]);
+      const failedBind = yield* reportLaunch({ failBind: true });
+      expect((yield* failedBind.handle(reportBinding)).at(-1)?.result).toMatchObject({
+        code: "orchestration_error",
+      });
+      expect(failedBind.operations).toEqual(["bind"]);
+    }),
+);
+it.effect("interrupted intake also unbinds the already committed report channel", () =>
+  Effect.gen(function* () {
+    const fixture = yield* reportLaunch({ interruptLaunch: true });
+    yield* fixture.handle(reportBinding).pipe(Effect.exit);
+    expect(fixture.operations).toEqual(["bind", "launch", "unbind"]);
+  }),
+);
+it.effect("a launch that failed after creating its thread keeps the report channel", () =>
+  Effect.gen(function* () {
+    const failed = yield* reportLaunch({ failLaunch: true, acceptedBeforeFailure: true });
+    expect((yield* failed.handle(reportBinding)).at(-1)?.result).toMatchObject({
+      code: "orchestration_error",
+    });
+    expect(failed.operations).toEqual(["bind", "launch"]);
+    const interrupted = yield* reportLaunch({ interruptLaunch: true, acceptedBeforeFailure: true });
+    yield* interrupted.handle(reportBinding).pipe(Effect.exit);
+    expect(interrupted.operations).toEqual(["bind", "launch"]);
   }),
 );

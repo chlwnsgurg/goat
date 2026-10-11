@@ -1,3 +1,4 @@
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -149,6 +150,7 @@ const seedParentWithTerminalTask = (input: {
   readonly taskId: NodeId;
   readonly deliveryState: "delivered" | "claimed" | "acknowledged" | "disposed";
   readonly completionWake?: "always" | "settled_only";
+  readonly remote?: boolean;
   readonly deliveryTaskIds?: ReadonlyArray<NodeId>;
   readonly now: DateTime.Utc;
 }) =>
@@ -272,6 +274,15 @@ const seedParentWithTerminalTask = (input: {
             providerInstanceId: modelSelection.instanceId,
             providerThreadId: null,
             childThreadId: null,
+            ...(input.remote
+              ? {
+                  remote: {
+                    host: "box",
+                    threadId: ThreadId.make("remote-child"),
+                    correlationId: "rr-mailbox",
+                  },
+                }
+              : {}),
             nativeTaskRef: null,
             prompt: "Inspect the delivered ownership edge.",
             title: null,
@@ -293,6 +304,172 @@ const seedParentWithTerminalTask = (input: {
   });
 
 it.layer(layerTest)("delegated completion delivery repairs", (it) => {
+  it.effect.each(["always", "settled_only"] as const)(
+    "remote %s shares the completion mailbox and acknowledgement",
+    (completionWake) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`remote-mailbox-${completionWake}`);
+        const runId = RunId.make(`remote-mailbox-run-${completionWake}`);
+        const taskId = NodeId.make(`remote-mailbox-task-${completionWake}`);
+        yield* seedParentWithTerminalTask({
+          threadId,
+          runId,
+          taskId,
+          projectId: ProjectId.make(`remote-mailbox-project-${completionWake}`),
+          rootNodeId: NodeId.make("root"),
+          deliveryState: "delivered",
+          completionWake,
+          remote: true,
+          now,
+        });
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        assert.isNull(before.subagents[0]?.childThreadId);
+        assert.equal(before.subagents[0]?.remote?.host, "box");
+        yield* orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make(`remote-ack-${completionWake}`),
+          parentThreadId: threadId,
+          taskId,
+          observedByRunId: runId,
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.subagents[0]?.completionDelivery?.state, "acknowledged");
+        assert.equal(after.messages.length, before.messages.length);
+      }),
+  );
+
+  it.effect("recovers missing registration and keeps the first remote terminal", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("remote-parent");
+      const runId = RunId.make("remote-parent-run");
+      const root = NodeId.make("remote-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        runId,
+        rootNodeId: root,
+        projectId: ProjectId.make("remote-project"),
+        taskId: NodeId.make("seed-task"),
+        deliveryState: "acknowledged",
+        now,
+      });
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      const missing = {
+        type: "delegated_task.remote.result" as const,
+        commandId: CommandId.make("missing-result"),
+        parentThreadId: threadId,
+        taskId: NodeId.make("never-registered"),
+        correlationId: "rr-missing",
+        status: "failed" as const,
+        summary: "launch outcome unknown",
+      };
+      const noop = yield* orchestrator.dispatch(missing);
+      assert.equal(noop.storedEvents.length, 0);
+      yield* orchestrator.dispatch(missing);
+      const missingProgress = yield* orchestrator.dispatch({
+        type: "delegated_task.remote.progress",
+        commandId: CommandId.make("missing-progress"),
+        parentThreadId: threadId,
+        taskId: NodeId.make("never-registered"),
+        correlationId: "rr-missing",
+        remoteThreadId: null,
+        summary: "unknown",
+      });
+      assert.equal(missingProgress.storedEvents.length, 0);
+      const commandId = CommandId.make("register-remote");
+      const taskId = derive.delegatedTaskNode({ commandId });
+      // Existing seed omits the root execution node; registration requires it.
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("remote-root-event"),
+            type: "node.updated",
+            threadId,
+            runId,
+            nodeId: root,
+            occurredAt: now,
+            payload: {
+              id: root,
+              threadId,
+              runId,
+              parentNodeId: null,
+              rootNodeId: root,
+              kind: "root_turn",
+              status: "running",
+              countsForRun: true,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+        ],
+      });
+      const registered = yield* orchestrator.dispatch({
+        type: "delegated_task.remote.register",
+        commandId,
+        parentThreadId: threadId,
+        parentRunId: runId,
+        parentNodeId: root,
+        createdBy: "agent",
+        creationSource: "mcp",
+        task: "Inspect remote repository",
+        modelSelection,
+        driver,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        completionWake: "settled_only",
+        remote: { host: "build-box", threadId: null, correlationId: "rr-A" },
+      });
+      assert.deepEqual(
+        registered.storedEvents.map((stored) => stored.event.type),
+        ["node.updated", "subagent.updated", "turn-item.updated"],
+      );
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.result",
+        commandId: CommandId.make("result-A"),
+        parentThreadId: threadId,
+        taskId,
+        correlationId: "rr-A",
+        status: "completed",
+        summary: "A done",
+      });
+      const late = yield* orchestrator.dispatch({
+        type: "delegated_task.remote.result",
+        commandId: CommandId.make("late-cancel-A"),
+        parentThreadId: threadId,
+        taskId,
+        correlationId: "rr-A",
+        status: "cancelled",
+        summary: "late cancellation",
+      });
+      assert.equal(late.storedEvents.length, 0);
+      const lateProgress = yield* orchestrator.dispatch({
+        type: "delegated_task.remote.progress",
+        commandId: CommandId.make("late-progress-A"),
+        parentThreadId: threadId,
+        taskId,
+        correlationId: "rr-A",
+        remoteThreadId: null,
+        summary: "late progress",
+      });
+      assert.equal(lateProgress.storedEvents.length, 0);
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      const task = after.subagents.find((value) => value.id === taskId)!;
+      assert.isNull(task.childThreadId);
+      assert.equal(task.status, "completed");
+      assert.equal(task.result, "A done");
+      assert.equal(after.contextTransfers.length, before.contextTransfers.length);
+    }),
+  );
   it.effect("acceptance batches pending siblings without acknowledging their results", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -397,6 +574,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
       const siblingId = NodeId.make("mailbox-mixed-settled-only");
       const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
       yield* seedParentWithTerminalTask({
+        remote: true,
         threadId,
         runId,
         projectId: ProjectId.make("mailbox-mixed-project"),
@@ -491,6 +669,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
       const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
 
       yield* seedParentWithTerminalTask({
+        remote: true,
         threadId,
         projectId,
         runId,
