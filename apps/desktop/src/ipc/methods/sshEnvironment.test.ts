@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as DesktopSshEnvironment from "../../ssh/DesktopSshEnvironment.ts";
 import { SshHttpBridgeError } from "@t3tools/ssh/errors";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -10,6 +11,7 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import {
   DesktopSshEnvironmentRequestError,
   fetchSshEnvironmentDescriptor,
+  ensureSshEnvironment,
 } from "./sshEnvironment.ts";
 
 function jsonResponse(request: HttpClientRequest.HttpClientRequest, body: unknown, status = 200) {
@@ -34,6 +36,43 @@ function layerHttpClient(
 }
 
 describe("SSH environment IPC", () => {
+  it.effect("preserves key-only options across the IPC handler", () =>
+    Effect.gen(function* () {
+      const target = {
+        alias: "devbox",
+        hostname: "devbox.example.test",
+        username: null,
+        port: null,
+      };
+      let received: unknown;
+      const result = yield* ensureSshEnvironment
+        .handler({ target, options: { keyOnly: true, issuePairingToken: true } })
+        .pipe(
+          Effect.provideService(DesktopSshEnvironment.DesktopSshEnvironment, {
+            discoverHosts: () => Effect.die("unused"),
+            resolveHost: () => Effect.die("unused"),
+            disconnectEnvironment: () => Effect.die("unused"),
+            ensureEnvironment: (receivedTarget, options) =>
+              Effect.sync(() => {
+                received = { target: receivedTarget, options };
+                return {
+                  target,
+                  httpBaseUrl: "http://127.0.0.1:41773/",
+                  wsBaseUrl: "ws://127.0.0.1:41773/",
+                  pairingToken: "fixture-token",
+                };
+              }),
+          }),
+        );
+      assert.deepEqual(received, { target, options: { keyOnly: true, issuePairingToken: true } });
+      assert.deepEqual(result, {
+        target,
+        httpBaseUrl: "http://127.0.0.1:41773/",
+        wsBaseUrl: "ws://127.0.0.1:41773/",
+        pairingToken: "fixture-token",
+      });
+    }),
+  );
   it.effect("fetches and decodes the remote environment descriptor", () => {
     const requestUrls: string[] = [];
     const layer = layerHttpClient((request) =>

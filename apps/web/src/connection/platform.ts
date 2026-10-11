@@ -187,10 +187,12 @@ export const provisionDesktopSshEnvironment = Effect.fn(
   bridge: DesktopBridge,
   target: DesktopSshEnvironmentTarget,
   expectedEnvironmentId?: EnvironmentId,
+  options?: { readonly keyOnly?: boolean },
 ) {
   const bootstrap = yield* Effect.tryPromise({
     try: () =>
       bridge.ensureSshEnvironment(target, {
+        ...options,
         issuePairingToken: true,
       }),
     catch: sshPreparationError,
@@ -274,7 +276,7 @@ const layerCapabilities = Layer.effectContext(
     });
     const ssh = ClientCapabilities.SshEnvironmentGateway.of({
       provision: Effect.fn("web.connectionPlatform.ssh.provision")(
-        function* (target, expectedEnvironmentId) {
+        function* (target, expectedEnvironmentId, options) {
           const bridge = window.desktopBridge;
           if (bridge === undefined) {
             return yield* new ConnectionBlockedError({
@@ -282,7 +284,12 @@ const layerCapabilities = Layer.effectContext(
               detail: "SSH environments are only available in the desktop app.",
             });
           }
-          return yield* provisionDesktopSshEnvironment(bridge, target, expectedEnvironmentId);
+          return yield* provisionDesktopSshEnvironment(
+            bridge,
+            target,
+            expectedEnvironmentId,
+            options,
+          );
         },
       ),
       prepare: Effect.fn("web.connectionPlatform.ssh.prepare")(function* (input) {

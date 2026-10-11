@@ -335,6 +335,15 @@ export function summarizeT3ToolCalls(
     case "ssh-browse":
       label = phrase("Browsed", "browse", `folders over SSH ${times}`);
       break;
+    case "connection-list":
+      label = phrase("Listed", "list", `saved connections ${times}`);
+      break;
+    case "connection-add":
+      label = phrase("Saved", "save", quantity(selected.length, "SSH connection"));
+      break;
+    case "connection-remove":
+      label = phrase("Removed", "remove", quantity(selected.length, "saved connection"));
+      break;
     case "ssh-thread-launch": {
       // The threads live on other machines, so they are counted, never linked here.
       const hosts = new Set(selected.map((call) => id(call.input?.host)).filter(Boolean));

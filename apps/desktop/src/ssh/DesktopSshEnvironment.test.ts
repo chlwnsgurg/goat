@@ -2,6 +2,7 @@ import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as NetService from "@t3tools/shared/Net";
+import * as SshTunnel from "@t3tools/ssh/tunnel";
 import { SshPasswordPromptError } from "@t3tools/ssh/errors";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -19,6 +20,45 @@ function makeTempHomeDir() {
 }
 
 describe("sshEnvironment", () => {
+  it.effect("passes key-only provisioning to the SSH manager without requesting a password", () => {
+    const target = { alias: "devbox", hostname: "box.example.test", username: null, port: null };
+    return Effect.gen(function* () {
+      const environment = yield* DesktopSshEnvironment.make;
+      const result = yield* environment.ensureEnvironment(target, {
+        keyOnly: true,
+        issuePairingToken: true,
+      });
+      assert.equal(result.pairingToken, "fixture-token");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          NodeHttpClient.layerUndici,
+          NetService.layer,
+          Layer.succeed(DesktopSshPasswordPrompts.DesktopSshPasswordPrompts, {
+            request: () => Effect.die("unexpected password prompt"),
+            resolve: () => Effect.die("unused"),
+          }),
+          Layer.succeed(SshTunnel.SshEnvironmentManager, {
+            ensureEnvironment: (receivedTarget, options) =>
+              Effect.sync(() => {
+                assert.deepEqual(receivedTarget, target);
+                assert.deepEqual(options, { keyOnly: true, issuePairingToken: true });
+                return {
+                  target,
+                  httpBaseUrl: "http://127.0.0.1:41773/",
+                  wsBaseUrl: "ws://127.0.0.1:41773/",
+                  pairingToken: "fixture-token",
+                };
+              }),
+            disconnectEnvironment: () => Effect.die("unused"),
+            issueMcpClientSession: () => Effect.die("unused"),
+            runRemoteScript: () => Effect.die("unused"),
+          }),
+        ),
+      ),
+    );
+  });
   it("keeps prompt presentation diagnostics distinct from the legacy wrapper message", () => {
     const cause = new DesktopSshPasswordPrompts.DesktopSshPromptPresentationError({
       requestId: "prompt-1",

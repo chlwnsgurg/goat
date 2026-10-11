@@ -82,6 +82,20 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
+  it.effect("refuses CLI session issuance with the reserved desktop subject", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const error = yield* Effect.flip(
+        auth.issueSession({
+          subject: PairingGrantStore.DESKTOP_BOOTSTRAP_SUBJECT,
+        }),
+      );
+      expect(error._tag).toBe("ReservedAuthSubjectError");
+      expect(error.message).toContain("reserved");
+      expect(yield* auth.listSessions()).toEqual([]);
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
   it.effect("uses the reusable dev cookie without overriding a normal scoped cookie", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

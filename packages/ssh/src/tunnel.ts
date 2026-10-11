@@ -247,6 +247,7 @@ function sshRunnerLogFields(runner: RemoteT3RunnerOptions | undefined) {
 }
 
 interface SshAuthOperationInput<T> {
+  readonly keyOnly?: boolean;
   readonly key: string;
   readonly target: DesktopSshEnvironmentTarget;
   readonly operation: (
@@ -262,7 +263,7 @@ interface SshAuthAttemptInput<T> extends SshAuthOperationInput<T> {
 export interface SshEnvironmentManagerShape {
   readonly ensureEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { readonly issuePairingToken?: boolean },
+    options?: { readonly issuePairingToken?: boolean; readonly keyOnly?: boolean },
   ) => Effect.Effect<
     DesktopSshEnvironmentBootstrap,
     SshEnvironmentEffectError,
@@ -2611,6 +2612,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         return yield* input.error;
       }
 
+      if (input.keyOnly === true) {
+        return yield* new SshPasswordPromptError({
+          message: `Key-based login failed for ${input.target.alias || input.target.hostname}; agents use only SSH keys or ssh-agent.`,
+          cause: input.error,
+        });
+      }
+
       yield* Effect.logWarning("ssh.auth.failed", {
         ...sshTargetLogFields(input.target),
         key: input.key,
@@ -2644,16 +2652,18 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   ): Effect.fn.Return<T, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
     const promptService = yield* SshAuth.SshPasswordPrompt;
     const authOptions =
-      input.authSecret === null
-        ? {
-            batchMode: promptService.isAvailable ? ("yes" as const) : ("no" as const),
-            interactiveAuth: !promptService.isAvailable,
-          }
-        : {
-            authSecret: input.authSecret,
-            batchMode: "no" as const,
-            interactiveAuth: true,
-          };
+      input.keyOnly === true
+        ? { batchMode: "yes" as const, interactiveAuth: false }
+        : input.authSecret === null
+          ? {
+              batchMode: promptService.isAvailable ? ("yes" as const) : ("no" as const),
+              interactiveAuth: !promptService.isAvailable,
+            }
+          : {
+              authSecret: input.authSecret,
+              batchMode: "no" as const,
+              interactiveAuth: true,
+            };
 
     return yield* input
       .operation(authOptions)
@@ -2666,13 +2676,14 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     return yield* runWithSshAuthAttempt({
       ...input,
       promptCount: 0,
-      authSecret: authSecrets.get(input.key) ?? null,
+      authSecret: input.keyOnly === true ? null : (authSecrets.get(input.key) ?? null),
     });
   });
 
   const createTunnelEntry = Effect.fn("ssh/tunnel.ensureTunnelEntry.create")(function* (input: {
     readonly key: string;
     readonly resolvedTarget: DesktopSshEnvironmentTarget;
+    readonly keyOnly?: boolean;
     readonly runner?: RemoteT3RunnerOptions;
   }): Effect.fn.Return<SshTunnelEntry, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
     yield* Effect.logDebug("ssh.environment.tunnel.create.start", {
@@ -2682,6 +2693,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     });
     const remoteLaunch = yield* runWithSshAuth({
       key: input.key,
+      keyOnly: input.keyOnly === true,
       target: input.resolvedTarget,
       operation: (authOptions) =>
         launchOrReuseRemoteServer(input.resolvedTarget, authOptions, input.runner),
@@ -2705,6 +2717,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     const entryScope = yield* Scope.make("sequential");
     const tunnelEntry = yield* runWithSshAuth({
       key: input.key,
+      keyOnly: input.keyOnly === true,
       target: input.resolvedTarget,
       operation: (authOptions) =>
         startSshTunnel({
@@ -2751,7 +2764,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           localPort: tunnelEntry.localPort,
           remotePort: tunnelEntry.remotePort,
         });
-        const authSecret = authSecrets.get(tunnelEntry.key) ?? null;
+        const authSecret =
+          input.keyOnly === true ? null : (authSecrets.get(tunnelEntry.key) ?? null);
         yield* stopRemoteServer(
           tunnelEntry.target,
           authSecret === null
@@ -2791,6 +2805,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     key: string,
     resolvedTarget: DesktopSshEnvironmentTarget,
     runner?: RemoteT3RunnerOptions,
+    keyOnly?: boolean,
   ): Effect.fn.Return<SshTunnelEntry, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
     const entry = tunnels.get(key) ?? null;
 
@@ -2840,6 +2855,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     return yield* createTunnelEntry({
       key,
       resolvedTarget,
+      keyOnly: keyOnly === true,
       ...(runner === undefined ? {} : { runner }),
     }).pipe(
       Effect.tapError((cause) =>
@@ -2854,7 +2870,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
 
   const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
-    requestOptions?: { readonly issuePairingToken?: boolean },
+    requestOptions?: { readonly issuePairingToken?: boolean; readonly keyOnly?: boolean },
   ): Effect.fn.Return<
     DesktopSshEnvironmentBootstrap,
     SshEnvironmentEffectError,
@@ -2895,11 +2911,17 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
                   !firstConnectionDecisions.has(key) &&
                   runner.refreshOwnedRuntimeOnFirstConnection === true,
               };
-        const entry = yield* ensureTunnelEntry(key, resolvedTarget, connectionRunner);
+        const entry = yield* ensureTunnelEntry(
+          key,
+          resolvedTarget,
+          connectionRunner,
+          requestOptions?.keyOnly,
+        );
 
         const pairingResult = requestOptions?.issuePairingToken
           ? yield* runWithSshAuth({
               key,
+              keyOnly: requestOptions?.keyOnly === true,
               target: entry.target,
               operation: (authOptions) =>
                 issueRemotePairingToken(entry.target, authOptions, runner, entry.selectedRuntime),

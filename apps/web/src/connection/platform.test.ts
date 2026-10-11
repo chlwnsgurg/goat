@@ -79,6 +79,21 @@ function makeBridge(
 }
 
 describe("desktop SSH pairing", () => {
+  it.effect("forwards key-only authentication to the desktop bridge", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const bridge = makeBridge(calls);
+      const ensure = bridge.ensureSshEnvironment;
+      let received: Parameters<DesktopBridge["ensureSshEnvironment"]>[1];
+      bridge.ensureSshEnvironment = (target, options) => {
+        received = options;
+        return ensure(target, options);
+      };
+      yield* provisionDesktopSshEnvironment(bridge, TARGET, undefined, { keyOnly: true });
+      expect(received).toEqual({ issuePairingToken: true, keyOnly: true });
+      expect(calls).toEqual(["ensure", "descriptor", "token"]);
+    }),
+  );
   it.effect("fetches the descriptor before consuming the one-time credential", () =>
     Effect.gen(function* () {
       const calls: string[] = [];

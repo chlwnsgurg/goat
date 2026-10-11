@@ -65,6 +65,7 @@ export class SshEnvironmentGateway extends Context.Service<
     readonly provision: (
       target: DesktopSshEnvironmentTarget,
       expectedEnvironmentId?: EnvironmentId,
+      options?: { readonly keyOnly?: boolean },
     ) => Effect.Effect<ProvisionedSshEnvironment, ConnectionAttemptError>;
     readonly prepare: (input: {
       readonly connectionId: string;

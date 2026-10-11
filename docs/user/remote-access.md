@@ -200,10 +200,20 @@ machine's own T3 Code, which is started the same way as above if needed.
 Only SSH keys or a running ssh-agent are used; a host that asks for a password
 is refused. Starting a thread needs a full-access thread or a full-access
 outside agent. To watch the new thread, add the same host under
-**Settings → Connections**. Each start issues a 12-hour sign-in on that
-machine, listed with its other clients. A machine running an older T3 Code
+**Settings → Connections**, or ask the agent to add it for you. Each start
+issues a 12-hour sign-in on that machine, listed with its other clients. A
+machine running an older T3 Code
 only accepts approval-required threads in folders that are already projects
 there.
+
+An agent can also list, add, and remove the connections saved in
+**Settings → Connections**, so another machine's threads show up in the
+sidebar without a trip to Settings. This works while the desktop app is open on
+the machine the agent runs on; web and mobile clients keep their own saved
+connections. Adding uses only SSH keys or ssh-agent, never a password, and
+adding a host that is already saved changes nothing. Adding and removing need a
+full-access thread or a full-access outside agent. Settings shows the change
+right away, and the saved connection records which agent added it.
 
 The agent that started the thread can follow it from here: it waits for the
 thread to finish, reads its messages, sends it follow-ups, or stops it, and it

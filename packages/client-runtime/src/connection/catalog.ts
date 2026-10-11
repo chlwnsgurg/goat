@@ -1,4 +1,8 @@
-import { DesktopSshEnvironmentTargetSchema, EnvironmentId } from "@t3tools/contracts";
+import {
+  ConnectionAddedBy,
+  DesktopSshEnvironmentTargetSchema,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -46,6 +50,8 @@ export class SshConnectionProfile extends Schema.TaggedClass<SshConnectionProfil
   {
     ...ConnectionProfileBase,
     target: DesktopSshEnvironmentTargetSchema,
+    // Older builds drop attribution when they rewrite the catalog.
+    addedBy: Schema.optionalKey(ConnectionAddedBy),
   },
 ) {}
 

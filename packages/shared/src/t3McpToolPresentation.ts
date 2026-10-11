@@ -53,6 +53,9 @@ export type T3McpToolSummaryAction =
   | "ssh-host-list"
   | "ssh-browse"
   | "ssh-thread-launch"
+  | "connection-list"
+  | "connection-add"
+  | "connection-remove"
   | "attachment-prepare"
   | "attachment-discard"
   | "attachment-send"
@@ -321,6 +324,12 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   goat_ssh_thread_launch: tool(
     ["Start", "Starting", "Started", "a thread on another machine"],
     "ssh-thread-launch",
+  ),
+  goat_connection_list: tool(["List", "Listing", "Listed", "saved connections"], "connection-list"),
+  goat_connection_add_ssh: tool(["Save", "Saving", "Saved", "an SSH connection"], "connection-add"),
+  goat_connection_remove: tool(
+    ["Remove", "Removing", "Removed", "a saved connection"],
+    "connection-remove",
   ),
   goat_project_list: tool(["List", "Listing", "Listed", "projects"], "project-list"),
   goat_project_read: tool(["Read", "Reading", "Read", "a project"], "project-read"),

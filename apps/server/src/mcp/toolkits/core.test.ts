@@ -52,6 +52,7 @@ import { AttachmentToolkit } from "./attachment/tools.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
 import { SshToolkit } from "./ssh/tools.ts";
+import { ConnectionToolkit } from "./connection/tools.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
 import { DeviceToolkit } from "./device/tools.ts";
 
@@ -93,6 +94,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     PullRequestsToolkit,
     HtmlToolkit,
     SshToolkit,
+    ConnectionToolkit,
   ]) {
     for (const tool of Object.values(toolkit.tools)) {
       expect(names.has(tool.name)).toBe(false);
@@ -118,6 +120,9 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
   expect([...names].filter((name) => name.startsWith("goat_")).sort()).toEqual([
     "goat_attachment_discard",
     "goat_attachment_prepare_upload",
+    "goat_connection_add_ssh",
+    "goat_connection_list",
+    "goat_connection_remove",
     "goat_environment_preferences_update",
     "goat_environment_read",
     "goat_pending_request_list",
@@ -159,7 +164,7 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_worktree_list",
     "goat_worktree_status",
   ]);
-  expect(names.size).toBe(83);
+  expect(names.size).toBe(86);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);

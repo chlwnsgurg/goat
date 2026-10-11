@@ -343,6 +343,7 @@ export class ServerAuthCloudMintJwtSigningError extends Schema.TaggedError<Serve
 }
 
 export const ServerAuthInternalError = Schema.Union([
+  PairingGrantStore.ReservedAuthSubjectError,
   ServerAuthBootstrapCredentialValidationError,
   ServerAuthSessionCredentialValidationError,
   ServerAuthAuthenticatedSessionIssueError,
@@ -1030,34 +1031,36 @@ export const make = Effect.gen(function* () {
     );
 
   const issueSession: EnvironmentAuth["Service"]["issueSession"] = (input) =>
-    sessions
-      .issue({
-        subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
-        method: "bearer-access-token",
-        scopes: input?.scopes ?? AuthAdministrativeScopes,
-        client: {
-          ...(input?.label ? { label: input.label } : {}),
-          deviceType: "bot",
-        },
-        ...(input?.ttl ? { ttl: input.ttl } : {}),
-        ...(input?.runtimeModeCeiling ? { runtimeModeCeiling: input.runtimeModeCeiling } : {}),
-      })
-      .pipe(
-        Effect.map(
-          (issued) =>
-            ({
-              sessionId: issued.sessionId,
-              token: issued.token,
-              method: "bearer-access-token",
-              scopes: issued.scopes,
-              subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
-              client: issued.client,
-              expiresAt: DateTime.toUtc(issued.expiresAt),
-            }) satisfies IssuedBearerSession,
-        ),
-        Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
-        Effect.withSpan("EnvironmentAuth.issueSession"),
-      );
+    input?.subject === PairingGrantStore.DESKTOP_BOOTSTRAP_SUBJECT
+      ? Effect.fail(new PairingGrantStore.ReservedAuthSubjectError())
+      : sessions
+          .issue({
+            subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
+            method: "bearer-access-token",
+            scopes: input?.scopes ?? AuthAdministrativeScopes,
+            client: {
+              ...(input?.label ? { label: input.label } : {}),
+              deviceType: "bot",
+            },
+            ...(input?.ttl ? { ttl: input.ttl } : {}),
+            ...(input?.runtimeModeCeiling ? { runtimeModeCeiling: input.runtimeModeCeiling } : {}),
+          })
+          .pipe(
+            Effect.map(
+              (issued) =>
+                ({
+                  sessionId: issued.sessionId,
+                  token: issued.token,
+                  method: "bearer-access-token",
+                  scopes: issued.scopes,
+                  subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
+                  client: issued.client,
+                  expiresAt: DateTime.toUtc(issued.expiresAt),
+                }) satisfies IssuedBearerSession,
+            ),
+            Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+            Effect.withSpan("EnvironmentAuth.issueSession"),
+          );
 
   const listSessions: EnvironmentAuth["Service"]["listSessions"] = () =>
     sessions.listActive().pipe(

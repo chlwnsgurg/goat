@@ -283,6 +283,10 @@ import {
 } from "./device.ts";
 import {} from "./previewAutomation.ts";
 import {
+  ConnectionCatalogHostRequest,
+  ConnectionCatalogHostResponse,
+} from "./connectionCatalog.ts";
+import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
   ServerConfig,
@@ -574,6 +578,10 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+
+  // The owning desktop renderer serves saved-connection operations for agents.
+  connectionCatalogServe: "connectionCatalog.serve",
+  connectionCatalogRespond: "connectionCatalog.respond",
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -1521,6 +1529,18 @@ const WsSubscribePreviewEventsRpc = Rpc.make(WS_METHODS.subscribePreviewEvents, 
   stream: true,
 });
 
+const WsConnectionCatalogServeRpc = Rpc.make(WS_METHODS.connectionCatalogServe, {
+  payload: Schema.Struct({}),
+  success: ConnectionCatalogHostRequest,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsConnectionCatalogRespondRpc = Rpc.make(WS_METHODS.connectionCatalogRespond, {
+  payload: ConnectionCatalogHostResponse,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsSubscribeDiscoveredLocalServersRpc = Rpc.make(WS_METHODS.subscribeDiscoveredLocalServers, {
   payload: Schema.Struct({
     configuredUrls: Schema.optional(ConfiguredLocalServerUrls),
@@ -1995,6 +2015,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewReportProfilesRpc,
   WsPreviewReportStatusRpc,
   WsSubscribePreviewEventsRpc,
+  WsConnectionCatalogServeRpc,
+  WsConnectionCatalogRespondRpc,
   WsSubscribeDiscoveredLocalServersRpc,
   WsDeviceConfigureRpc,
   WsDeviceListRpc,

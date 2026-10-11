@@ -629,6 +629,8 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "project-delete":
     case "project-clone":
     case "environment-update":
+    case "connection-add":
+    case "connection-remove":
     case "attachment-prepare":
     case "attachment-discard":
     case "attachment-send":

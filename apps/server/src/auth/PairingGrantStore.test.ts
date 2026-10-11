@@ -67,6 +67,21 @@ const layerPairingGrantStoreTest = (
   );
 
 it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
+  it.effect("refuses the reserved desktop subject for one-time grants", () =>
+    Effect.gen(function* () {
+      const store = yield* PairingGrantStore.PairingGrantStore;
+      const error = yield* Effect.flip(
+        store.issueOneTimeToken({
+          subject: PairingGrantStore.DESKTOP_BOOTSTRAP_SUBJECT,
+          scopes: AuthAdministrativeScopes,
+        }),
+      );
+      expect(error._tag).toBe("ReservedAuthSubjectError");
+      expect(error.message).toContain("reserved");
+      expect(yield* store.listActive()).toEqual([]);
+    }).pipe(Effect.provide(layerPairingGrantStore())),
+  );
+
   it.effect("issues pairing tokens in a short manual-entry format", () =>
     Effect.gen(function* () {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;

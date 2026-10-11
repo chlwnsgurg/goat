@@ -1,3 +1,5 @@
+import * as ConnectionHandlers from "./toolkits/connection/handlers.ts";
+import { ConnectionToolkit } from "./toolkits/connection/tools.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -927,6 +929,11 @@ const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHand
   Layer.provide(OrchestratorMcpService.layer),
 );
 
+export const layerConnectionToolkit = toolkitRegistration(
+  ConnectionToolkit,
+  ConnectionHandlers.layer,
+);
+
 const layerSshToolkitRegistration = toolkitRegistration(SshToolkit, SshHandlers.layer);
 
 export const layerAttachmentToolkit = toolkitRegistration(
@@ -975,6 +982,7 @@ export const layer = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerSshToolkitRegistration,
+  layerConnectionToolkit,
 ).pipe(
   // One dispatch for the SSH and thread tools, so they share tunnels, sessions and connected hosts.
   Layer.provide(SshRemoteDispatch.layer),

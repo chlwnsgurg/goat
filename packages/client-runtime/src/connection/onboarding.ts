@@ -1,4 +1,8 @@
-import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
+import type {
+  ConnectionAddedBy,
+  DesktopSshEnvironmentTarget,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -46,6 +50,8 @@ export interface PairingConnectionInput {
 }
 
 export interface SshConnectionInput {
+  readonly keyOnly?: boolean;
+  readonly addedBy?: ConnectionAddedBy;
   readonly target: DesktopSshEnvironmentTarget;
   readonly label?: string;
   /** Set when adding a route to a saved machine; see `PairingConnectionInput`. */
@@ -258,7 +264,11 @@ export const prepareSshRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.prepareSshRegistration",
 )(function* (input: SshConnectionInput) {
   const gateway = yield* ClientCapabilities.SshEnvironmentGateway;
-  const provisioned = yield* gateway.provision(input.target, input.expectedEnvironmentId);
+  const provisioned = yield* gateway.provision(
+    input.target,
+    input.expectedEnvironmentId,
+    input.keyOnly === undefined ? undefined : { keyOnly: input.keyOnly },
+  );
   // One id per SSH target, so a second host or alias for the same machine
   // adds a route instead of replacing the first.
   const connectionId = `ssh:${provisioned.environmentId}:${sshTargetKey(provisioned.bootstrap.target)}`;
@@ -275,6 +285,7 @@ export const prepareSshRegistration = Effect.fn(
       environmentId: provisioned.environmentId,
       label,
       target: provisioned.bootstrap.target,
+      ...(input.addedBy === undefined ? {} : { addedBy: input.addedBy }),
     }),
   });
 });

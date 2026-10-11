@@ -33,6 +33,8 @@ import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
+import { DESKTOP_BOOTSTRAP_SUBJECT } from "./PairingGrantStore.ts";
+
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 /**
@@ -42,6 +44,8 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   ...CLIENT_GUARDED_RPC_SCOPES,
+  [WS_METHODS.connectionCatalogServe]: AuthSettingsWriteScope,
+  [WS_METHODS.connectionCatalogRespond]: AuthSettingsWriteScope,
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,
@@ -278,3 +282,24 @@ export const requiredScopeForDeviceList = (input: DeviceListInput): AuthEnvironm
   input.retryHostId || input.updateTool
     ? AuthOrchestrationOperateScope
     : AuthOrchestrationReadScope;
+
+/** Hosting is reserved to the owning desktop's trusted bootstrap grant. */
+export const requireConnectionCatalogHost = (session: {
+  readonly subject: string;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+}) =>
+  session.subject !== DESKTOP_BOOTSTRAP_SUBJECT
+    ? Effect.fail(
+        new EnvironmentAuthorizationError({
+          message: "Only the owning desktop bootstrap session may host saved connections.",
+          requiredScope: AuthSettingsWriteScope,
+        }),
+      )
+    : session.scopes.includes(AuthSettingsWriteScope)
+      ? Effect.void
+      : Effect.fail(
+          new EnvironmentAuthorizationError({
+            message: "Hosting saved connections requires settings:write scope.",
+            requiredScope: AuthSettingsWriteScope,
+          }),
+        );

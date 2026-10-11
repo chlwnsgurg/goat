@@ -1,4 +1,5 @@
 import {
+  ConnectionAddedBy,
   AuthAdministrativeScopes,
   AuthStandardClientScopes,
   EnvironmentId,
@@ -9,6 +10,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import * as RpcHttp from "../rpc/http.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
@@ -20,6 +22,8 @@ import {
   preparePairingRegistration,
   prepareSshRegistration,
 } from "./onboarding.ts";
+
+const decodeAddedBy = Schema.decodeEffect(ConnectionAddedBy);
 
 const layerClientPresentation = Layer.succeed(
   ClientCapabilities.ClientPresentation,
@@ -372,14 +376,24 @@ describe("connection onboarding", () => {
         username: "developer",
         port: 22,
       };
+      const addedBy = yield* decodeAddedBy({
+        kind: "agent",
+        client: "test-agent",
+        at: "2026-10-12T00:00:00.000Z",
+      });
       const registration = yield* prepareSshRegistration({
         target,
+        keyOnly: true,
+        addedBy,
       }).pipe(
         Effect.provideService(
           ClientCapabilities.SshEnvironmentGateway,
           ClientCapabilities.SshEnvironmentGateway.of({
-            provision: () =>
-              Effect.succeed({
+            provision: (receivedTarget, expectedEnvironmentId, options) => {
+              expect(receivedTarget).toEqual(target);
+              expect(expectedEnvironmentId).toBeUndefined();
+              expect(options).toEqual({ keyOnly: true });
+              return Effect.succeed({
                 environmentId: EnvironmentId.make("environment-ssh"),
                 label: "Remote development box",
                 bootstrap: {
@@ -389,13 +403,15 @@ describe("connection onboarding", () => {
                   pairingToken: "pairing-token",
                 },
                 bearerToken: "bearer-token",
-              }),
+              });
+            },
             prepare: () => Effect.die("unused"),
             disconnect: () => Effect.die("unused"),
           }),
         ),
       );
 
+      expect(registration.profile).toMatchObject({ addedBy });
       expect(registration).toMatchObject({
         _tag: "SshConnectionRegistration",
         target: {

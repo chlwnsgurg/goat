@@ -20,3 +20,6 @@ export * as Wakeups from "./wakeups.ts";
 export { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 // Flat so consumers' inferred command types can name it.
 export { OutdatedHostUpdateError } from "./outdatedHostUpdate.ts";
+
+export * from "./desktopLocal.ts";
+export { handleConnectionCatalogOperation } from "./catalogHost.ts";

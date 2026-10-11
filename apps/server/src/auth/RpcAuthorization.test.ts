@@ -31,6 +31,37 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it.effect("accepts only the owning desktop with settings write scope as a catalog host", () =>
+    Effect.gen(function* () {
+      for (const method of [
+        WS_METHODS.connectionCatalogServe,
+        WS_METHODS.connectionCatalogRespond,
+      ]) {
+        expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
+      }
+      const otherSubject = yield* Effect.flip(
+        RpcAuthorization.requireConnectionCatalogHost({
+          subject: "cli-issued-session",
+          scopes: [AuthSettingsWriteScope],
+        }),
+      );
+      expect(otherSubject._tag).toBe("EnvironmentAuthorizationError");
+      expect(otherSubject.requiredScope).toBe(AuthSettingsWriteScope);
+      expect(otherSubject.message).toContain("desktop bootstrap");
+      const missingScope = yield* Effect.flip(
+        RpcAuthorization.requireConnectionCatalogHost({
+          subject: "desktop-bootstrap",
+          scopes: [],
+        }),
+      );
+      expect(missingScope.requiredScope).toBe(AuthSettingsWriteScope);
+      yield* RpcAuthorization.requireConnectionCatalogHost({
+        subject: "desktop-bootstrap",
+        scopes: [AuthSettingsWriteScope],
+      });
+    }),
+  );
+
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });

@@ -33,6 +33,17 @@ export interface BootstrapGrant {
   readonly expiresAt: DateTime.DateTime;
 }
 
+export const DESKTOP_BOOTSTRAP_SUBJECT = "desktop-bootstrap";
+
+export class ReservedAuthSubjectError extends Schema.TaggedError<ReservedAuthSubjectError>()(
+  "ReservedAuthSubjectError",
+  {},
+) {
+  override get message(): string {
+    return "The subject desktop-bootstrap is reserved for the desktop bootstrap grant.";
+  }
+}
+
 export class UnknownBootstrapCredentialError extends Schema.TaggedError<UnknownBootstrapCredentialError>()(
   "UnknownBootstrapCredentialError",
   {},
@@ -169,6 +180,7 @@ export class BootstrapCredentialLookupError extends Schema.TaggedError<Bootstrap
 }
 
 export const BootstrapCredentialInternalError = Schema.Union([
+  ReservedAuthSubjectError,
   ActivePairingLinksLoadError,
   PairingLinkRevokeError,
   PairingCredentialIssueError,
@@ -337,7 +349,7 @@ export const make = Effect.gen(function* () {
     yield* seedGrant(config.desktopBootstrapToken, {
       method: "desktop-bootstrap",
       scopes: AuthAdministrativeScopes,
-      subject: "desktop-bootstrap",
+      subject: DESKTOP_BOOTSTRAP_SUBJECT,
       expiresAt: DateTime.add(now, {
         milliseconds: Duration.toMillis(DESKTOP_BOOTSTRAP_TTL_HOURS),
       }),
@@ -398,6 +410,9 @@ export const make = Effect.gen(function* () {
   const issueOneTimeToken: PairingGrantStore["Service"]["issueOneTimeToken"] = Effect.fn(
     "PairingGrantStore.issueOneTimeToken",
   )(function* (input) {
+    if (input?.subject === DESKTOP_BOOTSTRAP_SUBJECT) {
+      return yield* new ReservedAuthSubjectError();
+    }
     const id = yield* crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) => new PairingCredentialRandomGenerationError({ operation: "generate-id", cause }),
@@ -459,7 +474,7 @@ export const make = Effect.gen(function* () {
         return {
           method: "desktop-bootstrap",
           scopes: AuthAdministrativeScopes,
-          subject: "desktop-bootstrap",
+          subject: DESKTOP_BOOTSTRAP_SUBJECT,
           expiresAt: DateTime.add(now, {
             milliseconds: DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
           }),

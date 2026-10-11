@@ -180,6 +180,7 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import * as ConnectionCatalogBroker from "./connections/ConnectionCatalogBroker.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
@@ -1182,6 +1183,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
 
 const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
+  connectionCatalogBroker: ConnectionCatalogBroker.ConnectionCatalogBroker["Service"],
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
@@ -1190,6 +1192,7 @@ const layerWsRpc = (
   ServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
+      const requireCatalogHost = RpcAuthorization.requireConnectionCatalogHost(currentSession);
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
@@ -1230,6 +1233,7 @@ const layerWsRpc = (
         yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
       const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
       const crypto = yield* Crypto.Crypto;
+      const connectionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const serverCommandId = (tag: string) =>
         crypto.randomUUIDv4.pipe(
           Effect.orDie,
@@ -1813,6 +1817,14 @@ const layerWsRpc = (
       });
 
       const handlers = ServerWsRpcGroup.of({
+        [WS_METHODS.connectionCatalogServe]: () =>
+          Stream.unwrap(
+            requireCatalogHost.pipe(Effect.as(connectionCatalogBroker.attach(connectionId))),
+          ),
+        [WS_METHODS.connectionCatalogRespond]: (response) =>
+          requireCatalogHost.pipe(
+            Effect.andThen(connectionCatalogBroker.respond(connectionId, response)),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -3129,6 +3141,7 @@ export const WS_RPC_SERVER_OPTIONS = {
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
+    const connectionCatalogBroker = yield* ConnectionCatalogBroker.ConnectionCatalogBroker;
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -3183,6 +3196,7 @@ export const layer = Layer.unwrap(
           Effect.provide(
             layerWsRpc(
               session,
+              connectionCatalogBroker,
               clientOrigin,
               clientAnalyticsProps,
               previewAutomationBroker,

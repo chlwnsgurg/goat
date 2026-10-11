@@ -11,6 +11,7 @@ import { Atom } from "effect/reactivity";
 import * as Runtime from "../lib/runtime";
 import * as BackgroundActivityReporter from "../lib/backgroundActivityReporter";
 import * as ConnectionPlatform from "./platform";
+import * as CatalogHost from "./catalogHost";
 
 const layerProvidedConnectionPlatform = ConnectionPlatform.layer.pipe(Layer.provide(Runtime.layer));
 
@@ -46,7 +47,7 @@ const layerProvidedClientConnection = layerSnapshotLoader.pipe(
   ),
 );
 
-const layerConnection = BackgroundActivityReporter.layer.pipe(
+const layerConnection = Layer.merge(BackgroundActivityReporter.layer, CatalogHost.layer).pipe(
   Layer.provideMerge(layerProvidedClientConnection),
 );
 
