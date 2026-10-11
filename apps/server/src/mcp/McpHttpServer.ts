@@ -922,7 +922,10 @@ export const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
-const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
+const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer).pipe(
+  Layer.provide(HostThreadsMcpService.layer),
+  Layer.provide(OrchestratorMcpService.layer),
+);
 
 const layerSshToolkitRegistration = toolkitRegistration(SshToolkit, SshHandlers.layer);
 

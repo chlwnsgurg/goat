@@ -2,6 +2,7 @@ import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
@@ -9,6 +10,8 @@ import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
+import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
@@ -52,6 +55,31 @@ const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
 });
+
+/** Whether a project read goes to another machine. */
+const reachesHost = <P extends { readonly host?: string | undefined }>(input: P) =>
+  input.host !== undefined;
+
+const decodeHostProjectList = Schema.decodeUnknownEffect(
+  ProjectToolkit.tools.goat_project_list.successSchema,
+);
+const decodeHostProject = Schema.decodeUnknownEffect(
+  ProjectToolkit.tools.goat_project_read.successSchema,
+);
+
+/** The same tool on another machine's T3 server, which answers for its own projects. */
+const readOnHost = <A extends object, E>(
+  host: string,
+  tool: "goat_project_list" | "goat_project_read",
+  args: Readonly<Record<string, unknown>>,
+  decode: (value: unknown) => Effect.Effect<A, E>,
+) =>
+  Effect.gen(function* () {
+    const scope = yield* McpInvocationContext.McpInvocationContext;
+    const hosts = yield* HostThreadsMcpService.HostThreadsMcpService;
+    return yield* hosts.readOnHost(scope, { host, tool, arguments: args }, decode);
+  });
+
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   goat_thread_launch: McpToolAccess.startsThreads(
     (input) => input,
@@ -174,8 +202,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         };
       }),
   ),
-  goat_project_list: McpToolAccess.reads((input) =>
+  goat_project_list: McpToolAccess.readsOrReachesHost(reachesHost, ({ host, ...input }) =>
     Effect.gen(function* () {
+      if (host !== undefined)
+        return yield* readOnHost(host, "goat_project_list", input, decodeHostProjectList);
       const projects = yield* access;
       const snapshot = yield* projects.snapshot.pipe(Effect.mapError(unavailable));
       const rows = snapshot.projects.filter((project) => project.deletedAt === null);
@@ -184,8 +214,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       return { projects: rows.slice(start, end), nextCursor: end < rows.length ? end : null };
     }),
   ),
-  goat_project_read: McpToolAccess.reads((input) =>
+  goat_project_read: McpToolAccess.readsOrReachesHost(reachesHost, ({ host, ...input }) =>
     Effect.gen(function* () {
+      if (host !== undefined)
+        return yield* readOnHost(host, "goat_project_read", input, decodeHostProject);
       const projects = yield* access;
       const result = yield* projects.getById(input.projectId).pipe(Effect.mapError(unavailable));
       if (Option.isNone(result))

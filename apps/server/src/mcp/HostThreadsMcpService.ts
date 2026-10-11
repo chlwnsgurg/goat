@@ -137,6 +137,19 @@ export interface HostThreadsMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
   ) => Effect.Effect<OrchestratorMcpThreadInterruptResult, OrchestratorMcpFailure>;
+  /**
+   * Calls one of a host's own read-only tools, such as goat_project_list, and
+   * decodes the answer as `decode` reads that tool's result, tagged with the host.
+   */
+  readonly readOnHost: <A extends object, E>(
+    scope: McpInvocationScope,
+    input: {
+      readonly host: string;
+      readonly tool: string;
+      readonly arguments: Readonly<Record<string, unknown>>;
+    },
+    decode: (value: unknown) => Effect.Effect<A, E>,
+  ) => Effect.Effect<A & { readonly host: string }, OrchestratorMcpFailure>;
 }
 
 export class HostThreadsMcpService extends Context.Service<
@@ -240,7 +253,7 @@ const make = Effect.gen(function* () {
           ? Effect.fail(
               failure(
                 "invalid_request",
-                `T3 on ${host} is too old to list every project; update T3 there or pass one of its projectIds.`,
+                `T3 on ${host} is too old to list every project; update T3 there or pass one of its projectIds, which goat_project_list with this host lists.`,
               ),
             )
           : Effect.fail(error),
@@ -375,6 +388,7 @@ const make = Effect.gen(function* () {
             },
             decodeInterrupt,
           ),
+    readOnHost: (scope, input, decode) => onHost(scope, { ...input, writes: false }, decode),
   });
 });
 

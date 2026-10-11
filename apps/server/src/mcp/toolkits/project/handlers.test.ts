@@ -23,8 +23,11 @@ import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
+import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
+import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -498,5 +501,98 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
 
     expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
     expect(launched).toHaveLength(1);
+  }),
+);
+
+it.effect("lists and reads another machine's projects through that machine's own tools", () =>
+  Effect.gen(function* () {
+    const sourceThreadId = ThreadId.make("source-thread");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const remoteProject = {
+      id: "project:remote",
+      title: "Remote",
+      workspaceRoot: "/srv/remote",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      deletedAt: null,
+    };
+    const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "session",
+        thread: { threadId: sourceThreadId, providerSessionId: "session", providerInstanceId },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () =>
+          Effect.succeed({
+            id: sourceThreadId,
+            providerInstanceId,
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+            activeRunId: "active-run",
+            archivedAt: null,
+            deletedAt: null,
+          } as OrchestrationV2ThreadShell),
+      }),
+      // This machine's projects are never read: any call would fail the test.
+      Layer.mock(Project.ProjectService)({}),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      NodeServices.layer,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-host-projects-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    const dependencies = HostThreadsMcpService.layer.pipe(
+      Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
+      Layer.provide(
+        Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+          callHostTool: (call, authorize) =>
+            authorize.pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  calls.push(call);
+                  return call.tool === "goat_project_list"
+                    ? { projects: [remoteProject], nextCursor: null }
+                    : remoteProject;
+                }),
+              ),
+            ),
+        }),
+      ),
+      Layer.provideMerge(layerDependencies),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+
+    const listed = yield* toolkit
+      .handle("goat_project_list", { host: "box", limit: 5 })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(listed.at(-1)?.result).toMatchObject({
+      host: "box",
+      projects: [{ id: "project:remote" }],
+      nextCursor: null,
+    });
+    const read = yield* toolkit
+      .handle("goat_project_read", { host: "box", projectId: ProjectId.make("project:remote") })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(read.at(-1)?.result).toMatchObject({ id: "project:remote", host: "box" });
+    expect(
+      calls.map(({ host, tool, arguments: args, writes }) => [host, tool, args, writes]),
+    ).toEqual([
+      ["box", "goat_project_list", { limit: 5 }, false],
+      ["box", "goat_project_read", { projectId: "project:remote" }, false],
+    ]);
   }),
 );

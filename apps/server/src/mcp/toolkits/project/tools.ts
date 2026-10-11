@@ -14,6 +14,7 @@ import {
   ProjectUpdatePayload,
   ProjectId,
   OrchestratorMcpFailure,
+  OrchestratorMcpHost,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
 } from "@t3tools/contracts";
@@ -28,6 +29,7 @@ import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.t
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
+import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const shared = {
@@ -41,26 +43,43 @@ const shared = {
     Crypto.Crypto,
   ],
 };
+/** Project reads that can also reach another machine's projects. */
+const hostProjectDependencies = [
+  ...shared.dependencies,
+  HostThreadsMcpService.HostThreadsMcpService,
+];
+const ON_ANOTHER_MACHINE =
+  " Pass host (an SSH alias from goat_ssh_host_list) for another machine's T3 environment; its project ids belong to that machine, so pass the same host wherever you use them, such as goat_thread_list. That needs a caller allowed to use this machine's SSH keys. host_unavailable means the machine, SSH, or its T3 server could not be reached.";
+const resultHost = Schema.optional(Schema.String).annotate({
+  description: "The SSH host this came from; absent for this environment.",
+});
 const ProjectListTool = Tool.make("goat_project_list", {
   ...shared,
   description:
-    "List registered projects in this environment. Pages use the current project snapshot and may shift between calls.",
+    "List registered projects in this environment. Pages use the current project snapshot and may shift between calls." +
+    ON_ANOTHER_MACHINE,
   parameters: Schema.Struct({
+    host: Schema.optional(OrchestratorMcpHost),
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
   }),
   success: Schema.Struct({
     projects: Schema.Array(Project),
     nextCursor: Schema.NullOr(NonNegativeInt),
+    host: resultHost,
   }),
+  dependencies: hostProjectDependencies,
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const ProjectReadTool = Tool.make("goat_project_read", {
   ...shared,
   description:
-    "Read a registered project in this environment, including its workspace and saved scripts.",
-  parameters: Schema.Struct({ projectId: ProjectId }),
+    "Read a registered project in this environment, including its workspace and saved scripts." +
+    ON_ANOTHER_MACHINE,
+  parameters: Schema.Struct({ projectId: ProjectId, host: Schema.optional(OrchestratorMcpHost) }),
+  success: Schema.Struct({ ...Project.fields, host: resultHost }),
+  dependencies: hostProjectDependencies,
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
