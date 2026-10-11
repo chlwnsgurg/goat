@@ -97,4 +97,3 @@ jobs:
             native/browser-secret/build/x64/t3-browser-secret
           if-no-files-found: error
           retention-days: 3
-

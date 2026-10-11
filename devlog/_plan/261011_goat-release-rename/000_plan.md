@@ -20,38 +20,36 @@ Research: `001_inventory.md` (three gpt-6.1-sol read-only inventories, summarize
 
 ## Decisions
 
-| ID | Decision | Reason |
-|---|---|---|
-| D1 | `packages/shared/src/cliRelease.ts` exports `CLI_RELEASE_REPOSITORY = "goat-si/goat"`; independent copies (scripts/install.sh, scripts/install.ps1, packaging/aur/scripts/release.sh, apps/marketing/src/lib/releases.ts, scripts/build-npm-platform-packages.ts links) follow. | One source of truth; every resolver now points at GOAT. |
-| D2 | SSH acquisition order in `prepareRemoteRuntime`: remote ready → cached local archive in archiveDirectory → when no explicit releaseBaseUrl, local `gh release download v<ver> --repo goat-si/goat --pattern <asset> --pattern SHA256SUMS --dir <scoped tmp>`, verify sha256 against SHA256SUMS, move into archiveDirectory, upload through the existing path. | Private repo: only an authenticated local client can read it; the remote never needs credentials. |
-| D3 | gh failures (not installed, unauthenticated, release or asset missing, checksum mismatch) raise `SshLaunchError` naming repo, tag, asset and the local archive directory; no silent fallback to anonymous remote download. An explicit `T3CODE_RELEASE_BASE_URL` mirror keeps the remote download path unchanged. | A clear local error replaces an opaque remote curl 404. |
-| D4 | Other anonymous consumers (`t3 update` index, cloud pinnedRuntime/selfUpdate/bootService, install scripts, mobile environment-maintenance) are only retargeted by D1. Converting them to authenticated access is a follow-up. | Keeps scope to the reported failure; documented as a limitation. |
-| D5 | MCP: the 42 `t3_*` tools become `goat_*`; `McpServer.layerHttp` name `"T3 Code"` → `"GOAT"`; shared presentation keeps `t3_*` read-side aliases so persisted history still renders. | User choice; history compatibility without DB rewrite. |
-| D6 | Provider registration key `t3-code` (qualified ids `mcp__t3-code__*`) → `goat` as its own work-phase wp6, executed after wp3 and before wp4 (A12) so wp5 probes final names. | 36 extra files with parser/allowlist logic (ACP regexes, Pi exposure, OpenCode isolation); isolating it keeps wp3 reviewable. |
-| D7 | **Decided by user 2026-10-11: SSH hosts use `~/.goat`** for runtime (`~/.goat/runtime/goat/versions/<v>`), ssh-launch state (`~/.goat/ssh-launch`) and server home (`--base-dir ~/.goat`). 030 §D7-A is the implemented variant; §D7-B is discarded. No migration of upstream `~/.t3`. | juns-macbook-pro runs upstream T3 Nightly on `~/.t3/userdata`; sharing it with a GOAT server risks the user's live data; same-version runtime dirs also collide. |
-| D8 | CLI: SEA executable `goat`, archives `goat-<version>-<platformKey>`, npm package stays `t3` with bins `goat` and `t3`, desktop CLI shim installs `goat`, help/user strings say `goat`; `npx t3`/`npm i -g t3` strings that name the npm package stay. | User choice; npm identity unchanged avoids workspace/filter churn. |
-| D9 | wp5 builds a local darwin-arm64 archive (`scripts/build-cli-archive.ts`) into the archive directory and prepares juns-macbook-pro through the upload path, then runs a read-only probe thread with claude-opus-5-5. No release is published. | goat-si/goat has zero releases; publishing is unauthorized. |
+| ID  | Decision                                                                                                                                                                                                                                                                                                                                                      | Reason                                                                                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | `packages/shared/src/cliRelease.ts` exports `CLI_RELEASE_REPOSITORY = "goat-si/goat"`; independent copies (scripts/install.sh, scripts/install.ps1, packaging/aur/scripts/release.sh, apps/marketing/src/lib/releases.ts, scripts/build-npm-platform-packages.ts links) follow.                                                                               | One source of truth; every resolver now points at GOAT.                                                                                                          |
+| D2  | SSH acquisition order in `prepareRemoteRuntime`: remote ready → cached local archive in archiveDirectory → when no explicit releaseBaseUrl, local `gh release download v<ver> --repo goat-si/goat --pattern <asset> --pattern SHA256SUMS --dir <scoped tmp>`, verify sha256 against SHA256SUMS, move into archiveDirectory, upload through the existing path. | Private repo: only an authenticated local client can read it; the remote never needs credentials.                                                                |
+| D3  | gh failures (not installed, unauthenticated, release or asset missing, checksum mismatch) raise `SshLaunchError` naming repo, tag, asset and the local archive directory; no silent fallback to anonymous remote download. An explicit `T3CODE_RELEASE_BASE_URL` mirror keeps the remote download path unchanged.                                             | A clear local error replaces an opaque remote curl 404.                                                                                                          |
+| D4  | Other anonymous consumers (`t3 update` index, cloud pinnedRuntime/selfUpdate/bootService, install scripts, mobile environment-maintenance) are only retargeted by D1. Converting them to authenticated access is a follow-up.                                                                                                                                 | Keeps scope to the reported failure; documented as a limitation.                                                                                                 |
+| D5  | MCP: the 42 `t3_*` tools become `goat_*`; `McpServer.layerHttp` name `"T3 Code"` → `"GOAT"`; shared presentation keeps `t3_*` read-side aliases so persisted history still renders.                                                                                                                                                                           | User choice; history compatibility without DB rewrite.                                                                                                           |
+| D6  | Provider registration key `t3-code` (qualified ids `mcp__t3-code__*`) → `goat` as its own work-phase wp6, executed after wp3 and before wp4 (A12) so wp5 probes final names.                                                                                                                                                                                  | 36 extra files with parser/allowlist logic (ACP regexes, Pi exposure, OpenCode isolation); isolating it keeps wp3 reviewable.                                    |
+| D7  | **Decided by user 2026-10-11: SSH hosts use `~/.goat`** for runtime (`~/.goat/runtime/goat/versions/<v>`), ssh-launch state (`~/.goat/ssh-launch`) and server home (`--base-dir ~/.goat`). 030 §D7-A is the implemented variant; §D7-B is discarded. No migration of upstream `~/.t3`.                                                                        | juns-macbook-pro runs upstream T3 Nightly on `~/.t3/userdata`; sharing it with a GOAT server risks the user's live data; same-version runtime dirs also collide. |
+| D8  | CLI: SEA executable `goat`, archives `goat-<version>-<platformKey>`, npm package stays `t3` with bins `goat` and `t3`, desktop CLI shim installs `goat`, help/user strings say `goat`; `npx t3`/`npm i -g t3` strings that name the npm package stay.                                                                                                         | User choice; npm identity unchanged avoids workspace/filter churn.                                                                                               |
+| D9  | wp5 builds a local darwin-arm64 archive (`scripts/build-cli-archive.ts`) into the archive directory and prepares juns-macbook-pro through the upload path, then runs a read-only probe thread with claude-opus-5-5. No release is published.                                                                                                                  | goat-si/goat has zero releases; publishing is unauthorized.                                                                                                      |
 
 ## Work-phase map (dependency order)
 
-| WP | Doc | Scope | Depends |
-|---|---|---|---|
-| wp1 | this + 001 | docs-only roadmap | — |
-| wp2 | 010_release_source_gh.md | D1–D4 | wp1 |
-| wp3 | 020_mcp_goat_tools.md | D5 | wp2 |
-| wp6 | 050_provider_key_goat.md | D6 (A12) | wp3 |
-| wp4 | 030_cli_goat_executable.md | D8 + D7-A (mandatory) | wp6 |
-| wp5 | 040_e2e_macbook_probe.md | D9 | wp4 |
+| WP  | Doc                        | Scope                 | Depends |
+| --- | -------------------------- | --------------------- | ------- |
+| wp1 | this + 001                 | docs-only roadmap     | —       |
+| wp2 | 010_release_source_gh.md   | D1–D4                 | wp1     |
+| wp3 | 020_mcp_goat_tools.md      | D5                    | wp2     |
+| wp6 | 050_provider_key_goat.md   | D6 (A12)              | wp3     |
+| wp4 | 030_cli_goat_executable.md | D8 + D7-A (mandatory) | wp6     |
+| wp5 | 040_e2e_macbook_probe.md   | D9                    | wp4     |
 
 ## Architect consultation
 
 Recorded in `002_architect.md` (proposal handle, decision dispositions, reflection verdict).
 
-
 ## Finding F1 (2026-10-11, live evidence)
 
 `juns-macbook-pro` is this Mac (same hostname juns-MacBook-Pro, SSH loops back). Its `~/.t3/ssh-launch/0d73bce7088860f3/run-t3.sh` (written 05:47 KST) was left by an upstream T3 Code Nightly desktop: `T3_ARCHIVE_VERSION='0.0.45-nightly.20261010.7'`, `T3_RELEASE_BASE_URL='https://github.com/pingdotgg/t3code/releases/download'`; only `0.0.45-nightly.20261010.6` is installed under `~/.t3/runtime/versions`. The server dispatch runs with `keepExistingRunner: true`, so it reuses this upstream runner, which downloads a nightly that has no CLI archive → `curl: (56) 404`. Retargeting releases alone cannot fix this while GOAT shares `~/.t3/ssh-launch` with upstream clients. This strengthens D7 = separate remote root (`~/.goat`). Evidence: `evidence/f1-remote-runner.txt`.
-
 
 Execution order (A12): wp2 → wp3 → wp6 → wp4 → wp5.
 
@@ -63,7 +61,6 @@ Execution order (A12): wp2 → wp3 → wp6 → wp4 → wp5.
 - D6+: fresh-session cutover, single Pi registration, legacy OpenCode deny rules kept, Claude allowlists combine D5+D6 names; real file count 83 (050).
 - D8+: GOAT runtime directory is `<root>/runtime/goat/versions/<v>` everywhere (local pinned runtime, service launcher, installers, SSH), so it never collides with upstream `runtime/versions/<v>`; Windows PATH ownership marker separate from upstream's (030).
 - D7-A (mandatory, user decision): root = `~/.goat` on SSH hosts → runtime `~/.goat/runtime/goat/versions/<v>`, state `~/.goat/ssh-launch`, server home `~/.goat` (030 §D7-A).
-
 
 ## Deviation V1 (2026-10-11)
 

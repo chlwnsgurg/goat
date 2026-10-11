@@ -39,50 +39,50 @@ SoT sync: update the already-existing `docs/orchestration-v2/orchestrator-mcp-se
 
 The 42 names are six orchestrator, sixteen thread, seven project, three worktree, three SSH, three attachment, two environment and two preview-controls tools. All other 41 live tool names stay unchanged (83 total).
 
-| Before | After |
-| --- | --- |
-| `t3_attachment_discard` | `goat_attachment_discard` |
-| `t3_attachment_prepare_upload` | `goat_attachment_prepare_upload` |
+| Before                              | After                                 |
+| ----------------------------------- | ------------------------------------- |
+| `t3_attachment_discard`             | `goat_attachment_discard`             |
+| `t3_attachment_prepare_upload`      | `goat_attachment_prepare_upload`      |
 | `t3_environment_preferences_update` | `goat_environment_preferences_update` |
-| `t3_environment_read` | `goat_environment_read` |
-| `t3_pending_request_list` | `goat_pending_request_list` |
-| `t3_pending_request_read` | `goat_pending_request_read` |
-| `t3_pending_request_respond` | `goat_pending_request_respond` |
-| `t3_preview_close` | `goat_preview_close` |
-| `t3_preview_list` | `goat_preview_list` |
-| `t3_project_clone` | `goat_project_clone` |
-| `t3_project_create` | `goat_project_create` |
-| `t3_project_delete` | `goat_project_delete` |
-| `t3_project_list` | `goat_project_list` |
-| `t3_project_read` | `goat_project_read` |
-| `t3_project_update` | `goat_project_update` |
-| `t3_queue_cancel` | `goat_queue_cancel` |
-| `t3_queue_edit` | `goat_queue_edit` |
-| `t3_queue_list` | `goat_queue_list` |
-| `t3_queue_promote_to_steer` | `goat_queue_promote_to_steer` |
-| `t3_queue_read` | `goat_queue_read` |
-| `t3_queue_reorder` | `goat_queue_reorder` |
-| `t3_ssh_browse` | `goat_ssh_browse` |
-| `t3_ssh_host_list` | `goat_ssh_host_list` |
-| `t3_ssh_thread_launch` | `goat_ssh_thread_launch` |
-| `t3_thread_configuration` | `goat_thread_configuration` |
-| `t3_thread_configure` | `goat_thread_configure` |
-| `t3_thread_fork` | `goat_thread_fork` |
-| `t3_thread_interrupt` | `goat_thread_interrupt` |
-| `t3_thread_launch` | `goat_thread_launch` |
-| `t3_thread_list` | `goat_thread_list` |
-| `t3_thread_merge_back` | `goat_thread_merge_back` |
-| `t3_thread_organize` | `goat_thread_organize` |
-| `t3_thread_read` | `goat_thread_read` |
-| `t3_thread_search` | `goat_thread_search` |
-| `t3_thread_send` | `goat_thread_send` |
-| `t3_thread_send_attachments` | `goat_thread_send_attachments` |
-| `t3_thread_transfers` | `goat_thread_transfers` |
-| `t3_thread_update` | `goat_thread_update` |
-| `t3_thread_wait` | `goat_thread_wait` |
-| `t3_worktree_handoff` | `goat_worktree_handoff` |
-| `t3_worktree_list` | `goat_worktree_list` |
-| `t3_worktree_status` | `goat_worktree_status` |
+| `t3_environment_read`               | `goat_environment_read`               |
+| `t3_pending_request_list`           | `goat_pending_request_list`           |
+| `t3_pending_request_read`           | `goat_pending_request_read`           |
+| `t3_pending_request_respond`        | `goat_pending_request_respond`        |
+| `t3_preview_close`                  | `goat_preview_close`                  |
+| `t3_preview_list`                   | `goat_preview_list`                   |
+| `t3_project_clone`                  | `goat_project_clone`                  |
+| `t3_project_create`                 | `goat_project_create`                 |
+| `t3_project_delete`                 | `goat_project_delete`                 |
+| `t3_project_list`                   | `goat_project_list`                   |
+| `t3_project_read`                   | `goat_project_read`                   |
+| `t3_project_update`                 | `goat_project_update`                 |
+| `t3_queue_cancel`                   | `goat_queue_cancel`                   |
+| `t3_queue_edit`                     | `goat_queue_edit`                     |
+| `t3_queue_list`                     | `goat_queue_list`                     |
+| `t3_queue_promote_to_steer`         | `goat_queue_promote_to_steer`         |
+| `t3_queue_read`                     | `goat_queue_read`                     |
+| `t3_queue_reorder`                  | `goat_queue_reorder`                  |
+| `t3_ssh_browse`                     | `goat_ssh_browse`                     |
+| `t3_ssh_host_list`                  | `goat_ssh_host_list`                  |
+| `t3_ssh_thread_launch`              | `goat_ssh_thread_launch`              |
+| `t3_thread_configuration`           | `goat_thread_configuration`           |
+| `t3_thread_configure`               | `goat_thread_configure`               |
+| `t3_thread_fork`                    | `goat_thread_fork`                    |
+| `t3_thread_interrupt`               | `goat_thread_interrupt`               |
+| `t3_thread_launch`                  | `goat_thread_launch`                  |
+| `t3_thread_list`                    | `goat_thread_list`                    |
+| `t3_thread_merge_back`              | `goat_thread_merge_back`              |
+| `t3_thread_organize`                | `goat_thread_organize`                |
+| `t3_thread_read`                    | `goat_thread_read`                    |
+| `t3_thread_search`                  | `goat_thread_search`                  |
+| `t3_thread_send`                    | `goat_thread_send`                    |
+| `t3_thread_send_attachments`        | `goat_thread_send_attachments`        |
+| `t3_thread_transfers`               | `goat_thread_transfers`               |
+| `t3_thread_update`                  | `goat_thread_update`                  |
+| `t3_thread_wait`                    | `goat_thread_wait`                    |
+| `t3_worktree_handoff`               | `goat_worktree_handoff`               |
+| `t3_worktree_list`                  | `goat_worktree_list`                  |
+| `t3_worktree_status`                | `goat_worktree_status`                |
 
 The exact bounded PCRE2 stale-name expression is below. Its missing left boundary is intentional: it must also find a tool suffix inside `mcp__t3-code__t3_thread_read`; `\bt3_` would miss those underscore-joined names. The right guard prevents matching longer unrelated identifiers. Do not perform a blanket `s/t3_/goat_/g`.
 
@@ -102,68 +102,68 @@ t3_(attachment_discard|attachment_prepare_upload|environment_preferences_update|
 
 Paths below are exact absolute source paths. Every hunk for every MODIFY file is in the single patch section; even repetitive existing test replacements are expanded, so no unrestricted sed/perl command is necessary.
 
-| Operation | Exact path | Role |
-| --- | --- | --- |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/mobile/src/lib/threadActivity.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/McpHttpServer.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/McpHttpServer.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/OrchestratorMcpToolkit.integration.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/WorktreeMcpService.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/attachment/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/attachment/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/core.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/environment/handlers.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/environment/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/environment/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/orchestrator/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/orchestrator/tools.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/orchestrator/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/previewControls/handlers.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/previewControls/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/previewControls/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/project/handlers.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/project/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/project/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/ssh/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/ssh/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/thread/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/thread/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/worktree/handlers.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/worktree/registration.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/worktree/tools.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/ContextHandoffBudget.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/ContextHandoffDelivery.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/Orchestrator.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/preview/ServerBrowser.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/sshRemote/SshRemoteDispatch.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.logic.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.logic.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.test.tsx` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.tsx` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/orchestration-v2/orchestrator-mcp-server.md` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime/src/t3ToolSummary.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime/src/work-log/presentation.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/contracts/src/composerContext.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/contracts/src/previewAutomation.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/contracts/src/worktreeMcp.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-acp/src/server/runtimeModel.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-core/src/server/handoffBudget.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-core/src/server/orchestrationInstructions.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-core/src/server/orchestrationInstructions.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/composerContextReferences.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/composerContextReferences.ts` | source / guidance |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/t3McpToolPresentation.test.ts` | behavior fixtures / assertions |
-| MODIFY | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/t3McpToolPresentation.ts` | source / guidance |
+| Operation | Exact path                                                                                                                                       | Role                           |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/mobile/src/lib/threadActivity.test.ts`                              | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/McpHttpServer.test.ts`                               | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/McpHttpServer.ts`                                    | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/OrchestratorMcpToolkit.integration.test.ts`          | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/WorktreeMcpService.test.ts`                          | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/attachment/handlers.ts`                     | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/attachment/tools.ts`                        | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/core.test.ts`                               | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/environment/handlers.test.ts`               | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/environment/handlers.ts`                    | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/environment/tools.ts`                       | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/orchestrator/handlers.ts`                   | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/orchestrator/tools.test.ts`                 | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/orchestrator/tools.ts`                      | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/previewControls/handlers.test.ts`           | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/previewControls/handlers.ts`                | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/previewControls/tools.ts`                   | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/project/handlers.test.ts`                   | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/project/handlers.ts`                        | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/project/tools.ts`                           | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/ssh/handlers.ts`                            | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/ssh/tools.ts`                               | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/thread/handlers.ts`                         | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/thread/tools.ts`                            | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/worktree/handlers.ts`                       | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/worktree/registration.test.ts`              | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/mcp/toolkits/worktree/tools.ts`                          | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`            | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts`        | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/ContextHandoffBudget.test.ts`           | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/ContextHandoffDelivery.ts`              | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts`    | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/Orchestrator.ts`                        | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.test.ts` | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/preview/ServerBrowser.ts`                                | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/sshRemote/SshRemoteDispatch.ts`                          | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.logic.test.ts`             | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.logic.ts`                  | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.test.tsx`                  | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/chat/MessagesTimeline.tsx`                       | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/orchestration-v2/orchestrator-mcp-server.md`                        | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime/src/t3ToolSummary.test.ts`                       | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime/src/work-log/presentation.test.ts`               | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/contracts/src/composerContext.ts`                               | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/contracts/src/previewAutomation.ts`                             | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/contracts/src/worktreeMcp.ts`                                   | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-acp/src/server/runtimeModel.test.ts`                   | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-core/src/server/handoffBudget.ts`                      | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-core/src/server/orchestrationInstructions.test.ts`     | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/provider-core/src/server/orchestrationInstructions.ts`          | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/composerContextReferences.test.ts`                   | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/composerContextReferences.ts`                        | source / guidance              |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/t3McpToolPresentation.test.ts`                       | behavior fixtures / assertions |
+| MODIFY    | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/t3McpToolPresentation.ts`                            | source / guidance              |
 
 ## Copy-paste application (parent B only)
 
 This is a future implementation command, **NOT RUN by the leaf**. It writes only the manifest's source files when executed by the parent in B. It extracts the one complete patch fence from this document into an external scratch file, checks all hunks first, then applies. `patch` is used so this recipe performs no branch, commit or index operation. Do not run this recipe from the documentation checkout. A failed dry run means re-read source and amend hunks; never force/reverse guessed hunks or continue with a partial application.
 
-```sh
+````sh
 set -eu
 cd /Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename
 wp3_patch=$(mktemp /tmp/goat-wp3.XXXXXX)
@@ -177,7 +177,7 @@ Path(sys.argv[2]).write_text(blocks[0])
 PATCH_EXTRACT
 patch --dry-run -p1 < "$wp3_patch"
 patch -p1 < "$wp3_patch"
-```
+````
 
 ## Complete before/after hunks
 
@@ -245,13 +245,13 @@ These are conventional unified diffs with real current before-lines and complete
 +        decodeJsonText(initializeData === undefined ? initializeText : initializeData.slice(5)),
 +      ).toMatchObject({ result: { serverInfo: { name: "GOAT" } } });
        expect(sessionId).not.toBeNull();
- 
+
        const missingSessionResponse = yield* httpClient.del("/mcp");
 --- a/apps/server/src/mcp/McpHttpServer.ts
 +++ b/apps/server/src/mcp/McpHttpServer.ts
 @@ -866,7 +866,7 @@
  );
- 
+
  export const layerMcpTransport = McpServer.layerHttp({
 -  name: "T3 Code",
 +  name: "GOAT",
@@ -262,7 +262,7 @@ These are conventional unified diffs with real current before-lines and complete
 +++ b/apps/server/src/mcp/OrchestratorMcpToolkit.integration.test.ts
 @@ -768,7 +768,7 @@
                invokeAs(invocation, name, args);
- 
+
              // Settling would stop the session, so the agent's own turn keeps running.
 -            const deferredSettle = yield* invoke("t3_thread_organize", { action: "settle" });
 +            const deferredSettle = yield* invoke("goat_thread_organize", { action: "settle" });
@@ -272,7 +272,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -777,20 +777,20 @@
                "running",
              );
- 
+
 -            const pinned = yield* invoke("t3_thread_organize", { action: "pin" });
 +            const pinned = yield* invoke("goat_thread_organize", { action: "pin" });
              expect(pinned.isError).toBe(false);
@@ -281,7 +281,7 @@ These are conventional unified diffs with real current before-lines and complete
 -            yield* invoke("t3_thread_organize", { action: "unpin" });
 +            yield* invoke("goat_thread_organize", { action: "unpin" });
              expect((yield* orchestrator.getThreadShell(parentThreadId))?.pinnedAt).toBeNull();
- 
+
              if (parentRun === undefined || parentRun.rootNodeId === null) {
                return yield* Effect.die(new Error("Parent run missing."));
              }
@@ -306,7 +306,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -1074,7 +1074,7 @@
                pendingAfterWait.runs.find((run) => run.id === directRead.queuedRun.id)?.status,
              ).toBe("queued");
- 
+
 -            const childPromptReadCall = yield* invoke("t3_thread_read", {
 +            const childPromptReadCall = yield* invoke("goat_thread_read", {
                threadId: directChildThreadId,
@@ -315,14 +315,14 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -1091,7 +1091,7 @@
                )?.completionDelivery?.state,
              ).toBe("claimed");
- 
+
 -            const truncatedResultReadCall = yield* invoke("t3_thread_read", {
 +            const truncatedResultReadCall = yield* invoke("goat_thread_read", {
                threadId: directChildThreadId,
                afterPosition: childPromptRead.nextPosition,
                limit: 1,
 @@ -1111,7 +1111,7 @@
- 
+
              const firstChunk = truncatedResultRead.items[0]!;
              expect(firstChunk.nextTextOffset).toBe(1);
 -            const remainderCall = yield* invoke("t3_thread_read", {
@@ -333,7 +333,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -1131,7 +1131,7 @@
                )?.completionDelivery?.state,
              ).toBe("claimed");
- 
+
 -            const terminalResultReadCall = yield* invoke("t3_thread_read", {
 +            const terminalResultReadCall = yield* invoke("goat_thread_read", {
                threadId: directChildThreadId,
@@ -441,11 +441,11 @@ These are conventional unified diffs with real current before-lines and complete
 +              ({ tool }) => tool.name === "goat_thread_interrupt",
              );
              expect(threadInterruptTool?.tool.annotations?.destructiveHint).toBe(true);
- 
+
 @@ -1785,7 +1785,7 @@
              // Wait-mode completion already returned its result while the parent was live.
              yield* expectOffersToStay(0);
- 
+
 -            const childFollowupCall = yield* invoke("t3_thread_send", {
 +            const childFollowupCall = yield* invoke("goat_thread_send", {
                threadId: delegated.childThreadId,
@@ -463,7 +463,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -1822,7 +1822,7 @@
              });
              expect(delegatedStatusAfterFollowup.latestTerminalSummary).not.toBeNull();
- 
+
 -            const activeChildFollowupCall = yield* invoke("t3_thread_send", {
 +            const activeChildFollowupCall = yield* invoke("goat_thread_send", {
                threadId: delegated.childThreadId,
@@ -472,7 +472,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2124,7 +2124,7 @@
              expect(emptyProjection.thread.forkedFrom).toBeNull();
              expect(emptyProjection.runs).toEqual([]);
- 
+
 -            const defaultRenameCall = yield* invoke("t3_thread_update", {
 +            const defaultRenameCall = yield* invoke("goat_thread_update", {
                action: "rename",
@@ -481,7 +481,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2138,7 +2138,7 @@
                title: "MCP parent metadata",
              });
- 
+
 -            const renameCall = yield* invoke("t3_thread_update", {
 +            const renameCall = yield* invoke("goat_thread_update", {
                threadId: emptyThread.threadId,
@@ -499,7 +499,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2165,7 +2165,7 @@
              expect(repeatedRename.commandId).toBe(renamed.commandId);
              expect(repeatedRename.sequence).toBe(renamed.sequence);
- 
+
 -            const linkedCall = yield* invoke("t3_thread_update", {
 +            const linkedCall = yield* invoke("goat_thread_update", {
                threadId: emptyThread.threadId,
@@ -571,7 +571,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2284,7 +2284,7 @@
                reason: "user",
              });
- 
+
 -            const unlinkedCall = yield* invoke("t3_thread_update", {
 +            const unlinkedCall = yield* invoke("goat_thread_update", {
                threadId: emptyThread.threadId,
@@ -580,7 +580,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2294,7 +2294,7 @@
              );
              expect(unlinked.linkedPullRequest).toBeNull();
- 
+
 -            const regenerateCall = yield* invoke("t3_thread_update", {
 +            const regenerateCall = yield* invoke("goat_thread_update", {
                threadId: emptyThread.threadId,
@@ -589,7 +589,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2365,7 +2365,7 @@
                ),
              ).toHaveLength(2);
- 
+
 -            const promptedReadCall = yield* invoke("t3_thread_read", {
 +            const promptedReadCall = yield* invoke("goat_thread_read", {
                threadId: promptedThread.threadId,
@@ -607,7 +607,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -2417,7 +2417,7 @@
                ),
              ).toBe(true);
- 
+
 -            const forkedReadCall = yield* invoke("t3_thread_read", {
 +            const forkedReadCall = yield* invoke("goat_thread_read", {
                threadId: forkedThreadId,
@@ -615,7 +615,7 @@ These are conventional unified diffs with real current before-lines and complete
              const forkedRead = yield* decodeThreadReadResult(forkedReadCall.structuredContent).pipe(
 @@ -2432,7 +2432,7 @@
              });
- 
+
              const ordinaryLoopPrompt = "Run an ordinary thread loop iteration.";
 -            const sendCall = yield* invoke("t3_thread_send", {
 +            const sendCall = yield* invoke("goat_thread_send", {
@@ -696,7 +696,7 @@ These are conventional unified diffs with real current before-lines and complete
              });
              expect(foreignOrganizeCall.isError).toBe(false);
              expect((yield* orchestrator.getThreadShell(foreignThreadId))?.pinnedAt).not.toBeNull();
- 
+
 -            const foreignReadCall = yield* invoke("t3_thread_read", {
 +            const foreignReadCall = yield* invoke("goat_thread_read", {
                threadId: foreignThreadId,
@@ -739,7 +739,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -3997,7 +3997,7 @@
                ),
              );
- 
+
 -          const queuedFollowupCall = yield* invoke("t3_thread_send", {
 +          const queuedFollowupCall = yield* invoke("goat_thread_send", {
              threadId: delegated.childThreadId,
@@ -747,7 +747,7 @@ These are conventional unified diffs with real current before-lines and complete
              mode: "queue",
 @@ -4060,7 +4060,7 @@
            });
- 
+
            const finalSequence = yield* orchestrator.getThreadEventSequence(delegated.childThreadId);
 -          const interruptCall = yield* invoke("t3_thread_interrupt", {
 +          const interruptCall = yield* invoke("goat_thread_interrupt", {
@@ -768,7 +768,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -388,7 +388,7 @@
      return yield* service.status(harness.scope);
    }).pipe(Effect.provide(harness.layer));
- 
+
 -describe("t3_worktree_handoff", () => {
 +describe("goat_worktree_handoff", () => {
    it.effect("creates a worktree from the current branch and re-points the thread", () => {
@@ -777,7 +777,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -974,7 +974,7 @@
    });
  });
- 
+
 -describe("t3_worktree_status", () => {
 +describe("goat_worktree_status", () => {
    it.effect("reports an unattached thread", () => {
@@ -849,7 +849,7 @@ These are conventional unified diffs with real current before-lines and complete
 +import { SshToolkit } from "./ssh/tools.ts";
  import { WorktreeToolkit } from "./worktree/tools.ts";
  import { DeviceToolkit } from "./device/tools.ts";
- 
+
 @@ -90,6 +91,7 @@
      DeviceToolkit,
      PullRequestsToolkit,
@@ -913,7 +913,7 @@ These are conventional unified diffs with real current before-lines and complete
 +  expect(names.has("goat_thread_launch")).toBe(true);
    expect(names.has("t3_thread_start")).toBe(false);
  });
- 
+
 @@ -144,9 +193,9 @@
  it.effect("checks capability through the production registration", () =>
    Effect.gen(function* () {
@@ -965,11 +965,11 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -430,11 +479,11 @@
            Effect.provideService(McpSchema.McpServerClient, client),
          );
- 
+
 -    const untargeted = yield* call("t3_thread_organize", { action: "pin" }, clientScope("auto"));
 +    const untargeted = yield* call("goat_thread_organize", { action: "pin" }, clientScope("auto"));
      expect(declaredFailure(untargeted)).toMatchObject({ code: "target_required" });
- 
+
      const pinned = yield* call(
 -      "t3_thread_organize",
 +      "goat_thread_organize",
@@ -978,7 +978,7 @@ These are conventional unified diffs with real current before-lines and complete
      );
 @@ -442,7 +491,7 @@
      expect(pinned.structuredContent).toMatchObject({ sequence: 7 });
- 
+
      const aboveCeiling = yield* call(
 -      "t3_thread_organize",
 +      "goat_thread_organize",
@@ -987,7 +987,7 @@ These are conventional unified diffs with real current before-lines and complete
      );
 @@ -451,7 +500,7 @@
      });
- 
+
      const forked = yield* call(
 -      "t3_thread_fork",
 +      "goat_thread_fork",
@@ -997,14 +997,14 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -497,20 +546,20 @@
            Effect.provideService(McpSchema.McpServerClient, client),
          );
- 
+
 -    const configuration = yield* call("t3_thread_configuration", {
 +    const configuration = yield* call("goat_thread_configuration", {
        threadId: "other-project-thread",
      });
      expect(configuration.isError).toBe(false);
      expect(configuration.structuredContent).toMatchObject({ runtimeMode: "auto" });
- 
+
 -    const pinned = yield* call("t3_thread_organize", {
 +    const pinned = yield* call("goat_thread_organize", {
        action: "pin",
@@ -1012,7 +1012,7 @@ These are conventional unified diffs with real current before-lines and complete
      });
      expect(declaredFailure(pinned)).toMatchObject({ code: "capability_denied" });
      expect(dispatched).toEqual([]);
- 
+
 -    const configure = yield* call("t3_thread_configure", {
 +    const configure = yield* call("goat_thread_configure", {
        threadId: "other-project-thread",
@@ -1039,11 +1039,11 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -732,21 +781,21 @@
        thread: { ...scope.thread!, threadId: ThreadId.make("other-thread") },
      };
- 
+
 -    const refused = yield* call("t3_attachment_discard", { attachmentId }, otherThread);
 +    const refused = yield* call("goat_attachment_discard", { attachmentId }, otherThread);
      expect(declaredFailure(refused)).toMatchObject({ code: "invalid_request" });
- 
+
      // Another prepare a day later keeps it: the file outlives its URL's 24 hours
      // by as long as the upload took, up to the URL's own lifetime.
      yield* TestClock.adjust(24 * 60 * 60 * 1000 + 5 * 60_000);
@@ -1053,7 +1053,7 @@ These are conventional unified diffs with real current before-lines and complete
        { upload: { name: "later.png", mimeType: "image/png", sizeBytes: 4 } },
        scope,
      );
- 
+
      // A new provider session of the same thread still owns the upload.
      const discarded = yield* call(
 -      "t3_attachment_discard",
@@ -1189,7 +1189,7 @@ These are conventional unified diffs with real current before-lines and complete
 --- a/apps/server/src/mcp/toolkits/orchestrator/tools.ts
 +++ b/apps/server/src/mcp/toolkits/orchestrator/tools.ts
 @@ -50,7 +50,7 @@
- 
+
  const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
    description:
 -    "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this caller. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
@@ -1198,7 +1198,7 @@ These are conventional unified diffs with real current before-lines and complete
    failure: OrchestratorMcpFailure,
    failureMode: "return",
 @@ -63,7 +63,7 @@
- 
+
  export const DelegateTaskTool = Tool.make("delegate_task", {
    description:
 -    "Needs an agent running inside a T3 thread. Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Choose providers and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-provider work only when they support the chosen model. Use this for any model missing from the native tool, including same-provider work, for cross-provider work, or for explicitly T3-owned child tasks. For every T3 delegated review round, call delegate_task again with the original brief, prior findings, responses, and unresolved objections in the task prompt. Track each round by its own taskId and use a distinct clientRequestId per round, stable across retries of that round. The childThreadId is backing storage, not the target for starting another delegated review round through t3_thread_send. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only the parent's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on later task_status. An async child's completion wakes this thread through a notification, steered into active turns where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
@@ -1207,7 +1207,7 @@ These are conventional unified diffs with real current before-lines and complete
    success: OrchestratorMcpDelegateTaskResult,
    failure: OrchestratorMcpFailure,
 @@ -165,7 +165,7 @@
- 
+
  export const CreateThreadsTool = Tool.make("create_threads", {
    description:
 -    "Needs an agent running inside a T3 thread. Create one or more ORDINARY TOP-LEVEL T3 conversations. This is not delegation and does not create child agents/subagents. For delegated work, choose models from orchestrator_capabilities. Prefer native subagents only when they support the chosen model; otherwise call delegate_task, including for same-provider work. Use create_threads for a batch of separate top-level threads sharing this checkout. Prefer t3_thread_launch for a single thread. Both require the user to request separate/new/top-level threads or conversations. Each entry may override provider, model, options, runtime mode, and interaction mode; omitted settings inherit. Project, branch, and worktree always inherit and cannot be overridden here. For independent implementation or a PR stack in its own worktree, use t3_thread_launch with workspaceStrategy instead of asking the agent to create a worktree in its prompt.",
@@ -1218,7 +1218,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -176,7 +176,7 @@
    .annotate(Tool.Destructive, true)
    .annotate(Tool.OpenWorld, true);
- 
+
 -const ThreadListTool = Tool.make("t3_thread_list", {
 +const ThreadListTool = Tool.make("goat_thread_list", {
    description:
@@ -1227,7 +1227,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -190,7 +190,7 @@
    .annotate(Tool.Destructive, false)
    .annotate(Tool.Idempotent, true);
- 
+
 -const ThreadReadTool = Tool.make("t3_thread_read", {
 +const ThreadReadTool = Tool.make("goat_thread_read", {
    description:
@@ -1236,7 +1236,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -204,7 +204,7 @@
    .annotate(Tool.Destructive, false)
    .annotate(Tool.Idempotent, true);
- 
+
 -export const ThreadUpdateTool = Tool.make("t3_thread_update", {
 +export const ThreadUpdateTool = Tool.make("goat_thread_update", {
    description:
@@ -1245,7 +1245,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -217,7 +217,7 @@
    .annotate(Tool.Destructive, true)
    .annotate(Tool.Idempotent, false);
- 
+
 -const ThreadSendTool = Tool.make("t3_thread_send", {
 +const ThreadSendTool = Tool.make("goat_thread_send", {
    description:
@@ -1254,7 +1254,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -230,9 +230,9 @@
    .annotate(Tool.Destructive, true)
    .annotate(Tool.OpenWorld, true);
- 
+
 -const ThreadWaitTool = Tool.make("t3_thread_wait", {
 -  description:
 -    "Wait for a T3 thread run to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again or use t3_thread_read/list after timedOut=true. Waiting reports status only and does not acknowledge a delegated result.",
@@ -1267,7 +1267,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -244,7 +244,7 @@
    .annotate(Tool.Destructive, false)
    .annotate(Tool.Idempotent, true);
- 
+
 -const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 +const ThreadInterruptTool = Tool.make("goat_thread_interrupt", {
    description:
@@ -1349,7 +1349,7 @@ These are conventional unified diffs with real current before-lines and complete
 -        .handle("t3_thread_launch", params)
 +        .handle("goat_thread_launch", params)
          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
- 
+
      const result = yield* handle({ title: "Notes", scratch: true, message: "Draft a list" });
 @@ -268,9 +268,9 @@
          ),
@@ -1361,7 +1361,7 @@ These are conventional unified diffs with real current before-lines and complete
 -        .handle("t3_project_create", params)
 +        .handle("goat_project_create", params)
          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
- 
+
      const result = yield* handle({ title: "Pinball Stats" });
 @@ -377,9 +377,9 @@
          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
@@ -1373,7 +1373,7 @@ These are conventional unified diffs with real current before-lines and complete
 -        .handle("t3_thread_launch", params)
 +        .handle("goat_thread_launch", params)
          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
- 
+
      const result = yield* handle({ title: "Fix", projectId, message: "Fix the bug" });
 @@ -428,7 +428,7 @@
      );
@@ -1403,7 +1403,7 @@ These are conventional unified diffs with real current before-lines and complete
 +        "worktreePath must be one of the project's git worktrees. goat_worktree_list shows them.",
      });
  });
- 
+
 @@ -53,7 +53,7 @@
    return yield* Project.ProjectService;
  });
@@ -1552,7 +1552,7 @@ These are conventional unified diffs with real current before-lines and complete
 --- a/apps/server/src/mcp/toolkits/ssh/handlers.ts
 +++ b/apps/server/src/mcp/toolkits/ssh/handlers.ts
 @@ -32,7 +32,7 @@
- 
+
  export const layer = McpToolAccess.toLayer(SshToolkit, {
    // Reading ~/.ssh/config changes nothing; probing logs in but runs only `true`.
 -  t3_ssh_host_list: McpToolAccess.reads((input) =>
@@ -1580,13 +1580,13 @@ These are conventional unified diffs with real current before-lines and complete
 --- a/apps/server/src/mcp/toolkits/ssh/tools.ts
 +++ b/apps/server/src/mcp/toolkits/ssh/tools.ts
 @@ -47,13 +47,13 @@
- 
+
  const HostAlias = TrimmedNonEmptyString.annotate({
    description:
 -    "An SSH host alias from t3_ssh_host_list (this machine's ~/.ssh/config or known_hosts).",
 +    "An SSH host alias from goat_ssh_host_list (this machine's ~/.ssh/config or known_hosts).",
  });
- 
+
 -const SshHostListTool = Tool.make("t3_ssh_host_list", {
 +const SshHostListTool = Tool.make("goat_ssh_host_list", {
    ...shared,
@@ -1599,7 +1599,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -61,7 +61,7 @@
    .annotate(Tool.Readonly, true)
    .annotate(Tool.Destructive, false);
- 
+
 -const SshBrowseTool = Tool.make("t3_ssh_browse", {
 +const SshBrowseTool = Tool.make("goat_ssh_browse", {
    ...shared,
@@ -1612,7 +1612,7 @@ These are conventional unified diffs with real current before-lines and complete
 -    "cwd runs in the folder itself. worktree creates a new Git worktree of the folder's repository on the remote, on a new branch from baseRef (default: the folder's checked-out branch). existing_worktree reuses one of the worktrees t3_ssh_browse reported. Default cwd.",
 +    "cwd runs in the folder itself. worktree creates a new Git worktree of the folder's repository on the remote, on a new branch from baseRef (default: the folder's checked-out branch). existing_worktree reuses one of the worktrees goat_ssh_browse reported. Default cwd.",
  });
- 
+
 -const SshThreadLaunchTool = Tool.make("t3_ssh_thread_launch", {
 +const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
    ...shared,
@@ -1770,7 +1770,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -28,7 +28,7 @@
  import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
  import * as McpInvocationContext from "../../McpInvocationContext.ts";
- 
+
 -const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
 +const ThreadOrganizeTool = Tool.make("goat_thread_organize", {
    description:
@@ -1864,7 +1864,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -175,7 +175,7 @@
    .annotate(Tool.Destructive, true)
    .annotate(Tool.OpenWorld, true);
- 
+
 -const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
 +const ThreadConfigurationTool = Tool.make("goat_thread_configuration", {
    ...commandTool,
@@ -1881,7 +1881,7 @@ These are conventional unified diffs with real current before-lines and complete
      "Set a thread's provider, model and options with the existing selection command. Omit threadId for this thread. This does not change permission modes. Use orchestrator_capabilities to choose a selection.",
 @@ -200,7 +200,7 @@
  }).annotate(Tool.Destructive, true);
- 
+
  const transferResult = Schema.Struct({ sequence: NonNegativeInt, targetThreadId: ThreadId });
 -const ThreadForkTool = Tool.make("t3_thread_fork", {
 +const ThreadForkTool = Tool.make("goat_thread_fork", {
@@ -1909,7 +1909,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -240,7 +240,7 @@
    .annotate(Tool.Readonly, true)
    .annotate(Tool.Destructive, false);
- 
+
 -const ThreadSearchTool = Tool.make("t3_thread_search", {
 +const ThreadSearchTool = Tool.make("goat_thread_search", {
    ...commandTool,
@@ -1919,7 +1919,7 @@ These are conventional unified diffs with real current before-lines and complete
 +++ b/apps/server/src/mcp/toolkits/worktree/handlers.ts
 @@ -11,7 +11,7 @@
  import { WorktreeToolkit } from "./tools.ts";
- 
+
  const handlers = {
 -  t3_worktree_list: McpToolAccess.reads((input) =>
 +  goat_worktree_list: McpToolAccess.reads((input) =>
@@ -1969,13 +1969,13 @@ These are conventional unified diffs with real current before-lines and complete
 +      const status = tools.find((tool) => tool.name === "goat_worktree_status");
        expect(status?.annotations?.readOnlyHint).toBe(true);
        expect(status?.annotations?.destructiveHint).toBe(false);
- 
+
 --- a/apps/server/src/mcp/toolkits/worktree/tools.ts
 +++ b/apps/server/src/mcp/toolkits/worktree/tools.ts
 @@ -26,9 +26,9 @@
  /** What handoff and status fail with, including the access gate's refusal. */
  const WorktreeToolFailure = Schema.Union([WorktreeMcpFailure, OrchestratorMcpFailure]);
- 
+
 -const WorktreeHandoffTool = Tool.make("t3_worktree_handoff", {
 +const WorktreeHandoffTool = Tool.make("goat_worktree_handoff", {
    description:
@@ -1987,7 +1987,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -41,9 +41,9 @@
    .annotate(Tool.Idempotent, false)
    .annotate(Tool.OpenWorld, true);
- 
+
 -const WorktreeStatusTool = Tool.make("t3_worktree_status", {
 +const WorktreeStatusTool = Tool.make("goat_worktree_status", {
    description:
@@ -1999,7 +1999,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -59,9 +59,9 @@
    .annotate(Tool.Idempotent, true)
    .annotate(Tool.OpenWorld, false);
- 
+
 -const WorktreeListTool = Tool.make("t3_worktree_list", {
 +const WorktreeListTool = Tool.make("goat_worktree_list", {
    description:
@@ -2047,7 +2047,7 @@ These are conventional unified diffs with real current before-lines and complete
    "mcp__t3-code__html_preview",
    "mcp__t3-code__html_render",
  ];
- 
+
  // Claude Code aborts an HTTP MCP call after 60 s ("The operation timed out.")
 -// unless the server config sets `timeout`. T3's wait tools (t3_thread_wait,
 +// unless the server config sets `timeout`. T3's wait tools (goat_thread_wait,
@@ -2128,7 +2128,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -614,7 +614,7 @@
            now,
          });
- 
+
 -        // Distinct command IDs mirror task_status vs t3_thread_read racing after
 +        // Distinct command IDs mirror task_status vs goat_thread_read racing after
          // their shared read preflight saw delivered ownership.
@@ -2249,7 +2249,7 @@ These are conventional unified diffs with real current before-lines and complete
 +    expect(threadReadTargetId(payload("t3-code.goat_thread_read", { threadId: "  " }))).toBeNull();
 +    expect(threadReadTargetId(payload("t3-code.goat_thread_read", null))).toBeNull();
    });
- 
+
    it("uses the active summary state for legacy tools without a lifecycle status", () => {
 @@ -788,7 +788,7 @@
          id: TurnItemId.make("list"),
@@ -2279,7 +2279,7 @@ These are conventional unified diffs with real current before-lines and complete
          output: { isError: true },
        },
 @@ -3575,7 +3575,7 @@
- 
+
  describe("resolveTimelineToolPresentation", () => {
    it("pretty prints Claude and Cursor T3 MCP tool names", () => {
 -    expect(resolveTimelineToolPresentation("mcp__t3-code__t3_thread_read")).toEqual({
@@ -2292,7 +2292,7 @@ These are conventional unified diffs with real current before-lines and complete
 @@ -178,7 +178,7 @@
    return `${heading.charAt(0).toUpperCase()}${heading.slice(1)}`;
  }
- 
+
 -/** The trimmed thread id a `t3_thread_read` call targets, or null for any other entry. */
 +/** The trimmed thread id a `goat_thread_read` call targets, or null for any other entry. */
  export function threadReadTargetId(entry: Pick<WorkLogEntry, "structuredPayload">) {
@@ -2316,14 +2316,14 @@ These are conventional unified diffs with real current before-lines and complete
 -    expect(markup).not.toContain("mcp__t3-code__t3_thread_read");
 +    expect(markup).not.toContain("mcp__t3-code__goat_thread_read");
    });
- 
+
    it("formats changed file paths from the workspace root", async () => {
 --- a/apps/web/src/components/chat/MessagesTimeline.tsx
 +++ b/apps/web/src/components/chat/MessagesTimeline.tsx
 @@ -3917,7 +3917,7 @@
    );
  }
- 
+
 -/** The thread a `t3_thread_read` call targets, titled from live shell state so renames show. */
 +/** The thread a `goat_thread_read` call targets, titled from live shell state so renames show. */
  function useThreadReadTarget(entry: TimelineWorkEntry, environmentId: EnvironmentId) {
@@ -2339,71 +2339,71 @@ These are conventional unified diffs with real current before-lines and complete
 +`goat_thread_send`. Ordinary thread messaging remains available for user-requested
  conversations; it does not reopen a completed task. There is no task-level follow-up
  API for preserving the same reviewer session.
- 
+
 @@ -322,7 +322,7 @@
  sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
  without a prompt remain idle.
- 
+
 -### `t3_thread_launch`
 +### `goat_thread_launch`
- 
+
  Launches one ordinary top-level thread through the app's launch service. Use an
  explicit `workspaceStrategy` to create a new worktree (`worktree` with `baseRef`),
 @@ -338,14 +338,14 @@
  interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
  launching again. `create_threads` remains the batch option for a shared checkout.
- 
+
 -### `t3_thread_list`
 +### `goat_thread_list`
- 
+
  Lists durable thread shells in one project, newest first: `projectId` when
  given, else the calling thread's project. Callers can filter by title, run
  status, and whether app-owned sub-agent threads are included. Results are
  bounded and offset-paginated. Deleted threads are never listed.
- 
+
 -### `t3_thread_read`
 +### `goat_thread_read`
- 
+
  Reads the durable state, recent runs, and visible timeline of any thread in
  the environment by thread ID. A deleted thread returns `thread_not_found`. The
 @@ -367,11 +367,11 @@
  rename never leaves a stale link.
- 
+
  List and read results report `snoozed` and `snoozedUntil`, and
 -`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 +`goat_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
  client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
  wakes early when it has a pending request, fails, or completes after the snooze.
- 
+
 -### `t3_thread_update`
 +### `goat_thread_update`
- 
+
  Updates metadata for the calling thread or any other thread in the environment.
  The typed actions are `rename`, `regenerate_title`, `link_pull_request`, and
 @@ -385,7 +385,7 @@
  receipt. Thread list and read results expose the linked pull request, and thread
  detail also exposes an in-flight title regeneration.
- 
+
 -### `t3_thread_send`
 +### `goat_thread_send`
- 
+
  Sends a message to any ordinary or delegated thread in the environment:
- 
+
 @@ -400,14 +400,14 @@
  Stable command and message IDs are derived from `clientRequestId` for
  idempotent retries.
- 
+
 -### `t3_thread_wait`
 +### `goat_thread_wait`
- 
+
  Waits for a selected run to become `completed`, `failed`, `cancelled`,
  `interrupted`, or `rolled_back`. Without `runId`, it pins the latest run at call
  time; an idle thread returns immediately. A timeout reports the latest durable
  status and does not cancel work.
- 
+
 -### `t3_thread_interrupt`
 +### `goat_thread_interrupt`
- 
+
  Interrupts a selected active run through the normal V2 `run.interrupt` command.
  Without `runId`, it selects the newest interruptible run. A terminal run is
 --- a/packages/client-runtime/src/t3ToolSummary.test.ts
@@ -2430,7 +2430,7 @@ These are conventional unified diffs with real current before-lines and complete
 +++ b/packages/client-runtime/src/work-log/presentation.test.ts
 @@ -298,15 +298,15 @@
    });
- 
+
    it.each([
 -    ["t3_project_list", "Listing projects", "Listed projects"],
 -    ["t3_project_clone", "Cloning a repository", "Cloned a repository"],
@@ -2514,7 +2514,7 @@ These are conventional unified diffs with real current before-lines and complete
 --- a/packages/contracts/src/composerContext.ts
 +++ b/packages/contracts/src/composerContext.ts
 @@ -223,7 +223,7 @@
- 
+
  /**
   * Another thread on the same server, attached so the agent can read its history through
 - * `t3_thread_read`. Only identity travels; the title is a display snapshot.
@@ -2537,7 +2537,7 @@ These are conventional unified diffs with real current before-lines and complete
 +++ b/packages/contracts/src/worktreeMcp.ts
 @@ -3,7 +3,7 @@
  import { TrimmedNonEmptyString } from "./baseSchemas.ts";
- 
+
  /**
 - * Input for the `t3_worktree_handoff` MCP tool.
 + * Input for the `goat_worktree_handoff` MCP tool.
@@ -2562,14 +2562,14 @@ These are conventional unified diffs with real current before-lines and complete
 -      _meta: { toolName: "mcp::t3-code::t3_thread_send", serverId: "t3-code", provenance: "mcp" },
 +      _meta: { toolName: "mcp::t3-code::goat_thread_send", serverId: "t3-code", provenance: "mcp" },
      });
- 
+
      expect(extractMcpToolCallIdentity(toolCall)).toEqual({
        server: "t3-code",
 -      tool: "t3_thread_send",
 +      tool: "goat_thread_send",
      });
    });
- 
+
 --- a/packages/provider-core/src/server/handoffBudget.ts
 +++ b/packages/provider-core/src/server/handoffBudget.ts
 @@ -277,6 +277,6 @@
@@ -2590,12 +2590,12 @@ These are conventional unified diffs with real current before-lines and complete
 +      "Do not use `goat_thread_send` on `childThreadId`",
      );
    });
- 
+
 --- a/packages/provider-core/src/server/orchestrationInstructions.ts
 +++ b/packages/provider-core/src/server/orchestrationInstructions.ts
 @@ -7,27 +7,27 @@
  The \`t3-code\` MCP server provides app-owned orchestration. Treat these concepts distinctly:
- 
+
  - A delegated task/subagent is child work owned by the current thread. Use \`orchestrator_capabilities\` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model. Use \`delegate_task\` with that provider instance and model when native tools cannot, including for same-provider work. Also use \`delegate_task\` for cross-provider or explicitly T3-owned child tasks. Retain each returned \`taskId\`, and use \`task_status\` or \`task_cancel\` to manage it. The returned \`childThreadId\` is backing storage for the subagent, not the target for starting another delegated review round.
 -- \`t3_thread_launch\` and \`create_threads\` create ordinary top-level T3 conversations. Use them only when the user explicitly asks for separate/new/top-level threads or conversations. Never use them merely because the user said "subagent" or requested parallel delegated work.
 -- For every T3 delegated review round, call \`delegate_task\` again. Include the original brief, prior findings, responses, and unresolved objections in each new task prompt. Track each round by its own \`taskId\`. Use a distinct \`clientRequestId\` per round, stable across retries of that round. Do not use \`t3_thread_send\` on \`childThreadId\` to continue a delegated review.
@@ -2604,30 +2604,30 @@ These are conventional unified diffs with real current before-lines and complete
  - \`schedule_task\` creates persistent recurring work in the app scheduler. Pass \`schedule\` as a structured object, never as JSON text: \`{"type":"interval","everyMs":3600000}\` for an interval, or \`{"type":"fixed_time","timeOfDay":"09:00","weekdays":[1,2,3,4,5]}\` for a wall-clock schedule, or \`{"type":"webhook"}\` to run on each request to the returned \`webhookUrl\` (the run sees the request only through \`{{body.path}}\`-style placeholders in the prompt). By default runs return to the current thread, which suits orchestrating: each trigger arrives here and you delegate or dedupe; set \`bindToCurrentThread=false\` only when the user wants a fresh thread for every run. After scheduling a timer, report the returned cadence and next run time; for a webhook, report its \`webhookUrl\`, or say T3 Connect remote access is needed if it is missing.
  - When you need a secret from the user (a token, API key, or webhook signing secret), call \`request_secret\` so they enter it privately, then pass the returned \`secretRef\` to the tool that needs it, e.g. \`signature.secretRef\` on a webhook task for a sender that signs requests such as GitHub. A \`secretRef\` works once. Never ask for a secret in chat, never invent one, and never repeat one.
  - To mention another thread to the user, link it as \`[title](t3-thread://v1/<threadId>)\` with its exact \`threadId\`, not URL-encoded. T3 Code opens the thread in the app and shows its current title.
- 
+
  ### Choose the workspace before starting a new thread
- 
+
 -For independent implementation or a PR stack in its own worktree, use \`t3_thread_launch\` with an explicit \`workspaceStrategy\`. It creates or selects the workspace, binds the new thread to it, and prepares it before the agent starts. Put the task in \`message\`, not \`prompt\`:
 +For independent implementation or a PR stack in its own worktree, use \`goat_thread_launch\` with an explicit \`workspaceStrategy\`. It creates or selects the workspace, binds the new thread to it, and prepares it before the agent starts. Put the task in \`message\`, not \`prompt\`:
- 
+
  - New worktree: \`{"title":"UI cleanup","workspaceStrategy":{"type":"worktree","baseRef":"feature/base","branch":"feature/ui-cleanup","startFromOrigin":false},"message":"Implement the cleanup and open a PR against feature/base."}\`
  - Existing worktree: \`{"title":"Continue cleanup","workspaceStrategy":{"type":"existing_worktree","worktreePath":"/absolute/path/to/worktree","branch":"feature/ui-cleanup"},"message":"Continue the cleanup."}\`
  - Project's main checkout: \`workspaceStrategy:{"type":"root"}\`. Omitting workspaceStrategy also selects root; it does not inherit the caller's worktree.
- 
+
 -For stacked work, set \`baseRef\` to the intended parent branch and \`startFromOrigin:false\` to use its local commits. Use \`startFromOrigin:true\` when you intend to fetch and start from origin. Uncommitted edits are not copied. Use \`t3_worktree_list\` to discover existing checkout paths. Project, model selection, and modes inherit unless supplied; a launched thread may not run with broader modes than yours.
 +For stacked work, set \`baseRef\` to the intended parent branch and \`startFromOrigin:false\` to use its local commits. Use \`startFromOrigin:true\` when you intend to fetch and start from origin. Uncommitted edits are not copied. Use \`goat_worktree_list\` to discover existing checkout paths. Project, model selection, and modes inherit unless supplied; a launched thread may not run with broader modes than yours.
- 
+
 -\`t3_thread_launch\` is the single-thread launch tool. Use \`create_threads\` only for a batch of threads intentionally sharing the caller's checkout: it always inherits the caller's project, branch, and worktree and has no workspace override. Asking an agent to run \`git worktree add\` or \`cd\` in its prompt does not update T3's thread binding. Select the workspace in the launch call instead. \`t3_worktree_handoff\` moves the calling thread, not another thread, and cannot move a thread already attached to a worktree.
 +\`goat_thread_launch\` is the single-thread launch tool. Use \`create_threads\` only for a batch of threads intentionally sharing the caller's checkout: it always inherits the caller's project, branch, and worktree and has no workspace override. Asking an agent to run \`git worktree add\` or \`cd\` in its prompt does not update T3's thread binding. Select the workspace in the launch call instead. \`goat_worktree_handoff\` moves the calling thread, not another thread, and cannot move a thread already attached to a worktree.
- 
+
 -\`t3_thread_launch\` has no idempotency key. Retain its returned threadId and inspect it with \`t3_thread_read\` / \`t3_thread_wait\`; preparation can still be running after acceptance. If a launch fails or its response is lost, inspect \`t3_thread_list\` before retrying, since a thread may already exist.
 +\`goat_thread_launch\` has no idempotency key. Retain its returned threadId and inspect it with \`goat_thread_read\` / \`goat_thread_wait\`; preparation can still be running after acceptance. If a launch fails or its response is lost, inspect \`goat_thread_list\` before retrying, since a thread may already exist.
- 
+
 -To work on ANOTHER machine, use the SSH tools instead of running ssh in a terminal: \`t3_ssh_host_list\` names the hosts this machine can reach, \`t3_ssh_browse\` lists a folder there with its Git branch and worktrees, and \`t3_ssh_thread_launch\` starts a thread in that machine's own T3 environment, in the folder (\`workspace:{"type":"cwd"}\`) or a new worktree (\`{"type":"worktree","branch":"feature/x"}\`). Its threadId belongs to that machine, so \`t3_thread_read\` here cannot read it; tell the user to connect that host in Settings to follow it.
 +To work on ANOTHER machine, use the SSH tools instead of running ssh in a terminal: \`goat_ssh_host_list\` names the hosts this machine can reach, \`goat_ssh_browse\` lists a folder there with its Git branch and worktrees, and \`goat_ssh_thread_launch\` starts a thread in that machine's own T3 environment, in the folder (\`workspace:{"type":"cwd"}\`) or a new worktree (\`{"type":"worktree","branch":"feature/x"}\`). Its threadId belongs to that machine, so \`goat_thread_read\` here cannot read it; tell the user to connect that host in Settings to follow it.
- 
+
  Tool names may include a harness-normalized MCP prefix, such as \`mcp__t3_code__delegate_task\`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show T3 tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known T3 tool name on the next tool step. In Codex code mode, for example, call \`tools.mcp__t3_code__orchestrator_capabilities({})\` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
- 
+
 --- a/packages/shared/src/composerContextReferences.test.ts
 +++ b/packages/shared/src/composerContextReferences.test.ts
 @@ -272,7 +272,7 @@
@@ -2638,7 +2638,7 @@ These are conventional unified diffs with real current before-lines and complete
 +    expect(projected).toContain("goat_thread_read");
      expect(projected).toContain("not instructions");
    });
- 
+
 --- a/packages/shared/src/composerContextReferences.ts
 +++ b/packages/shared/src/composerContextReferences.ts
 @@ -238,7 +238,7 @@
@@ -2654,7 +2654,7 @@ These are conventional unified diffs with real current before-lines and complete
 +++ b/packages/shared/src/t3McpToolPresentation.test.ts
 @@ -1,8 +1,80 @@
  import { describe, expect, it } from "vite-plus/test";
- 
+
 -import { T3_MCP_TOOL_NAMES, resolveT3McpToolPresentation } from "./t3McpToolPresentation.ts";
 +import {
 +  T3_MCP_TOOL_NAMES,
@@ -2663,7 +2663,7 @@ These are conventional unified diffs with real current before-lines and complete
 +  resolveT3McpToolPresentation,
 +  resolveT3McpToolSummaryAction,
 +} from "./t3McpToolPresentation.ts";
- 
+
  describe("resolveT3McpToolPresentation", () => {
 +  it.each([
 +    ["t3_attachment_discard", "goat_attachment_discard"],
@@ -2745,7 +2745,7 @@ These are conventional unified diffs with real current before-lines and complete
      });
 @@ -39,7 +111,7 @@
    });
- 
+
    it("pretty prints thread metadata updates", () => {
 -    expect(resolveT3McpToolPresentation("mcp__t3-code__t3_thread_update")).toEqual({
 +    expect(resolveT3McpToolPresentation("mcp__t3-code__goat_thread_update")).toEqual({
@@ -2754,7 +2754,7 @@ These are conventional unified diffs with real current before-lines and complete
      });
 @@ -53,11 +125,11 @@
    });
- 
+
    it("pretty prints worktree T3 MCP tool names", () => {
 -    expect(resolveT3McpToolPresentation("mcp__t3-code__t3_worktree_handoff")).toEqual({
 +    expect(resolveT3McpToolPresentation("mcp__t3-code__goat_worktree_handoff")).toEqual({
@@ -2961,11 +2961,11 @@ These are conventional unified diffs with real current before-lines and complete
 +  ...Object.keys(T3_MCP_TOOLS),
 +  ...Object.keys(T3_MCP_LEGACY_TOOL_ALIASES),
 +]);
- 
+
  function normalizeT3McpToolLabel(value: string): string {
    return value.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
 @@ -364,13 +414,13 @@
- 
+
    const prefixed = /^(?:mcp[-_]{1,2})?t3[-_ ]?code(?:__|[-_.:/ ])(?<tool>.+)$/i.exec(label);
    const candidate = prefixed?.groups?.tool ?? label;
 -  if (Object.hasOwn(T3_MCP_TOOLS, candidate)) return candidate;
@@ -2987,7 +2987,7 @@ These are conventional unified diffs with real current before-lines and complete
 -  return name !== null && Object.hasOwn(T3_MCP_TOOLS, name) ? name : null;
 +  return name !== null && T3_MCP_TOOL_NAMES.has(name) ? name : null;
  }
- 
+
  export function resolveT3McpToolDefinition(
    toolName: string | null | undefined,
  ): T3McpToolDefinition | null {
@@ -2998,24 +2998,23 @@ These are conventional unified diffs with real current before-lines and complete
 +    ? T3_MCP_TOOLS[canonicalName]!
 +    : null;
  }
- 
+
  export function resolveT3McpToolPresentation(
 ```
 
-
 ## Meaningful behavior proof and conditional activation
 
-| Requirement / activated path | Existing or updated test | Observable proof |
-| --- | --- | --- |
-| Public name contract, including SSH toolkit | `apps/server/src/mcp/toolkits/core.test.ts` | The complete public inventory has exactly the 42 independently listed GOAT names, 83 total names, unique object-root schemas and no live `t3_` name. Adds SshToolkit to the existing inventory check so the three SSH names are covered. |
-| MCP protocol initialization | `apps/server/src/mcp/McpHttpServer.test.ts` | The existing authenticated HTTP initialization/DELETE test additionally consumes the actual initialization response (JSON or SSE data line) and observes `result.serverInfo.name = GOAT`; DELETE and stale-session rejection still pass. No static constant-only assertion. |
-| Renamed production calls preserve permissions | `core.test.ts`; `OrchestratorMcpToolkit.integration.test.ts`; environment/project/preview-controls/worktree tests | Calls now use GOAT names. A missing orchestration capability returns `capability_denied`; invalid input and bounded declared failures remain unchanged; read-only client/thread limits and attachment ownership remain enforced. Existing integration scenarios still observe persisted thread/queue/result behavior. |
-| Claude read-only approval matches live registration | `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts` (existing test, no source edit) | Existing annotation-to-qualified-allowlist test observes the new GOAT suffixes under `mcp__t3-code__`; mutating tools remain excluded. Retain the current key/wildcard. |
-| Canonical tool history | shared presentation, mobile activity, web timeline logic/component, client-runtime summaries/work-log, ACP runtime-model tests | Existing fixtures now exercise GOAT suffixes; rendering still shows the same labels, thread links, summary actions and outputs. No new static-markup tests are introduced; only existing fixture strings are updated. |
-| Persisted legacy aliases | `packages/shared/src/t3McpToolPresentation.test.ts` | Forty-two explicit old/new public-name pairs render identically for bare, Claude-style, Codex-style and per-thread OpenCode prefixes, including `completed` suffixes; summary actions match; tool ID retains actual old/new spelling. The original all-prefix test also loops over the expanded read-side set. |
-| Foreign / unknown namespace path | same shared test | Both old/new tools under `mcp__another-server__` stay generic; unknown t3/goat suffixes and invented `goat_thread_start` return null. No loose prefix rewrite accepts an unlisted name. |
-| Context recovery and instructions | composer references, orchestration instructions, context-handoff budget tests | Agent-facing recovery instructions contain `goat_thread_read`; orchestration instructions preserve child-vs-top-level and retry/idempotency guidance with the new names. |
-| SSH request suffixes | exact `SshRemoteDispatch.ts` hunks + targeted server typecheck + stale-name gate | Three remote call sites use `goat_project_list`, `goat_project_create`, `goat_thread_launch`. Existing SSH result tests do not exercise request dispatch; do not claim them as remote execution proof. Actual remote behavior is wp5's authorized probe of the final `mcp__goat__goat_*` names after wp6 and wp4. |
+| Requirement / activated path                        | Existing or updated test                                                                                                       | Observable proof                                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public name contract, including SSH toolkit         | `apps/server/src/mcp/toolkits/core.test.ts`                                                                                    | The complete public inventory has exactly the 42 independently listed GOAT names, 83 total names, unique object-root schemas and no live `t3_` name. Adds SshToolkit to the existing inventory check so the three SSH names are covered.                                                                              |
+| MCP protocol initialization                         | `apps/server/src/mcp/McpHttpServer.test.ts`                                                                                    | The existing authenticated HTTP initialization/DELETE test additionally consumes the actual initialization response (JSON or SSE data line) and observes `result.serverInfo.name = GOAT`; DELETE and stale-session rejection still pass. No static constant-only assertion.                                           |
+| Renamed production calls preserve permissions       | `core.test.ts`; `OrchestratorMcpToolkit.integration.test.ts`; environment/project/preview-controls/worktree tests              | Calls now use GOAT names. A missing orchestration capability returns `capability_denied`; invalid input and bounded declared failures remain unchanged; read-only client/thread limits and attachment ownership remain enforced. Existing integration scenarios still observe persisted thread/queue/result behavior. |
+| Claude read-only approval matches live registration | `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts` (existing test, no source edit)                            | Existing annotation-to-qualified-allowlist test observes the new GOAT suffixes under `mcp__t3-code__`; mutating tools remain excluded. Retain the current key/wildcard.                                                                                                                                               |
+| Canonical tool history                              | shared presentation, mobile activity, web timeline logic/component, client-runtime summaries/work-log, ACP runtime-model tests | Existing fixtures now exercise GOAT suffixes; rendering still shows the same labels, thread links, summary actions and outputs. No new static-markup tests are introduced; only existing fixture strings are updated.                                                                                                 |
+| Persisted legacy aliases                            | `packages/shared/src/t3McpToolPresentation.test.ts`                                                                            | Forty-two explicit old/new public-name pairs render identically for bare, Claude-style, Codex-style and per-thread OpenCode prefixes, including `completed` suffixes; summary actions match; tool ID retains actual old/new spelling. The original all-prefix test also loops over the expanded read-side set.        |
+| Foreign / unknown namespace path                    | same shared test                                                                                                               | Both old/new tools under `mcp__another-server__` stay generic; unknown t3/goat suffixes and invented `goat_thread_start` return null. No loose prefix rewrite accepts an unlisted name.                                                                                                                               |
+| Context recovery and instructions                   | composer references, orchestration instructions, context-handoff budget tests                                                  | Agent-facing recovery instructions contain `goat_thread_read`; orchestration instructions preserve child-vs-top-level and retry/idempotency guidance with the new names.                                                                                                                                              |
+| SSH request suffixes                                | exact `SshRemoteDispatch.ts` hunks + targeted server typecheck + stale-name gate                                               | Three remote call sites use `goat_project_list`, `goat_project_create`, `goat_thread_launch`. Existing SSH result tests do not exercise request dispatch; do not claim them as remote execution proof. Actual remote behavior is wp5's authorized probe of the final `mcp__goat__goat_*` names after wp6 and wp4.     |
 
 Registration rejection of legacy names is proven at catalog level here (no old registration/handler key remains), not by migrating or rewriting a database. Running an old live session against the newly renamed server is intentionally unsupported by D5's read-side-only compatibility promise.
 
@@ -3024,7 +3023,6 @@ Registration rejection of legacy names is proven at catalog level here (no old r
 **All test/typecheck/application commands below: NOT RUN** by this leaf because the packet forbids builds, tests, servers and source edits. No exit code or PASS is asserted. Paths/configuration were read to ground them. `vp test run` receives named files only; no `vp check`, recursive test/typecheck, or repo-wide suite is permitted. Execute each command independently and record its exit code; expected success is 0, with no failures and no no-tests-found result.
 
 Root `vite.config.ts` supplies the node test environment and excludes `.repos`, `.t3`, node_modules and build outputs. Server uses its own `vite.config.ts` (serial file execution and git test setup), web uses its own test project (and `MessagesTimeline.test.tsx` declares jsdom), and client-runtime uses its own `src/**/*.test.ts` include. The package commands below run in the owning package so relative configuration paths resolve correctly. Mobile, provider-acp, provider-core and shared use their package.json test recipe (`--config ../../vite.config.ts --dir .`); web selects its `unit` project without permitting an empty selection. All 23 named test paths were checked for existence; these are future execution recipes, not test results.
-
 
 ```sh
 cd /Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/mobile
@@ -3048,7 +3046,6 @@ vp test run --config ../../vite.config.ts --dir . \
   src/t3McpToolPresentation.test.ts
 ```
 
-
 ```sh
 cd /Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server
 vp test run \
@@ -3068,7 +3065,6 @@ vp test run \
   src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts
 ```
 
-
 ```sh
 cd /Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime
 vp test run \
@@ -3076,14 +3072,12 @@ vp test run \
   src/work-log/presentation.test.ts
 ```
 
-
 ```sh
 cd /Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web
 vp test run --project unit \
   src/components/chat/MessagesTimeline.logic.test.ts \
   src/components/chat/MessagesTimeline.test.tsx
 ```
-
 
 Targeted typecheck scopes and grounding: `packages/shared`, `contracts`, `provider-core`, `provider-acp`, and `client-runtime` all declare `include: ["src"]`; `apps/server` declares `include: ["src", "vite.config.ts", "scripts", "integration", "../../scripts/lib"]`; web includes its `src` and configuration/test support paths; mobile extends Expo's config and uses default source inclusion. Every touched TypeScript file belongs to one of these eight configs. Desktop inherits the web bundle and shared rendering; no Electron IPC code or mobile native code changes. These commands check only those packages, not the repository's recursive script.
 
@@ -3160,4 +3154,5 @@ Suggested 000_plan amendment (D5 clarification, not an added scope): state that 
 - Patch application, tests, typechecks, runtime initialization, independent review and remote dispatch remain **NOT RUN** by this leaf. Commands above are future parent gates, not claimed evidence.
 
 ## Post-review amendment (cycle 2)
+
 Stale-name gate exceptions now also allow the intentional legacy rewrite in apps/server/src/orchestration-v2/ContextHandoffDelivery.ts (refreshRecoveryToolName + comment) and its regression fixture/assertion in apps/server/src/orchestration-v2/ContextHandoffBudget.test.ts. Any other t3_thread_read occurrence outside the presentation files still fails the gate.

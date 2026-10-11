@@ -39,14 +39,14 @@ Baseline is the read-only source at **cd1dfd752d1486948f461eac1ebfb9c16f6cb416**
 
 ## Unchanged indirect consumers (NO CHANGE)
 
-| Exact absolute path | Reason no diff is required |
-| --- | --- |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/runtimeArchive.ts` | readLocalRuntimeArchive calls cliArchiveFileName; helper selects goat archives. Actual filesystem tests change below. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/main.ts` | supplies version/archiveDirectory/releaseBaseUrl, no executable basename/remote home; tunnel builders own those paths. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime/src/preview/serverBrowserStream.ts` | sudo npx t3 browser setup names the unchanged npm package. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/marketing/src/lib/releases.ts` | wp2 owns repository; no CLI asset basename selected here. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packaging/aur/t3code-bin/PKGBUILD` | desktop AppImage consumer; wp2 owns URLs, D8 excludes app ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packaging/aur/t3code-nightly-bin/PKGBUILD` | same desktop-only boundary. |
+| Exact absolute path                                                                                                                 | Reason no diff is required                                                                                             |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/runtimeArchive.ts`                         | readLocalRuntimeArchive calls cliArchiveFileName; helper selects goat archives. Actual filesystem tests change below.  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/main.ts`                                   | supplies version/archiveDirectory/releaseBaseUrl, no executable basename/remote home; tunnel builders own those paths. |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/client-runtime/src/preview/serverBrowserStream.ts` | sudo npx t3 browser setup names the unchanged npm package.                                                             |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/marketing/src/lib/releases.ts`                         | wp2 owns repository; no CLI asset basename selected here.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packaging/aur/t3code-bin/PKGBUILD`                          | desktop AppImage consumer; wp2 owns URLs, D8 excludes app ids.                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packaging/aur/t3code-nightly-bin/PKGBUILD`                  | same desktop-only boundary.                                                                                            |
 
 ## Review and application instructions
 
@@ -56,79 +56,79 @@ The authorizing packet grants this single plan-file write despite AGENTS' defaul
 
 ## Core file map
 
-| Exact absolute source path | Action | Inspected SHA-256 (first 16) | Purpose |
-| --- | --- | --- | --- |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/vite.config.ts` | MODIFY | `bbe145c419b7d727` | SEA output name (including tsdown target suffixes). |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/package.json` | MODIFY | `efc8e633047405bd` | Keep npm/workspace name t3; expose both command names from source package. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/cliRelease.ts` | MODIFY | `9433d8a2153d0ee2` | Shared archive filename; release repository is owned by wp2. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-cli-archive.ts` | MODIFY | `b5caa993c5124e4c` | Archive stem, SEA input, packaged entry, signing/help diagnostics; runtime npm manifest and native resource-monitor names stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.ts` | MODIFY | `3c5d08709ae8bf70` | All npm package identities/filenames stay t3 and @t3code/t3-*; both bins invoke bin/t3.js, which executes goat/goat.exe. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/legacyCliLauncher.ts` | MODIFY | `b82b1c4f822f1a34` | Legacy dist/bin.mjs forwards IPC/signals to renamed executable; keep npm package path. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/pinnedRuntime.ts` | MODIFY | `8d7f4d8e16a0ec13` | Own runtime/goat/versions namespace protects an upstream runtime at the same home/version; marker remains .install-complete. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/serviceLauncher.ts` | MODIFY | `f334eb8b4d1b0742` | Standalone Node-only launcher must mirror pinnedRuntimePaths; retain boot-service ids/protocol. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.ts` | MODIFY | `4406d465264b211c` | Rename archive/entry in runner, upload installer and probe together; runtime namespace protects same-version upstream cache. Remote state/server home move to `~/.goat` through mandatory D7-A inside wp4. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.sh` | MODIFY | `dc77a9736006d1bb` | Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_HOME default and npm fallback package identity. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.ps1` | MODIFY | `85fc04da5d7a34dd` | Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_HOME default and npm fallback package identity. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliShim.ts` | MODIFY | `932dca4808d46372` | Unique GOAT ownership marker. Never accept legacy upstream marker or touch bin/t3; retain T3CODE_CLI_PATH/T3CODE_HOME. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliCommand.ts` | MODIFY | `8fd807744aba38a4` | Install/remove only goat links with GOAT marker; namespace Windows PATH ownership receipt so old upstream receipt cannot authorize removal. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/wsl/DesktopWslEnvironment.ts` | MODIFY | `a2514b97723a1c61` | WSL executable checks, digest, preflight and backend invocation all use goat; archive hash identities/WSL marker names remain. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/backend/DesktopBackendConfiguration.ts` | MODIFY | `606d52f838904d45` | WSL executable checks, digest, preflight and backend invocation all use goat; archive hash identities/WSL marker names remain. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-desktop-artifact.ts` | MODIFY | `06e62f413b92c86f` | WSL archive stem/member preflight; leave Electron/native helper ids intact. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/smoke-cli-archive.ts` | MODIFY | `98b69611bf8fdb4a` | Real archive smoke launches goat; do not execute it in this leaf. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/.github/workflows/release.yml` | MODIFY | `30292496ee748321` | Checksums/upload find renamed archives; npm filters/publication unchanged and not authorized to run. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/.github/workflows/release-desktop.yml` | MODIFY | `0460811d0ecbd2d7` | Desktop job locates renamed Linux archive. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/scripts/cli.ts` | MODIFY | `d4e247bbbd9f1340` | Build success help points at actual artifact; publishing t3 tarballs remains unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/invocation.ts` | MODIFY | `264e9622f20226f4` | Prefer proven goat global bin for new manifests; legacy t3-only manifests/native entries still classify, npm runner suggestions remain npx/pnpm/bunx t3. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/binCli.ts` | MODIFY | `42a7596b283e41a5` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/service.ts` | MODIFY | `b1cd37fca9735728` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/pair.ts` | MODIFY | `30c199726d5020a8` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/connect.ts` | MODIFY | `0a6a629626f9ed86` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/app.ts` | MODIFY | `f69f835b5535a4f1` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/triage.ts` | MODIFY | `f95bb60b42f5cacc` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/triagePrompt.ts` | MODIFY | `970eb9747c0e38e4` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/uninstall.ts` | MODIFY | `13f9cebb1c7bc572` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/browser.ts` | MODIFY | `49e7ef6f1c143338` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/trace.ts` | MODIFY | `f2699761f74a3316` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/config.ts` | MODIFY | `8ecb75f017250db7` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/bin.ts` | MODIFY | `f6ffd03fadd4be5e` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/update.ts` | MODIFY | `4c7f93c76d41b3fc` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/CloudLink.ts` | MODIFY | `08de42c516a15d14` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/relayResponse.ts` | MODIFY | `6b5e6688f7e30efc` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/selfUpdate.ts` | MODIFY | `d74f3e7810257734` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/bootService.ts` | MODIFY | `55eb86272d6c58d3` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/preview/PreviewBrowserHost.ts` | MODIFY | `47675238e2fd6703` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/HostProcess.ts` | MODIFY | `db6f13db034a5163` | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/settings/CliCommandSettingsRow.tsx` | MODIFY | `73e366b69af731d7` | User command guidance/search on web/desktop/mobile; no wire-contract or layout change. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/settings/settingsSearch.ts` | MODIFY | `eed0f5dcec290947` | User command guidance/search on web/desktop/mobile; no wire-contract or layout change. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/ServerUpdateAction.tsx` | MODIFY | `2b06bcf40a2193ec` | User command guidance/search on web/desktop/mobile; no wire-contract or layout change. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/cloud/ConnectCliAuthSurface.tsx` | MODIFY | `eeac8ce29b18d529` | User command guidance/search on web/desktop/mobile; no wire-contract or layout change. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx` | MODIFY | `b3781a09eeef57ce` | User command guidance/search on web/desktop/mobile; no wire-contract or layout change. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/cliRelease.test.ts` | MODIFY | `7cc76254aa3ade63` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.test.ts` | MODIFY | `aa151cbf8fcc4cd6` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/pinnedRuntime.test.ts` | MODIFY | `7e46cd93154fdbdc` | Existing install behavior now proves same-version upstream runtime is not reused/removed. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/serviceLauncher.test.ts` | MODIFY | `e89270ea6c88db6a` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/wsl/DesktopWslEnvironment.test.ts` | MODIFY | `11c0471513a3784a` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts` | MODIFY | `bedc049b43f3f017` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-desktop-artifact.test.ts` | MODIFY | `1ab5c2d4ee0a106a` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.test.ts` | MODIFY | `c6fa97205ad34fd5` | Real shell probe/upload proves marker-only cache is missed and repaired while same-version upstream bytes survive; retain race and second-client lifecycle cases. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/update.test.ts` | MODIFY | `d637d5fe9544f17d` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/uninstall.test.ts` | MODIFY | `39e7d28021d68005` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliShim.test.ts` | MODIFY | `d6dd829282d01593` | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliCommand.test.ts` | MODIFY | `088c15c73138b4b1` | Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-marker refusal. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/app.test.ts` | MODIFY | `ef61487407bfba6f` | Expected help/error/command output follows goat; preserve npm runner expectations. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/pair.test.ts` | MODIFY | `67fe71df1b8c69f6` | Expected help/error/command output follows goat; preserve npm runner expectations. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/service.test.ts` | MODIFY | `bfca6686f068571d` | Expected help/error/command output follows goat; preserve npm runner expectations. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/preview/PreviewBrowserHost.test.ts` | MODIFY | `64829e5de8a78752` | Expected help/error/command output follows goat; preserve npm runner expectations. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/ServerUpdateAction.test.tsx` | MODIFY | `311b31b0646e8f75` | Expected help/error/command output follows goat; preserve npm runner expectations. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/invocation.test.ts` | MODIFY | `508def24793bb87a` | Legacy npm ownership + new goat native bin ownership; version mismatch fails closed and foreign t3 survives. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.test.ts` | MODIFY | `f0d1346cae90baca` | Real POSIX installer repairs marker-only GOAT cache, executes goat shim, preserves upstream same-version cache; HTTP failure/progress semantics remain tested. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/fixtures/remote-runner-baseline.json` | MODIFY | `a3eaad24210bf8e6` | Frozen runner/launch/pairing bytes change deliberately with executable/runtime namespace. This includes node override variants because wrapper script still embeds archive fallback. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/install.md` | MODIFY | `fa0f0dbfb73d5782` | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/background-service.md` | MODIFY | `5f66d57b3ea918a5` | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/remote-access.md` | MODIFY | `1373192c71cfca9d` | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/welcome-wizard.md` | MODIFY | `010b8fa2f4a3e561` | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/updating.md` | MODIFY | `8a08e5ab696e0bcb` | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/operations/release.md` | MODIFY | `d70c4cc9cb505b7b` | Document archive/executable and dual-bin contract in existing operational guidance; package publishing identity stays unchanged. |
+| Exact absolute source path                                                                                                                 | Action | Inspected SHA-256 (first 16) | Purpose                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/vite.config.ts`                                        | MODIFY | `bbe145c419b7d727`           | SEA output name (including tsdown target suffixes).                                                                                                                                                        |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/package.json`                                          | MODIFY | `efc8e633047405bd`           | Keep npm/workspace name t3; expose both command names from source package.                                                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/cliRelease.ts`                                 | MODIFY | `9433d8a2153d0ee2`           | Shared archive filename; release repository is owned by wp2.                                                                                                                                               |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-cli-archive.ts`                                      | MODIFY | `b5caa993c5124e4c`           | Archive stem, SEA input, packaged entry, signing/help diagnostics; runtime npm manifest and native resource-monitor names stay unchanged.                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.ts`                            | MODIFY | `3c5d08709ae8bf70`           | All npm package identities/filenames stay t3 and @t3code/t3-*; both bins invoke bin/t3.js, which executes goat/goat.exe.                                                                                   |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/legacyCliLauncher.ts`                          | MODIFY | `b82b1c4f822f1a34`           | Legacy dist/bin.mjs forwards IPC/signals to renamed executable; keep npm package path.                                                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/pinnedRuntime.ts`                            | MODIFY | `8d7f4d8e16a0ec13`           | Own runtime/goat/versions namespace protects an upstream runtime at the same home/version; marker remains .install-complete.                                                                               |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/serviceLauncher.ts`                                | MODIFY | `f334eb8b4d1b0742`           | Standalone Node-only launcher must mirror pinnedRuntimePaths; retain boot-service ids/protocol.                                                                                                            |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.ts`                                        | MODIFY | `4406d465264b211c`           | Rename archive/entry in runner, upload installer and probe together; runtime namespace protects same-version upstream cache. Remote state/server home move to `~/.goat` through mandatory D7-A inside wp4. |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.sh`                                                | MODIFY | `dc77a9736006d1bb`           | Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_HOME default and npm fallback package identity.                                                                             |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.ps1`                                               | MODIFY | `85fc04da5d7a34dd`           | Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_HOME default and npm fallback package identity.                                                                             |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliShim.ts`                            | MODIFY | `932dca4808d46372`           | Unique GOAT ownership marker. Never accept legacy upstream marker or touch bin/t3; retain T3CODE_CLI_PATH/T3CODE_HOME.                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliCommand.ts`                         | MODIFY | `8fd807744aba38a4`           | Install/remove only goat links with GOAT marker; namespace Windows PATH ownership receipt so old upstream receipt cannot authorize removal.                                                                |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/wsl/DesktopWslEnvironment.ts`                     | MODIFY | `a2514b97723a1c61`           | WSL executable checks, digest, preflight and backend invocation all use goat; archive hash identities/WSL marker names remain.                                                                             |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/backend/DesktopBackendConfiguration.ts`           | MODIFY | `606d52f838904d45`           | WSL executable checks, digest, preflight and backend invocation all use goat; archive hash identities/WSL marker names remain.                                                                             |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-desktop-artifact.ts`                                 | MODIFY | `06e62f413b92c86f`           | WSL archive stem/member preflight; leave Electron/native helper ids intact.                                                                                                                                |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/smoke-cli-archive.ts`                                      | MODIFY | `98b69611bf8fdb4a`           | Real archive smoke launches goat; do not execute it in this leaf.                                                                                                                                          |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/.github/workflows/release.yml`                                     | MODIFY | `30292496ee748321`           | Checksums/upload find renamed archives; npm filters/publication unchanged and not authorized to run.                                                                                                       |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/.github/workflows/release-desktop.yml`                             | MODIFY | `0460811d0ecbd2d7`           | Desktop job locates renamed Linux archive.                                                                                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/scripts/cli.ts`                                        | MODIFY | `d4e247bbbd9f1340`           | Build success help points at actual artifact; publishing t3 tarballs remains unchanged.                                                                                                                    |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/invocation.ts`                                 | MODIFY | `264e9622f20226f4`           | Prefer proven goat global bin for new manifests; legacy t3-only manifests/native entries still classify, npm runner suggestions remain npx/pnpm/bunx t3.                                                   |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/binCli.ts`                                         | MODIFY | `42a7596b283e41a5`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/service.ts`                                    | MODIFY | `b1cd37fca9735728`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/pair.ts`                                       | MODIFY | `30c199726d5020a8`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/connect.ts`                                    | MODIFY | `0a6a629626f9ed86`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/app.ts`                                        | MODIFY | `f69f835b5535a4f1`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/triage.ts`                                     | MODIFY | `f95bb60b42f5cacc`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/triagePrompt.ts`                               | MODIFY | `970eb9747c0e38e4`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/uninstall.ts`                                  | MODIFY | `13f9cebb1c7bc572`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/browser.ts`                                    | MODIFY | `49e7ef6f1c143338`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/trace.ts`                                      | MODIFY | `f2699761f74a3316`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/config.ts`                                     | MODIFY | `8ecb75f017250db7`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/bin.ts`                                            | MODIFY | `f6ffd03fadd4be5e`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/update.ts`                                     | MODIFY | `4c7f93c76d41b3fc`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/CloudLink.ts`                                | MODIFY | `08de42c516a15d14`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/relayResponse.ts`                            | MODIFY | `6b5e6688f7e30efc`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/selfUpdate.ts`                               | MODIFY | `d74f3e7810257734`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/bootService.ts`                              | MODIFY | `55eb86272d6c58d3`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/preview/PreviewBrowserHost.ts`                     | MODIFY | `47675238e2fd6703`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/HostProcess.ts`                                | MODIFY | `db6f13db034a5163`           | CLI/help/error strings use goat; package runner/npm invocations and persisted identifiers stay unchanged.                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/settings/CliCommandSettingsRow.tsx`        | MODIFY | `73e366b69af731d7`           | User command guidance/search on web/desktop/mobile; no wire-contract or layout change.                                                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/settings/settingsSearch.ts`                | MODIFY | `eed0f5dcec290947`           | User command guidance/search on web/desktop/mobile; no wire-contract or layout change.                                                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/ServerUpdateAction.tsx`                    | MODIFY | `2b06bcf40a2193ec`           | User command guidance/search on web/desktop/mobile; no wire-contract or layout change.                                                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/cloud/ConnectCliAuthSurface.tsx`           | MODIFY | `eeac8ce29b18d529`           | User command guidance/search on web/desktop/mobile; no wire-contract or layout change.                                                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx` | MODIFY | `b3781a09eeef57ce`           | User command guidance/search on web/desktop/mobile; no wire-contract or layout change.                                                                                                                     |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/cliRelease.test.ts`                            | MODIFY | `7cc76254aa3ade63`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.test.ts`                       | MODIFY | `aa151cbf8fcc4cd6`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/pinnedRuntime.test.ts`                       | MODIFY | `7e46cd93154fdbdc`           | Existing install behavior now proves same-version upstream runtime is not reused/removed.                                                                                                                  |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/serviceLauncher.test.ts`                           | MODIFY | `e89270ea6c88db6a`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/wsl/DesktopWslEnvironment.test.ts`                | MODIFY | `11c0471513a3784a`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/backend/DesktopBackendConfiguration.test.ts`      | MODIFY | `bedc049b43f3f017`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-desktop-artifact.test.ts`                            | MODIFY | `1ab5c2d4ee0a106a`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.test.ts`                                   | MODIFY | `c6fa97205ad34fd5`           | Real shell probe/upload proves marker-only cache is missed and repaired while same-version upstream bytes survive; retain race and second-client lifecycle cases.                                          |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/update.test.ts`                                | MODIFY | `d637d5fe9544f17d`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/uninstall.test.ts`                             | MODIFY | `39e7d28021d68005`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliShim.test.ts`                       | MODIFY | `d6dd829282d01593`           | Update real archive/install/spawn/ownership fixtures and existing observable outcomes; retain npm package paths and frozen compatibility ids.                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/desktop/src/app/DesktopCliCommand.test.ts`                    | MODIFY | `088c15c73138b4b1`           | Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-marker refusal.                                                                                                              |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/app.test.ts`                                   | MODIFY | `ef61487407bfba6f`           | Expected help/error/command output follows goat; preserve npm runner expectations.                                                                                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/pair.test.ts`                                  | MODIFY | `67fe71df1b8c69f6`           | Expected help/error/command output follows goat; preserve npm runner expectations.                                                                                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/service.test.ts`                               | MODIFY | `bfca6686f068571d`           | Expected help/error/command output follows goat; preserve npm runner expectations.                                                                                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/preview/PreviewBrowserHost.test.ts`                | MODIFY | `64829e5de8a78752`           | Expected help/error/command output follows goat; preserve npm runner expectations.                                                                                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/ServerUpdateAction.test.tsx`               | MODIFY | `311b31b0646e8f75`           | Expected help/error/command output follows goat; preserve npm runner expectations.                                                                                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/invocation.test.ts`                            | MODIFY | `508def24793bb87a`           | Legacy npm ownership + new goat native bin ownership; version mismatch fails closed and foreign t3 survives.                                                                                               |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.test.ts`                                           | MODIFY | `f0d1346cae90baca`           | Real POSIX installer repairs marker-only GOAT cache, executes goat shim, preserves upstream same-version cache; HTTP failure/progress semantics remain tested.                                             |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/fixtures/remote-runner-baseline.json`             | MODIFY | `a3eaad24210bf8e6`           | Frozen runner/launch/pairing bytes change deliberately with executable/runtime namespace. This includes node override variants because wrapper script still embeds archive fallback.                       |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/install.md`                                              | MODIFY | `fa0f0dbfb73d5782`           | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/background-service.md`                                   | MODIFY | `5f66d57b3ea918a5`           | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/remote-access.md`                                        | MODIFY | `1373192c71cfca9d`           | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/welcome-wizard.md`                                       | MODIFY | `010b8fa2f4a3e561`           | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/updating.md`                                             | MODIFY | `8a08e5ab696e0bcb`           | Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.                                                                                                 |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/operations/release.md`                                        | MODIFY | `d70c4cc9cb505b7b`           | Document archive/executable and dual-bin contract in existing operational guidance; package publishing identity stays unchanged.                                                                           |
 
 | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/runtimeArchive.test.ts` | MODIFY | `7692eea1d9326fd2` | Follow renamed archive/runtime/help through existing behavioral consumer or fixture; no package/protocol identity change. |
 | `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/selfUpdate.test.ts` | MODIFY | `a71ec60dd51fd2bb` | Follow renamed archive/runtime/help through existing behavioral consumer or fixture; no package/protocol identity change. |
@@ -186,12 +186,12 @@ Shared archive filename; release repository is owned by wp2.
 +++ b/packages/shared/src/cliRelease.ts
 @@ -51,7 +51,7 @@
  }
- 
+
  export function cliArchiveFileName(version: string, platformKey: CliArchivePlatformKey): string {
 -  return `t3-${version}-${platformKey}.${platformKey.startsWith("win32") ? "zip" : "tar.gz"}`;
 +  return `goat-${version}-${platformKey}.${platformKey.startsWith("win32") ? "zip" : "tar.gz"}`;
  }
- 
+
  const CLI_RELEASE_DEFAULT_BASE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases/download`;
 ```
 
@@ -222,12 +222,12 @@ Archive stem, SEA input, packaged entry, signing/help diagnostics; runtime npm m
   *   node_modules/        runtime externals (node-pty, msgpackr-extract, fff)
 @@ -98,7 +98,7 @@
  }
- 
+
  export function cliArchiveStem(version: string, platform: BuildPlatform, arch: BuildArch): string {
 -  return `t3-${version}-${cliArchivePlatformKey(platform, arch)}`;
 +  return `goat-${version}-${cliArchivePlatformKey(platform, arch)}`;
  }
- 
+
  export function cliArchiveFileName(version: string, platform: BuildPlatform, arch: BuildArch) {
 @@ -366,7 +366,7 @@
      ]),
@@ -236,12 +236,12 @@ Archive stem, SEA input, packaged entry, signing/help diagnostics; runtime npm m
 -  yield* Effect.log("[cli-archive] Notarized t3.");
 +  yield* Effect.log("[cli-archive] Notarized goat.");
  });
- 
+
  const WindowsSigningConfig = Config.all({
 @@ -421,7 +421,7 @@
    );
  });
- 
+
 -/** Signs t3.exe through the same Azure Trusted Signing setup the installer uses. */
 +/** Signs goat.exe through the same Azure Trusted Signing setup the installer uses. */
  const signWindowsExecutable = Effect.fn("signWindowsExecutable")(function* (
@@ -258,7 +258,7 @@ Archive stem, SEA input, packaged entry, signing/help diagnostics; runtime npm m
 +  );
 +  yield* Effect.log("[cli-archive] Signed goat.exe (Azure Trusted Signing).");
  });
- 
+
  const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
 @@ -467,14 +467,14 @@
    const path = yield* Path.Path;
@@ -285,7 +285,7 @@ Archive stem, SEA input, packaged entry, signing/help diagnostics; runtime npm m
    (input) => buildCliArchive(input).pipe(Effect.scoped),
 -).pipe(Command.withDescription("Package the t3 single-executable into a per-platform archive."));
 +).pipe(Command.withDescription("Package the goat single-executable into a per-platform archive."));
- 
+
  if (import.meta.main) {
    Command.run(command, { version: "0.0.0" }).pipe(
 ```
@@ -346,7 +346,7 @@ All npm package identities/filenames stay t3 and @t3code/t3-*; both bins invoke 
 @@ -217,10 +217,10 @@
    process.exit(1);
  }
- 
+
 -const executable = join(packageDir, process.platform === "win32" ? "t3.exe" : "t3");
 +const executable = join(packageDir, process.platform === "win32" ? "goat.exe" : "goat");
  const result = spawnSync(executable, process.argv.slice(2), { stdio: "inherit" });
@@ -421,7 +421,7 @@ Own runtime/goat/versions namespace protects an upstream runtime at the same hom
 +++ b/apps/server/src/cloud/pinnedRuntime.ts
 @@ -21,8 +21,8 @@
  import * as ProcessRunner from "../processRunner.ts";
- 
+
  /**
 - * A pinned runtime is an exact t3 release archive unpacked into
 - * <baseDir>/runtime/versions/<version>: the self-contained executable, the
@@ -432,12 +432,12 @@ Own runtime/goat/versions namespace protects an upstream runtime at the same hom
   * target version here before switching over. The runtime never depends on a
 @@ -53,7 +53,7 @@
  }
- 
+
  export function pinnedRuntimeVersionsDir(path: Path.Path, baseDir: string): string {
 -  return path.join(baseDir, PINNED_RUNTIME_DIR, "versions");
 +  return path.join(baseDir, PINNED_RUNTIME_DIR, "goat", "versions");
  }
- 
+
  export function pinnedRuntimePaths(
 @@ -65,7 +65,7 @@
    const versionDir = path.join(pinnedRuntimeVersionsDir(path, baseDir), version);
@@ -450,7 +450,7 @@ Own runtime/goat/versions namespace protects an upstream runtime at the same hom
  }
 @@ -104,7 +104,7 @@
    | { readonly stage: "verify" | "extract" | "validate" | "cached" };
- 
+
  /**
 - * Installs the t3 release archive for `version` into the pinned runtime
 + * Installs the GOAT release archive for `version` into the pinned runtime
@@ -502,7 +502,7 @@ Own runtime/goat/versions namespace protects an upstream runtime at the same hom
 +      step: "verifying the GOAT release archive checksum",
      });
    }
- 
+
 @@ -235,13 +235,13 @@
      .writeFile(archivePath, archive)
      .pipe(
@@ -644,7 +644,7 @@ Rename archive/entry in runner, upload installer and probe together; runtime nam
 -exec "$T3_RUNTIME_DIR/t3" "$@"
 +exec "$T3_RUNTIME_DIR/goat" "$@"
  `;
- 
+
  const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@ -893,7 +893,7 @@
    { archiveVersion: Schema.String },
@@ -654,7 +654,7 @@ Rename archive/entry in runner, upload installer and probe together; runtime nam
 +    return `'${this.archiveVersion}' is not an exact GOAT version and cannot name a runtime directory.`;
    }
  }
- 
+
 @@ -908,7 +908,7 @@
    {},
  ) {
@@ -663,7 +663,7 @@ Rename archive/entry in runner, upload installer and probe together; runtime nam
 +    return "A remote goat runner needs an archive version or a node script path.";
    }
  }
- 
+
 @@ -1046,8 +1046,8 @@
    const installer = buildRemoteT3UploadInstallerScript(input, sha256);
    return `set -eu
@@ -720,7 +720,7 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 +# same layout `goat service install` uses, so the service reuses this download
  # instead of fetching the release again.
  set -eu
- 
+
 @@ -162,7 +162,7 @@
  case "$version" in
    *-preview.*)
@@ -733,14 +733,14 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 @@ -172,12 +172,15 @@
      ;;
  esac
- 
+
 -stem="t3-${version}-${platform}-${arch}"
 +stem="goat-${version}-${platform}-${arch}"
  archive="${stem}.tar.gz"
 -versions_dir="${t3_home}/runtime/versions"
 +versions_dir="${t3_home}/runtime/goat/versions"
  target_dir="${versions_dir}/${version}"
- 
+
 -if [ -f "${target_dir}/.install-complete" ] && [ "$(cat "${target_dir}/.install-complete")" = "$version" ]; then
 +if [ -x "${target_dir}/goat" ] &&
 +   [ -f "${target_dir}/.install-complete" ] &&
@@ -751,7 +751,7 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
    mkdir -p "$versions_dir"
 @@ -188,12 +191,12 @@
    trap 'printf "\n" >&2; exit 143' TERM
- 
+
    if "$interactive"; then printf '\r\033[2K' >&2; fi
 -  printf '  %sInstalling%s T3 Code %s%s%s\n\n' "$muted" "$reset" "$bold" "$version" "$reset" >&2
 +  printf '  %sInstalling%s GOAT %s%s%s\n\n' "$muted" "$reset" "$bold" "$version" "$reset" >&2
@@ -767,7 +767,7 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 @@ -205,10 +208,10 @@
    actual="$(checksum "${staging}/${archive}")"
    [ "$actual" = "$expected" ] || fail "checksum mismatch for ${archive}"
- 
+
 -  step "Extracting T3 Code..."
 +  step "Extracting GOAT..."
    tar -xzf "${staging}/${archive}" -C "$staging" --strip-components=1
@@ -775,12 +775,12 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 -  "${staging}/t3" --version >/dev/null || fail "the downloaded executable does not run"
 +  "${staging}/goat" --version >/dev/null || fail "the downloaded executable does not run"
    printf '%s\n' "$version" > "${staging}/.install-complete"
- 
+
    rm -rf "$target_dir"
 @@ -216,12 +219,12 @@
    trap - EXIT
  fi
- 
+
 -step "Setting up the t3 command..."
 +step "Setting up the goat command..."
  mkdir -p "$bin_dir"
@@ -828,16 +828,16 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 +# same layout `goat service install` uses, so the service reuses this download.
  $ErrorActionPreference = "Stop"
  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
- 
+
 @@ -22,7 +22,7 @@
  $binDir = if ($env:T3CODE_INSTALL_BIN_DIR) { $env:T3CODE_INSTALL_BIN_DIR } else { Join-Path $HOME ".local\bin" }
- 
+
  function Fail([string] $message) {
 -  Write-Error "t3 install: $message"
 +  Write-Error "goat install: $message"
    exit 1
  }
- 
+
 @@ -139,25 +139,33 @@
      "preview" { '^v\d+\.\d+\.\d+-preview\.\d+\.\d+$' }
      default { Fail "T3CODE_CHANNEL must be stable, nightly, or preview" }
@@ -855,7 +855,7 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
      Fail "refusing a preview build that was not explicitly requested"
    }
  }
- 
+
 -$stem = "t3-$version-win32-$arch"
 +$stem = "goat-$version-win32-$arch"
  $archive = "$stem.zip"
@@ -863,7 +863,7 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 +$versionsDir = Join-Path $t3Home "runtime\goat\versions"
  $targetDir = Join-Path $versionsDir $version
  $marker = Join-Path $targetDir ".install-complete"
- 
+
 -if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
 +$entry = Join-Path $targetDir "goat.exe"
 +$cached = (Test-Path $marker -PathType Leaf) -and (Test-Path $entry -PathType Leaf) -and ((Get-Content $marker -Raw).Trim() -eq $version)
@@ -897,7 +897,7 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 @@ -186,7 +194,7 @@
      $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $staging $archive)).Hash.ToLowerInvariant()
      if ($actual -ne $expected) { Fail "checksum mismatch for $archive" }
- 
+
 -    Step "Extracting T3 Code..."
 +    Step "Extracting GOAT..."
      # The archive module reads the global preference, not the caller's local scope.
@@ -906,16 +906,16 @@ Own goat shim and runtime namespace; marker alone is insufficient. Keep T3CODE_H
 @@ -197,7 +205,7 @@
      Get-ChildItem (Join-Path $staging $stem) | Move-Item -Destination $staging
      Remove-Item (Join-Path $staging $stem), (Join-Path $staging $archive), (Join-Path $staging "SHA256SUMS") -Recurse -Force
- 
+
 -    & (Join-Path $staging "t3.exe") --version | Out-Null
 +    & (Join-Path $staging "goat.exe") --version | Out-Null
      if ($LASTEXITCODE -ne 0) { Fail "the downloaded executable does not run" }
      Set-Content -Path (Join-Path $staging ".install-complete") -Value $version -NoNewline
- 
+
 @@ -209,16 +217,16 @@
    }
  }
- 
+
 -Step "Setting up the t3 command..."
 +Step "Setting up the goat command..."
  New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -948,7 +948,7 @@ Unique GOAT ownership marker. Never accept legacy upstream marker or touch bin/t
 @@ -6,15 +6,15 @@
  import * as DesktopEnvironment from "./DesktopEnvironment.ts";
  import { makeComponentLogger } from "./DesktopObservability.ts";
- 
+
 -// A desktop install puts no `t3` on PATH, so commands the server asks a person
 -// to run (`sudo t3 browser setup`) had nothing to call. The app keeps a small
 +// A desktop install puts no `goat` on PATH, so commands the server asks a person
@@ -959,16 +959,16 @@ Unique GOAT ownership marker. Never accept legacy upstream marker or touch bin/t
  // commands through T3CODE_CLI_PATH. An AppImage mounts somewhere new each run,
  // so its launcher mounts the AppImage itself instead of pointing into it.
  const { logInfo, logWarning } = makeComponentLogger("desktop-cli-shim");
- 
+
 -export const MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
 +export const MARKER = "Written by GOAT: runs the desktop app's bundled goat CLI.";
- 
+
  /** Server entry inside the app, relative to its server root (an asar archive when packaged). */
  const SERVER_ENTRY = "apps/server/dist/bin.mjs";
 @@ -125,12 +125,12 @@
    ].join("\n");
  };
- 
+
 -/** Where the packaged app keeps its launcher: `<T3 home>/bin/t3`, `t3.cmd` on Windows. */
 +/** Where the packaged app keeps its launcher: `<T3 home>/bin/goat`, `goat.cmd` on Windows. */
  export const launcherPath = (environment: DesktopEnvironment.DesktopEnvironment["Service"]) =>
@@ -978,7 +978,7 @@ Unique GOAT ownership marker. Never accept legacy upstream marker or touch bin/t
 -    environment.platform === "win32" ? "t3.cmd" : "t3",
 +    environment.platform === "win32" ? "goat.cmd" : "goat",
    );
- 
+
  /**
 @@ -162,23 +162,23 @@
    return yield* Effect.gen(function* () {
@@ -1022,7 +1022,7 @@ Install/remove only goat links with GOAT marker; namespace Windows PATH ownershi
 @@ -12,7 +12,7 @@
  import * as DesktopCliShim from "./DesktopCliShim.ts";
  import * as DesktopEnvironment from "./DesktopEnvironment.ts";
- 
+
 -// Settings → Install `t3` command, like VS Code's "Install 'code' command".
 +// Settings → Install `goat` command, like VS Code's "Install 'code' command".
  // The app's launcher (see DesktopCliShim) lives in the T3 home and is off PATH
@@ -1034,7 +1034,7 @@ Install/remove only goat links with GOAT marker; namespace Windows PATH ownershi
    /** Records that Install added `binDirectory` to the Windows PATH, so Remove takes out only that. */
 -  const ownedPathMarker = path.join(environment.stateDir, "cli-command-path-entry");
 +  const ownedPathMarker = path.join(environment.stateDir, "goat-cli-command-path-entry");
- 
+
    const fail = (message: string) => new DesktopCliCommandError({ message });
    const exists = (target: string) => fs.exists(target).pipe(Effect.orElseSucceed(() => false));
 @@ -101,7 +101,7 @@
@@ -1049,7 +1049,7 @@ Install/remove only goat links with GOAT marker; namespace Windows PATH ownershi
 @@ -137,16 +137,16 @@
        Effect.mapError(() => fail("Could not update your PATH.")),
      );
- 
+
 -  /** The `t3` a new shell runs, by PATH order, or none. */
 +  /** The `goat` a new shell runs, by PATH order, or none. */
    const firstOnPath = Effect.gen(function* () {
@@ -1060,7 +1060,7 @@ Install/remove only goat links with GOAT marker; namespace Windows PATH ownershi
      }
      return Option.none<string>();
    });
- 
+
 -  /** The `t3` a new shell runs when it is not this app's, on Unix. */
 +  /** The `goat` a new shell runs when it is not this app's, on Unix. */
    const foreignFirstOnPath = Effect.gen(function* () {
@@ -1094,7 +1094,7 @@ Install/remove only goat links with GOAT marker; namespace Windows PATH ownershi
        }),
      ),
    );
- 
+
    const install: DesktopCliCommand["Service"]["install"] = Effect.gen(function* () {
 -    if (!environment.isPackaged) return yield* fail("The t3 command needs an installed app.");
 +    if (!environment.isPackaged) return yield* fail("The goat command needs an installed app.");
@@ -1141,7 +1141,7 @@ Install/remove only goat links with GOAT marker; namespace Windows PATH ownershi
 +      `Another goat command is already installed, or no folder on your PATH is writable. Run the launcher directly at ${launcher}.`,
      );
    }).pipe(Effect.withSpan("desktop.cliCommand.install"));
- 
+
 @@ -266,7 +266,7 @@
        return yield* state;
      }
@@ -1170,9 +1170,9 @@ WSL executable checks, digest, preflight and backend invocation all use goat; ar
      // CLIs. Node is optional; the mounted tree still requires ensureNodePty.
      readonly probeRuntime: (
 @@ -276,7 +276,7 @@
- 
+
  const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
- 
+
 -// Holds the sha256 of the runtime's `t3` executable, written when the install
 +// Holds the sha256 of the runtime's `goat` executable, written when the install
  // promotes a verified tree. Presence alone only says an install once finished
@@ -1230,7 +1230,7 @@ WSL executable checks, digest, preflight and backend invocation all use goat; ar
 -    `${shellQuote(`${linuxAppRoot}/t3`)} --version >/dev/null 2>&1`,
 +    `${shellQuote(`${linuxAppRoot}/goat`)} --version >/dev/null 2>&1`,
    ].join("\n");
- 
+
  const TOOLCHAIN_CHECK_SCRIPT = [
 @@ -694,7 +694,7 @@
        const trimmedTail = probe.stderr.trim().slice(-500);
@@ -1252,7 +1252,7 @@ WSL executable checks, digest, preflight and backend invocation all use goat; ar
 +++ b/apps/desktop/src/backend/DesktopBackendConfiguration.ts
 @@ -271,7 +271,7 @@
  }
- 
+
  // What the launch runs inside the distro. The staged runtime is the release's
 -// self-contained `t3` executable (Node inside); the mounted server tree is a
 +// self-contained `goat` executable (Node inside); the mounted server tree is a
@@ -1280,7 +1280,7 @@ WSL archive stem/member preflight; leave Electron/native helper ids intact.
 @@ -1088,7 +1088,7 @@
    to: WSL_RUNTIME_ARCHIVE_HASH_NAME,
  } as const;
- 
+
 -// The WSL runtime is the Linux CLI release archive (t3-<version>-linux-<arch>
 +// The WSL runtime is the Linux CLI release archive (goat-<version>-linux-<arch>
  // .tar.gz, built by scripts/build-cli-archive.ts) copied in verbatim, so WSL
@@ -1301,7 +1301,7 @@ WSL archive stem/member preflight; leave Electron/native helper ids intact.
  export const wslRuntimeArchiveStem = (version: string, arch: typeof BuildArch.Type): string =>
 -  `t3-${version}-linux-${arch}`;
 +  `goat-${version}-linux-${arch}`;
- 
+
  export const parseWslRuntimeArchiveMembers = (listing: string): ReadonlyArray<string> =>
    listing
 @@ -3300,7 +3300,7 @@
@@ -1480,7 +1480,7 @@ Prefer proven goat global bin for new manifests; legacy t3-only manifests/native
      )
 @@ -116,9 +118,9 @@
  }
- 
+
  /**
 - * Render a `t3 <subcommand>` suggestion that matches how this process was
 + * Render a `goat <subcommand>` suggestion that matches how this process was
@@ -1501,7 +1501,7 @@ Prefer proven goat global bin for new manifests; legacy t3-only manifests/native
  }
 @@ -148,10 +150,10 @@
    /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
- 
+
  /**
 - * The launcher a person can type to run this install when `t3` is not on
 - * PATH: the desktop app's `t3` shim, which the app and the shim itself name in
@@ -1515,7 +1515,7 @@ Prefer proven goat global bin for new manifests; legacy t3-only manifests/native
    const fs = yield* FileSystem.FileSystem;
 @@ -165,15 +167,15 @@
  });
- 
+
  /**
 - * `t3 <subcommand>` for a person to run on this host: `t3` when it is on PATH,
 + * `goat <subcommand>` for a person to run on this host: `goat` when it is on PATH,
@@ -1534,7 +1534,7 @@ Prefer proven goat global bin for new manifests; legacy t3-only manifests/native
        ? { command: `${shellWord(launcher.value)} ${subcommand}`, launcher: true }
 @@ -181,9 +183,9 @@
    });
- 
+
  /**
 - * `t3 <subcommand>` as root, for setup a person runs once on the host. `sudo`
 + * `goat <subcommand>` as root, for setup a person runs once on the host. `sudo`
@@ -1564,7 +1564,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
      ),
 @@ -55,14 +55,14 @@
  );
- 
+
  export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
 -  Command.make("t3", { ...sharedServerCommandFlags }).pipe(
 -    Command.withDescription("Run the T3 Code server."),
@@ -1622,7 +1622,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    ...(status.current ? [] : ["  Next: Run `goat service install` to repair it."]),
    ].join("\n");
  }
- 
+
 @@ -127,37 +127,37 @@
          const result = yield* reconcileService({ allowDowngrade: flags.allowDowngrade });
          if (!result.changed) {
@@ -1676,7 +1676,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
        }),
      ),
 @@ -166,7 +166,7 @@
- 
+
  const serviceRestartCommand = Command.make("restart", projectLocationFlags).pipe(
    Command.withDescription(
 -    "Restart the background service. Picks up a version installed by `t3 update` that was not restarted at the time.",
@@ -1724,7 +1724,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    | { readonly _tag: "unreachable" }
 -  | { readonly _tag: "not-a-t3-server" };
 +  | { readonly _tag: "not-a-goat-server" };
- 
+
  const probeEnvironmentDescriptor = (
    baseUrl: string,
 @@ -215,7 +215,7 @@
@@ -1762,7 +1762,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    if (existing._tag === "not-a-goat-server") {
        return yield* new ServePortOccupiedError({ servePort: input.servePort });
      }
- 
+
 @@ -437,7 +437,7 @@
      return yield* environmentAuth.createPairingLink({
        scopes: input.scopes,
@@ -1821,7 +1821,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
      } else if (input.relayResult.value.status === "revoked") {
        yield* Console.log("Revoked the relay-side environment record.");
 @@ -403,7 +403,7 @@
- 
+
    if (options.clearAuthorization) {
      yield* Console.log(
 -      "Signed out of T3 Connect locally.\nThe background service is managed separately with `t3 service`.",
@@ -1860,7 +1860,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    return "`goat app` only controls a desktop app on the same machine. It cannot run over SSH.";
    }
  }
- 
+
 @@ -41,7 +41,7 @@
    { platform: Schema.String },
  ) {
@@ -1869,7 +1869,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    return `\`goat app\` is not supported on ${this.platform}.`;
    }
  }
- 
+
 @@ -55,7 +55,7 @@
    },
  ) {
@@ -1878,7 +1878,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    return "Could not reach the T3 Code desktop app. Start or update the desktop app on this machine, then run `goat app` again. A running T3 Code server is not enough.";
    }
  }
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/triage.ts`
@@ -1896,7 +1896,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
   * The command is deliberately thin: it writes a `context.md` with machine facts
   * (version, paths, server liveness), then launches claude or codex
 @@ -168,7 +168,7 @@
- 
+
        // Triage is a user-facing feature: always the userdata state, never dev.
        // --base-dir wins; T3CODE_HOME is its documented env equivalent (same
 -      // precedence as `t3 pair`).
@@ -1921,30 +1921,30 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
   *
   * `TRIAGE_PLAYBOOK` must stay byte-identical to `.github/triage/PLAYBOOK.md`
 @@ -65,7 +65,7 @@
- 
+
  - How is T3 Code running on this machine: \`npx t3 serve\` in a terminal, the
    background service, or the desktop app?
 -- Which surface is the user connecting from: the website (app.t3.codes), the
 +- Which surface is the user connecting from: the website (app.goat.codes), the
    desktop app against a local server, the desktop app against a remote server,
    or the mobile app?
- 
+
 @@ -151,7 +151,7 @@
- 
+
  /** The full seed prompt, written to `prompt.md` in the triage scratch dir. */
  export const buildTriageSeedPrompt = (contextFilePath: string) => `A T3 Code user is \
 -having a problem with their install and started this session with \`t3 triage\`.
 +having a problem with their install and started this session with \`goat triage\`.
- 
+
  Machine facts (version, OS, paths, server liveness) are in the triage context file:
- 
+
 @@ -191,7 +191,7 @@
  /** The `context.md` written into the triage scratch directory. */
  export const buildTriageContext = (input: TriageContextInput) => `# T3 Code triage context
- 
+
 -Generated by \`t3 triage\` at ${input.generatedAt}.
 +Generated by \`goat triage\` at ${input.generatedAt}.
- 
+
  - Installed version: ${input.version}
  - Release tag for this version: ${input.releaseTag}
 ```
@@ -1958,7 +1958,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +++ b/apps/server/src/cli/uninstall.ts
 @@ -29,15 +29,15 @@
  }
- 
+
  /**
 - * What `t3 uninstall` would remove for one T3 home. Computed before anything
 + * What `goat uninstall` would remove for one T3 home. Computed before anything
@@ -1976,7 +1976,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    /** `<home>/userdata`, which is never removed; shown so the user knows where it is. */
    readonly userdataDir: string;
 @@ -45,7 +45,7 @@
- 
+
  /**
   * Finds the launcher this install left on PATH. Only a launcher that points
 - * into this home's `runtime/versions` is claimed: a plain copy of the
@@ -1995,7 +1995,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
      Effect.gen(function* () {
 @@ -130,10 +130,10 @@
    const plan = yield* planUninstall({ baseDir: input.baseDir });
- 
+
    if (!plan.service && plan.launcher === undefined && plan.runtimeDir === undefined) {
 -    yield* Console.log(`Nothing to remove: t3 is not installed for ${input.baseDir}.`);
 +    yield* Console.log(`Nothing to remove: goat is not installed for ${input.baseDir}.`);
@@ -2075,7 +2075,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 @@ -84,7 +84,7 @@
    Flag.optional,
  );
- 
+
 -// Trace file location, shared by the server and `t3 trace summary`.
 +// Trace file location, shared by the server and `goat trace summary`.
  export const traceFileConfig = Config.String("T3CODE_TRACE_FILE").pipe(
@@ -2133,7 +2133,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 @@ -88,7 +88,7 @@
    return yield* new CliUpdateError({ reason: `No published ${channel} release was found.` });
  });
- 
+
 -/** Whether a launcher target lives inside `<baseDir>/runtime/versions`. */
 +/** Whether a launcher target lives inside `<baseDir>/runtime/goat/versions`. */
  export function launcherOwnsVersionsDir(
@@ -2141,7 +2141,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    versionsDir: string,
 @@ -99,16 +99,16 @@
  }
- 
+
  /**
 - * The launcher the install scripts leave behind: a symlink at `<bin>/t3` on
 - * POSIX, a `t3.cmd` shim on Windows. `t3 update` repoints it so the next `t3`
@@ -2161,7 +2161,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    readonly targetEntryPath: string;
  }) {
 @@ -121,9 +121,9 @@
- 
+
    if (platform === "win32") {
      // The shim runs the executable by absolute path, so the executable sees
 -    // itself as argv0; the shim is the `t3.cmd` next to it only when launched
@@ -2191,7 +2191,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    );
    return Option.some(input.launchedAs);
 @@ -156,8 +156,8 @@
- 
+
  /**
   * The path the executable was started through. Node keeps the shell's
 - * spelling in argv0: a launcher symlink or `./t3` resolves against the
@@ -2202,7 +2202,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
   */
  export const resolveLauncherPath = Effect.gen(function* () {
 @@ -183,7 +183,7 @@
- 
+
  /**
   * On Windows a `.cmd` shim is what PATH resolves, but the executable it runs
 - * only ever sees its own path. Walk PATH for a `t3.cmd` whose target is the
@@ -2239,7 +2239,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
      Effect.gen(function* () {
 @@ -268,7 +268,7 @@
  );
- 
+
  /**
 - * A `t3 serve` or `t3` someone started by hand, as opposed to the one the
 + * A `goat serve` or `goat` someone started by hand, as opposed to the one the
@@ -2285,7 +2285,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +      reason: `goat@${targetVersion} is older than the installed ${newestInstalled}. Pass --allow-downgrade to install it anyway.`,
      });
    }
- 
+
 @@ -469,7 +469,7 @@
        ).pipe(Effect.catchTags({ QuitError: () => Effect.succeed(false) }));
      } else {
@@ -2346,7 +2346,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
        ),
      );
 @@ -567,7 +567,7 @@
- 
+
    progress.success(`Installed T3 Code ${targetVersion}`);
    if (Option.isSome(repointed)) {
 -    yield* Console.log("  Run t3 to get started.\n");
@@ -2375,7 +2375,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 @@ -192,13 +192,13 @@
    }
  }
- 
+
 -/** Linking from the CLI needs the authorization `t3 connect link` stores. */
 +/** Linking from the CLI needs the authorization `goat connect link` stores. */
  export class CloudLinkAuthorizationMissingError extends Schema.TaggedError<CloudLinkAuthorizationMissingError>()(
@@ -2387,14 +2387,14 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    return "Run `goat connect link` to authorize this environment.";
    }
  }
- 
+
 @@ -563,7 +563,7 @@
        | HttpClientError.HttpClientError
      >;
    }
 ->()("t3/cloud/CloudLink") {}
 +>()("goat/cloud/CloudLink") {}
- 
+
  const make = Effect.gen(function* () {
    const secrets = yield* ServerSecretStore.ServerSecretStore;
 @@ -644,7 +644,7 @@
@@ -2484,7 +2484,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    }
 ->()("t3/cloud/selfUpdate/ServerSelfUpdate") {}
 +>()("goat/cloud/selfUpdate/ServerSelfUpdate") {}
- 
+
  export const withRunningThreadContinuation = Effect.fn(
    "cloud.server_self_update.withRunningThreadContinuation",
 @@ -209,13 +209,13 @@
@@ -2495,7 +2495,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +        "Remote updates require the T3 Code background service. Run `goat service install` on the server machine.",
        );
      }
- 
+
      const targetVersion = input.targetVersion.trim();
      if (!isExactServiceVersion(targetVersion)) {
 -      return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
@@ -2511,7 +2511,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +            : failWith(`Could not prepare goat@${targetVersion}.`, error),
          ),
        );
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/bootService.ts`
@@ -2528,7 +2528,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 -/** File in the logs dir that receives the service's stdout and stderr. `t3 triage` points agents at it. */
 +/** File in the logs dir that receives the service's stdout and stderr. `goat triage` points agents at it. */
  export const BOOT_SERVICE_LOG_FILE = "boot-service.log";
- 
+
  /** systemd expands `%` specifiers, including in unquoted append-log paths. */
 @@ -465,11 +465,11 @@
      case "linger-disabled":
@@ -2544,7 +2544,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +      return "A newer version is installed but the service is still running the previous one. Run `goat service restart` to switch.";
    }
  }
- 
+
 @@ -499,7 +499,7 @@
    },
  ) {
@@ -2553,7 +2553,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +    return `Refusing to replace goat@${this.installedVersion} with older goat@${this.targetVersion}. Run the command again with --allow-downgrade to continue.`;
    }
  }
- 
+
 @@ -519,7 +519,7 @@
    /**
     * The T3 home the installed unit serves. The unit name is fixed per user,
@@ -2580,7 +2580,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
    }
 ->()("t3/cloud/bootService") {}
 +>()("goat/cloud/bootService") {}
- 
+
  export interface BootServiceHost {
    readonly execPath: string;
 @@ -786,7 +786,7 @@
@@ -2627,7 +2627,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 +export const APPARMOR_PROFILE = `# Written by \`goat browser setup\`: lets T3 Code's headless browser use Chrome's sandbox.
  abi <abi/4.0>,
  include <tunables/global>
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/shared/src/HostProcess.ts`
@@ -2638,7 +2638,7 @@ CLI/help/error strings use goat; package runner/npm invocations and persisted id
 --- a/packages/shared/src/HostProcess.ts
 +++ b/packages/shared/src/HostProcess.ts
 @@ -56,7 +56,7 @@
- 
+
  /**
   * The command the shell was given, before Node resolved it to the binary:
 - * `t3` for a PATH lookup, `./t3` or the launcher symlink for an explicit
@@ -2657,7 +2657,7 @@ User command guidance/search on web/desktop/mobile; no wire-contract or layout c
 +++ b/apps/web/src/components/settings/CliCommandSettingsRow.tsx
 @@ -7,7 +7,7 @@
  import { searchableSetting } from "./settingsSearch";
- 
+
  /**
 - * Settings → `t3` command: puts the desktop app's bundled CLI on PATH, or takes
 + * Settings → `goat` command: puts the desktop app's bundled CLI on PATH, or takes
@@ -2686,7 +2686,7 @@ User command guidance/search on web/desktop/mobile; no wire-contract or layout c
          ? `Installed at ${state.installedPath}. Open a new terminal to use it.`
 -        : `Installed at ${state.installedPath}, which is not on your PATH yet. Add its folder to your PATH to run \`t3\`.`;
 +        : `Installed at ${state.installedPath}, which is not on your PATH yet. Add its folder to your PATH to run \`goat\`.`;
- 
+
    return (
      <SettingsRow
 ```
@@ -2783,7 +2783,7 @@ User command guidance/search on web/desktop/mobile; no wire-contract or layout c
 -    "The link is missing its authorization request. Re-run `t3 connect` in your terminal and open the freshly printed URL.",
 +    "The link is missing its authorization request. Re-run `goat connect` in your terminal and open the freshly printed URL.",
  } as const;
- 
+
  /**
 ```
 
@@ -2796,7 +2796,7 @@ User command guidance/search on web/desktop/mobile; no wire-contract or layout c
 +++ b/apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx
 @@ -232,7 +232,7 @@
            />
- 
+
            <View collapsable={false} className="gap-2">
 -            <Text className="px-4 text-sm font-t3-medium text-foreground-muted">Or enter it</Text>
 +            <Text className="px-4 text-sm font-goat-medium text-foreground-muted">Or enter it</Text>
@@ -2822,7 +2822,7 @@ User command guidance/search on web/desktop/mobile; no wire-contract or layout c
        </View>
      </Pressable>
 @@ -392,7 +392,7 @@
- 
+
    return (
      <View collapsable={false} className="gap-2">
 -      <Text className="px-4 text-sm font-t3-medium text-foreground-muted">
@@ -2849,7 +2849,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 -    expect(cliArchiveFileName("1.2.3", "win32-x64")).toBe("t3-1.2.3-win32-x64.zip");
 +    expect(cliArchiveFileName("1.2.3", "win32-x64")).toBe("goat-1.2.3-win32-x64.zip");
    });
- 
+
    it("only maps platforms and architectures that have a release archive", () => {
 @@ -35,22 +35,22 @@
      expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
@@ -2861,7 +2861,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +      "https://mirror.example/goat/v1.2.3",
      );
    });
- 
+
    it("parses sha256sum output including binary-mode markers", () => {
      const checksums = parseChecksums(
        [
@@ -2879,7 +2879,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +    expect(checksums.get("goat-1.2.3-win32-x64.zip")).toBe("b".repeat(64));
      expect(checksums.size).toBe(2);
    });
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.test.ts`
@@ -2928,7 +2928,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
        assert.isTrue(yield* fs.exists(path.join(linuxDir, "node_modules/node-pty")));
 -      assert.equal(Number((yield* fs.stat(path.join(linuxDir, "t3"))).mode) & 0o111, 0o111);
 +      assert.equal(Number((yield* fs.stat(path.join(linuxDir, "goat"))).mode) & 0o111, 0o111);
- 
+
        const darwinManifest = yield* decodeManifest(
          yield* fs.readFileString(
 @@ -171,7 +171,7 @@
@@ -2948,7 +2948,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +        lines.some((line) => /^-rwxr-xr-x .* package\/goat$/.test(line)),
          listing.stdout,
        );
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cloud/pinnedRuntime.test.ts`
@@ -3013,7 +3013,7 @@ Existing install behavior now proves same-version upstream runtime is not reused
 +      assert.deepEqual(yield* fs.readDirectory(path.join(baseDir, "runtime", "goat", "versions")), []);
      }),
    );
- 
+
 @@ -236,9 +243,9 @@
          validate: () => Effect.die("must not validate an unverified archive"),
        }).pipe(Effect.flip);
@@ -3025,9 +3025,9 @@ Existing install behavior now proves same-version upstream runtime is not reused
 +      assert.deepEqual(yield* fs.readDirectory(path.join(baseDir, "runtime", "goat", "versions")), []);
      }),
    );
- 
+
 @@ -390,7 +397,7 @@
- 
+
        yield* Deferred.await(started);
        yield* Fiber.interrupt(install);
 -      const versionsDir = path.join(baseDir, "runtime", "versions");
@@ -3124,13 +3124,13 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
      // separate native probe is needed.
 -    expect(script).toContain('  [ -x "$1/t3" ] && "$1/t3" --version >/dev/null 2>&1');
 +    expect(script).toContain('  [ -x "$1/goat" ] && "$1/goat" --version >/dev/null 2>&1');
- 
+
      // Readiness gates the short-circuit, so a cache whose executable broke
      // reinstalls from the archive instead of being reused forever.
 @@ -306,7 +306,7 @@
        "b".repeat(64),
      );
- 
+
 -    expect(script).toContain(`  sha256sum "$1/t3" 2>/dev/null | cut -d ' ' -f 1`);
 +    expect(script).toContain(`  sha256sum "$1/goat" 2>/dev/null | cut -d ' ' -f 1`);
      expect(script).toContain(
@@ -3139,7 +3139,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 @@ -370,7 +370,7 @@
    it("never deletes a runtime another backend is running from", () => {
      const script = buildWslRuntimePruneScript("1.2.3/x64");
- 
+
 -    // The running backend's argv holds `<runtime>/t3`, so
 +    // The running backend's argv holds `<runtime>/goat`, so
      // the process itself is the lease and exiting releases it. Nothing has to be
@@ -3208,7 +3208,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
              "0",
            ]);
 @@ -518,9 +518,9 @@
- 
+
            assert.deepEqual(observedRuntimeIds, [`sha256-${firstHash}`, `sha256-${secondHash}`]);
            assert.equal(first.wslRuntimeId, observedRuntimeIds[0]);
 -          assert.include(first.args, `/runtime/sha256-${firstHash}/t3`);
@@ -3239,7 +3239,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
            assert.isTrue(Option.isNone(config.preflightFailure));
 @@ -683,7 +683,7 @@
          yield* fileSystem.writeFileString(entryPath, "");
- 
+
          const nodePath = "/home/test user's/.nvm/versions/node/v22.0.0/bin/node";
 -        const linuxAppRoot = "/tmp/t3 code's launch";
 +        const linuxAppRoot = "/tmp/goat code's launch";
@@ -3304,7 +3304,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 -    assert.equal(wslRuntimeArchiveStem("1.2.3", "x64"), "t3-1.2.3-linux-x64");
 +    assert.equal(wslRuntimeArchiveStem("1.2.3", "x64"), "goat-1.2.3-linux-x64");
    });
- 
+
    it("parses Windows bsdtar member listings with CRLF line endings", () => {
      assert.deepStrictEqual(
 -      parseWslRuntimeArchiveMembers("./t3-1.2.3-linux-x64/t3\r\nt3-1.2.3-linux-x64/client/\r\n"),
@@ -3313,7 +3313,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +      ["goat-1.2.3-linux-x64/goat", "goat-1.2.3-linux-x64/client"],
      );
    });
- 
+
 @@ -2226,7 +2226,7 @@
          const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wsl-runtime-stage-" });
          const sourceArchivePath = yield* makeLinuxCliArchiveFixture({
@@ -3391,7 +3391,7 @@ Real shell probe/upload proves marker-only cache is missed and repaired while sa
      );
      // Node discovery is defined for the dev path but only ever invoked inside
 @@ -274,10 +274,10 @@
- 
+
      const launch = SshTunnel.buildRemoteLaunchScript({
        ...ARCHIVE,
 -      releaseBaseUrl: "https://mirror.example/t3/",
@@ -3514,7 +3514,7 @@ Real shell probe/upload proves marker-only cache is missed and repaired while sa
 +      }
 +    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 +  );
- 
+
    it.effect.skipIf(windowsHost)("fails on an uploaded archive checksum mismatch", () =>
      Effect.gen(function* () {
 @@ -1421,7 +1456,7 @@
@@ -3589,14 +3589,14 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
          yield* fs.writeFileString(file, "");
 @@ -26,7 +26,7 @@
- 
+
        const repointed = yield* repointLauncher({
          launchedAs: launcher,
 -        versionsDir: path.join(root, "runtime/versions"),
 +        versionsDir: path.join(root, "runtime/goat/versions"),
          targetEntryPath: newExe,
        });
- 
+
 @@ -40,13 +40,13 @@
        const fs = yield* FileSystem.FileSystem;
        const path = yield* Path.Path;
@@ -3634,7 +3634,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +      const launcher = path.join(root, "bin/goat");
        yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
        yield* fs.writeFileString(launcher, "");
- 
+
        const bare = yield* resolveLauncherPath.pipe(
 -        Effect.provideService(HostProcess.InvokedAs, "t3"),
 +        Effect.provideService(HostProcess.InvokedAs, "goat"),
@@ -3698,7 +3698,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +++ b/apps/desktop/src/app/DesktopCliShim.test.ts
 @@ -16,7 +16,7 @@
  });
- 
+
  const tempRoot = () => {
 -  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cli-shim-"));
 +  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-cli-shim-"));
@@ -3708,7 +3708,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 @@ -26,9 +26,9 @@
    NodeFS.writeFileSync(path, content, { mode: 0o755 });
  };
- 
+
 -/** Writes the launcher for `target` at `<root>/bin/t3`, with `<root>/home` as its T3 home. */
 +/** Writes the launcher for `target` at `<root>/bin/goat`, with `<root>/home` as its T3 home. */
  const writeShim = (root: string, target: CliShimTarget) => {
@@ -3725,7 +3725,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 +    const relative = NodeChildProcess.spawnSync("./bin/goat", [], { cwd: root, encoding: "utf8" });
      expect(relative.stdout).toContain(`cli=${shim}`);
    });
- 
+
 @@ -151,7 +151,7 @@
      const executable = "C:\\Apps\\R&whoami&X 100%\\!CHANNEL!\\T3 Code.exe";
      const script = renderCliShim({
@@ -3742,7 +3742,7 @@ Update real archive/install/spawn/ownership fixtures and existing observable out
 -    expect(lines).toContain('set "T3CODE_CLI_PATH=C:\\Users\\José\\.t3\\bin\\t3.cmd"');
 +    expect(lines).toContain('set "T3CODE_CLI_PATH=C:\\Users\\José\\.t3\\bin\\goat.cmd"');
    });
- 
+
    it("switches the Windows console to UTF-8 only when a path needs it", () => {
      const ascii = renderCliShim({
        target: { kind: "windows", executable: "C:\\T3\\T3 Code.exe", entry: "C:\\T3\\bin.mjs" },
@@ -3763,7 +3763,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
 @@ -85,7 +85,7 @@
    return { registry, spawner };
  };
- 
+
 -// The machine's own PATH may already hold a t3; each test sets the PATH it means.
 +// The machine's own PATH may already hold a goat; each test sets the PATH it means.
  const machinePath = process.env.PATH;
@@ -3771,7 +3771,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
    process.env.PATH = "";
 @@ -95,46 +95,71 @@
  });
- 
+
  it.layer(NodeServices.layer)("DesktopCliCommand", (it) => {
 +  it.effect("keeps upstream t3 and rejects an upstream marker on a goat link", () =>
 +    Effect.gen(function* () {
@@ -3806,7 +3806,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
        const command = yield* commandIn({ home });
 -      const link = path.join(home, ".local", "bin", "t3");
 +      const link = path.join(home, ".local", "bin", "goat");
- 
+
        expect(yield* command.state).toEqual({ supported: true, installedPath: null, onPath: false });
        // Install writes the launcher itself, even when no local backend ever did.
        const installed = yield* command.install;
@@ -3814,7 +3814,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
 -      expect(yield* fs.readLink(link)).toBe(path.join(home, ".t3", "bin", "t3"));
 +      expect(yield* fs.readLink(link)).toBe(path.join(home, ".t3", "bin", "goat"));
        expect((yield* command.install).installedPath).toBe(link);
- 
+
        expect((yield* command.uninstall).installedPath).toBeNull();
        expect(yield* fs.exists(link)).toBe(false);
        // The launcher itself stays for setup commands.
@@ -3847,7 +3847,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
        yield* fs.makeDirectory(path.join(home, "bin"), { recursive: true });
 -      yield* fs.symlink(path.join(home, "gone"), path.join(home, "bin", "t3"));
 +      yield* fs.symlink(path.join(home, "gone"), path.join(home, "bin", "goat"));
- 
+
        const error = yield* Effect.flip(command.install);
 -      expect(error.message).toContain("Another t3 command is already installed");
 -      yield* command.uninstall;
@@ -3859,7 +3859,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
 +      expect(yield* fs.readLink(path.join(home, "bin", "goat"))).toBe(path.join(home, "gone"));
      }).pipe(Effect.scoped),
    );
- 
+
 @@ -143,60 +168,60 @@
        const fs = yield* FileSystem.FileSystem;
        const path = yield* Path.Path;
@@ -3867,7 +3867,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
 -      const before = yield* commandIn({ home, baseDir: path.join(home, "old-t3") });
 +      const before = yield* commandIn({ home, baseDir: path.join(home, "old-goat") });
        const link = (yield* before.install).installedPath;
- 
+
 -      const after = yield* commandIn({ home, baseDir: path.join(home, "new-t3") });
 +      const after = yield* commandIn({ home, baseDir: path.join(home, "new-goat") });
        expect((yield* after.state).installedPath).toBe(link);
@@ -3921,7 +3921,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
 -      yield* fs.writeFileString(path.join(shadow, "t3"), "#!/bin/sh\n", { mode: 0o755 });
 +      yield* fs.writeFileString(path.join(shadow, "goat"), "#!/bin/sh\n", { mode: 0o755 });
        process.env.PATH = [shadow, path.join(home, ".local", "bin")].join(":");
- 
+
        const command = yield* commandIn({ home });
 -      const theirs = path.join(shadow, "t3");
 +      const theirs = path.join(shadow, "goat");
@@ -3931,7 +3931,7 @@ Keep ownership behavior tests plus real GOAT/upstream coexistence and foreign-ma
        expect(error.message).toContain(theirs);
 -      expect(yield* fs.exists(path.join(home, ".local", "bin", "t3"))).toBe(false);
 +      expect(yield* fs.exists(path.join(home, ".local", "bin", "goat"))).toBe(false);
- 
+
        yield* fs.remove(theirs);
        const installed = yield* command.install;
        expect(installed).toMatchObject({
@@ -3962,7 +3962,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 @@ -123,9 +123,9 @@
      (root) => Effect.promise(() => NodeFSP.rm(root, { recursive: true, force: true })),
    );
- 
+
 -describe("t3 server command safety", () => {
 +describe("goat server command safety", () => {
    it.effect("rejects unknown command words without creating a home or project", () =>
@@ -3973,7 +3973,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
          for (const word of [
 @@ -149,18 +149,18 @@
    );
- 
+
    it.effect("shows help without creating state", () =>
 -    withTempDirectory("t3-cli-help-", (root) =>
 +    withTempDirectory("goat-cli-help-", (root) =>
@@ -3986,7 +3986,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
        }),
      ),
    );
- 
+
    it.effect("refuses manual startup over a live server before creating directories", () =>
 -    withTempDirectory("t3-cli-running-", (root) =>
 +    withTempDirectory("goat-cli-running-", (root) =>
@@ -3996,7 +3996,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 @@ -205,11 +205,11 @@
    );
  });
- 
+
 -describe("t3 app", () => {
 +describe("goat app", () => {
    it.effect("rejects SSH before it tries to reach a desktop app", () =>
@@ -4020,7 +4020,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
        }),
 @@ -225,9 +225,9 @@
    );
- 
+
    it.effect("rejects unsupported platforms without creating state", () =>
 -    withTempDirectory("t3-app-platform-test-", (root) =>
 -      Effect.gen(function* () {
@@ -4042,7 +4042,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
        }),
 @@ -244,9 +244,9 @@
    );
- 
+
    it.effect("does not create state when only a server or no desktop app is running", () =>
 -    withTempDirectory("t3-app-missing-test-", (root) =>
 -      Effect.gen(function* () {
@@ -4051,11 +4051,11 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 +      Effect.gen(function* () {
 +        const baseDir = NodePath.join(root, "missing-goat-home");
          const error = yield* runCli(["app", "--base-dir", baseDir]).pipe(Effect.flip);
- 
+
          expect(error).toMatchObject({
 @@ -262,9 +262,9 @@
    );
- 
+
    it.effect("uses T3CODE_HOME or --base-dir and sends the default or explicit path", () =>
 -    withTempDirectory("t3-app-command-test-", (root) =>
 -      Effect.gen(function* () {
@@ -4068,7 +4068,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
          const workingDirectory = yield* HostProcess.WorkingDirectory;
 @@ -283,7 +283,7 @@
    );
- 
+
    it.effect("prefers the installed desktop app when a dev desktop is also running", () =>
 -    withTempDirectory("t3-app-preferred-test-", (root) =>
 +    withTempDirectory("goat-app-preferred-test-", (root) =>
@@ -4077,7 +4077,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
          const desktop = yield* fakeDesktop({ baseDir });
 @@ -298,7 +298,7 @@
    );
- 
+
    it.effect("finds the dev desktop when the default desktop socket is absent", () =>
 -    withTempDirectory("t3-app-dev-test-", (root) =>
 +    withTempDirectory("goat-app-dev-test-", (root) =>
@@ -4086,7 +4086,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
          const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 @@ -313,7 +313,7 @@
    );
- 
+
    it.effect("never searches a dev state directory for an explicit T3 home", () =>
 -    withTempDirectory("t3-app-explicit-test-", (root) =>
 +    withTempDirectory("goat-app-explicit-test-", (root) =>
@@ -4114,7 +4114,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 @@ -144,11 +144,11 @@
      (server) => Effect.sync(() => server.close()),
    );
- 
+
 -describe("t3 pair", () => {
 +describe("goat pair", () => {
    it.effect("mints a token and prints a QR pairing URL for a live server", () =>
@@ -4155,13 +4155,13 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 @@ -258,9 +258,9 @@
      ).pipe(Effect.provide(NodeServices.layer)),
    );
- 
+
 -  it.effect("directs to t3 serve or t3 connect when no server is running", () =>
 +  it.effect("directs to goat serve or goat connect when no server is running", () =>
      Effect.gen(function* () {
 -      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pair-none-test-"));
 +      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-pair-none-test-"));
- 
+
        const error = yield* provideCliTestLayers(
          runCli(["pair", "--base-dir", baseDir]).pipe(Effect.flip),
 @@ -278,7 +278,7 @@
@@ -4174,7 +4174,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
          // The origin answers (another server reused the port), but the pid
          // that wrote this state file is dead — pairing must not mint a token
 @@ -307,7 +307,7 @@
- 
+
    it.effect("ignores stale runtime state pointing at a dead server", () =>
      Effect.gen(function* () {
 -      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pair-stale-test-"));
@@ -4226,7 +4226,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 +    "Next: Run `goat service install` to repair it.",
    );
  });
- 
+
 @@ -64,7 +64,7 @@
    expect(output).toContain("last login session ends");
    expect(output).toContain('sudo loginctl enable-linger "$(id -un)"');
@@ -4235,7 +4235,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 +  expect(output).toContain("Run `goat service install` to repair it.");
    expect(output).not.toContain("npx");
  });
- 
+
 @@ -73,7 +73,7 @@
      { ...status, current: false, installedVersion: "0.0.28" },
      "0.0.29",
@@ -4244,18 +4244,18 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 +  expect(output).toContain("Run `goat service install` to repair it.");
    expect(output).not.toContain("npx");
  });
- 
+
 @@ -90,8 +90,8 @@
      "0.0.31",
    );
- 
+
 -  assert.include(output, "t3@0.0.32-nightly.1 (newer than this t3@0.0.31 CLI)");
 -  assert.include(output, "Run `t3 update 0.0.32-nightly.1` to match it");
 +  assert.include(output, "goat@0.0.32-nightly.1 (newer than this goat@0.0.31 CLI)");
 +  assert.include(output, "Run `goat update 0.0.32-nightly.1` to match it");
    assert.notInclude(output, "npx");
  });
- 
+
 @@ -110,8 +110,8 @@
        Effect.sync(() => {
          installOptions.push(options);
@@ -4329,7 +4329,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 +      expect(error?.message).toContain("Run `sudo goat browser setup` on the host");
      }),
    );
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/ServerUpdateAction.test.tsx`
@@ -4370,7 +4370,7 @@ Expected help/error/command output follows goat; preserve npm runner expectation
 +      description: "Reconnected on goat@0.0.31.",
      });
    });
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/cli/invocation.test.ts`
@@ -4397,7 +4397,7 @@ Legacy npm ownership + new goat native bin ownership; version mismatch fails clo
 +    "goat serve",
    );
  });
- 
+
 @@ -119,7 +119,7 @@
      const fs = yield* FileSystem.FileSystem;
      const path = yield* Path.Path;
@@ -4406,7 +4406,7 @@ Legacy npm ownership + new goat native bin ownership; version mismatch fails clo
 +    yield* fs.writeFileString(path.join(bin, "goat"), "#!/bin/sh\n", { mode: 0o755 });
      return bin;
    });
- 
+
 @@ -140,7 +140,7 @@
            entry: "/home/theo/.local/lib/node_modules/t3/dist/bin.mjs",
            path: yield* pathWithT3,
@@ -4415,7 +4415,7 @@ Legacy npm ownership + new goat native bin ownership; version mismatch fails clo
 +      ).toBe('sudo env "PATH=$PATH" goat browser setup');
      }).pipe(Effect.scoped),
    );
- 
+
 @@ -149,7 +149,7 @@
        const fs = yield* FileSystem.FileSystem;
        const path = yield* Path.Path;
@@ -4487,7 +4487,7 @@ Legacy npm ownership + new goat native bin ownership; version mismatch fails clo
 +      expect(yield* resolve).toBeNull();
      }),
    );
- 
+
 ```
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/install.test.ts`
@@ -4607,128 +4607,128 @@ Frozen runner/launch/pairing bytes change deliberately with executable/runtime n
 
 Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.
 
-```diff
+````diff
 --- a/docs/user/install.md
 +++ b/docs/user/install.md
 @@ -11,33 +11,33 @@
  ## Command line
- 
+
  ```bash
 -curl -fsSL https://t3.codes/install.sh | sh
 +curl -fsSL https://goat.codes/install.sh | sh
- ```
- 
- On Windows, in PowerShell:
- 
- ```powershell
+````
+
+On Windows, in PowerShell:
+
+```powershell
 -irm https://t3.codes/install.ps1 | iex
 +irm https://goat.codes/install.ps1 | iex
- ```
- 
+```
+
 -This installs the `t3` binary to `~/.local/bin`. If your shell reports `command not found`
 +This installs the `goat` binary to `~/.local/bin`. If your shell reports `command not found`
- afterwards, that directory is not on your `PATH` yet; the installer prints the
- line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
- `T3CODE_VERSION` to pin an exact version.
- 
- | Task                                             | Command                                                   |
- | ------------------------------------------------ | --------------------------------------------------------- |
--| Start the server and open the web app            | `t3`                                                      |
--| Start the server without a browser               | `t3 serve`                                                |
--| Keep it running in the background (macOS, Linux) | `t3 service install` ([details](./background-service.md)) |
--| Move to the newest release                       | `t3 update`                                               |
--| Remove it again                                  | `t3 uninstall`                                            |
-+| Start the server and open the web app            | `goat`                                                      |
-+| Start the server without a browser               | `goat serve`                                                |
-+| Keep it running in the background (macOS, Linux) | `goat service install` ([details](./background-service.md)) |
-+| Move to the newest release                       | `goat update`                                               |
-+| Remove it again                                  | `goat uninstall`                                            |
- 
+afterwards, that directory is not on your `PATH` yet; the installer prints the
+line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
+`T3CODE_VERSION` to pin an exact version.
+
+| Task | Command                                          |
+| ---- | ------------------------------------------------ |
+| -    | Start the server and open the web app            | `t3`                                                        |
+| -    | Start the server without a browser               | `t3 serve`                                                  |
+| -    | Keep it running in the background (macOS, Linux) | `t3 service install` ([details](./background-service.md))   |
+| -    | Move to the newest release                       | `t3 update`                                                 |
+| -    | Remove it again                                  | `t3 uninstall`                                              |
+| +    | Start the server and open the web app            | `goat`                                                      |
+| +    | Start the server without a browser               | `goat serve`                                                |
+| +    | Keep it running in the background (macOS, Linux) | `goat service install` ([details](./background-service.md)) |
+| +    | Move to the newest release                       | `goat update`                                               |
+| +    | Remove it again                                  | `goat uninstall`                                            |
+
 -Run `t3 help` or `t3 --help` for the full reference. To start in a new working
 -directory, use an explicit path such as `t3 ./my-project`. A bare directory name
 +Run `goat help` or `goat --help` for the full reference. To start in a new working
 +directory, use an explicit path such as `goat ./my-project`. A bare directory name
- is accepted only if it already exists.
- 
+is accepted only if it already exists.
+
 -If `t3` or `t3 start` reports an already running server, connect to that server
 +If `goat` or `goat start` reports an already running server, connect to that server
- instead. Stop it before starting a replacement, or use a different `--base-dir`
- for an independent server.
- 
+instead. Stop it before starting a replacement, or use a different `--base-dir`
+for an independent server.
+
 @@ -46,7 +46,7 @@
- 
- ### Intel Macs
- 
+
+### Intel Macs
+
 -There is no `t3` executable for Intel Macs (the desktop app is available). To
 +There is no `goat` executable for Intel Macs (the desktop app is available). To
- run a server there, build it from source with Node.js 24 and `vp`
- ([Install vp](https://github.com/pingdotgg/t3code#install-vp)):
- 
+run a server there, build it from source with Node.js 24 and `vp`
+([Install vp](https://github.com/pingdotgg/t3code#install-vp)):
+
 @@ -56,7 +56,7 @@
- node apps/server/dist/bin.mjs
- ```
- 
+node apps/server/dist/bin.mjs
+
+````
+
 -`t3 update` and the background service do not apply to a server run this way;
 +`goat update` and the background service do not apply to a server run this way;
- update it with `git pull` and a rebuild.
- 
- ## Desktop app
+update it with `git pull` and a rebuild.
+
+## Desktop app
 @@ -67,7 +67,7 @@
- | Platform           | Install                            |
- | ------------------ | ---------------------------------- |
- | Windows            | `winget install T3Tools.T3Code`    |
+| Platform           | Install                            |
+| ------------------ | ---------------------------------- |
+| Windows            | `winget install T3Tools.T3Code`    |
 -| macOS              | `brew install --cask t3-code`      |
 +| macOS              | `brew install --cask goat-code`      |
- | Debian, Ubuntu     | `sudo apt install ./T3-Code-*.deb` |
- | Arch Linux         | `yay -S t3code-bin`                |
- | Arch Linux nightly | `yay -S t3code-nightly-bin`        |
+| Debian, Ubuntu     | `sudo apt install ./T3-Code-*.deb` |
+| Arch Linux         | `yay -S t3code-bin`                |
+| Arch Linux nightly | `yay -S t3code-nightly-bin`        |
 @@ -76,11 +76,11 @@
- password to install each update. If your desktop has no password prompt, the
- update fails. Download the new `.deb` and install it the same way.
- 
+password to install each update. If your desktop has no password prompt, the
+update fails. Download the new `.deb` and install it the same way.
+
 -### The `t3` command
 +### The `goat` command
- 
+
 -The desktop app includes the `t3` command-line tool. To run it from any
 +The desktop app includes the `goat` command-line tool. To run it from any
- terminal, open **Settings → General → About** and choose **Install** next to
+terminal, open **Settings → General → About** and choose **Install** next to
 -**t3 command**. On macOS and Linux it adds a `t3` link to a folder on your
 +**goat command**. On macOS and Linux it adds a `goat` link to a folder on your
- `PATH`; on Windows it adds the app's command folder to your `PATH`. Open a new
- terminal afterwards. **Remove** takes it off again. If you already have `t3`
- from npm, it stays as it is.
+`PATH`; on Windows it adds the app's command folder to your `PATH`. Open a new
+terminal afterwards. **Remove** takes it off again. If you already have `t3`
+from npm, it stays as it is.
 @@ -97,18 +97,18 @@
- With the desktop app already running on the same machine:
- 
- ```bash
+With the desktop app already running on the same machine:
+
+```bash
 -t3 app
 +goat app
- ```
- 
- This opens a new thread for the current directory, adding the project if needed.
+````
+
+This opens a new thread for the current directory, adding the project if needed.
 -Pass a path, such as `t3 app ../my-project`, to open another directory. It requires
 +Pass a path, such as `goat app ../my-project`, to open another directory. It requires
- the desktop app, so a standalone server or an SSH session is not enough. If the
- command cannot reach the app, start or update the desktop app and try again.
- 
- ## Mobile app
- 
- Install T3 Code from the
--[App Store](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824) or
-+[App Store](https://apps.apple.com/us/app/goat-code-remote-claude-more/id6787819824) or
- [Google Play](https://play.google.com/store/apps/details?id=com.t3tools.t3code).
- The phone connects to a server on another machine. Follow
- [remote access](./remote-access.md) to link it through T3 Connect or a pairing URL.
+the desktop app, so a standalone server or an SSH session is not enough. If the
+command cannot reach the app, start or update the desktop app and try again.
+
+## Mobile app
+
+Install T3 Code from the
+\-[App Store](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824) or +[App Store](https://apps.apple.com/us/app/goat-code-remote-claude-more/id6787819824) or
+[Google Play](https://play.google.com/store/apps/details?id=com.t3tools.t3code).
+The phone connects to a server on another machine. Follow
+[remote access](./remote-access.md) to link it through T3 Connect or a pairing URL.
 @@ -117,7 +117,7 @@
- shows these links as QR codes in **Settings → General → Mobile app**.
- 
- - **iPhone and iPad:** join the [TestFlight beta](https://testflight.apple.com/join/XgaxaRtd).
--- **Android:** join the [beta group](https://groups.google.com/g/t3-code-v2-beta). With the same
-+- **Android:** join the [beta group](https://groups.google.com/g/goat-code-v2-beta). With the same
-   Google account, open the [Google Play testing page](https://play.google.com/apps/testing/com.t3tools.t3code)
-   and become a tester.
- 
-```
+shows these links as QR codes in **Settings → General → Mobile app**.
+
+- **iPhone and iPad:** join the [TestFlight beta](https://testflight.apple.com/join/XgaxaRtd).
+  -- **Android:** join the [beta group](https://groups.google.com/g/t3-code-v2-beta). With the same
+  +- **Android:** join the [beta group](https://groups.google.com/g/goat-code-v2-beta). With the same
+  Google account, open the [Google Play testing page](https://play.google.com/apps/testing/com.t3tools.t3code)
+  and become a tester.
+
+````
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/background-service.md`
 
@@ -4738,13 +4738,13 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
 --- a/docs/user/background-service.md
 +++ b/docs/user/background-service.md
 @@ -5,37 +5,37 @@
- 
+
  ## Manage the service
- 
+
 -Install the `t3` CLI first ([Install T3 Code](./install.md#command-line)), then
 +Install the `goat` CLI first ([Install T3 Code](./install.md#command-line)), then
  run these commands on the machine that will host T3 Code:
- 
+
  | Task                            | Command                |
  | ------------------------------- | ---------------------- |
 -| Install and start               | `t3 service install`   |
@@ -4757,12 +4757,12 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
 +| Move to a newer release         | `goat update`            |
 +| Restart                         | `goat service restart`   |
 +| Stop and remove from startup    | `goat service uninstall` |
- 
+
  Uninstalling the service leaves your projects, threads, and settings intact.
 -Running `t3 service install` again repairs a service that `t3 service status`
 +Running `goat service install` again repairs a service that `goat service status`
  reports as broken.
- 
+
 -`t3 update` downloads the newest release on your channel and switches `t3`
 +`goat update` downloads the newest release on your channel and switches `goat`
  and the service to it. Restarting interrupts running agent turns, terminals,
@@ -4773,7 +4773,7 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
  to pick up the new version. Wait for any remote update already in progress
  before updating; to match a remote client's version, follow
  [Updating T3 Code](./updating.md).
- 
+
 -Pass an exact version (`t3 update 0.0.42`) to pin one, `--channel nightly` to
 +Pass an exact version (`goat update 0.0.42`) to pin one, `--channel nightly` to
  switch trains, or `--allow-downgrade` to move backwards. `preview` is a
@@ -4781,29 +4781,29 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
 -updates, so the installer and `t3 update` ask for confirmation before
 +updates, so the installer and `goat update` ask for confirmation before
  installing one.
- 
+
 -`t3 uninstall` removes the background service, the `t3` launcher, and the
 +`goat uninstall` removes the background service, the `goat` launcher, and the
  downloaded versions after showing you the list and asking once. Your projects,
  threads, and settings under `~/.t3/userdata` are kept. Pass `--yes` from a
  script.
 @@ -58,7 +58,7 @@
- 
+
  ## Troubleshooting
- 
+
 -Start with `t3 service status` on the host. It prints the log path and, on Linux,
 +Start with `goat service status` on the host. It prints the log path and, on Linux,
  checks whether the installed service is running, enabled, and allowed to survive
  logout.
- 
+
 @@ -77,7 +77,7 @@
- 
+
  Then retry service setup as your normal user. Run only the `loginctl` command
  with sudo; running T3 Code as root creates a separate installation and Connect
 -identity. Without administrator access, run `t3 serve` in a terminal and keep
 +identity. Without administrator access, run `goat serve` in a terminal and keep
  that session open.
- 
+
  | Status problem                          | Next step                                                                                                                      |
 @@ -85,11 +85,11 @@
  | `linger-unavailable`                    | Run `loginctl show-user "$(id -un)" --property=Linger` and check that systemd-logind is available.                             |
@@ -4811,149 +4811,151 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
  | `service-disabled` or `service-stopped` | Read the log and `systemctl --user status t3code.service`, then use the repair command printed by T3 Code.                     |
 -| `restart-pending`                       | A newer version is installed but the service still runs the previous one. Run `t3 service restart`.                            |
 +| `restart-pending`                       | A newer version is installed but the service still runs the previous one. Run `goat service restart`.                            |
- 
+
  On macOS, check **System Settings → General → Login Items** if the service no
  longer starts at login. If agent work cannot access Desktop, Documents, or
 -Downloads, it may need Full Disk Access for the `t3` executable listed in
 +Downloads, it may need Full Disk Access for the `goat` executable listed in
  `ProgramArguments` in
  `~/Library/LaunchAgents/com.t3tools.t3code.service.plist`.
- 
-```
+
+````
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/remote-access.md`
 
 Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.
 
-```diff
+````diff
 --- a/docs/user/remote-access.md
 +++ b/docs/user/remote-access.md
 @@ -12,12 +12,12 @@
  For a command-line host, run:
- 
+
  ```bash
 -t3 connect
 +goat connect
- ```
- 
- Follow the sign-in instructions. Setup offers a
- [background service](./background-service.md); if you decline it, start the
+````
+
+Follow the sign-in instructions. Setup offers a
+[background service](./background-service.md); if you decline it, start the
 -server with `t3 serve`. Saving your sign-in alone does not make the machine
 +server with `goat serve`. Saving your sign-in alone does not make the machine
- reachable.
- 
- On your other device, sign in to the same T3 Connect account and choose the
+reachable.
+
+On your other device, sign in to the same T3 Connect account and choose the
 @@ -42,13 +42,13 @@
- address:
- 
- ```bash
+address:
+
+```bash
 -t3 serve --host <private-ip>
 +goat serve --host <private-ip>
- ```
- 
- If a server is already running, generate a fresh link without restarting it:
- 
- ```bash
+```
+
+If a server is already running, generate a fresh link without restarting it:
+
+```bash
 -t3 pair
 +goat pair
- ```
- 
- Scan the QR code on your phone or paste the pairing URL into **Add environment**
+```
+
+Scan the QR code on your phone or paste the pairing URL into **Add environment**
 @@ -127,13 +127,13 @@
- To start a command-line server with Tailscale HTTPS:
- 
- ```bash
+To start a command-line server with Tailscale HTTPS:
+
+```bash
 -t3 serve --tailscale-serve
 +goat serve --tailscale-serve
- ```
- 
- For an already-running server:
- 
- ```bash
+```
+
+For an already-running server:
+
+```bash
 -t3 pair --tailscale
 +goat pair --tailscale
- ```
- 
- The pairing link uses an address such as `https://machine.tailnet.ts.net/`.
+```
+
+The pairing link uses an address such as `https://machine.tailnet.ts.net/`.
 @@ -145,11 +145,11 @@
- ```
- 
- If that port is already in use, choose another with
+
+````
+
+If that port is already in use, choose another with
 -`--tailscale-serve-port`. See `t3 pair --help` for other pairing options.
 +`--tailscale-serve-port`. See `goat pair --help` for other pairing options.
- 
- ### Hosted web app
- 
+
+### Hosted web app
+
 -[app.t3.codes](https://app.t3.codes) needs an HTTPS endpoint. It connects directly
 +[app.goat.codes](https://app.goat.codes) needs an HTTPS endpoint. It connects directly
- to your server; a hosted pairing link does not make an unreachable backend
- reachable or convert HTTP to HTTPS.
- 
+to your server; a hosted pairing link does not make an unreachable backend
+reachable or convert HTTP to HTTPS.
+
 @@ -235,13 +235,13 @@
- command to run on the host:
- 
- ```sh
+command to run on the host:
+
+```sh
 -sudo t3 browser setup
 +sudo goat browser setup
- ```
- 
- The server shows the exact line for how you started it, such as
- `sudo npx t3 browser setup`, and keeps your `PATH` when Node is installed only
+````
+
+The server shows the exact line for how you started it, such as
+`sudo npx t3 browser setup`, and keeps your `PATH` when Node is installed only
 -for your user. Where `t3` is not on your `PATH`, such as with only the
 -desktop app installed, it names the full path of the app's own `t3` instead. It allows Chrome's sandbox with an AppArmor profile and installs
 +for your user. Where `goat` is not on your `PATH`, such as with only the
 +desktop app installed, it names the full path of the app's own `goat` instead. It allows Chrome's sandbox with an AppArmor profile and installs
- any missing libraries with apt. It is safe to run again. Without `sudo`, it
- only reports what it would change.
- 
+any missing libraries with apt. It is safe to run again. Without `sudo`, it
+only reports what it would change.
+
 @@ -259,7 +259,7 @@
- On the host, **Settings → Connections** lets authorized administrators create
- pairing links and revoke client sessions. Revoking an unused link prevents new
- pairings; revoke a device's session to remove its existing access. Command-line
+On the host, **Settings → Connections** lets authorized administrators create
+pairing links and revoke client sessions. Revoking an unused link prevents new
+pairings; revoke a device's session to remove its existing access. Command-line
 -management is available through `t3 auth --help`.
 +management is available through `goat auth --help`.
- 
- A session with an open connection stays listed after its access credential
- expires.
+
+A session with an open connection stays listed after its access credential
+expires.
 @@ -321,8 +321,8 @@
- asking you to update. Start T3 Code on that computer and update it to the latest
- version; it reconnects at the same address without pairing again.
- 
+asking you to update. Start T3 Code on that computer and update it to the latest
+version; it reconnects at the same address without pairing again.
+
 -On a command-line host, `t3 connect unlink` disables exposure while retaining
 -your login; `t3 connect logout` also clears that login. Background-service
 +On a command-line host, `goat connect unlink` disables exposure while retaining
 +your login; `goat connect logout` also clears that login. Background-service
- [removal](./background-service.md#manage-the-service) is separate.
- 
- Treat pairing URLs and authorization codes as passwords. Do not include them in
+[removal](./background-service.md#manage-the-service) is separate.
+
+Treat pairing URLs and authorization codes as passwords. Do not include them in
 @@ -330,22 +330,22 @@
- 
- ## T3 Connect troubleshooting
- 
+
+## T3 Connect troubleshooting
+
 -Run `t3 connect status` on the host to inspect saved authorization and link
 +Run `goat connect status` on the host to inspect saved authorization and link
- configuration. It is not a live reachability check. If the environment appears
+configuration. It is not a live reachability check. If the environment appears
 -offline, run `t3 service status` and read the displayed log. If it disappears
 +offline, run `goat service status` and read the displayed log. If it disappears
- when SSH closes, see [background-service troubleshooting](./background-service.md#troubleshooting).
- 
- | Error                                                     | Recovery                                                                                                                                    |
- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
- | `environment_link_limit_exceeded` or managed tunnel limit | Deregister an unused environment, then restart T3 Code on the host.                                                                         |
--| `auth_invalid` or `invalid_bearer`                        | Run `t3 connect login`. If credentials were revoked, run `t3 connect logout`, then `t3 connect` again. Restart the server after signing in. |
-+| `auth_invalid` or `invalid_bearer`                        | Run `goat connect login`. If credentials were revoked, run `goat connect logout`, then `goat connect` again. Restart the server after signing in. |
- | Expired or invalid link proof                             | Check the host's date and time, update T3 Code, then restart it.                                                                            |
- | HTTP 403 without a recognized error                       | Check relay access, proxies, and firewall rules. Keep any Cloudflare Ray ID for a bug report.                                               |
- | HTTP 408, 429, or 5xx                                     | Check network and relay availability. Startup retries temporary failures for up to ten minutes.                                             |
- 
- After fixing a permanent rejection, restart the host's server. On Linux, use
- `systemctl --user restart t3code.service` for the background service. For a
+when SSH closes, see [background-service troubleshooting](./background-service.md#troubleshooting).
+
+| Error                                                     | Recovery                                                                                        |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `environment_link_limit_exceeded` or managed tunnel limit | Deregister an unused environment, then restart T3 Code on the host.                             |
+| -                                                         | `auth_invalid` or `invalid_bearer`                                                              | Run `t3 connect login`. If credentials were revoked, run `t3 connect logout`, then `t3 connect` again. Restart the server after signing in.       |
+| +                                                         | `auth_invalid` or `invalid_bearer`                                                              | Run `goat connect login`. If credentials were revoked, run `goat connect logout`, then `goat connect` again. Restart the server after signing in. |
+| Expired or invalid link proof                             | Check the host's date and time, update T3 Code, then restart it.                                |
+| HTTP 403 without a recognized error                       | Check relay access, proxies, and firewall rules. Keep any Cloudflare Ray ID for a bug report.   |
+| HTTP 408, 429, or 5xx                                     | Check network and relay availability. Startup retries temporary failures for up to ten minutes. |
+
+After fixing a permanent rejection, restart the host's server. On Linux, use
+`systemctl --user restart t3code.service` for the background service. For a
 -foreground server, stop it and run `t3 serve` again with your usual options.
 +foreground server, stop it and run `goat serve` again with your usual options.
- Include the diagnostic message and trace ID when reporting a persistent failure.
- 
- For a connection that still fails after linking, check the date and time on both
-```
+Include the diagnostic message and trace ID when reporting a persistent failure.
+
+For a connection that still fails after linking, check the date and time on both
+
+````
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/welcome-wizard.md`
 
@@ -4964,7 +4966,7 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
 +++ b/docs/user/welcome-wizard.md
 @@ -13,13 +13,13 @@
  You can add more computers before continuing:
- 
+
  - **T3 Connect** connects computers that are signed in to your account.
 -  [Install the CLI](./install.md#command-line) and run `t3 connect` on each
 -  computer you want to add, then start T3 Code or run `t3 serve` so the
@@ -4978,16 +4980,16 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
 +  Start the server with `goat serve`, then run `goat pair --tailscale` and paste
 +  the pairing link. You can also run `goat serve --host <address>` and use
 +  `goat pair` when the server is already reachable on your network.
- 
+
  Saved computers and computers discovered through T3 Connect are selected by
  default. Uncheck any you do not want to set up; this does not disconnect them.
-```
+````
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/user/updating.md`
 
 Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream store/package-manager ids.
 
-```diff
+````diff
 --- a/docs/user/updating.md
 +++ b/docs/user/updating.md
 @@ -45,21 +45,21 @@
@@ -4996,27 +4998,26 @@ Rewrite existing standalone/desktop usage to goat; preserve npx t3 and upstream 
  | **Copy update command**    | Run the command on the named host to update the detected global npm install, then restart the server with your usual options.                                                                   |
 -| **Copy relaunch command**  | Stop the command-line server on its host and relaunch with the copied command, keeping your usual subcommand and options. This does not update an installed `t3` command.                       |
 +| **Copy relaunch command**  | Stop the command-line server on its host and relaunch with the copied command, keeping your usual subcommand and options. This does not update an installed `goat` command.                       |
- 
+
  On the host, run:
- 
+
  ```sh
 -t3 update <client-version>
 +goat update <client-version>
- ```
- 
- Replace `<client-version>` with the version shown in the notice. The command
- asks before restarting the background service; if you decline, run
--`t3 service restart` when you are ready. For a server you started by hand,
-+`goat service restart` when you are ready. For a server you started by hand,
- stop it and start it again afterwards with your usual options such as `--host`
- or `--tailscale-serve`.
- 
+````
+
+Replace `<client-version>` with the version shown in the notice. The command
+asks before restarting the background service; if you decline, run
+\-`t3 service restart` when you are ready. For a server you started by hand, +`goat service restart` when you are ready. For a server you started by hand,
+stop it and start it again afterwards with your usual options such as `--host`
+or `--tailscale-serve`.
+
 -If you run the server with `npx` rather than an installed `t3`, there is
 +If you run the server with `npx` rather than an installed `goat`, there is
- nothing to update on the host: stop the server and relaunch it as
- `npx t3@<client-version>` with the same subcommand and options.
- 
-```
+nothing to update on the host: stop the server and relaunch it as
+`npx t3@<client-version>` with the same subcommand and options.
+
+````
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/docs/operations/release.md`
 
@@ -5068,7 +5069,7 @@ Document archive/executable and dual-bin contract in existing operational guidan
    `node_modules/` with the Linux node-pty binary, and must not carry a loose
    server bundle (`bin.mjs`).
  - The external Windows resource monitor is absent.
-```
+````
 
 ### MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/runtimeArchive.test.ts`
 
@@ -5125,14 +5126,14 @@ Follow renamed archive/runtime/help through existing behavioral consumer or fixt
 @@ -20,7 +20,7 @@
    serviceStateHasPendingUpdate,
  } from "./serviceProtocol.ts";
- 
+
 -const linuxRuntime = "/home/theo/.t3/runtime/versions/1.2.3/t3";
 +const linuxRuntime = "/home/theo/.t3/runtime/goat/versions/1.2.3/goat";
  const linuxPlan = {
    program: [linuxRuntime, "__service-launcher"],
    baseDir: "/home/theo/.t3",
 @@ -38,7 +38,7 @@
- 
+
  it("reads the served T3 home back out of a rendered unit or plist", () => {
    const plan = (baseDir: string) => ({
 -    program: [`${baseDir}/runtime/versions/1.2.3/t3`, "__service-launcher"],
@@ -5143,7 +5144,7 @@ Follow renamed archive/runtime/help through existing behavioral consumer or fixt
 @@ -70,7 +70,7 @@
    expect(unit).toContain("OOMPolicy=continue");
  });
- 
+
 -const macRuntime = "/Users/theo/.t3/runtime/versions/1.2.3/t3";
 +const macRuntime = "/Users/theo/.t3/runtime/goat/versions/1.2.3/goat";
  const macPlan = {
@@ -5194,7 +5195,7 @@ Follow renamed archive/runtime/help through existing behavioral consumer or fixt
 --- a/apps/server/src/cloud/relayResponse.test.ts
 +++ b/apps/server/src/cloud/relayResponse.test.ts
 @@ -71,7 +71,7 @@
- 
+
      expect(error).toMatchObject({ _tag: "RelayRequestError", rejection: "unauthorized" });
      expect(error.message).toContain("invalid_bearer");
 -    expect(error.message).toContain("t3 connect login");
@@ -5350,7 +5351,7 @@ Preview deployment output and workflow guidance name the standalone goat pairing
 +              "Pair a server into it with `goat pair --tailscale`, or paste a host + pairing",
                "code under Settings → Connections.",
              ].join("\n");
- 
+
 ```
 
 ## A11: preserved GOAT runner readiness (extend wp2's single probe)
@@ -5506,12 +5507,12 @@ Parent proof: retain the named SSH focused suites and typecheck below; observe r
 
 No automatic import of `.t3` pid/port/managed/runner/database files. Existing upstream managed/default servers therefore remain outside GOAT discovery/stop/restart scope. keepExistingRunner follows wp2 retained-runner semantics within the GOAT namespace (A11): a ready older/unmarked runner is reused; a missing selected GOAT runtime fails before acquisition. leaveRemoteServerRunning protects the remote server when the local forward ends. The runner filename stays run-t3.sh within the new directory. Local archiveDirectory stays `<local config.baseDir>/runtime/archives`: it is not a remote path and must not be rewritten to `$HOME/.goat` in SshRemoteDispatch.
 
-| Exact absolute path | Action | Purpose |
-| --- | --- | --- |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.ts` | MODIFY (mandatory in wp4) | Every remote runner/runtime lock/staging/probe/upload plus launch/pairing/MCP-session/stop/log state and default server home switches together. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/sshRemote/SshRemoteDispatch.ts` | MODIFY (mandatory in wp4) | There is no remote-home option in RemoteT3RunnerOptions: tunnel.ts owns the namespace. Keep archiveDirectory LOCAL and keepExistingRunner/leaveRemoteServerRunning true; explain that service boundary here instead of adding handler IO or a disconnected config flag. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.test.ts` | MODIFY (mandatory in wp4) | Remote GOAT fixtures move; the added upstream-collision fixture deliberately stays .t3/runtime/versions so preservation still measures the other product. |
-| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/fixtures/remote-runner-baseline.json` | MODIFY (mandatory in wp4) | Freeze changed runner/launch/pairing default-home bytes for archive, mirror and node override variants. |
+| Exact absolute path                                                                                                            | Action                    | Purpose                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------ | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.ts`                            | MODIFY (mandatory in wp4) | Every remote runner/runtime lock/staging/probe/upload plus launch/pairing/MCP-session/stop/log state and default server home switches together.                                                                                                                         |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/server/src/sshRemote/SshRemoteDispatch.ts`        | MODIFY (mandatory in wp4) | There is no remote-home option in RemoteT3RunnerOptions: tunnel.ts owns the namespace. Keep archiveDirectory LOCAL and keepExistingRunner/leaveRemoteServerRunning true; explain that service boundary here instead of adding handler IO or a disconnected config flag. |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.test.ts`                       | MODIFY (mandatory in wp4) | Remote GOAT fixtures move; the added upstream-collision fixture deliberately stays .t3/runtime/versions so preservation still measures the other product.                                                                                                               |
+| `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/fixtures/remote-runner-baseline.json` | MODIFY (mandatory in wp4) | Freeze changed runner/launch/pairing default-home bytes for archive, mirror and node override variants.                                                                                                                                                                 |
 
 ### D7-A MODIFY `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.ts`
 
@@ -5562,7 +5563,7 @@ Every remote runner/runtime lock/staging/probe/upload plus launch/pairing/MCP-se
  PID_FILE="$STATE_DIR/pid"
 @@ -785,8 +785,8 @@
  `;
- 
+
  const REMOTE_PAIRING_SCRIPT = `set -eu
 -STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
 -DEFAULT_SERVER_HOME="$HOME/.t3"
@@ -5584,7 +5585,7 @@ Every remote runner/runtime lock/staging/probe/upload plus launch/pairing/MCP-se
  if [ "@@T3_KEEP_EXISTING_RUNNER@@" != "1" ] || [ ! -f "$RUNNER_FILE" ]; then
 @@ -858,7 +858,7 @@
  `;
- 
+
  const REMOTE_STOP_SCRIPT = `set -eu
 -STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
 +STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
@@ -5593,7 +5594,7 @@ Every remote runner/runtime lock/staging/probe/upload plus launch/pairing/MCP-se
  MANAGED_FILE="$STATE_DIR/managed"
 @@ -881,7 +881,7 @@
  `;
- 
+
  const REMOTE_LOG_TAIL_SCRIPT = `set -eu
 -STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
 +STATE_DIR="$HOME/.goat/ssh-launch/@@T3_STATE_KEY@@"
@@ -5793,20 +5794,20 @@ The user chose D7-A (`~/.goat`) on 2026-10-11. Keeping remote state or server ho
 
 ## Conditional activation and meaningful proof
 
-| Behavior / scenario | Activation | Observable pass evidence |
-| --- | --- | --- |
-| archive/executable names agree | shared archive name cases for POSIX and Windows; existing real fake-archive npm packaging; WSL archive structural preflight | goat archive names, tar root/goat present, platform-package executable bit and actual npm launcher stdout/exit-code passthrough; native helper names unchanged |
-| legacy npm bin compatibility | existing t3-only manifest/global-bin/native fixtures | still classify valid installation; npx/pnpm/bunx t3 channel suggestions unchanged |
-| new npm goat ownership | added dual-bin native fixture with unrelated global t3 and missing/matching goat | unknown until goat bin proves package ownership; matching version recognized; mismatching platform manifest remains unknown; foreign t3 bytes survive |
-| same exact version upstream cache | pinnedRuntime's real filesystem test + SSH runShell/upload + installer HTTP test seed runtime/versions/version/t3 and marker | GOAT installs into runtime/goat/versions and upstream executable+marker bytes survive unchanged |
-| marker-only stale GOAT cache | SSH test and successful installer fixture seed matching marker without goat | probe ready=false, install downloads/uploads rather than claiming cached; working goat/marker published; subsequent probe true |
-| checksum failure / concurrent preparation | retained SSH checksum-mismatch/racing-upload/launch cases and pinnedRuntime progress/concurrency cases | nonzero/no completed runtime on mismatch; one complete namespace after concurrent upload; no auth/remote download fallback introduced |
-| desktop foreign shim | create goat symlink to upstream T3 marker + upstream t3 entry | state unowned; install refuses; remove does not delete foreign link; after fixture removes the conflict, GOAT install/remove leaves t3 unchanged |
-| prior GOAT shim refresh | existing previous-home and large-binary link tests with goat paths/new marker | recognizes only GOAT marker; refresh/removal uses GOAT links; large binaries/foreign links never claimed |
-| second client / runner ownership | existing compatible managed-server test + A11 retained-readiness cases + frozen script oracle | ready retained GOAT runtime reuses even for older/unmarked runner; missing selected runtime errors before acquisition; persisted runner/pid/port/managed bytes and old runtime survive; captured server remains running |
-| D7-A isolation (mandatory) | all shell fixtures use .goat except upstream-collision fixture | runtime/state/default server home point to .goat; .t3 upstream bytes untouched; no import of old runner/pid/DB; wp5 must inspect selected base-dir and host process evidence |
-| ghCommand override retained from wp2 | `runtimeArchiveGh.test.ts`: spaced executable path supplied through runner.ghCommand after core + A11 + D7-A composition | configured executable receives gh acquisition; verified cache bytes upload; no accidental PATH-default substitution |
-| help/string surfaces | retained CLI parser help/error tests and standalone command formatter, web update command-output tests | commandPath/root/help goat; npx t3 remains executable package hint; web/desktop install/remove label and mobile pairing hint readable by source inspection (no static-markup tests) |
+| Behavior / scenario                       | Activation                                                                                                                   | Observable pass evidence                                                                                                                                                                                                |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| archive/executable names agree            | shared archive name cases for POSIX and Windows; existing real fake-archive npm packaging; WSL archive structural preflight  | goat archive names, tar root/goat present, platform-package executable bit and actual npm launcher stdout/exit-code passthrough; native helper names unchanged                                                          |
+| legacy npm bin compatibility              | existing t3-only manifest/global-bin/native fixtures                                                                         | still classify valid installation; npx/pnpm/bunx t3 channel suggestions unchanged                                                                                                                                       |
+| new npm goat ownership                    | added dual-bin native fixture with unrelated global t3 and missing/matching goat                                             | unknown until goat bin proves package ownership; matching version recognized; mismatching platform manifest remains unknown; foreign t3 bytes survive                                                                   |
+| same exact version upstream cache         | pinnedRuntime's real filesystem test + SSH runShell/upload + installer HTTP test seed runtime/versions/version/t3 and marker | GOAT installs into runtime/goat/versions and upstream executable+marker bytes survive unchanged                                                                                                                         |
+| marker-only stale GOAT cache              | SSH test and successful installer fixture seed matching marker without goat                                                  | probe ready=false, install downloads/uploads rather than claiming cached; working goat/marker published; subsequent probe true                                                                                          |
+| checksum failure / concurrent preparation | retained SSH checksum-mismatch/racing-upload/launch cases and pinnedRuntime progress/concurrency cases                       | nonzero/no completed runtime on mismatch; one complete namespace after concurrent upload; no auth/remote download fallback introduced                                                                                   |
+| desktop foreign shim                      | create goat symlink to upstream T3 marker + upstream t3 entry                                                                | state unowned; install refuses; remove does not delete foreign link; after fixture removes the conflict, GOAT install/remove leaves t3 unchanged                                                                        |
+| prior GOAT shim refresh                   | existing previous-home and large-binary link tests with goat paths/new marker                                                | recognizes only GOAT marker; refresh/removal uses GOAT links; large binaries/foreign links never claimed                                                                                                                |
+| second client / runner ownership          | existing compatible managed-server test + A11 retained-readiness cases + frozen script oracle                                | ready retained GOAT runtime reuses even for older/unmarked runner; missing selected runtime errors before acquisition; persisted runner/pid/port/managed bytes and old runtime survive; captured server remains running |
+| D7-A isolation (mandatory)                | all shell fixtures use .goat except upstream-collision fixture                                                               | runtime/state/default server home point to .goat; .t3 upstream bytes untouched; no import of old runner/pid/DB; wp5 must inspect selected base-dir and host process evidence                                            |
+| ghCommand override retained from wp2      | `runtimeArchiveGh.test.ts`: spaced executable path supplied through runner.ghCommand after core + A11 + D7-A composition     | configured executable receives gh acquisition; verified cache bytes upload; no accidental PATH-default substitution                                                                                                     |
+| help/string surfaces                      | retained CLI parser help/error tests and standalone command formatter, web update command-output tests                       | commandPath/root/help goat; npx t3 remains executable package hint; web/desktop install/remove label and mobile pairing hint readable by source inspection (no static-markup tests)                                     |
 
 PowerShell has an exact NEW test hunk in `scripts/install-windows.test.ts`: real install.ps1 through a local HTTP/ZIP fixture using a copied native Node executable as the --version stand-in. It checks marker-only/broken entries force download, runnable cache avoids archive download, goat.cmd runs, and upstream runtime/t3.cmd survives. This proves installer behavior, not GOAT SEA output; hosted artifact smoke owns that proof. It skips non-Windows; a macOS skip is not Windows evidence. The 120-second harness timeout bounds native compression/extraction; it never sleeps or polls for orchestration completion.
 
@@ -5911,5 +5912,6 @@ vp exec tsc -p scripts/tsconfig.json --noEmit
 ```
 
 ## Audit fold (cycle 4)
+
 1. Blocker: packages/shared/src/legacyCliLauncher.test.ts fixture executable renamed from `…/t3` to `…/goat` (matching the launcher hunk at line ~400); add `src/legacyCliLauncher.test.ts` to the shared command in the Verification bundle.
 2. Fix: do NOT introduce new hosting domains. Every hunk that writes `goat.codes`, `app.goat.codes` or similar new URLs keeps the established URL (`t3.codes`, `app.t3.codes`, existing install URLs) while still renaming the command/executable to `goat` where the command itself is described. GOAT hosting is out of scope (no deploy authority).

@@ -22,31 +22,31 @@ Source root for all relative paths and all future commands:
 
 The branch name `goat/ssh-runtime-supply` comes from the task packet. No git command was run to verify branch/HEAD. Recheck these source anchors before applying; line numbers refer to the tree read on 2026-10-11:
 
-| Source | Observed behavior |
-|---|---|
-| `packages/ssh/src/tunnel.ts:303-311,557` | `applyScriptPlaceholders` uses a string replacement in `replaceAll`; inserting a generated runner collapses its lock-owner `$$` to `$`. Use a function replacer, preserving all occurrences. |
-| `packages/ssh/src/tunnel.ts:610-646` | Writes `RUNNER_NEXT`, installs it, chmods the published runner, then invokes its `--version`. |
-| `packages/ssh/src/tunnel.ts:713-751` | Default-runtime adoption can stop the managed PID before the `RUNNER_CHANGED` branch; unchanged runners therefore need an explicit own-runtime branch too. |
-| `packages/ssh/src/tunnel.ts:784-815` | Pairing directly overwrites `RUNNER_FILE`; replacement install unconditionally moves the candidate even when bytes match. |
-| `packages/ssh/src/tunnel.ts:839-852` | MCP overwrites unless `keepExistingRunner` is true. |
-| `packages/ssh/src/tunnel.ts:1128-1215` | Preparation already recognizes a retained runner only with `keepExistingRunner` and a state key. A missing retained runtime fails instead of replacing the retained runner. |
-| `packages/ssh/src/tunnel.ts:1307,1361` | Pairing omits its state key; MCP supplies it but retains only when the input flag asks. |
-| `packages/ssh/src/tunnel.ts:1959-2012,2055` | Entry finalizer stops the remote only if the entry still occupies the map. Stale recovery currently closes with that ownership still present. Explicit disconnect already deletes the entry first and invokes remote stop separately. |
-| `packages/ssh/src/tunnel.test.ts:150-222` | `nativeScripts` runs native Node to avoid Vite rewriting `Function.toString`; the frozen fixture protects runner/launch/pairing bytes. |
-| `packages/ssh/src/tunnel.test.ts:825-1042` | Existing retained tests explicitly expect pairing to acquire the requested newer version; revise that expectation. |
-| `packages/ssh/src/tunnel.test.ts:1045-1138` | Existing managed-reuse test explicitly omits `server-runtime.json`; it misses the own-runtime restart defect. |
-| `packages/ssh/src/tunnel.mcpSession.test.ts:34,118,169` | Fixture still uses upstream `.t3` paths and expects replacement when the flag is false. Both assumptions conflict with D1/GOAT. |
-| `packages/ssh/src/tunnel.ts:1977,2138-2170` | Scope finalization respects `leaveRemoteServerRunning`; explicit disconnect deletes/closes the entry then unconditionally stops the remote, bypassing the same policy. |
-| `apps/server/src/sshRemote/SshRemoteDispatch.ts:626-633`; `apps/desktop/src/ssh/DesktopSshEnvironment.ts:168-172` | Server dispatch sets `leaveRemoteServerRunning: true`; desktop passes no override and retains owner behavior. |
+| Source                                                                                                            | Observed behavior                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/ssh/src/tunnel.ts:303-311,557`                                                                          | `applyScriptPlaceholders` uses a string replacement in `replaceAll`; inserting a generated runner collapses its lock-owner `$$` to `$`. Use a function replacer, preserving all occurrences.                                          |
+| `packages/ssh/src/tunnel.ts:610-646`                                                                              | Writes `RUNNER_NEXT`, installs it, chmods the published runner, then invokes its `--version`.                                                                                                                                         |
+| `packages/ssh/src/tunnel.ts:713-751`                                                                              | Default-runtime adoption can stop the managed PID before the `RUNNER_CHANGED` branch; unchanged runners therefore need an explicit own-runtime branch too.                                                                            |
+| `packages/ssh/src/tunnel.ts:784-815`                                                                              | Pairing directly overwrites `RUNNER_FILE`; replacement install unconditionally moves the candidate even when bytes match.                                                                                                             |
+| `packages/ssh/src/tunnel.ts:839-852`                                                                              | MCP overwrites unless `keepExistingRunner` is true.                                                                                                                                                                                   |
+| `packages/ssh/src/tunnel.ts:1128-1215`                                                                            | Preparation already recognizes a retained runner only with `keepExistingRunner` and a state key. A missing retained runtime fails instead of replacing the retained runner.                                                           |
+| `packages/ssh/src/tunnel.ts:1307,1361`                                                                            | Pairing omits its state key; MCP supplies it but retains only when the input flag asks.                                                                                                                                               |
+| `packages/ssh/src/tunnel.ts:1959-2012,2055`                                                                       | Entry finalizer stops the remote only if the entry still occupies the map. Stale recovery currently closes with that ownership still present. Explicit disconnect already deletes the entry first and invokes remote stop separately. |
+| `packages/ssh/src/tunnel.test.ts:150-222`                                                                         | `nativeScripts` runs native Node to avoid Vite rewriting `Function.toString`; the frozen fixture protects runner/launch/pairing bytes.                                                                                                |
+| `packages/ssh/src/tunnel.test.ts:825-1042`                                                                        | Existing retained tests explicitly expect pairing to acquire the requested newer version; revise that expectation.                                                                                                                    |
+| `packages/ssh/src/tunnel.test.ts:1045-1138`                                                                       | Existing managed-reuse test explicitly omits `server-runtime.json`; it misses the own-runtime restart defect.                                                                                                                         |
+| `packages/ssh/src/tunnel.mcpSession.test.ts:34,118,169`                                                           | Fixture still uses upstream `.t3` paths and expects replacement when the flag is false. Both assumptions conflict with D1/GOAT.                                                                                                       |
+| `packages/ssh/src/tunnel.ts:1977,2138-2170`                                                                       | Scope finalization respects `leaveRemoteServerRunning`; explicit disconnect deletes/closes the entry then unconditionally stops the remote, bypassing the same policy.                                                                |
+| `apps/server/src/sshRemote/SshRemoteDispatch.ts:626-633`; `apps/desktop/src/ssh/DesktopSshEnvironment.ts:168-172` | Server dispatch sets `leaveRemoteServerRunning: true`; desktop passes no override and retains owner behavior.                                                                                                                         |
 
-| Operation | Path | Change |
-|---|---|---|
-| MODIFY | `packages/ssh/src/tunnel.ts` | Literal placeholder insertion, shared staging and expected archive-version check before publish, unchanged-runner preservation, auth retention, own-runtime reuse, local-only stale recovery/non-owner disconnect, preparation diagnostics. |
-| MODIFY | `packages/ssh/src/tunnel.test.ts` | Real-shell lifecycle/version/lock-PID tests, real remote-PID disconnect/shutdown policy tests, stale recovery, retained pairing/MCP expectations, native script extraction. |
-| MODIFY | `packages/ssh/src/tunnel.mcpSession.test.ts` | GOAT fixture paths and unconditional warm-runner retention expectations; keep ceiling-fallback tests. |
-| MODIFY | `packages/ssh/src/fixtures/remote-runner-baseline.json` | Deliberately update **six entries only**: `archive.launch`, `archive.pairing`, `mirror.launch`, `mirror.pairing`, `node.launch`, `node.pairing`. |
-| NEW | none | Add helpers/tests within the existing owning test file. |
-| DELETE | none | Remove obsolete blocks within files, not files. |
+| Operation | Path                                                    | Change                                                                                                                                                                                                                                      |
+| --------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MODIFY    | `packages/ssh/src/tunnel.ts`                            | Literal placeholder insertion, shared staging and expected archive-version check before publish, unchanged-runner preservation, auth retention, own-runtime reuse, local-only stale recovery/non-owner disconnect, preparation diagnostics. |
+| MODIFY    | `packages/ssh/src/tunnel.test.ts`                       | Real-shell lifecycle/version/lock-PID tests, real remote-PID disconnect/shutdown policy tests, stale recovery, retained pairing/MCP expectations, native script extraction.                                                                 |
+| MODIFY    | `packages/ssh/src/tunnel.mcpSession.test.ts`            | GOAT fixture paths and unconditional warm-runner retention expectations; keep ceiling-fallback tests.                                                                                                                                       |
+| MODIFY    | `packages/ssh/src/fixtures/remote-runner-baseline.json` | Deliberately update **six entries only**: `archive.launch`, `archive.pairing`, `mirror.launch`, `mirror.pairing`, `node.launch`, `node.pairing`.                                                                                            |
+| NEW       | none                                                    | Add helpers/tests within the existing owning test file.                                                                                                                                                                                     |
+| DELETE    | none                                                    | Remove obsolete blocks within files, not files.                                                                                                                                                                                             |
 
 No transport schema/type/enum is added. Creation/serialization/deserialization/consumers: N/A; the existing runner option is derived locally for auth preparation and not sent over a new wire contract. Desktop launch, server dispatch, pairing and MCP consume the shared SSH package. Web/mobile access through the existing server paths; no frontend entry point or provider adapter changes. No internal/user document addition is needed: the implementation constraint belongs beside the shared installer, and this plan is the parent-requested work artifact.
 
@@ -391,8 +391,11 @@ Add these tests beside the existing frozen-byte test. They use native generation
 it.effect("preserves literal shell PIDs through every nested script builder", () =>
   Effect.gen(function* () {
     const lockOwner = `printf '%s\\n' "$$" > "$T3_LOCK/pid.tmp"`;
-    for (const input of [ARCHIVE, { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
-      { nodeScriptPath: "/fixture/cli entry.mjs", nodeEngineRange: TEST_NODE_ENGINE_RANGE }]) {
+    for (const input of [
+      ARCHIVE,
+      { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
+      { nodeScriptPath: "/fixture/cli entry.mjs", nodeEngineRange: TEST_NODE_ENGINE_RANGE },
+    ]) {
       const generated = yield* nativeScripts(input);
       for (const field of ["runner", "launch", "pairing", "mcp"] as const) {
         assert.include(generated[field], lockOwner, field);
@@ -493,11 +496,16 @@ For the two pretty-JSON pairing tests at source lines 563 and 589, preparation n
 const spawner = ChildProcessSpawner.make((command) =>
   Effect.gen(function* () {
     const input = command._tag === "StandardCommand" ? command.options.stdin : undefined;
-    const bytes = input !== undefined && typeof input === "object" &&
-      "stream" in input && Stream.isStream(input.stream)
-      ? yield* input.stream.pipe(Stream.runCollect)
-      : [];
-    const script = new TextDecoder().decode(new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))));
+    const bytes =
+      input !== undefined &&
+      typeof input === "object" &&
+      "stream" in input &&
+      Stream.isStream(input.stream)
+        ? yield* input.stream.pipe(Stream.runCollect)
+        : [];
+    const script = new TextDecoder().decode(
+      new Uint8Array(bytes.flatMap((chunk) => Array.from(chunk))),
+    );
     if (script.includes("ready=false")) {
       return makeSuccessfulProcess(JSON.stringify({ platform, arch, ready: true }));
     }
@@ -532,31 +540,40 @@ Strengthen the existing local-cache error test, with this hunk only in `"surface
 Append the following block after the existing suites. It executes **native generated bytes** using real `sh`, `tar`, checksum tools and loopback HTTP. No SSH transport or external release request occurs; the mirror is `file://` and HOME is a scoped temp directory. Use `it.live` because native process milestones are outside TestClock; Windows skips only these POSIX-shell cases.
 
 ```ts
-describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("install before runner switch", () => {
-  const stateKey = "711bc738002d72fd";
-  const oldVersion = "1.2.2-preview.20260910.1";
-  const nextVersion = ARCHIVE.archiveVersion;
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "install before runner switch",
+  () => {
+    const stateKey = "711bc738002d72fd";
+    const oldVersion = "1.2.2-preview.20260910.1";
+    const nextVersion = ARCHIVE.archiveVersion;
 
-  const shell = Effect.fn("test.runnerSwitch.shell")(function* (
-    home: string, script: string, args: string[] = [],
-    pathValue: string = process.env.PATH ?? "",
-  ) {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const child = yield* spawner.spawn(ChildProcess.make("sh", ["-s", "--", ...args], {
-      env: { HOME: home, PATH: pathValue, LC_ALL: "C" },
-      extendEnv: false,
-      stdin: { stream: Stream.make(encoder.encode(script)), endOnDone: true },
-    }));
-    return yield* Effect.all({
-      stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
-      stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
-      code: child.exitCode.pipe(Effect.map(Number)),
-    }, { concurrency: "unbounded" });
-  });
+    const shell = Effect.fn("test.runnerSwitch.shell")(function* (
+      home: string,
+      script: string,
+      args: string[] = [],
+      pathValue: string = process.env.PATH ?? "",
+    ) {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const child = yield* spawner.spawn(
+        ChildProcess.make("sh", ["-s", "--", ...args], {
+          env: { HOME: home, PATH: pathValue, LC_ALL: "C" },
+          extendEnv: false,
+          stdin: { stream: Stream.make(encoder.encode(script)), endOnDone: true },
+        }),
+      );
+      return yield* Effect.all(
+        {
+          stdout: child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+          stderr: child.stderr.pipe(Stream.decodeText(), Stream.mkString),
+          code: child.exitCode.pipe(Effect.map(Number)),
+        },
+        { concurrency: "unbounded" },
+      );
+    });
 
-  // Written into the old runtime and the tiny release archive. This is a
-  // behavioral double for the executable, not a duplicate of the installer.
-  const executable = (version: string) => `#!${process.execPath}
+    // Written into the old runtime and the tiny release archive. This is a
+    // behavioral double for the executable, not a duplicate of the installer.
+    const executable = (version: string) => `#!${process.execPath}
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -642,315 +659,429 @@ if (args[0] === "--version") {
 } else process.exit(2);
 `;
 
-  const fixture = Effect.fn("test.runnerSwitch.fixture")(function* (
-    failure: "none" | "missing-release" | "bad-checksum" | "broken-executable" | "wrong-version",
-    options: { seed?: boolean; identical?: boolean; publishDefault?: boolean } = {},
-  ) {
-    const fs = yield* FileSystem.FileSystem;
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-switch-" });
-    const state = `${home}/.goat/ssh-launch/${stateKey}`;
-    const previous = options.identical ? nextVersion : oldVersion;
-    const oldRuntime = `${home}/.goat/runtime/goat/versions/${previous}`;
-    const test = `${home}/.test`;
-    yield* fs.makeDirectory(state, { recursive: true });
-    yield* fs.makeDirectory(test, { recursive: true });
-    yield* fs.writeFileString(`${test}/events`, "");
-    yield* fs.writeFileString(`${test}/pids`, "");
-    const upstream = `${home}/.t3/runtime/versions/${previous}`;
-    yield* fs.makeDirectory(upstream, { recursive: true });
-    yield* fs.writeFileString(`${upstream}/t3`, "upstream executable sentinel\n");
-    yield* fs.writeFileString(`${upstream}/.install-complete`, `${previous}\n`);
-    yield* fs.writeFileString(`${test}/config.json`, JSON.stringify({
-      publishDefault: options.publishDefault !== false,
-    }));
-    const fifo = yield* spawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
-    assert.equal(Number(yield* fifo.exitCode), 0);
-    // Register last-created server cleanup before any server is started.
-    // Every PID below is emitted by this fixture's executable, not searched.
-    yield* Effect.addFinalizer(() => fs.readFileString(`${test}/pids`).pipe(
-      Effect.flatMap((data) => Effect.sync(() => {
-        for (const pid of data.trim().split("\n").filter(Boolean).map(Number)) {
-          try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ }
+    const fixture = Effect.fn("test.runnerSwitch.fixture")(function* (
+      failure: "none" | "missing-release" | "bad-checksum" | "broken-executable" | "wrong-version",
+      options: { seed?: boolean; identical?: boolean; publishDefault?: boolean } = {},
+    ) {
+      const fs = yield* FileSystem.FileSystem;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-switch-" });
+      const state = `${home}/.goat/ssh-launch/${stateKey}`;
+      const previous = options.identical ? nextVersion : oldVersion;
+      const oldRuntime = `${home}/.goat/runtime/goat/versions/${previous}`;
+      const test = `${home}/.test`;
+      yield* fs.makeDirectory(state, { recursive: true });
+      yield* fs.makeDirectory(test, { recursive: true });
+      yield* fs.writeFileString(`${test}/events`, "");
+      yield* fs.writeFileString(`${test}/pids`, "");
+      const upstream = `${home}/.t3/runtime/versions/${previous}`;
+      yield* fs.makeDirectory(upstream, { recursive: true });
+      yield* fs.writeFileString(`${upstream}/t3`, "upstream executable sentinel\n");
+      yield* fs.writeFileString(`${upstream}/.install-complete`, `${previous}\n`);
+      yield* fs.writeFileString(
+        `${test}/config.json`,
+        JSON.stringify({
+          publishDefault: options.publishDefault !== false,
+        }),
+      );
+      const fifo = yield* spawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
+      assert.equal(Number(yield* fifo.exitCode), 0);
+      // Register last-created server cleanup before any server is started.
+      // Every PID below is emitted by this fixture's executable, not searched.
+      yield* Effect.addFinalizer(() =>
+        fs.readFileString(`${test}/pids`).pipe(
+          Effect.flatMap((data) =>
+            Effect.sync(() => {
+              for (const pid of data.trim().split("\n").filter(Boolean).map(Number)) {
+                try {
+                  process.kill(pid, "SIGKILL");
+                } catch {
+                  /* already exited */
+                }
+              }
+            }),
+          ),
+          Effect.ignore,
+        ),
+      );
+      const mirror = `file://${home}/mirror`;
+      const runner = { ...ARCHIVE, releaseBaseUrl: mirror };
+      const scripts = yield* nativeScripts(runner);
+      const oldScripts = yield* nativeScripts({ archiveVersion: previous, releaseBaseUrl: mirror });
+      let oldProcess: ChildProcessSpawner.ChildProcessHandle | null = null;
+      if (options.seed !== false) {
+        yield* fs.makeDirectory(oldRuntime, { recursive: true });
+        yield* fs.writeFileString(`${oldRuntime}/goat`, executable(previous));
+        yield* fs.chmod(`${oldRuntime}/goat`, 0o700);
+        yield* fs.writeFileString(`${oldRuntime}/.install-complete`, `${previous}\n`);
+        yield* fs.writeFileString(`${state}/run-t3.sh`, oldScripts.runner + "\n");
+        yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
+        oldProcess = yield* spawner.spawn(
+          ChildProcess.make(`${oldRuntime}/goat`, ["serve", "--test-seed"], {
+            env: { HOME: home, PATH: process.env.PATH ?? "" },
+            extendEnv: false,
+          }),
+        );
+        const ready = JSON.parse(
+          yield* oldProcess.stdout.pipe(
+            Stream.decodeText(),
+            Stream.splitLines,
+            Stream.take(1),
+            Stream.mkString,
+          ),
+        ) as { pid: number; port: number };
+        assert.equal(ready.pid, oldProcess.pid);
+        yield* fs.writeFileString(
+          `${test}/config.json`,
+          JSON.stringify({
+            publishDefault: options.publishDefault !== false,
+            seedPid: ready.pid,
+          }),
+        );
+        yield* fs.writeFileString(`${state}/pid`, `${ready.pid}\n`);
+        yield* fs.writeFileString(`${state}/port`, `${ready.port}\n`);
+        yield* fs.writeFileString(`${state}/managed`, "managed\n");
+      }
+      const stem = `goat-${nextVersion}-${platform}-${arch}`;
+      const release = `${home}/mirror/v${nextVersion}`;
+      const stage = `${home}/stage/${stem}`;
+      yield* fs.makeDirectory(stage, { recursive: true });
+      yield* fs.makeDirectory(release, { recursive: true });
+      yield* fs.writeFileString(
+        `${stage}/goat`,
+        failure === "broken-executable"
+          ? "#!/bin/sh\nprintf 'wrong architecture\\n' >&2\nexit 95\n"
+          : executable(failure === "wrong-version" ? oldVersion : nextVersion),
+      );
+      yield* fs.chmod(`${stage}/goat`, 0o700);
+      const packed = yield* spawner.spawn(
+        ChildProcess.make("tar", [
+          "-czf",
+          `${release}/${stem}.tar.gz`,
+          "-C",
+          `${home}/stage`,
+          stem,
+        ]),
+      );
+      assert.equal(Number(yield* packed.exitCode), 0);
+      const crypto = yield* Crypto.Crypto;
+      const sum = Hex.encode(
+        yield* crypto.digest("SHA-256", yield* fs.readFile(`${release}/${stem}.tar.gz`)),
+      );
+      yield* fs.writeFileString(
+        `${release}/SHA256SUMS`,
+        `${failure === "bad-checksum" ? "0".repeat(64) : sum}  ${stem}.tar.gz\n`,
+      );
+      if (failure === "missing-release") yield* fs.remove(release, { recursive: true });
+      const snapshot = Effect.gen(function* () {
+        const files = ["run-t3.sh", "pid", "port", "managed"];
+        const values: Record<string, unknown> = {};
+        for (const file of files)
+          if (yield* fs.exists(`${state}/${file}`)) {
+            values[file] = yield* fs.readFileString(`${state}/${file}`);
+          }
+        if (yield* fs.exists(`${state}/run-t3.sh`)) {
+          const info = yield* fs.stat(`${state}/run-t3.sh`);
+          values.runnerMetadata = { ino: info.ino, mode: info.mode, mtime: info.mtime };
         }
-      })), Effect.ignore,
-    ));
-    const mirror = `file://${home}/mirror`;
-    const runner = { ...ARCHIVE, releaseBaseUrl: mirror };
-    const scripts = yield* nativeScripts(runner);
-    const oldScripts = yield* nativeScripts({ archiveVersion: previous, releaseBaseUrl: mirror });
-    let oldProcess: ChildProcessSpawner.ChildProcessHandle | null = null;
-    if (options.seed !== false) {
-      yield* fs.makeDirectory(oldRuntime, { recursive: true });
-      yield* fs.writeFileString(`${oldRuntime}/goat`, executable(previous));
-      yield* fs.chmod(`${oldRuntime}/goat`, 0o700);
-      yield* fs.writeFileString(`${oldRuntime}/.install-complete`, `${previous}\n`);
-      yield* fs.writeFileString(`${state}/run-t3.sh`, oldScripts.runner + "\n");
-      yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
-      oldProcess = yield* spawner.spawn(ChildProcess.make(`${oldRuntime}/goat`, ["serve", "--test-seed"], {
-        env: { HOME: home, PATH: process.env.PATH ?? "" }, extendEnv: false,
-      }));
-      const ready = JSON.parse(yield* oldProcess.stdout.pipe(
-        Stream.decodeText(), Stream.splitLines, Stream.take(1), Stream.mkString,
-      )) as { pid: number; port: number };
-      assert.equal(ready.pid, oldProcess.pid);
-      yield* fs.writeFileString(`${test}/config.json`, JSON.stringify({
-        publishDefault: options.publishDefault !== false,
-        seedPid: ready.pid,
-      }));
-      yield* fs.writeFileString(`${state}/pid`, `${ready.pid}\n`);
-      yield* fs.writeFileString(`${state}/port`, `${ready.port}\n`);
-      yield* fs.writeFileString(`${state}/managed`, "managed\n");
-    }
-    const stem = `goat-${nextVersion}-${platform}-${arch}`;
-    const release = `${home}/mirror/v${nextVersion}`;
-    const stage = `${home}/stage/${stem}`;
-    yield* fs.makeDirectory(stage, { recursive: true });
-    yield* fs.makeDirectory(release, { recursive: true });
-    yield* fs.writeFileString(`${stage}/goat`, failure === "broken-executable"
-      ? "#!/bin/sh\nprintf 'wrong architecture\\n' >&2\nexit 95\n"
-      : executable(failure === "wrong-version" ? oldVersion : nextVersion));
-    yield* fs.chmod(`${stage}/goat`, 0o700);
-    const packed = yield* spawner.spawn(ChildProcess.make("tar", [
-      "-czf", `${release}/${stem}.tar.gz`, "-C", `${home}/stage`, stem,
-    ]));
-    assert.equal(Number(yield* packed.exitCode), 0);
-    const crypto = yield* Crypto.Crypto;
-    const sum = Hex.encode(yield* crypto.digest("SHA-256", yield* fs.readFile(`${release}/${stem}.tar.gz`)));
-    yield* fs.writeFileString(`${release}/SHA256SUMS`,
-      `${failure === "bad-checksum" ? "0".repeat(64) : sum}  ${stem}.tar.gz\n`);
-    if (failure === "missing-release") yield* fs.remove(release, { recursive: true });
-    const snapshot = Effect.gen(function* () {
-      const files = ["run-t3.sh", "pid", "port", "managed"];
-      const values: Record<string, unknown> = {};
-      for (const file of files) if (yield* fs.exists(`${state}/${file}`)) {
-        values[file] = yield* fs.readFileString(`${state}/${file}`);
-      }
-      if (yield* fs.exists(`${state}/run-t3.sh`)) {
-        const info = yield* fs.stat(`${state}/run-t3.sh`);
-        values.runnerMetadata = { ino: info.ino, mode: info.mode, mtime: info.mtime };
-      }
-      if (yield* fs.exists(oldRuntime)) {
-        values.oldExecutable = yield* fs.readFileString(`${oldRuntime}/goat`);
-        values.oldMarker = yield* fs.readFileString(`${oldRuntime}/.install-complete`);
-        for (const file of ["goat", ".install-complete"]) {
-          const info = yield* fs.stat(`${oldRuntime}/${file}`);
-          values[`oldMetadata:${file}`] = { ino: info.ino, mode: info.mode, mtime: info.mtime };
+        if (yield* fs.exists(oldRuntime)) {
+          values.oldExecutable = yield* fs.readFileString(`${oldRuntime}/goat`);
+          values.oldMarker = yield* fs.readFileString(`${oldRuntime}/.install-complete`);
+          for (const file of ["goat", ".install-complete"]) {
+            const info = yield* fs.stat(`${oldRuntime}/${file}`);
+            values[`oldMetadata:${file}`] = { ino: info.ino, mode: info.mode, mtime: info.mtime };
+          }
         }
-      }
-      const descriptor = `${home}/.goat/userdata/server-runtime.json`;
-      if (yield* fs.exists(descriptor)) values.descriptor = yield* fs.readFileString(descriptor);
-      values.upstreamExecutable = yield* fs.readFileString(`${upstream}/t3`);
-      values.upstreamMarker = yield* fs.readFileString(`${upstream}/.install-complete`);
-      return values;
+        const descriptor = `${home}/.goat/userdata/server-runtime.json`;
+        if (yield* fs.exists(descriptor)) values.descriptor = yield* fs.readFileString(descriptor);
+        values.upstreamExecutable = yield* fs.readFileString(`${upstream}/t3`);
+        values.upstreamMarker = yield* fs.readFileString(`${upstream}/.install-complete`);
+        return values;
+      });
+      const events = fs.readFileString(`${test}/events`).pipe(
+        Effect.map((data) =>
+          data
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map(
+              (line) =>
+                JSON.parse(line) as {
+                  type: string;
+                  version: string;
+                  runner?: string;
+                  oldAlive?: boolean;
+                  installed?: string;
+                  complete?: string;
+                },
+            ),
+        ),
+      );
+      const cleanCandidates = Effect.gen(function* () {
+        assert.deepEqual(
+          (yield* fs.readDirectory(state)).filter((name) => name.startsWith("run-t3.next.")),
+          [],
+        );
+      });
+      return { home, state, runner, scripts, oldProcess, snapshot, events, cleanCandidates, fs };
     });
-    const events = fs.readFileString(`${test}/events`).pipe(Effect.map((data) =>
-      data.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as {
-        type: string; version: string; runner?: string; oldAlive?: boolean;
-        installed?: string; complete?: string;
-      }),
-    ));
-    const cleanCandidates = Effect.gen(function* () {
-      assert.deepEqual((yield* fs.readDirectory(state)).filter((name) => name.startsWith("run-t3.next.")), []);
-    });
-    return { home, state, runner, scripts, oldProcess, snapshot, events, cleanCandidates, fs };
-  });
 
-  it.live.each([
-    { failure: "missing-release", publishDefault: true },
-    { failure: "missing-release", publishDefault: false },
-    { failure: "bad-checksum", publishDefault: true },
-    { failure: "bad-checksum", publishDefault: false },
-    { failure: "broken-executable", publishDefault: true },
-    { failure: "broken-executable", publishDefault: false },
-    { failure: "wrong-version", publishDefault: true },
-    { failure: "wrong-version", publishDefault: false },
-  ] as const)("$failure preserves the live server (default descriptor=$publishDefault)", ({ failure, publishDefault }) =>
+    it.live.each([
+      { failure: "missing-release", publishDefault: true },
+      { failure: "missing-release", publishDefault: false },
+      { failure: "bad-checksum", publishDefault: true },
+      { failure: "bad-checksum", publishDefault: false },
+      { failure: "broken-executable", publishDefault: true },
+      { failure: "broken-executable", publishDefault: false },
+      { failure: "wrong-version", publishDefault: true },
+      { failure: "wrong-version", publishDefault: false },
+    ] as const)(
+      "$failure preserves the live server (default descriptor=$publishDefault)",
+      ({ failure, publishDefault }) =>
+        Effect.gen(function* () {
+          const f = yield* fixture(failure, { publishDefault });
+          const before = yield* f.snapshot;
+          const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+          assert.notEqual(result.code, 0);
+          assert.include(result.stderr, nextVersion);
+          assert.include(result.stderr, "existing runner and server");
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+          yield* f.cleanCandidates;
+          if (failure === "wrong-version") {
+            assert.include(result.stderr, `expected goat v${nextVersion}`);
+            assert.include(result.stderr, `reported "goat v${oldVersion}"`);
+            assert.isTrue(
+              (yield* f.events).some(
+                (event) =>
+                  event.type === "version" && event.version === oldVersion && event.oldAlive,
+              ),
+            );
+          } else {
+            assert.isFalse(
+              yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/${nextVersion}`),
+            );
+          }
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live("verifies, publishes, stops, then starts on a successful upgrade", () =>
       Effect.gen(function* () {
-        const f = yield* fixture(failure, { publishDefault });
+        const f = yield* fixture("none");
         const before = yield* f.snapshot;
         const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
-        assert.notEqual(result.code, 0);
-        assert.include(result.stderr, nextVersion);
-        assert.include(result.stderr, "existing runner and server");
-        assert.deepEqual(yield* f.snapshot, before);
-        assert.isTrue(yield* f.oldProcess!.isRunning);
-        assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
-        yield* f.cleanCandidates;
-        if (failure === "wrong-version") {
-          assert.include(result.stderr, `expected goat v${nextVersion}`);
-          assert.include(result.stderr, `reported "goat v${oldVersion}"`);
-          assert.isTrue((yield* f.events).some((event) =>
-            event.type === "version" && event.version === oldVersion && event.oldAlive));
-        } else {
-          assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/${nextVersion}`));
-        }
-      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-    );
-
-  it.live("verifies, publishes, stops, then starts on a successful upgrade", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture("none");
-      const before = yield* f.snapshot;
-      const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
-      assert.equal(result.code, 0, result.stderr);
-      const events = yield* f.events;
-      const verified = events.findIndex((event) => event.type === "version" && event.version === nextVersion);
-      const stopped = events.findIndex((event) => event.type === "stop" && event.version === oldVersion);
-      const started = events.findIndex((event) => event.type === "start" && event.version === nextVersion);
-      const published = events.findIndex((event) => event.type === "version" && event.version === nextVersion &&
-        event.runner?.includes(`T3_ARCHIVE_VERSION='${nextVersion}'`));
-      assert.isAtLeast(verified, 0);
-      assert.include(events[verified]!.runner!, `T3_ARCHIVE_VERSION='${oldVersion}'`);
-      assert.isTrue(events[verified]!.oldAlive);
-      assert.isTrue(events[published]!.oldAlive);
-      assert.isBelow(verified, published);
-      assert.isBelow(published, stopped);
-      assert.isBelow(verified, stopped);
-      assert.isBelow(stopped, started);
-      assert.include(events[started]!.installed!, `T3_ARCHIVE_VERSION='${nextVersion}'`);
-      assert.equal(events[started]!.complete, nextVersion);
-      assert.equal(Number(yield* f.oldProcess!.exitCode), 0);
-      const resultJson = JSON.parse(result.stdout.trim()) as { serverKind: string };
-      assert.equal(resultJson.serverKind, "managed");
-      const after = yield* f.snapshot;
-      for (const key of ["oldExecutable", "oldMarker", "oldMetadata:goat", "oldMetadata:.install-complete",
-        "upstreamExecutable", "upstreamMarker"]) assert.deepEqual(after[key], before[key]);
-      yield* f.cleanCandidates;
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-  );
-
-  it.live("identical runner retains managed PID even with its default descriptor", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture("none", { identical: true });
-      const before = yield* f.snapshot;
-      const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
-      assert.equal(result.code, 0, result.stderr);
-      assert.deepEqual(yield* f.snapshot, before);
-      assert.isTrue(yield* f.oldProcess!.isRunning);
-      assert.deepEqual((yield* f.events).filter((event) => event.type === "start" || event.type === "stop")
-        .map((event) => event.type), ["start"]);
-      yield* f.cleanCandidates;
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-  );
-
-  it.live("keep-existing ignores a newer unavailable release and leaves the older runtime untouched", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture("missing-release");
-      const before = yield* f.snapshot;
-      const scripts = yield* nativeScripts({ ...f.runner, keepExistingRunner: true });
-      const result = yield* shell(f.home, scripts.launch, [stateKey]);
-      assert.equal(result.code, 0, result.stderr);
-      assert.deepEqual(yield* f.snapshot, before);
-      assert.isTrue(yield* f.oldProcess!.isRunning);
-      assert.isFalse((yield* f.events).some((event) => event.version === nextVersion));
-      yield* f.cleanCandidates;
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-  );
-
-  it.live.each(["pairing", "mcp"] as const)
-    ("warm %s uses the retained runner even without a keep flag", (entry) =>
-      Effect.gen(function* () {
-        const f = yield* fixture("missing-release");
-        const before = yield* f.snapshot;
-        const result = yield* shell(f.home, f.scripts[entry]);
         assert.equal(result.code, 0, result.stderr);
-        if (entry === "pairing") {
-          assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
-        } else {
-          assert.deepEqual(yield* SshTunnel.decodeRemoteMcpSessionOutput(result.stdout), {
-            token: "fixture-session", expiresAt: null, runtimeModeCeilingApplied: false,
-          });
-        }
-        assert.deepEqual(yield* f.snapshot, before);
-        assert.isTrue(yield* f.oldProcess!.isRunning);
-        assert.deepEqual((yield* f.events).filter((event) => event.type === "auth")
-          .map((event) => event.version), [oldVersion]);
-        yield* f.cleanCandidates;
-      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-    );
-
-  it.live.each(["pairing", "mcp"] as const)
-    ("cold %s verifies and publishes before issuing credentials", (entry) =>
-      Effect.gen(function* () {
-        const f = yield* fixture("none", { seed: false });
-        const result = yield* shell(f.home, f.scripts[entry]);
-        assert.equal(result.code, 0, result.stderr);
-        if (entry === "pairing") {
-          assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
-        } else {
-          assert.deepEqual(yield* SshTunnel.decodeRemoteMcpSessionOutput(result.stdout), {
-            token: "fixture-session", expiresAt: null, runtimeModeCeilingApplied: false,
-          });
-        }
         const events = yield* f.events;
-        const verified = events.findIndex((event) => event.type === "version");
-        const issued = events.findIndex((event) => event.type === "auth");
+        const verified = events.findIndex(
+          (event) => event.type === "version" && event.version === nextVersion,
+        );
+        const stopped = events.findIndex(
+          (event) => event.type === "stop" && event.version === oldVersion,
+        );
+        const started = events.findIndex(
+          (event) => event.type === "start" && event.version === nextVersion,
+        );
+        const published = events.findIndex(
+          (event) =>
+            event.type === "version" &&
+            event.version === nextVersion &&
+            event.runner?.includes(`T3_ARCHIVE_VERSION='${nextVersion}'`),
+        );
         assert.isAtLeast(verified, 0);
-        assert.isBelow(verified, issued);
-        assert.include(yield* f.fs.readFileString(`${f.state}/run-t3.sh`), `T3_ARCHIVE_VERSION='${nextVersion}'`);
-        assert.equal((yield* f.fs.readFileString(`${f.home}/.goat/runtime/goat/versions/${nextVersion}/.install-complete`)).trim(), nextVersion);
-        assert.isFalse(yield* f.fs.exists(`${f.state}/pid`));
+        assert.include(events[verified]!.runner!, `T3_ARCHIVE_VERSION='${oldVersion}'`);
+        assert.isTrue(events[verified]!.oldAlive);
+        assert.isTrue(events[published]!.oldAlive);
+        assert.isBelow(verified, published);
+        assert.isBelow(published, stopped);
+        assert.isBelow(verified, stopped);
+        assert.isBelow(stopped, started);
+        assert.include(events[started]!.installed!, `T3_ARCHIVE_VERSION='${nextVersion}'`);
+        assert.equal(events[started]!.complete, nextVersion);
+        assert.equal(Number(yield* f.oldProcess!.exitCode), 0);
+        const resultJson = JSON.parse(result.stdout.trim()) as { serverKind: string };
+        assert.equal(resultJson.serverKind, "managed");
+        const after = yield* f.snapshot;
+        for (const key of [
+          "oldExecutable",
+          "oldMarker",
+          "oldMetadata:goat",
+          "oldMetadata:.install-complete",
+          "upstreamExecutable",
+          "upstreamMarker",
+        ])
+          assert.deepEqual(after[key], before[key]);
         yield* f.cleanCandidates;
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
 
-  it.live.each([
-    { entry: "pairing", failure: "missing-release" },
-    { entry: "pairing", failure: "bad-checksum" },
-    { entry: "pairing", failure: "broken-executable" },
-    { entry: "pairing", failure: "wrong-version" },
-    { entry: "mcp", failure: "missing-release" },
-    { entry: "mcp", failure: "bad-checksum" },
-    { entry: "mcp", failure: "broken-executable" },
-    { entry: "mcp", failure: "wrong-version" },
-  ] as const)("cold $entry refuses $failure without publishing or issuing credentials", ({ entry, failure }) =>
-    Effect.gen(function* () {
-      const f = yield* fixture(failure, { seed: false });
-      const before = yield* f.snapshot;
-      const result = yield* shell(f.home, f.scripts[entry]);
-      assert.notEqual(result.code, 0);
-      assert.include(result.stderr, nextVersion);
-      assert.include(result.stderr, "existing runner and server");
-      assert.deepEqual(yield* f.snapshot, before);
-      for (const file of ["run-t3.sh", "pid", "port", "managed"]) {
-        assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
-      }
-      assert.isFalse((yield* f.events).some((event) => event.type === "auth" || event.type === "start"));
-      if (failure === "wrong-version") {
-        assert.include(result.stderr, `expected goat v${nextVersion}`);
-        assert.include(result.stderr, `reported "goat v${oldVersion}"`);
-      } else {
-        assert.isFalse(yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/${nextVersion}`));
-      }
-      yield* f.cleanCandidates;
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-  );
+    it.live("identical runner retains managed PID even with its default descriptor", () =>
+      Effect.gen(function* () {
+        const f = yield* fixture("none", { identical: true });
+        const before = yield* f.snapshot;
+        const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+        assert.equal(result.code, 0, result.stderr);
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.isTrue(yield* f.oldProcess!.isRunning);
+        assert.deepEqual(
+          (yield* f.events)
+            .filter((event) => event.type === "start" || event.type === "stop")
+            .map((event) => event.type),
+          ["start"],
+        );
+        yield* f.cleanCandidates;
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
 
-  it.live("TERM during candidate validation removes the candidate and preserves the old server", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture("none");
-      const before = yield* f.snapshot;
-      const candidateRuntime = `${f.home}/.goat/runtime/goat/versions/${nextVersion}`;
-      yield* f.fs.makeDirectory(candidateRuntime, { recursive: true });
-      yield* f.fs.writeFileString(`${candidateRuntime}/.install-complete`, `${nextVersion}\n`);
-      yield* f.fs.writeFileString(`${candidateRuntime}/goat`, `#!${process.execPath}
+    it.live(
+      "keep-existing ignores a newer unavailable release and leaves the older runtime untouched",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture("missing-release");
+          const before = yield* f.snapshot;
+          const scripts = yield* nativeScripts({ ...f.runner, keepExistingRunner: true });
+          const result = yield* shell(f.home, scripts.launch, [stateKey]);
+          assert.equal(result.code, 0, result.stderr);
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.version === nextVersion));
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["pairing", "mcp"] as const)(
+      "warm %s uses the retained runner even without a keep flag",
+      (entry) =>
+        Effect.gen(function* () {
+          const f = yield* fixture("missing-release");
+          const before = yield* f.snapshot;
+          const result = yield* shell(f.home, f.scripts[entry]);
+          assert.equal(result.code, 0, result.stderr);
+          if (entry === "pairing") {
+            assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
+          } else {
+            assert.deepEqual(yield* SshTunnel.decodeRemoteMcpSessionOutput(result.stdout), {
+              token: "fixture-session",
+              expiresAt: null,
+              runtimeModeCeilingApplied: false,
+            });
+          }
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.deepEqual(
+            (yield* f.events)
+              .filter((event) => event.type === "auth")
+              .map((event) => event.version),
+            [oldVersion],
+          );
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each(["pairing", "mcp"] as const)(
+      "cold %s verifies and publishes before issuing credentials",
+      (entry) =>
+        Effect.gen(function* () {
+          const f = yield* fixture("none", { seed: false });
+          const result = yield* shell(f.home, f.scripts[entry]);
+          assert.equal(result.code, 0, result.stderr);
+          if (entry === "pairing") {
+            assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
+          } else {
+            assert.deepEqual(yield* SshTunnel.decodeRemoteMcpSessionOutput(result.stdout), {
+              token: "fixture-session",
+              expiresAt: null,
+              runtimeModeCeilingApplied: false,
+            });
+          }
+          const events = yield* f.events;
+          const verified = events.findIndex((event) => event.type === "version");
+          const issued = events.findIndex((event) => event.type === "auth");
+          assert.isAtLeast(verified, 0);
+          assert.isBelow(verified, issued);
+          assert.include(
+            yield* f.fs.readFileString(`${f.state}/run-t3.sh`),
+            `T3_ARCHIVE_VERSION='${nextVersion}'`,
+          );
+          assert.equal(
+            (yield* f.fs.readFileString(
+              `${f.home}/.goat/runtime/goat/versions/${nextVersion}/.install-complete`,
+            )).trim(),
+            nextVersion,
+          );
+          assert.isFalse(yield* f.fs.exists(`${f.state}/pid`));
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live.each([
+      { entry: "pairing", failure: "missing-release" },
+      { entry: "pairing", failure: "bad-checksum" },
+      { entry: "pairing", failure: "broken-executable" },
+      { entry: "pairing", failure: "wrong-version" },
+      { entry: "mcp", failure: "missing-release" },
+      { entry: "mcp", failure: "bad-checksum" },
+      { entry: "mcp", failure: "broken-executable" },
+      { entry: "mcp", failure: "wrong-version" },
+    ] as const)(
+      "cold $entry refuses $failure without publishing or issuing credentials",
+      ({ entry, failure }) =>
+        Effect.gen(function* () {
+          const f = yield* fixture(failure, { seed: false });
+          const before = yield* f.snapshot;
+          const result = yield* shell(f.home, f.scripts[entry]);
+          assert.notEqual(result.code, 0);
+          assert.include(result.stderr, nextVersion);
+          assert.include(result.stderr, "existing runner and server");
+          assert.deepEqual(yield* f.snapshot, before);
+          for (const file of ["run-t3.sh", "pid", "port", "managed"]) {
+            assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
+          }
+          assert.isFalse(
+            (yield* f.events).some((event) => event.type === "auth" || event.type === "start"),
+          );
+          if (failure === "wrong-version") {
+            assert.include(result.stderr, `expected goat v${nextVersion}`);
+            assert.include(result.stderr, `reported "goat v${oldVersion}"`);
+          } else {
+            assert.isFalse(
+              yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/${nextVersion}`),
+            );
+          }
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.live(
+      "TERM during candidate validation removes the candidate and preserves the old server",
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture("none");
+          const before = yield* f.snapshot;
+          const candidateRuntime = `${f.home}/.goat/runtime/goat/versions/${nextVersion}`;
+          yield* f.fs.makeDirectory(candidateRuntime, { recursive: true });
+          yield* f.fs.writeFileString(`${candidateRuntime}/.install-complete`, `${nextVersion}\n`);
+          yield* f.fs.writeFileString(
+            `${candidateRuntime}/goat`,
+            `#!${process.execPath}
 const fs = require("node:fs");
 fs.appendFileSync(process.env.HOME + "/.test/events", JSON.stringify({ type: "interrupted-validation", version: ${JSON.stringify(nextVersion)} }) + "\\n");
 process.kill(process.ppid, "SIGTERM");
 process.exit(95);
-`);
-      yield* f.fs.chmod(`${candidateRuntime}/goat`, 0o700);
-      const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
-      assert.notEqual(result.code, 0);
-      assert.isTrue((yield* f.events).some((event) => event.type === "interrupted-validation"));
-      assert.deepEqual(yield* f.snapshot, before);
-      assert.isTrue(yield* f.oldProcess!.isRunning);
-      assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
-      yield* f.cleanCandidates;
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-  );
-});
+`,
+          );
+          yield* f.fs.chmod(`${candidateRuntime}/goat`, 0o700);
+          const result = yield* shell(f.home, f.scripts.launch, [stateKey]);
+          assert.notEqual(result.code, 0);
+          assert.isTrue((yield* f.events).some((event) => event.type === "interrupted-validation"));
+          assert.deepEqual(yield* f.snapshot, before);
+          assert.isTrue(yield* f.oldProcess!.isRunning);
+          assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+          yield* f.cleanCandidates;
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  },
+);
 ```
 
 The installed `@effect/vitest/dist/index.d.ts:60-72` exposes `each` only on `Tester`; both `each(...)` and `skipIf(...)` return callables without the other modifier. The suite-level `describe.skipIf` above avoids unsupported modifier chaining. The snapshots include runner and old-runtime inode/mode/mtime, runtime descriptor bytes and an isolated upstream sentinel. The wrong-version archive is valid/checksummed and its executable exits 0: this activates equality refusal rather than the existing execution failure. The existing archive installer may already have cached the requested-version directory before the candidate-runner equality check; this amendment does not promise rollback of that new cache. It preserves the distinct old runtime, installed runner bytes/metadata, `pid`/`port`/`managed`, descriptor, and old live process. A retry must supply corrected bytes and invalidate that unusable requested-version cache; the error names the archive source and rejected cache path, with cleanup performed through its owning client. Cache hardening is a separate amendment if the parent requires it. Atime is intentionally excluded because execution can update it. TERM tests preinstall the candidate so its executable's parent is the captured generated launch shell; no searched PID is signaled.
@@ -961,7 +1092,8 @@ Insert this new test inside the first `describe("ssh tunnel scripts", ...)`, bef
 
 ```ts
 it.effect.each(["successful reconnect", "failed reconnect"] as const)(
-  "stale local forward never stops the remote during %s", (mode) =>
+  "stale local forward never stops the remote during %s",
+  (mode) =>
     Effect.gen(function* () {
       let forwards = 0;
       let kills = 0;
@@ -970,46 +1102,58 @@ it.effect.each(["successful reconnect", "failed reconnect"] as const)(
       let remoteRunning = true;
       let stale = false;
       const probeStarted = yield* Deferred.make<void>();
-      const spawner = ChildProcessSpawner.make((command) => Effect.sync(() => {
-        const args = commandArgs(command);
-        if (args.includes("-G")) return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
-        if (args.includes("-N")) {
-          forwards++;
-          return makeRunningProcess(() => { kills++; });
-        }
-        if (args.includes("--")) {
-          launches++;
-          if (launches === 2 && mode === "failed reconnect") return {
-            ...makeSuccessfulProcess(""),
-            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
-            stderr: Stream.make(encoder.encode("Cannot prepare requested GOAT version")),
-          };
-          stale = false;
-          return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
-        }
-        if (args.includes("sh")) {
-          stops++;
-          remoteRunning = false;
-          return makeSuccessfulProcess('{"stopped":true}');
-        }
-        return makeSuccessfulProcess("");
-      }));
-      const client = HttpClient.make((request) => stale
-        ? Deferred.succeed(probeStarted, undefined).pipe(Effect.andThen(Effect.never))
-        : Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))));
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.sync(() => {
+          const args = commandArgs(command);
+          if (args.includes("-G"))
+            return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
+          if (args.includes("-N")) {
+            forwards++;
+            return makeRunningProcess(() => {
+              kills++;
+            });
+          }
+          if (args.includes("--")) {
+            launches++;
+            if (launches === 2 && mode === "failed reconnect")
+              return {
+                ...makeSuccessfulProcess(""),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+                stderr: Stream.make(encoder.encode("Cannot prepare requested GOAT version")),
+              };
+            stale = false;
+            return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
+          }
+          if (args.includes("sh")) {
+            stops++;
+            remoteRunning = false;
+            return makeSuccessfulProcess('{"stopped":true}');
+          }
+          return makeSuccessfulProcess("");
+        }),
+      );
+      const client = HttpClient.make((request) =>
+        stale
+          ? Deferred.succeed(probeStarted, undefined).pipe(Effect.andThen(Effect.never))
+          : Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))),
+      );
       const layer = Layer.mergeAll(
         NodeServices.layer,
         Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Layer.succeed(HttpClient.HttpClient, client),
         Layer.succeed(NetService.NetService, testNetService),
         SshAuth.SshPasswordPrompt.disabledLayer,
-        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(PROTOCOL_ARCHIVE) }),
+        SshTunnel.SshEnvironmentManager.layer({
+          resolveCliRunner: Effect.succeed(PROTOCOL_ARCHIVE),
+        }),
       );
       yield* Effect.gen(function* () {
         const manager = yield* SshTunnel.SshEnvironmentManager;
         yield* manager.ensureEnvironment(uploadTarget);
         stale = true;
-        const reconnect = yield* Effect.forkChild(Effect.result(manager.ensureEnvironment(uploadTarget)));
+        const reconnect = yield* Effect.forkChild(
+          Effect.result(manager.ensureEnvironment(uploadTarget)),
+        );
         yield* Deferred.await(probeStarted);
         yield* TestClock.adjust(Duration.seconds(2));
         const result = yield* Fiber.join(reconnect);
@@ -1043,7 +1187,9 @@ it.live("a nested auth runner publishes the real shell PID as install-lock owner
     const observed = `${f.home}/.test/lock-owners.jsonl`;
     yield* f.fs.makeDirectory(bin, { recursive: true });
     yield* f.fs.writeFileString(observed, "");
-    yield* f.fs.writeFileString(`${bin}/curl`, `#!${process.execPath}
+    yield* f.fs.writeFileString(
+      `${bin}/curl`,
+      `#!${process.execPath}
 const fs = require("node:fs");
 const { fileURLToPath } = require("node:url");
 const home = process.env.HOME;
@@ -1057,12 +1203,15 @@ const args = process.argv.slice(2);
 const url = args.find(arg => arg.startsWith("file://"));
 const output = args[args.indexOf("-o") + 1];
 fs.copyFileSync(fileURLToPath(url), output);
-`);
+`,
+    );
     yield* f.fs.chmod(`${bin}/curl`, 0o700);
     const result = yield* shell(f.home, f.scripts.pairing, [], `${bin}:${process.env.PATH ?? ""}`);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).credential, "fixture-pairing");
-    const records = (yield* f.fs.readFileString(observed)).trim().split("\n")
+    const records = (yield* f.fs.readFileString(observed))
+      .trim()
+      .split("\n")
       .map((line) => JSON.parse(line) as { owner: string; shellPid: number; alive: boolean });
     assert.equal(records.length, 2); // checksum and archive downloads
     for (const record of records) {
@@ -1071,9 +1220,9 @@ fs.copyFileSync(fileURLToPath(url), output);
       assert.isTrue(record.alive);
     }
     assert.equal(records[0]!.owner, records[1]!.owner);
-    assert.isFalse(yield* f.fs.exists(
-      `${f.home}/.goat/runtime/goat/versions/.${nextVersion}.install.lock`,
-    ));
+    assert.isFalse(
+      yield* f.fs.exists(`${f.home}/.goat/runtime/goat/versions/.${nextVersion}.install.lock`),
+    );
     yield* f.cleanCandidates;
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
@@ -1082,11 +1231,14 @@ it.live("a Node dev runner succeeds without matching an archive version", () =>
   Effect.gen(function* () {
     const f = yield* fixture("missing-release", { seed: false });
     const devScript = `${f.home}/.test/dev.mjs`;
-    yield* f.fs.writeFileString(devScript, `
+    yield* f.fs.writeFileString(
+      devScript,
+      `
 if (process.argv[2] === "--version") console.log("dev build without archive version");
 else if (process.argv[2] === "auth") console.log(JSON.stringify({ credential: "dev-pairing" }));
 else process.exit(2);
-`);
+`,
+    );
     // Even if the input carries an archive version, nodeScriptPath selects dev mode.
     const generated = yield* nativeScripts({ ...ARCHIVE, nodeScriptPath: devScript });
     const result = yield* shell(f.home, generated.pairing);
@@ -1111,73 +1263,80 @@ it.live.each([
   { leaveRemoteServerRunning: false, action: "disconnect" },
   { leaveRemoteServerRunning: true, action: "shutdown" },
   { leaveRemoteServerRunning: false, action: "shutdown" },
-] as const)("$action follows leaveRemoteServerRunning=$leaveRemoteServerRunning",
-  ({ leaveRemoteServerRunning, action }) => Effect.gen(function* () {
-    const f = yield* fixture("none");
-    const before = yield* f.snapshot;
-    const remote = f.oldProcess!;
-    let forwardKills = 0;
-    let remoteStops = 0;
-    const spawner = ChildProcessSpawner.make((command) => Effect.gen(function* () {
-      const args = commandArgs(command);
-      if (args.includes("-G")) {
-        return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
-      }
-      if (args.includes("-N")) return makeRunningProcess(() => { forwardKills++; });
-      if (args.includes("--")) {
-        return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
-      }
-      if (args.includes("sh")) {
-        remoteStops++;
-        assert.equal(forwardKills, 1); // local forward closes before remote stop
-        yield* remote.kill({ killSignal: "SIGTERM" });
-        assert.equal(Number(yield* remote.exitCode), 0);
-        return makeSuccessfulProcess('{"stopped":true}');
-      }
-      return makeSuccessfulProcess("");
-    }));
-    const layer = Layer.mergeAll(
-      NodeServices.layer,
-      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      Layer.succeed(HttpClient.HttpClient, testHttpClient),
-      Layer.succeed(NetService.NetService, testNetService),
-      SshAuth.SshPasswordPrompt.disabledLayer,
-      SshTunnel.SshEnvironmentManager.layer({
-        resolveCliRunner: Effect.succeed(PROTOCOL_ARCHIVE),
-        ...(leaveRemoteServerRunning ? { leaveRemoteServerRunning: true } : {}),
-      }),
-    );
-    yield* Effect.gen(function* () {
-      const manager = yield* SshTunnel.SshEnvironmentManager;
-      yield* manager.ensureEnvironment(uploadTarget);
-      assert.isTrue(yield* remote.isRunning);
-      if (action === "disconnect") {
-        yield* manager.disconnectEnvironment(uploadTarget);
-        assert.equal(forwardKills, 1);
-        assert.equal(remoteStops, leaveRemoteServerRunning ? 0 : 1);
-        assert.equal(yield* remote.isRunning, leaveRemoteServerRunning);
-        if (leaveRemoteServerRunning) {
-          assert.deepEqual(yield* f.snapshot, before);
-          // No cached tunnel remains: a second disconnect still cannot stop it.
+] as const)(
+  "$action follows leaveRemoteServerRunning=$leaveRemoteServerRunning",
+  ({ leaveRemoteServerRunning, action }) =>
+    Effect.gen(function* () {
+      const f = yield* fixture("none");
+      const before = yield* f.snapshot;
+      const remote = f.oldProcess!;
+      let forwardKills = 0;
+      let remoteStops = 0;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          const args = commandArgs(command);
+          if (args.includes("-G")) {
+            return makeSuccessfulProcess("hostname devbox.example.com\nuser julius\nport 2222\n");
+          }
+          if (args.includes("-N"))
+            return makeRunningProcess(() => {
+              forwardKills++;
+            });
+          if (args.includes("--")) {
+            return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}');
+          }
+          if (args.includes("sh")) {
+            remoteStops++;
+            assert.equal(forwardKills, 1); // local forward closes before remote stop
+            yield* remote.kill({ killSignal: "SIGTERM" });
+            assert.equal(Number(yield* remote.exitCode), 0);
+            return makeSuccessfulProcess('{"stopped":true}');
+          }
+          return makeSuccessfulProcess("");
+        }),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, testHttpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        SshAuth.SshPasswordPrompt.disabledLayer,
+        SshTunnel.SshEnvironmentManager.layer({
+          resolveCliRunner: Effect.succeed(PROTOCOL_ARCHIVE),
+          ...(leaveRemoteServerRunning ? { leaveRemoteServerRunning: true } : {}),
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(uploadTarget);
+        assert.isTrue(yield* remote.isRunning);
+        if (action === "disconnect") {
           yield* manager.disconnectEnvironment(uploadTarget);
-          assert.equal(remoteStops, 0);
           assert.equal(forwardKills, 1);
-          assert.isTrue(yield* remote.isRunning);
+          assert.equal(remoteStops, leaveRemoteServerRunning ? 0 : 1);
+          assert.equal(yield* remote.isRunning, leaveRemoteServerRunning);
+          if (leaveRemoteServerRunning) {
+            assert.deepEqual(yield* f.snapshot, before);
+            // No cached tunnel remains: a second disconnect still cannot stop it.
+            yield* manager.disconnectEnvironment(uploadTarget);
+            assert.equal(remoteStops, 0);
+            assert.equal(forwardKills, 1);
+            assert.isTrue(yield* remote.isRunning);
+          }
         }
+      }).pipe(Effect.provide(layer), Effect.scoped);
+      // In shutdown rows the manager finalizer performed the tested action.
+      // In disconnect rows it must not perform a duplicate close/remote stop.
+      assert.equal(forwardKills, 1);
+      assert.equal(remoteStops, leaveRemoteServerRunning ? 0 : 1);
+      assert.equal(yield* remote.isRunning, leaveRemoteServerRunning);
+      if (leaveRemoteServerRunning) {
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
+      } else {
+        assert.equal((yield* f.events).filter((event) => event.type === "stop").length, 1);
       }
-    }).pipe(Effect.provide(layer), Effect.scoped);
-    // In shutdown rows the manager finalizer performed the tested action.
-    // In disconnect rows it must not perform a duplicate close/remote stop.
-    assert.equal(forwardKills, 1);
-    assert.equal(remoteStops, leaveRemoteServerRunning ? 0 : 1);
-    assert.equal(yield* remote.isRunning, leaveRemoteServerRunning);
-    if (leaveRemoteServerRunning) {
-      assert.deepEqual(yield* f.snapshot, before);
-      assert.isFalse((yield* f.events).some((event) => event.type === "stop"));
-    } else {
-      assert.equal((yield* f.events).filter((event) => event.type === "stop").length, 1);
-    }
-  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 ```
 
@@ -1224,14 +1383,14 @@ This warm fixture does not respond to `--version`; that is intentional. An exist
 
 `remote-runner-baseline.json` has top-level `archive`, `mirror`, `node`, each with `runner`, `launch`, `pairing`. The standalone runner's persisted bytes and upload transformation remain unchanged. The literal function replacer repairs nested runner `$$` in every wrapper (including the archive fallback inside Node-mode runners), while the shared setup adds candidate PID staging and archive-version equality. The exact changing fixture entries are:
 
-| Fixture entry | Deliberate byte changes |
-|---|---|
-| `archive.launch` | Literal nested installer lock PID; shared candidate staging/expected archive version; own-runtime reuse branch. |
-| `archive.pairing` | Literal nested installer lock PID; shared staging/expected version with auth keep mode. |
-| `mirror.launch` | Same launch changes, retaining its explicit mirror URL. |
-| `mirror.pairing` | Same pairing changes, retaining its explicit mirror URL. |
-| `node.launch` | Literal nested fallback lock PID; shared candidate `run-t3.next.$$`; empty expected version for Node dev mode; own-runtime branch. |
-| `node.pairing` | Literal nested fallback lock PID; shared staging/auth keep mode; empty expected version for Node dev mode. |
+| Fixture entry     | Deliberate byte changes                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `archive.launch`  | Literal nested installer lock PID; shared candidate staging/expected archive version; own-runtime reuse branch.                    |
+| `archive.pairing` | Literal nested installer lock PID; shared staging/expected version with auth keep mode.                                            |
+| `mirror.launch`   | Same launch changes, retaining its explicit mirror URL.                                                                            |
+| `mirror.pairing`  | Same pairing changes, retaining its explicit mirror URL.                                                                           |
+| `node.launch`     | Literal nested fallback lock PID; shared candidate `run-t3.next.$$`; empty expected version for Node dev mode; own-runtime branch. |
+| `node.pairing`    | Literal nested fallback lock PID; shared staging/auth keep mode; empty expected version for Node dev mode.                         |
 
 `archive.runner`, `mirror.runner`, and `node.runner` remain frozen: their lock PID was already literal because it lives in the outer template, not an inserted replacement. Review both the nested lock line and candidate PID line in the six changed wrappers. MCP also receives the corrected generation, but no MCP fixture entry exists and none is added.
 
@@ -1274,31 +1433,31 @@ Fixture review must check the expanded shell at the six entries. Passing a newly
 
 ## 6. Activation and acceptance ledger
 
-| Activation | Observable acceptance |
-|---|---|
-| Requested release directory missing | Launch fails naming exact requested version; old runner/runtime/ownership snapshots equal; old HTTP process alive; no stop event; candidate absent. |
-| SHA256SUMS wrong | Same preservation; checksum diagnostic survives in stderr; no requested completed runtime. |
-| Executable exits nonzero on `--version` | Same preservation; executable-host diagnostic names version; no ready marker/publication. |
+| Activation                                                                                           | Observable acceptance                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Requested release directory missing                                                                  | Launch fails naming exact requested version; old runner/runtime/ownership snapshots equal; old HTTP process alive; no stop event; candidate absent.                                                                                                                                                                               |
+| SHA256SUMS wrong                                                                                     | Same preservation; checksum diagnostic survives in stderr; no requested completed runtime.                                                                                                                                                                                                                                        |
+| Executable exits nonzero on `--version`                                                              | Same preservation; executable-host diagnostic names version; no ready marker/publication.                                                                                                                                                                                                                                         |
 | Valid archive executable exits 0 but reports the old/wrong version (with/without default descriptor) | Nonzero launch exit; error names requested and reported versions plus corrective archive action; installed runner bytes/metadata, old runtime, ownership files and descriptor equal; actual old process alive; zero stops; candidate removed. A newly cached requested-version directory may exist and is not old-state rollback. |
-| Cold pairing/MCP executable exits 0 but reports wrong version | Nonzero exit before publication/auth; no installed runner/ownership/auth event; exact-version diagnostic; candidate removed. |
-| Node-script dev executable reports an unrelated dev version with exit 0 | Cold auth runner publishes and returns decoded pairing output; archive-version equality is exempt; no managed server ownership created. |
-| Generated archive/mirror/node runner and nested launch/pairing/MCP | Exact nested runner equality; lock-owner `$$` and candidate `run-t3.next.$$` survive; quoted `$$`/`$&` inputs remain literal. |
-| Cold nested archive auth runner with downloader hook | Lock owner is numeric, equals downloader parent shell PID and is alive at both downloads; installation/auth succeeds; lock and candidate removed. Existing upload/runner race tests continue to pass. |
-| Candidate receives TERM during validation | Scoped launch shell exits; EXIT cleanup removes next file; old process/snapshots preserved. SIGKILL explicitly excluded from trap guarantee. |
-| Changed valid archive, managed server, default descriptor belongs to same PID | Candidate validation observes the old installed runner and live old PID; old stop precedes new start; new start observes published candidate and ready marker. |
-| Same bytes, default descriptor belongs to managed PID | Same PID/ownership/runner metadata, one initial start, zero stops, no restart. |
-| Keep-existing older valid runner, newer release unavailable | No newer-version invocation/acquisition; old runtime/runner/ownership unchanged and live PID reused. |
-| Retained runtime missing/invalid/marker-only/wrong marker/non-executable/upstream-only | Preparation refuses without cache acquisition, runner mutation, auth invocation or stop; error explains retained version/owner and requested version. |
-| Pairing/MCP warm with default/false flag | Retained CLI issues credential/session; no runtime acquisition/publication, no restart. Existing ceiling accepted/rejected/null outcomes remain correct. |
-| Pairing/MCP cold, valid archive | Version validation precedes auth; runner published executable, runtime marker correct, auth output decoded; no server launched as an auth side effect. |
-| Pairing/MCP cold, any installation failure | No runner or auth output, no server ownership records; candidate cleaned; actionable requested-version message. |
-| Local-cache size/checksum/gh error | Error includes requested version; runner/server untouched; upload authentication still retries once via existing prompt test. |
-| Stale forward, successful reconnect | Old forward killed exactly once; no remote stop; normal same-runner launch creates second forward; explicit disconnect still stops once. |
-| Stale forward, failed reconnect | Old forward removed/closed; no remote stop and no second forward; owner explicit disconnect can still stop the preserved remote. |
-| Non-owner (`leaveRemoteServerRunning: true`) explicit disconnect, then repeat without cached entry | Local forward killed once, zero remote stop requests, actual remote PID remains alive, installed runner and ownership/descriptor snapshots equal; later scope shutdown does not issue a duplicate stop. |
-| Owner/default explicit disconnect | Local forward killed before one remote stop; actual remote exits and stop event recorded; scope shutdown adds no second stop; existing stop errors still reach caller. |
-| Non-owner manager scope shutdown | Local forward killed once; zero remote stops; actual PID and ownership snapshots preserved. |
-| Owner/default manager scope shutdown | Local forward killed before one remote stop; actual remote exits; finalizer still uses existing best-effort error policy. |
+| Cold pairing/MCP executable exits 0 but reports wrong version                                        | Nonzero exit before publication/auth; no installed runner/ownership/auth event; exact-version diagnostic; candidate removed.                                                                                                                                                                                                      |
+| Node-script dev executable reports an unrelated dev version with exit 0                              | Cold auth runner publishes and returns decoded pairing output; archive-version equality is exempt; no managed server ownership created.                                                                                                                                                                                           |
+| Generated archive/mirror/node runner and nested launch/pairing/MCP                                   | Exact nested runner equality; lock-owner `$$` and candidate `run-t3.next.$$` survive; quoted `$$`/`$&` inputs remain literal.                                                                                                                                                                                                     |
+| Cold nested archive auth runner with downloader hook                                                 | Lock owner is numeric, equals downloader parent shell PID and is alive at both downloads; installation/auth succeeds; lock and candidate removed. Existing upload/runner race tests continue to pass.                                                                                                                             |
+| Candidate receives TERM during validation                                                            | Scoped launch shell exits; EXIT cleanup removes next file; old process/snapshots preserved. SIGKILL explicitly excluded from trap guarantee.                                                                                                                                                                                      |
+| Changed valid archive, managed server, default descriptor belongs to same PID                        | Candidate validation observes the old installed runner and live old PID; old stop precedes new start; new start observes published candidate and ready marker.                                                                                                                                                                    |
+| Same bytes, default descriptor belongs to managed PID                                                | Same PID/ownership/runner metadata, one initial start, zero stops, no restart.                                                                                                                                                                                                                                                    |
+| Keep-existing older valid runner, newer release unavailable                                          | No newer-version invocation/acquisition; old runtime/runner/ownership unchanged and live PID reused.                                                                                                                                                                                                                              |
+| Retained runtime missing/invalid/marker-only/wrong marker/non-executable/upstream-only               | Preparation refuses without cache acquisition, runner mutation, auth invocation or stop; error explains retained version/owner and requested version.                                                                                                                                                                             |
+| Pairing/MCP warm with default/false flag                                                             | Retained CLI issues credential/session; no runtime acquisition/publication, no restart. Existing ceiling accepted/rejected/null outcomes remain correct.                                                                                                                                                                          |
+| Pairing/MCP cold, valid archive                                                                      | Version validation precedes auth; runner published executable, runtime marker correct, auth output decoded; no server launched as an auth side effect.                                                                                                                                                                            |
+| Pairing/MCP cold, any installation failure                                                           | No runner or auth output, no server ownership records; candidate cleaned; actionable requested-version message.                                                                                                                                                                                                                   |
+| Local-cache size/checksum/gh error                                                                   | Error includes requested version; runner/server untouched; upload authentication still retries once via existing prompt test.                                                                                                                                                                                                     |
+| Stale forward, successful reconnect                                                                  | Old forward killed exactly once; no remote stop; normal same-runner launch creates second forward; explicit disconnect still stops once.                                                                                                                                                                                          |
+| Stale forward, failed reconnect                                                                      | Old forward removed/closed; no remote stop and no second forward; owner explicit disconnect can still stop the preserved remote.                                                                                                                                                                                                  |
+| Non-owner (`leaveRemoteServerRunning: true`) explicit disconnect, then repeat without cached entry   | Local forward killed once, zero remote stop requests, actual remote PID remains alive, installed runner and ownership/descriptor snapshots equal; later scope shutdown does not issue a duplicate stop.                                                                                                                           |
+| Owner/default explicit disconnect                                                                    | Local forward killed before one remote stop; actual remote exits and stop event recorded; scope shutdown adds no second stop; existing stop errors still reach caller.                                                                                                                                                            |
+| Non-owner manager scope shutdown                                                                     | Local forward killed once; zero remote stops; actual PID and ownership snapshots preserved.                                                                                                                                                                                                                                       |
+| Owner/default manager scope shutdown                                                                 | Local forward killed before one remote stop; actual remote exits; finalizer still uses existing best-effort error policy.                                                                                                                                                                                                         |
 
 Boundaries: the shell candidate check is an E7 application boundary implemented by generated shell, not a host security enforcement layer. A caller can invoke the CLI/kill the remote directly; two independent clients can race a runner switch. Residual risk is stated, and no wording claims unbypassable enforcement. There is no additional final enforcement layer in this unit.
 
@@ -1363,10 +1522,12 @@ Independent review checks the six fixture fields including nested `$$`, actual i
 The plan writer/amender changed only this named document. No source edits, tests, builds, git, SSH, child dispatch, goal or FSM calls were performed. All added test code and commands are implementation instructions, not claimed execution evidence. The parent must revalidate hunks against shared-source movement before implementation and record the actual verification results.
 
 ## Reflection fold (A1)
+
 - Disconnect blocker is folded into §2.6/§3.5: server dispatch disconnect/shutdown is local-only; desktop owner disconnect and shutdown retain today's stop behavior. Tests use a real captured remote PID and include repeated disconnect with no local entry.
 - Placeholder blocker is folded into §2.0/§3.1/§3.4/§5: function replacement preserves shell dollars through nesting; generated lock ownership equals the actual shell PID; regenerate exactly six wrapper fields.
 - Expected-version blocker is folded into §2.1/§2.3/§3.2/§3.4: exit-zero/wrong-version archives cannot publish a runner or stop the old server; snapshot ownership/runner/old-runtime preservation; Node dev equality exemption is explicit.
 - Version directory: the runner only removes/replaces `versions/<v>` for the requested version when it is not ready (missing marker or broken binary); an old runner selects a different version directory, which is never touched. A same-version broken install is replaced only after the new staging verifies. Add a test: failed candidate for version B leaves version A directory and its server intact.
 
 ## Audit fold (cycle 1)
+
 Existing managed-reuse fixture (packages/ssh/src/tunnel.test.ts ~1100) writes the retained runner without chmod; add `yield* fs.chmod(\`${state}/run-t3.sh\`, 0o700)` right after writing it, since implicit chmod of retained runners is removed.

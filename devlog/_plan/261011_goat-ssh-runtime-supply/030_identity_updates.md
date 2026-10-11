@@ -23,27 +23,27 @@ GOAT must package and open as its own desktop product without inheriting an upst
 
 Read `000_plan.md` D1–D5/D9 and `001_research.md` from the documentation checkout named in Resource bounds; they are absent from the source lane. At `480ed90da`, this stale check re-read every patch before-image, complete replacement test owners, home/import owners, the current SSH shell harness, and the landed bundled-runtime integration. The table below uses current source anchors; earlier research line numbers are historical. Shared HEAD/source can move; re-read the exact contexts before applying. Do not replace whole files changed by wp1/wp2, and do not treat line numbers as patch authority.
 
-| Owner / anchor | Current behavior | Planned disposition |
-| --- | --- | --- |
-| `scripts/build-desktop-artifact.ts:64,2710–2737,2788–2862` | upstream bundle ID, product names, artifact prefix; ambient repo can become update feed; absent `publish` lets builder infer publishing | GOAT identities; canonical repo only; explicit feed opt-in; initialize `publish: null` |
-| same file `:1279–1322,1688,4053–4089` | every signed mac build resolves required Associated Domains provisioning | separate passkey opt-in; channel-specific entitlement app ID |
-| `apps/desktop/src/app/DesktopEnvironment.ts:96–124,173–196,245–247` | display base `goat`, Alpha/Nightly stage; runtime base `T3 Code`; `.t3` default | uppercase display names, retain runtime stage/name, own app user model ID; production `.goat/desktop` |
-| `DesktopUserData.ts:35–106` | upstream dev/V2 profiles; automatically copies Windows Local State | own stable/nightly/dev profiles; no implicit upstream profile reads/copy |
-| `DesktopClerk.ts:104–105`, `DesktopApp.ts:306–307` | both select userData; Clerk does so synchronously before ready | both receive same channel-aware resolver input; preserve startup ordering |
-| `DesktopLegacyLocalStorage.ts:84–89` | imports V1 upstream Local Storage on production startup | skip implicit V1 import for GOAT |
-| `DesktopStatePaths.ts:13–32` | default `.t3`; implicit development `/dev`, explicit home `/userdata` | production `.goat/desktop`; implicit dev `.t3`; explicit home/worktree precedence unchanged |
-| `DesktopEarlyElectronStartup.ts:57–70` / `DesktopPreReadyPlatform.ts:33–41` | synchronous Linux password-store settings read uses same path helper | pass development status into helper so pre-ready settings and later environment agree |
-| `DesktopBackendConfiguration.ts:568,608–610,728–733,763–805` | primary bootstrap carries `environment.baseDir` and bundled resource env; WSL drops Windows T3CODE_HOME and translates bundled path | primary follows selected home; retain bundled resource env, explicit overrides and WSL isolation |
-| `apps/server/src/cli/config.ts:319–333` | flags > T3CODE_HOME > bootstrap home > default; derived paths below userdata | keep precedence; desktop bootstrap supplies `.goat/desktop`, generic CLI default remains `.goat` |
-| `apps/server/src/os-jank.ts:105–112` | central CLI/server default `.t3` | standalone/SSH host `.goat`; never append `/desktop` in the generic resolver |
-| `apps/server/src/cli/browser.ts:55–71` | sudo browser setup independently calculates invoking user's `.t3` | standalone sudo fallback `.goat`; desktop setup inherits its explicit selected home |
-| `scripts/dev-runner.ts:70–72,670–679` / `packages/shared/src/devHome.ts:93–102` | linked worktree `.t3` overrides ambient home; dev fallback `.t3` | KEEP; no blanket `.t3` replacement |
-| `apps/desktop/src/wsl/DesktopWslEnvironment.ts:300,425,489` | WSL runtime distribution cache at Linux `$HOME/.t3/wsl-runtime` | KEEP in this work-phase; this is a distribution cache, not primary desktop userdata; WSL server defaults follow generic os-jank `.goat` |
-| `apps/server/scripts/migrate-dev-db.ts:250–258,279–329,330–453,470–613` | source attached read-only; visible stopped families retained; runnable/auth tables cleared; exported runner replaces its destination DB | reuse exported `runMigrateDevDb` in an isolated staging home; publish only filtered DB into absent desktop target |
-| `scripts/build-desktop-artifact.ts:936–952,1693–1705,1800–1836,2836–2843,3083–3238,4130–4145,4220–4231` | bundled-runtime options, CI requirement, validation/staging, extraResources and trailing config argument are landed | KEEP; identity/feed edits must preserve all of these |
-| `apps/desktop/src/main.ts:107–138` / `apps/desktop/src/ssh/desktopSshCliRunner.ts:14–38` | packaged SSH runner receives resource bundle; mutable cache defaults to `<environment.baseDir>/runtime/archives`; unpackaged version uses server package | KEEP resolver and bundled path; desktop home change naturally moves only the default cache to `.goat/desktop/runtime/archives` |
-| `scripts/dev-runtime-archive.ts:31–46,96` / `.github/workflows/release-desktop.yml:421–464,530,559–560` | dev cache follows dev-runner home precedence; release hands exact-version archives to packaging | KEEP dev `.t3` behavior, archive production/sidecars and release requirement; do not turn on either new opt-in in this phase |
-| `packages/ssh/src/fixtures/remote-runner-baseline.json` | current landed fixture read; SHA256 `42ed378fab39fd551f77476d7fe7ef34ed11068916b30ab476ae7ea5429838c4` | FROZEN for wp3: no fixture edits; parent compares current bytes before/after implementation |
+| Owner / anchor                                                                                          | Current behavior                                                                                                                                         | Planned disposition                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/build-desktop-artifact.ts:64,2710–2737,2788–2862`                                              | upstream bundle ID, product names, artifact prefix; ambient repo can become update feed; absent `publish` lets builder infer publishing                  | GOAT identities; canonical repo only; explicit feed opt-in; initialize `publish: null`                                                  |
+| same file `:1279–1322,1688,4053–4089`                                                                   | every signed mac build resolves required Associated Domains provisioning                                                                                 | separate passkey opt-in; channel-specific entitlement app ID                                                                            |
+| `apps/desktop/src/app/DesktopEnvironment.ts:96–124,173–196,245–247`                                     | display base `goat`, Alpha/Nightly stage; runtime base `T3 Code`; `.t3` default                                                                          | uppercase display names, retain runtime stage/name, own app user model ID; production `.goat/desktop`                                   |
+| `DesktopUserData.ts:35–106`                                                                             | upstream dev/V2 profiles; automatically copies Windows Local State                                                                                       | own stable/nightly/dev profiles; no implicit upstream profile reads/copy                                                                |
+| `DesktopClerk.ts:104–105`, `DesktopApp.ts:306–307`                                                      | both select userData; Clerk does so synchronously before ready                                                                                           | both receive same channel-aware resolver input; preserve startup ordering                                                               |
+| `DesktopLegacyLocalStorage.ts:84–89`                                                                    | imports V1 upstream Local Storage on production startup                                                                                                  | skip implicit V1 import for GOAT                                                                                                        |
+| `DesktopStatePaths.ts:13–32`                                                                            | default `.t3`; implicit development `/dev`, explicit home `/userdata`                                                                                    | production `.goat/desktop`; implicit dev `.t3`; explicit home/worktree precedence unchanged                                             |
+| `DesktopEarlyElectronStartup.ts:57–70` / `DesktopPreReadyPlatform.ts:33–41`                             | synchronous Linux password-store settings read uses same path helper                                                                                     | pass development status into helper so pre-ready settings and later environment agree                                                   |
+| `DesktopBackendConfiguration.ts:568,608–610,728–733,763–805`                                            | primary bootstrap carries `environment.baseDir` and bundled resource env; WSL drops Windows T3CODE_HOME and translates bundled path                      | primary follows selected home; retain bundled resource env, explicit overrides and WSL isolation                                        |
+| `apps/server/src/cli/config.ts:319–333`                                                                 | flags > T3CODE_HOME > bootstrap home > default; derived paths below userdata                                                                             | keep precedence; desktop bootstrap supplies `.goat/desktop`, generic CLI default remains `.goat`                                        |
+| `apps/server/src/os-jank.ts:105–112`                                                                    | central CLI/server default `.t3`                                                                                                                         | standalone/SSH host `.goat`; never append `/desktop` in the generic resolver                                                            |
+| `apps/server/src/cli/browser.ts:55–71`                                                                  | sudo browser setup independently calculates invoking user's `.t3`                                                                                        | standalone sudo fallback `.goat`; desktop setup inherits its explicit selected home                                                     |
+| `scripts/dev-runner.ts:70–72,670–679` / `packages/shared/src/devHome.ts:93–102`                         | linked worktree `.t3` overrides ambient home; dev fallback `.t3`                                                                                         | KEEP; no blanket `.t3` replacement                                                                                                      |
+| `apps/desktop/src/wsl/DesktopWslEnvironment.ts:300,425,489`                                             | WSL runtime distribution cache at Linux `$HOME/.t3/wsl-runtime`                                                                                          | KEEP in this work-phase; this is a distribution cache, not primary desktop userdata; WSL server defaults follow generic os-jank `.goat` |
+| `apps/server/scripts/migrate-dev-db.ts:250–258,279–329,330–453,470–613`                                 | source attached read-only; visible stopped families retained; runnable/auth tables cleared; exported runner replaces its destination DB                  | reuse exported `runMigrateDevDb` in an isolated staging home; publish only filtered DB into absent desktop target                       |
+| `scripts/build-desktop-artifact.ts:936–952,1693–1705,1800–1836,2836–2843,3083–3238,4130–4145,4220–4231` | bundled-runtime options, CI requirement, validation/staging, extraResources and trailing config argument are landed                                      | KEEP; identity/feed edits must preserve all of these                                                                                    |
+| `apps/desktop/src/main.ts:107–138` / `apps/desktop/src/ssh/desktopSshCliRunner.ts:14–38`                | packaged SSH runner receives resource bundle; mutable cache defaults to `<environment.baseDir>/runtime/archives`; unpackaged version uses server package | KEEP resolver and bundled path; desktop home change naturally moves only the default cache to `.goat/desktop/runtime/archives`          |
+| `scripts/dev-runtime-archive.ts:31–46,96` / `.github/workflows/release-desktop.yml:421–464,530,559–560` | dev cache follows dev-runner home precedence; release hands exact-version archives to packaging                                                          | KEEP dev `.t3` behavior, archive production/sidecars and release requirement; do not turn on either new opt-in in this phase            |
+| `packages/ssh/src/fixtures/remote-runner-baseline.json`                                                 | current landed fixture read; SHA256 `42ed378fab39fd551f77476d7fe7ef34ed11068916b30ab476ae7ea5429838c4`                                                   | FROZEN for wp3: no fixture edits; parent compares current bytes before/after implementation                                             |
 
 The central server default is consumed by auth, CLI, service, browser and backend paths through `resolveBaseDir`; its GOAT default is `~/.goat` for standalone CLI/SSH hosts. Only the desktop selector adds `/desktop`, and the primary desktop backend receives it through `bootstrap.t3Home`. An explicit `--base-dir` or `T3CODE_HOME` continues to work, including `.t3` deliberately chosen by an operator. Do not make generic server defaults depend on the desktop's Chromium profile or product channel.
 
@@ -51,30 +51,30 @@ The central server default is consumed by auth, CLI, service, browser and backen
 
 All paths in the following patches are relative to the source lane. Apply with the `apply_patch` tool from that lane after the parent revalidates wp1/wp2 changes. Patch blocks use that tool's `*** Begin Patch` format, rather than shell interpolation. No source patch is applied by this leaf. At `480ed90da`, `createBuildConfig` ends with `wslRuntimeBundled = false`, `arch?`, `sshRuntimeBundled = false`; its staged-package caller passes all three. Keep the SSH archive input/requirement fields, `SSH_RUNTIME_EXTRA_RESOURCES`, archive validation/staging and payload checks. `main.ts`, `ssh/desktopSshCliRunner.ts`, `DesktopBackendConfiguration.ts`, the release workflows and `dev-runtime-archive.ts` need no identity source edits. The existing backend bundle env and WSL translation remain independent of the newly selected desktop home.
 
-| Action | Path | Purpose |
-| --- | --- | --- |
-| MODIFY | `scripts/build-desktop-artifact.ts` | identity + feed policy + passkey opt-in |
-| MODIFY | `scripts/build-desktop-artifact.test.ts` | config, feed rejection, signing/provisioning and channel tests |
-| MODIFY | `apps/desktop/src/app/DesktopEnvironment.ts` | display + Windows ID; production desktop home consumer |
-| MODIFY | `apps/desktop/src/app/DesktopUserData.ts` | own channel-aware profile, remove implicit upstream migration |
-| MODIFY | `apps/desktop/src/app/DesktopLegacyLocalStorage.ts` | disable upstream V1 import for GOAT |
-| MODIFY | `apps/desktop/src/app/DesktopEnvironment.test.ts` | visible identity and selected home |
-| MODIFY | `apps/desktop/src/app/DesktopAppIdentity.test.ts` | preserve runtime identity; visible names and own profiles |
-| MODIFY | `apps/desktop/src/app/DesktopUserData.test.ts` | replace old migration cases with channel coexistence and upstream preservation |
-| MODIFY | `apps/desktop/src/app/DesktopPreReadyFileSystem.test.ts` | replace upstream migration/read expectation with own profile/no-copy proof |
-| MODIFY | `apps/desktop/src/app/DesktopClerk.test.ts` | own profile installed before Clerk bridge; keep synchronous ordering proof |
-| NEW | `apps/desktop/src/app/DesktopLegacyLocalStorage.test.ts` | GOAT starts without reading/importing upstream V1 data; no such owner test exists yet |
-| MODIFY | `apps/desktop/src/app/DesktopStatePaths.ts` | production `.goat/desktop`, implicit dev `.t3` |
-| MODIFY | `apps/desktop/src/app/DesktopEarlyElectronStartup.ts` | synchronize early path with production/dev mode |
-| MODIFY | `apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts` | actual settings read path/preference |
-| MODIFY if still upstream | `apps/server/src/os-jank.ts`, `apps/server/src/cli/browser.ts` | standalone/SSH/sudo fallback `.goat`; no desktop suffix |
-| MODIFY | `apps/server/src/os-jank.test.ts`, `apps/server/src/cli/config.test.ts`, `apps/desktop/src/backend/DesktopBackendConfiguration.test.ts` | generic `.goat` versus desktop bootstrap `.goat/desktop`, isolated home and precedence proofs |
-| NEW if absent | `apps/server/src/cli/browser.test.ts` | sudo home special-case behavior; no such test exists yet |
-| MODIFY test only | `packages/ssh/src/tunnel.test.ts` | real shell isolation regression; generated script bytes stay frozen |
-| NEW | `scripts/import-desktop-home.ts` | explicit manual one-time filtered import; reuse existing migration runner, no startup hook |
-| NEW | `scripts/import-desktop-home.test.ts` | real isolated DB retention/exclusion, source preservation and no-overwrite proofs |
-| READ / reuse | `apps/server/scripts/migrate-dev-db.ts`, `apps/server/scripts/migrate-dev-db.test.ts` | existing filtering/migration logic and fixture patterns; preserve dev rebuild semantics |
-| DELETE | none | old profile directories and upstream data stay present |
+| Action                   | Path                                                                                                                                    | Purpose                                                                                       |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| MODIFY                   | `scripts/build-desktop-artifact.ts`                                                                                                     | identity + feed policy + passkey opt-in                                                       |
+| MODIFY                   | `scripts/build-desktop-artifact.test.ts`                                                                                                | config, feed rejection, signing/provisioning and channel tests                                |
+| MODIFY                   | `apps/desktop/src/app/DesktopEnvironment.ts`                                                                                            | display + Windows ID; production desktop home consumer                                        |
+| MODIFY                   | `apps/desktop/src/app/DesktopUserData.ts`                                                                                               | own channel-aware profile, remove implicit upstream migration                                 |
+| MODIFY                   | `apps/desktop/src/app/DesktopLegacyLocalStorage.ts`                                                                                     | disable upstream V1 import for GOAT                                                           |
+| MODIFY                   | `apps/desktop/src/app/DesktopEnvironment.test.ts`                                                                                       | visible identity and selected home                                                            |
+| MODIFY                   | `apps/desktop/src/app/DesktopAppIdentity.test.ts`                                                                                       | preserve runtime identity; visible names and own profiles                                     |
+| MODIFY                   | `apps/desktop/src/app/DesktopUserData.test.ts`                                                                                          | replace old migration cases with channel coexistence and upstream preservation                |
+| MODIFY                   | `apps/desktop/src/app/DesktopPreReadyFileSystem.test.ts`                                                                                | replace upstream migration/read expectation with own profile/no-copy proof                    |
+| MODIFY                   | `apps/desktop/src/app/DesktopClerk.test.ts`                                                                                             | own profile installed before Clerk bridge; keep synchronous ordering proof                    |
+| NEW                      | `apps/desktop/src/app/DesktopLegacyLocalStorage.test.ts`                                                                                | GOAT starts without reading/importing upstream V1 data; no such owner test exists yet         |
+| MODIFY                   | `apps/desktop/src/app/DesktopStatePaths.ts`                                                                                             | production `.goat/desktop`, implicit dev `.t3`                                                |
+| MODIFY                   | `apps/desktop/src/app/DesktopEarlyElectronStartup.ts`                                                                                   | synchronize early path with production/dev mode                                               |
+| MODIFY                   | `apps/desktop/src/app/DesktopEarlyElectronStartup.test.ts`                                                                              | actual settings read path/preference                                                          |
+| MODIFY if still upstream | `apps/server/src/os-jank.ts`, `apps/server/src/cli/browser.ts`                                                                          | standalone/SSH/sudo fallback `.goat`; no desktop suffix                                       |
+| MODIFY                   | `apps/server/src/os-jank.test.ts`, `apps/server/src/cli/config.test.ts`, `apps/desktop/src/backend/DesktopBackendConfiguration.test.ts` | generic `.goat` versus desktop bootstrap `.goat/desktop`, isolated home and precedence proofs |
+| NEW if absent            | `apps/server/src/cli/browser.test.ts`                                                                                                   | sudo home special-case behavior; no such test exists yet                                      |
+| MODIFY test only         | `packages/ssh/src/tunnel.test.ts`                                                                                                       | real shell isolation regression; generated script bytes stay frozen                           |
+| NEW                      | `scripts/import-desktop-home.ts`                                                                                                        | explicit manual one-time filtered import; reuse existing migration runner, no startup hook    |
+| NEW                      | `scripts/import-desktop-home.test.ts`                                                                                                   | real isolated DB retention/exclusion, source preservation and no-overwrite proofs             |
+| READ / reuse             | `apps/server/scripts/migrate-dev-db.ts`, `apps/server/scripts/migrate-dev-db.test.ts`                                                   | existing filtering/migration logic and fixture patterns; preserve dev rebuild semantics       |
+| DELETE                   | none                                                                                                                                    | old profile directories and upstream data stay present                                        |
 
 New value chains:
 
@@ -631,49 +631,69 @@ import { resolveUserDataPath } from "./DesktopUserData.ts";
 
 it.effect.each(["darwin", "linux", "win32"] as const)(
   "isolates GOAT channels without importing upstream profiles on %s",
-  (platform) => Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-profile-" });
-    for (const name of ["t3code-v2", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"]) {
-      yield* fs.makeDirectory(path.join(root, name, "IndexedDB"), { recursive: true });
-      yield* fs.writeFileString(path.join(root, name, "Local State"), "upstream keys");
-      yield* fs.writeFileString(path.join(root, name, "IndexedDB", "LOCK"), "upstream database");
-    }
-    for (const [version, development, profile] of [
-      ["1.2.3", false, "goat-desktop"],
-      ["1.2.3-nightly.20261011.1", false, "goat-desktop-nightly"],
-      ["1.2.3", true, "goat-desktop-dev"],
-    ] as const) {
-      const actual = yield* resolveUserDataPath({ appDataDirectory: root, isDevelopment: development, platform, appVersion: version });
-      assert.equal(actual, path.join(root, profile));
-      assert.isFalse(yield* fs.exists(path.join(actual, "Local State")));
-      yield* fs.makeDirectory(actual, { recursive: true });
-      yield* fs.writeFileString(path.join(actual, "Local State"), profile);
-      assert.equal(yield* resolveUserDataPath({ appDataDirectory: root, isDevelopment: development, platform, appVersion: version }), actual);
-      assert.equal(yield* fs.readFileString(path.join(actual, "Local State")), profile);
-    }
-    for (const name of ["t3code-v2", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"]) {
-      assert.equal(yield* fs.readFileString(path.join(root, name, "Local State")), "upstream keys");
-      assert.equal(yield* fs.readFileString(path.join(root, name, "IndexedDB", "LOCK")), "upstream database");
-    }
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  (platform) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-profile-" });
+      for (const name of ["t3code-v2", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"]) {
+        yield* fs.makeDirectory(path.join(root, name, "IndexedDB"), { recursive: true });
+        yield* fs.writeFileString(path.join(root, name, "Local State"), "upstream keys");
+        yield* fs.writeFileString(path.join(root, name, "IndexedDB", "LOCK"), "upstream database");
+      }
+      for (const [version, development, profile] of [
+        ["1.2.3", false, "goat-desktop"],
+        ["1.2.3-nightly.20261011.1", false, "goat-desktop-nightly"],
+        ["1.2.3", true, "goat-desktop-dev"],
+      ] as const) {
+        const actual = yield* resolveUserDataPath({
+          appDataDirectory: root,
+          isDevelopment: development,
+          platform,
+          appVersion: version,
+        });
+        assert.equal(actual, path.join(root, profile));
+        assert.isFalse(yield* fs.exists(path.join(actual, "Local State")));
+        yield* fs.makeDirectory(actual, { recursive: true });
+        yield* fs.writeFileString(path.join(actual, "Local State"), profile);
+        assert.equal(
+          yield* resolveUserDataPath({
+            appDataDirectory: root,
+            isDevelopment: development,
+            platform,
+            appVersion: version,
+          }),
+          actual,
+        );
+        assert.equal(yield* fs.readFileString(path.join(actual, "Local State")), profile);
+      }
+      for (const name of ["t3code-v2", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"]) {
+        assert.equal(
+          yield* fs.readFileString(path.join(root, name, "Local State")),
+          "upstream keys",
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(root, name, "IndexedDB", "LOCK")),
+          "upstream database",
+        );
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 ```
 
 For existing desktop tests, amend the exact behavior cases as follows; preserve commit-hash, icon and error tests unrelated to removed profile probing:
 
-| Test owner | Before | After / observable proof |
-| --- | --- | --- |
-| `DesktopEnvironment.test.ts` development ID | `com.t3tools.t3code.dev` | `si.goat.desktop.dev`; test overrides remain unchanged |
-| same file implicit production desktop home | `/Users/alice/.t3/userdata` | `/Users/alice/.goat/desktop/userdata`; development stays `.t3/dev` |
-| same file | no stable/nightly identity comparison | construct stable, nightly, dev; assert GOAT / GOAT (Nightly) / GOAT (Dev), correct Windows app IDs and override wins |
-| `DesktopAppIdentity.test.ts` V2 path | `.../t3code-v2` | `.../goat-desktop`, even with upstream profiles present |
-| same file legacy dev path | `.../T3 Code (Dev)` | `.../goat-desktop-dev`; replace the removed inspect-failure test with nightly path isolation |
-| same file applicationName | `goat (Alpha)` | `GOAT`; nightly/dev labels uppercase GOAT; keep exact `setName` `T3 Code Alpha/Nightly/Dev` tests |
-| `DesktopClerk.test.ts` paths/event ordering | `t3code-v2`, `t3code-dev` | `goat-desktop`, `goat-desktop-dev`; add nightly case `goat-desktop-nightly`; event sequence still `setPath:userData:<selected>`, then `createClerkBridge` |
+| Test owner                                         | Before                                      | After / observable proof                                                                                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DesktopEnvironment.test.ts` development ID        | `com.t3tools.t3code.dev`                    | `si.goat.desktop.dev`; test overrides remain unchanged                                                                                                                                                                            |
+| same file implicit production desktop home         | `/Users/alice/.t3/userdata`                 | `/Users/alice/.goat/desktop/userdata`; development stays `.t3/dev`                                                                                                                                                                |
+| same file                                          | no stable/nightly identity comparison       | construct stable, nightly, dev; assert GOAT / GOAT (Nightly) / GOAT (Dev), correct Windows app IDs and override wins                                                                                                              |
+| `DesktopAppIdentity.test.ts` V2 path               | `.../t3code-v2`                             | `.../goat-desktop`, even with upstream profiles present                                                                                                                                                                           |
+| same file legacy dev path                          | `.../T3 Code (Dev)`                         | `.../goat-desktop-dev`; replace the removed inspect-failure test with nightly path isolation                                                                                                                                      |
+| same file applicationName                          | `goat (Alpha)`                              | `GOAT`; nightly/dev labels uppercase GOAT; keep exact `setName` `T3 Code Alpha/Nightly/Dev` tests                                                                                                                                 |
+| `DesktopClerk.test.ts` paths/event ordering        | `t3code-v2`, `t3code-dev`                   | `goat-desktop`, `goat-desktop-dev`; add nightly case `goat-desktop-nightly`; event sequence still `setPath:userData:<selected>`, then `createClerkBridge`                                                                         |
 | `DesktopPreReadyFileSystem.test.ts` migration test | reads old Local State and creates t3code-v2 | add `appVersion: "1.2.3"` to helper; resolve `goat-desktop` synchronously, assert no destination Local State and old source keys untouched; remove unreadable-old-profile failure test because old profile is no longer inspected |
-| NEW `DesktopLegacyLocalStorage.test.ts` | file absent | GOAT case: `load` + `take` yields none, source filesystem is never probed, and `complete` does not write an import marker |
+| NEW `DesktopLegacyLocalStorage.test.ts`            | file absent                                 | GOAT case: `load` + `take` yields none, source filesystem is never probed, and `complete` does not write an import marker                                                                                                         |
 
 Required direct-call completeness gate: `rg -n 'resolveUserDataPath\(' apps/desktop/src`. Every direct literal caller must add `appVersion`; `environment` callers already contain it. Before applying the profile patch, inspect all current test helpers; do not add optional default appVersion just to silence missed callers.
 
@@ -802,10 +822,20 @@ it.layer(NodeServices.layer)("DesktopPreReadyFileSystem", (it) => {
       yield* fs.makeDirectory(path.dirname(old), { recursive: true });
       yield* fs.writeFileString(old, "upstream keys");
       const synchronous = yield* Effect.context<Path.Path>();
-      const actual = Effect.runSync(DesktopUserData.resolveUserDataPath({ appDataDirectory: root, isDevelopment: false, platform: "win32", appVersion: "1.2.3" }).pipe(Effect.provide(synchronous), Effect.provide(DesktopPreReadyFileSystem.layer)));
+      const actual = Effect.runSync(
+        DesktopUserData.resolveUserDataPath({
+          appDataDirectory: root,
+          isDevelopment: false,
+          platform: "win32",
+          appVersion: "1.2.3",
+        }).pipe(Effect.provide(synchronous), Effect.provide(DesktopPreReadyFileSystem.layer)),
+      );
       assert.equal(actual, path.join(root, "goat-desktop"));
       assert.isFalse(yield* fs.exists(path.join(actual, "Local State")));
-      assert.equal(Effect.runSync(DesktopPreReadyFileSystem.make.readFileString(old)), "upstream keys");
+      assert.equal(
+        Effect.runSync(DesktopPreReadyFileSystem.make.readFileString(old)),
+        "upstream keys",
+      );
       assert.equal(yield* fs.readFileString(old), "upstream keys");
     }),
   );
@@ -1045,27 +1075,27 @@ wp1/wp2 have landed at the stale-check HEAD; wp3 keeps the current bytes identif
 
 ## Acceptance and activation matrix
 
-| Scenario | Observable result |
-| --- | --- |
-| local signed/unsigned, absent feed opt-in, canonical/upstream ambient repo | config contains `publish: null`; actual local package later has no `app-update.yml` or update manifests; no upstream polling |
-| feed enabled + explicit canonical or canonical ambient | GitHub GOAT latest/nightly config; no actual release upload |
-| enabled + explicit invalid while ambient canonical | null publish; invalid override cannot switch to another repository |
-| preview/PR + feed enabled/mock | null publish, no app update metadata |
-| mock non-preview + any canonical feed env | generic local mock URL wins |
-| stable/nightly product | GOAT / GOAT (Nightly), GOAT prefix, stable/nightly own bundle IDs |
-| unsigned, or signed without passkey opt-in and missing profile vars | signing plan does not require profile; no entitlement-specific WebAuthn metadata |
-| signed mac + passkey opt-in, bad/missing team/profile/domain | existing typed build error; no silent half-provisioned app |
-| entitled signed nightly | correct nightly app ID in signed entitlement fields and metadata |
-| old upstream profiles present | GOAT stable/nightly/dev paths remain distinct; upstream files unchanged; no automatic Windows Local State/V1 import |
-| About/menu identity | visible GOAT names; runtime setName remains T3 Code Alpha/Nightly/Dev |
-| no override, packaged desktop environment + primary bootstrap + early Linux settings | `.goat/desktop` base and `.goat/desktop/userdata` state/settings through actual inputs; upstream `.t3` untouched |
-| standalone CLI + SSH-host default + sudo browser fallback | `.goat` base and `.goat/userdata` state; no `/desktop` suffix |
-| explicit home + dev linked worktree | custom paths unchanged; worktree `.t3` isolation and precedence retained |
-| sudo browser setup | invoking user's `.goat` browser installation inspected |
-| D9-A rehearsal | stopped projects/thread families retained without dev sample caps; runnable/auth tables empty; WAL/integrity/source preservation pass; existing/racing DB refused; no secrets/settings/runtime copy |
-| D9-A operator gate | manual `node scripts/import-desktop-home.ts --from <dir>` executes in wp5 only after user chooses copy |
-| D9-B | no import; fresh `.goat/desktop/userdata` created only by normal desktop startup |
-| native shell with isolated HOME / retained ready runtime | executes `.goat` runtime, no `.t3` runtime writes; frozen script entries unchanged |
+| Scenario                                                                             | Observable result                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| local signed/unsigned, absent feed opt-in, canonical/upstream ambient repo           | config contains `publish: null`; actual local package later has no `app-update.yml` or update manifests; no upstream polling                                                                        |
+| feed enabled + explicit canonical or canonical ambient                               | GitHub GOAT latest/nightly config; no actual release upload                                                                                                                                         |
+| enabled + explicit invalid while ambient canonical                                   | null publish; invalid override cannot switch to another repository                                                                                                                                  |
+| preview/PR + feed enabled/mock                                                       | null publish, no app update metadata                                                                                                                                                                |
+| mock non-preview + any canonical feed env                                            | generic local mock URL wins                                                                                                                                                                         |
+| stable/nightly product                                                               | GOAT / GOAT (Nightly), GOAT prefix, stable/nightly own bundle IDs                                                                                                                                   |
+| unsigned, or signed without passkey opt-in and missing profile vars                  | signing plan does not require profile; no entitlement-specific WebAuthn metadata                                                                                                                    |
+| signed mac + passkey opt-in, bad/missing team/profile/domain                         | existing typed build error; no silent half-provisioned app                                                                                                                                          |
+| entitled signed nightly                                                              | correct nightly app ID in signed entitlement fields and metadata                                                                                                                                    |
+| old upstream profiles present                                                        | GOAT stable/nightly/dev paths remain distinct; upstream files unchanged; no automatic Windows Local State/V1 import                                                                                 |
+| About/menu identity                                                                  | visible GOAT names; runtime setName remains T3 Code Alpha/Nightly/Dev                                                                                                                               |
+| no override, packaged desktop environment + primary bootstrap + early Linux settings | `.goat/desktop` base and `.goat/desktop/userdata` state/settings through actual inputs; upstream `.t3` untouched                                                                                    |
+| standalone CLI + SSH-host default + sudo browser fallback                            | `.goat` base and `.goat/userdata` state; no `/desktop` suffix                                                                                                                                       |
+| explicit home + dev linked worktree                                                  | custom paths unchanged; worktree `.t3` isolation and precedence retained                                                                                                                            |
+| sudo browser setup                                                                   | invoking user's `.goat` browser installation inspected                                                                                                                                              |
+| D9-A rehearsal                                                                       | stopped projects/thread families retained without dev sample caps; runnable/auth tables empty; WAL/integrity/source preservation pass; existing/racing DB refused; no secrets/settings/runtime copy |
+| D9-A operator gate                                                                   | manual `node scripts/import-desktop-home.ts --from <dir>` executes in wp5 only after user chooses copy                                                                                              |
+| D9-B                                                                                 | no import; fresh `.goat/desktop/userdata` created only by normal desktop startup                                                                                                                    |
+| native shell with isolated HOME / retained ready runtime                             | executes `.goat` runtime, no `.t3` runtime writes; frozen script entries unchanged                                                                                                                  |
 
 Surfaces: desktop packaging and Electron startup are in scope; hosted/local web and mobile display/provider behavior are unchanged. Standalone/remote GOAT CLI defaults stay `.goat`; desktop alone defaults to `.goat/desktop`. Explicit homes/protocol remain authoritative. All provider adapters use the same server home and need no adapter changes. Existing updater UI/service reports unavailable when no `app-update.yml`; use its focused regression suite. The only new operator entry is the manually invoked import script; no new UI action, RPC method or scheduler path is added.
 
@@ -1146,6 +1176,7 @@ Source-of-truth sync: update the D3/D9 rows in `000_plan.md` with accepted choic
 Folded into the owning home patches, D9 copy/fresh operator sections, file map, tests and acceptance gates above. Packaged production desktop uses `~/.goat/desktop`; standalone/SSH defaults stay `~/.goat`; dev-worktree `.t3` is unchanged. The old whole-DB backup/copy block is removed. The explicit manual import reuses the migration runner in private staging and publishes only filtered projects/stopped history to an absent desktop DB, with source preservation and no automatic secrets/runtime/service transfer. Actual execution remains gated on the user’s copy/fresh choice in wp5.
 
 ## Audit fold (cycle 3)
+
 1. Scope expansion approved: .github/workflows/release-desktop.yml (~574–587) prepares/requires the provisioning profile only when an explicit passkey opt-in input/env is true and passes that opt-in to the build; ordinary Developer ID signing and notarization stay unconditional for signed builds. Extend scripts/release-desktop-runtime.test.ts to cover signed mac with opt-in off (no profile requirement, signing still configured) and on (profile required, entitlements included).
 2. Update feed: select the explicit override by presence (`!== undefined`), then validate; an empty/whitespace explicit value yields publish null and never falls back to ambient GITHUB_REPOSITORY. Tests for empty/whitespace overrides with canonical ambient.
 3. CLI shim: DesktopCliShim.ts derives home from environment.baseDir (no resolver edit); add a test that a shim rendered for a packaged environment embeds ~/.goat/desktop, honours explicit overrides and leaves ~/.t3 untouched.

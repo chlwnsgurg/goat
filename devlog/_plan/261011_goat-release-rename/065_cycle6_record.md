@@ -3,6 +3,7 @@
 Commit `96c828db0`: 11 MCP identity strings say GOAT. Audit 01a12812 FAIL→PASS (possessive strings), review 01a12813 PASS. Receipt: server 33+88, acp 66, opencode 51; tsc 3 packages.
 
 ## Unit result (branch codex/goat-release-rename, local only, base dfd768cb5)
+
 - fe8df0d3a fix(ssh): GOAT runtimes via local gh from goat-si/goat
 - f08a410af feat(mcp): goat_* tools, server GOAT
 - cd1dfd752 feat(mcp): provider key goat
@@ -11,6 +12,7 @@ Commit `96c828db0`: 11 MCP identity strings say GOAT. Audit 01a12812 FAIL→PASS
 - 96c828db0 fix(mcp): GOAT MCP error strings
 
 ## Residuals / follow-ups
+
 - Claude (claudeAgent) on SSH-launched macOS hosts: keychain not readable in SSH sessions → "Not logged in" (pre-existing; needs token-based auth or another provider).
 - Anonymous release consumers (t3 update, pinned runtime, installers, mobile) cannot read the private repo (D4).
 - No goat-si/goat release exists; live gh success path unobserved; publishing needs authorization.
@@ -19,4 +21,3 @@ Commit `96c828db0`: 11 MCP identity strings say GOAT. Audit 01a12812 FAIL→PASS
 - The user's running dev app (t3code-lanes/ssh-dispatch-goat) still runs the old build; restart it on this branch to use the changes.
 - A GOAT server keeps running on juns-macbook-pro from ~/.goat (pid recorded in evidence/wp5-probe.txt).
 - `git fetch` of the lane branch into the goat clone also copied upstream tags locally (not pushed).
-

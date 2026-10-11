@@ -33,18 +33,18 @@ At the pinned SHA, `packages/ssh/src/tunnel.ts` contains:
 - Launch at 1305, pairing at 1367 and MCP at 1430 ignore preparation's result; pairing and MCP already pass `stateKey` and `keepExistingRunner: true`. Do not reintroduce their old missing-state-key bug.
 - `SshTunnelEntry` at 116, `startSshTunnel` at 1603, manager pairing at 2206 and manager MCP at 2303 form the selection's remaining in-memory chain.
 
-| Action | Implementation file | Change |
-| --- | --- | --- |
-| NEW | `packages/shared/src/sshRuntimeProtocol.ts` | Constant 1; SSH helper/runner/auth compatibility bump policy. |
-| MODIFY | `packages/shared/package.json` | Explicit subpath export. |
-| MODIFY | `packages/contracts/src/environment.ts`, `environment.test.ts` | Optional descriptor SSH integer; legacy and malformed decoding. |
-| MODIFY | `apps/server/src/environment/ServerEnvironment.ts`, `ServerEnvironment.test.ts` | Emit current SSH integer alongside version/orchestration. |
-| MODIFY | `apps/server/src/serverRuntimeState.ts`, `serverRuntimeState.test.ts` | Optional three build fields in format 1; current writer emits all three. |
-| MODIFY / NEW test | `apps/server/src/cli/sshHelper.ts`, `sshHelper.test.ts` | Own JSON advertisement and bounded loopback live observation, including legacy/missing metadata. |
-| MODIFY | `packages/ssh/src/tunnel.ts` | Typed selected runtime; read-only compatibility probe; integrated staging/publication and use guards. |
-| MODIFY | `packages/ssh/src/tunnel.test.ts`, `tunnel.mcpSession.test.ts` | Isolated-HOME real-shell behavior, manager propagation, existing-double repairs. |
-| MODIFY | `packages/ssh/src/fixtures/remote-runner-baseline.json` | Six launch/pairing fields only, relative to b79ff462c (unchanged since 480ed90da). |
-| DELETE | None | Keep old runtime directories and marker data. |
+| Action            | Implementation file                                                             | Change                                                                                                |
+| ----------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| NEW               | `packages/shared/src/sshRuntimeProtocol.ts`                                     | Constant 1; SSH helper/runner/auth compatibility bump policy.                                         |
+| MODIFY            | `packages/shared/package.json`                                                  | Explicit subpath export.                                                                              |
+| MODIFY            | `packages/contracts/src/environment.ts`, `environment.test.ts`                  | Optional descriptor SSH integer; legacy and malformed decoding.                                       |
+| MODIFY            | `apps/server/src/environment/ServerEnvironment.ts`, `ServerEnvironment.test.ts` | Emit current SSH integer alongside version/orchestration.                                             |
+| MODIFY            | `apps/server/src/serverRuntimeState.ts`, `serverRuntimeState.test.ts`           | Optional three build fields in format 1; current writer emits all three.                              |
+| MODIFY / NEW test | `apps/server/src/cli/sshHelper.ts`, `sshHelper.test.ts`                         | Own JSON advertisement and bounded loopback live observation, including legacy/missing metadata.      |
+| MODIFY            | `packages/ssh/src/tunnel.ts`                                                    | Typed selected runtime; read-only compatibility probe; integrated staging/publication and use guards. |
+| MODIFY            | `packages/ssh/src/tunnel.test.ts`, `tunnel.mcpSession.test.ts`                  | Isolated-HOME real-shell behavior, manager propagation, existing-double repairs.                      |
+| MODIFY            | `packages/ssh/src/fixtures/remote-runner-baseline.json`                         | Six launch/pairing fields only, relative to b79ff462c (unchanged since 480ed90da).                    |
+| DELETE            | None                                                                            | Keep old runtime directories and marker data.                                                         |
 
 Field chain: shared SSH constant → service descriptor / format-1 writer / CLI own JSON → contracts schema / persisted schema / shell-token decoder → selector, publication guard, live-server reuse and auth use guard. Server version comes from `apps/server/package.json`; orchestration comes from contracts' existing constant 2. No caller supplies build metadata. Optional fields stay absent on old records; no defaulting to current protocol values.
 
@@ -63,23 +63,23 @@ All providers are served by the same selected server; no provider adapter change
 7. Ready selections are rechecked before invoking any installing wrapper. Retained selections additionally carry the probe SHA-256 and rehash the source and copied bytes before pinning, publication and use. Their generated candidate is pinned to the selected version; vanished executable/marker errors before publication/auth. A mirror cold selection may install the **requested exact** runtime during candidate validation; preserve the landed acquisition order and archive validation.
 8. Explicit Node-script mode remains explicit, uses the configured CLI helper, and never converts a retained Node script into an archive selection. Its build must advertise complete matching protocols; it has no exact archive identity to authorize legacy reuse.
 
-| Activation | Observable acceptance |
-| --- | --- |
-| Older retained/live runtime, SSH=1/orchestration=2 | Selected older version; same live PID/port; pairing/MCP log that executable; zero bundle/cache reads, gh, upload, download, stop. |
-| Older retained runtime lacks command or one integer, no live server | No cross-release reuse; acquire requested exact; preserve old executable and marker. |
-| Exact ready legacy binary, no live server | `--version` proves exact; permitted when command is absent; no guessed integer. |
-| Exact live descriptor omits protocol fields | Permitted only with matching exact binary version and no explicit mismatch; valid old format-1 metadata remains readable. |
-| Same exact version advertises mismatching integer | Reject before publish; same version does not override a protocol mismatch. |
-| Owned live incompatible, owning launch | Stage and verify requested candidate first; guard approves ownership; publish; fresh identity check; terminate only recorded live owned PID; wait for exit; spawn requested runtime. |
-| Owned live incompatible, secondary launch/pairing/MCP | Error before runner/process/ownership mutation, regardless of selected runner's keep flag. |
-| External live incompatible/unknown or remembered external port with malformed record | Error and preserve state; original captured process continues answering. |
-| Persisted/live descriptor disagree, or nonloopback origin | Never select cross-release from those records; externally owned server remains untouched. |
-| Owning launch with stale metadata or descriptor 404 | Actionable unknown error; no publication/kill; original process and runner/ownership bytes preserved. |
-| Same-version retained runner replaced between probe and launch/pairing/MCP | SHA-256 mismatch before copied bytes execute/pin/publish; no auth/start/stop; zero acquisition. |
-| Malformed own/live version, protocols or PID/port tokens (also Node mode) | Reject successful malformed output; valid own `0 0` and independently proven exact-version legacy fallback remain supported. |
-| Selection disappears or retained runner changes after prepare | Error before installing wrapper, publish, serve or auth; zero old-release acquisition. |
-| Cached manager pairing/MCP after resolver version changes | Carry original selection; recheck it/live descriptor; issue with original chosen binary or error, never silently select a different release. |
-| MCP ceiling rejected | Both attempts use the same selection and fresh guard; preserve fallback semantics and ceiling marker. |
+| Activation                                                                           | Observable acceptance                                                                                                                                                                |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Older retained/live runtime, SSH=1/orchestration=2                                   | Selected older version; same live PID/port; pairing/MCP log that executable; zero bundle/cache reads, gh, upload, download, stop.                                                    |
+| Older retained runtime lacks command or one integer, no live server                  | No cross-release reuse; acquire requested exact; preserve old executable and marker.                                                                                                 |
+| Exact ready legacy binary, no live server                                            | `--version` proves exact; permitted when command is absent; no guessed integer.                                                                                                      |
+| Exact live descriptor omits protocol fields                                          | Permitted only with matching exact binary version and no explicit mismatch; valid old format-1 metadata remains readable.                                                            |
+| Same exact version advertises mismatching integer                                    | Reject before publish; same version does not override a protocol mismatch.                                                                                                           |
+| Owned live incompatible, owning launch                                               | Stage and verify requested candidate first; guard approves ownership; publish; fresh identity check; terminate only recorded live owned PID; wait for exit; spawn requested runtime. |
+| Owned live incompatible, secondary launch/pairing/MCP                                | Error before runner/process/ownership mutation, regardless of selected runner's keep flag.                                                                                           |
+| External live incompatible/unknown or remembered external port with malformed record | Error and preserve state; original captured process continues answering.                                                                                                             |
+| Persisted/live descriptor disagree, or nonloopback origin                            | Never select cross-release from those records; externally owned server remains untouched.                                                                                            |
+| Owning launch with stale metadata or descriptor 404                                  | Actionable unknown error; no publication/kill; original process and runner/ownership bytes preserved.                                                                                |
+| Same-version retained runner replaced between probe and launch/pairing/MCP           | SHA-256 mismatch before copied bytes execute/pin/publish; no auth/start/stop; zero acquisition.                                                                                      |
+| Malformed own/live version, protocols or PID/port tokens (also Node mode)            | Reject successful malformed output; valid own `0 0` and independently proven exact-version legacy fallback remain supported.                                                         |
+| Selection disappears or retained runner changes after prepare                        | Error before installing wrapper, publish, serve or auth; zero old-release acquisition.                                                                                               |
+| Cached manager pairing/MCP after resolver version changes                            | Carry original selection; recheck it/live descriptor; issue with original chosen binary or error, never silently select a different release.                                         |
+| MCP ceiling rejected                                                                 | Both attempts use the same selection and fresh guard; preserve fallback semantics and ceiling marker.                                                                                |
 
 ## 1. Foundation hunks
 
@@ -167,66 +167,87 @@ export const ownSshRuntimeProtocol = () => ({
   orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
 });
 
-const readProtocolDescriptor = (port: number) => new Promise<unknown>((resolve, reject) => {
-  let settled = false;
-  const finish = (cause?: unknown, value?: unknown) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(deadline);
-    if (cause !== undefined) reject(cause); else resolve(value);
-  };
-  const request = NodeHttp.get({ hostname: "127.0.0.1", port,
-    path: "/.well-known/t3/environment", timeout: 1000 }, (response) => {
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    response.on("data", (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > 65536) {
-        const cause = new Error("SSH runtime descriptor exceeds 64 KiB");
-        response.destroy(cause); request.destroy(cause); finish(cause);
-        return;
-      }
-      chunks.push(chunk);
+const readProtocolDescriptor = (port: number) =>
+  new Promise<unknown>((resolve, reject) => {
+    let settled = false;
+    const finish = (cause?: unknown, value?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (cause !== undefined) reject(cause);
+      else resolve(value);
+    };
+    const request = NodeHttp.get(
+      { hostname: "127.0.0.1", port, path: "/.well-known/t3/environment", timeout: 1000 },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 65536) {
+            const cause = new Error("SSH runtime descriptor exceeds 64 KiB");
+            response.destroy(cause);
+            request.destroy(cause);
+            finish(cause);
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.once("error", finish);
+        response.once("end", () => {
+          try {
+            if (response.statusCode !== 200) throw new Error("SSH runtime descriptor unavailable");
+            // @effect-diagnostics-next-line preferSchemaOverJson:off - validated by caller.
+            finish(undefined, JSON.parse(Buffer.concat(chunks).toString("utf8")));
+          } catch (cause) {
+            finish(cause);
+          }
+        });
+      },
+    );
+    const deadline = setTimeout(() => {
+      const cause = new Error("SSH descriptor deadline exceeded");
+      request.destroy(cause);
+      finish(cause);
+    }, 1500);
+    request.once("timeout", () => {
+      const cause = new Error("SSH descriptor timed out");
+      request.destroy(cause);
+      finish(cause);
     });
-    response.once("error", finish);
-    response.once("end", () => {
-      try {
-        if (response.statusCode !== 200) throw new Error("SSH runtime descriptor unavailable");
-        // @effect-diagnostics-next-line preferSchemaOverJson:off - validated by caller.
-        finish(undefined, JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch (cause) { finish(cause); }
-    });
+    request.once("error", finish);
   });
-  const deadline = setTimeout(() => {
-    const cause = new Error("SSH descriptor deadline exceeded");
-    request.destroy(cause); finish(cause);
-  }, 1500);
-  request.once("timeout", () => {
-    const cause = new Error("SSH descriptor timed out");
-    request.destroy(cause); finish(cause);
-  });
-  request.once("error", finish);
-});
 
-const protocolVersion = (value: unknown): value is string => typeof value === "string"
-  && /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(value);
-const protocolInteger = (value: unknown) => typeof value === "number"
-  && Number.isSafeInteger(value) && value > 0;
+const protocolVersion = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(
+    value,
+  );
+const protocolInteger = (value: unknown) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 const processExists = (pid: number) => {
-  try { process.kill(pid, 0); return true; }
-  catch (cause) { return cause instanceof Error && "code" in cause && cause.code === "EPERM"; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return cause instanceof Error && "code" in cause && cause.code === "EPERM";
+  }
 };
-const hasLoopbackListener = (port: number) => new Promise<boolean>((resolve) => {
-  const socket = NodeNet.createConnection({ host: "127.0.0.1", port });
-  let settled = false;
-  const finish = (present: boolean) => {
-    if (settled) return;
-    settled = true; clearTimeout(deadline); socket.destroy(); resolve(present);
-  };
-  const deadline = setTimeout(() => finish(false), 1000);
-  socket.once("connect", () => finish(true));
-  socket.once("error", () => finish(false));
-});
+const hasLoopbackListener = (port: number) =>
+  new Promise<boolean>((resolve) => {
+    const socket = NodeNet.createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    const finish = (present: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(present);
+    };
+    const deadline = setTimeout(() => finish(false), 1000);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
 const rememberedInteger = (file: string | undefined) => {
   if (file === undefined || !NodeFS.existsSync(file)) return 0;
   const raw = NodeFS.readFileSync(file, "utf8").trim();
@@ -249,33 +270,53 @@ export const readLiveSshRuntimeProtocol = async (
     if (NodeFS.existsSync(runtimeFile)) {
       // @effect-diagnostics-next-line preferSchemaOverJson:off - decoded immediately.
       record = Schema.decodeUnknownSync(PersistedServerRuntimeState)(
-        JSON.parse(NodeFS.readFileSync(runtimeFile, "utf8")));
+        JSON.parse(NodeFS.readFileSync(runtimeFile, "utf8")),
+      );
       const origin = new URL(record.origin);
-      if (!Number.isSafeInteger(record.pid) || record.pid <= 0
-          || !Number.isSafeInteger(record.port) || record.port < 1 || record.port > 65535
-          || origin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(origin.hostname)
-          || Number(origin.port || "80") !== record.port) throw new Error("Invalid runtime identity");
+      if (
+        !Number.isSafeInteger(record.pid) ||
+        record.pid <= 0 ||
+        !Number.isSafeInteger(record.port) ||
+        record.port < 1 ||
+        record.port > 65535 ||
+        origin.protocol !== "http:" ||
+        !["127.0.0.1", "localhost"].includes(origin.hostname) ||
+        Number(origin.port || "80") !== record.port
+      )
+        throw new Error("Invalid runtime identity");
       pid = !record.serviceManaged && processExists(record.pid) ? record.pid : 0;
       port = record.port;
     }
-  } catch { record = undefined; damaged = true; }
+  } catch {
+    record = undefined;
+    damaged = true;
+  }
   let rememberedPid = 0;
   try {
     if (port === 0) port = rememberedInteger(portFile);
     rememberedPid = rememberedInteger(pidFile);
     const rememberedPort = rememberedInteger(portFile);
-    if (record !== undefined && ((rememberedPort > 0 && rememberedPort !== record.port)
-        || (rememberedPid > 0 && rememberedPid !== record.pid))) damaged = true;
+    if (
+      record !== undefined &&
+      ((rememberedPort > 0 && rememberedPort !== record.port) ||
+        (rememberedPid > 0 && rememberedPid !== record.pid))
+    )
+      damaged = true;
     if (port > 65535) throw new Error("Invalid remembered port");
-  } catch { damaged = true; port = 0; }
+  } catch {
+    damaged = true;
+    port = 0;
+  }
   const rememberedAlive = rememberedPid > 0 && processExists(rememberedPid);
   const unknown = { status: "unknown", pid, port } as const;
-  if (port === 0) return damaged || rememberedAlive ? unknown : { status: "none", pid: 0, port: 0 } as const;
+  if (port === 0)
+    return damaged || rememberedAlive ? unknown : ({ status: "none", pid: 0, port: 0 } as const);
   let raw: unknown;
-  try { raw = await readProtocolDescriptor(port); }
-  catch {
+  try {
+    raw = await readProtocolDescriptor(port);
+  } catch {
     // A root HTTP response or living PID is not compatibility evidence.
-    if (damaged || pid > 0 || rememberedAlive || await hasLoopbackListener(port)) return unknown;
+    if (damaged || pid > 0 || rememberedAlive || (await hasLoopbackListener(port))) return unknown;
     return { status: "none", pid: 0, port: 0 } as const;
   }
   try {
@@ -287,7 +328,11 @@ export const readLiveSshRuntimeProtocol = async (
     }
     if (damaged) return unknown;
     if (record !== undefined) {
-      for (const field of ["serverVersion", "sshRuntimeProtocolVersion", "orchestrationProtocolVersion"] as const) {
+      for (const field of [
+        "serverVersion",
+        "sshRuntimeProtocolVersion",
+        "orchestrationProtocolVersion",
+      ] as const) {
         // Old format-1 absence is allowed; disagreement with a present field is not.
         if (record[field] !== undefined && record[field] !== descriptor[field]) return unknown;
       }
@@ -295,19 +340,35 @@ export const readLiveSshRuntimeProtocol = async (
     // Reread after HTTP: a changed persisted PID/port/version cannot authorize ownership.
     if (record !== undefined) {
       const current = Schema.decodeUnknownSync(PersistedServerRuntimeState)(
-        JSON.parse(NodeFS.readFileSync(runtimeFile, "utf8")));
-      for (const field of ["pid", "port", "origin", "startedAt", "serviceManaged",
-        "serverVersion", "sshRuntimeProtocolVersion", "orchestrationProtocolVersion"] as const) {
+        JSON.parse(NodeFS.readFileSync(runtimeFile, "utf8")),
+      );
+      for (const field of [
+        "pid",
+        "port",
+        "origin",
+        "startedAt",
+        "serviceManaged",
+        "serverVersion",
+        "sshRuntimeProtocolVersion",
+        "orchestrationProtocolVersion",
+      ] as const) {
         if (current[field] !== record[field]) return unknown;
       }
       // Historical records still support live exact-version reuse, but do not grant kill authority.
       if (record.serverVersion === undefined || !processExists(record.pid)) pid = 0;
     }
     // No record/dead/unversioned PID means an answering port is external.
-    return { status: "live", pid, port, serverVersion: descriptor.serverVersion,
+    return {
+      status: "live",
+      pid,
+      port,
+      serverVersion: descriptor.serverVersion,
       sshRuntimeProtocolVersion: descriptor.sshRuntimeProtocolVersion,
-      orchestrationProtocolVersion: descriptor.orchestrationProtocolVersion } as const;
-  } catch { return unknown; }
+      orchestrationProtocolVersion: descriptor.orchestrationProtocolVersion,
+    } as const;
+  } catch {
+    return unknown;
+  }
 };
 
 const protocol = Command.make("protocol", {
@@ -315,27 +376,51 @@ const protocol = Command.make("protocol", {
   runtimeFile: Flag.String("runtime-file").pipe(Flag.optional),
   portFile: Flag.String("port-file").pipe(Flag.optional),
   pidFile: Flag.String("pid-file").pipe(Flag.optional),
-}).pipe(Command.withHandler(({ shell, runtimeFile, portFile, pidFile }) => Effect.promise(async () => {
-  try {
-    const signals = Option.isSome(runtimeFile)
-      ? await readLiveSshRuntimeProtocol(runtimeFile.value, Option.getOrUndefined(portFile), Option.getOrUndefined(pidFile))
-      : ownSshRuntimeProtocol();
-    if (!shell) { process.stdout.write(JSON.stringify(signals) + "\n"); return; }
-    if ("serverVersion" in signals && !protocolVersion(signals.serverVersion)) {
-      throw new Error("Invalid SSH protocol version token");
-    }
-    const version = "serverVersion" in signals ? signals.serverVersion : "unknown";
-    const integer = (value: unknown) => protocolInteger(value) ? String(value) : "unknown";
-    const fields = [version,
-      integer("sshRuntimeProtocolVersion" in signals ? signals.sshRuntimeProtocolVersion : undefined),
-      integer("orchestrationProtocolVersion" in signals ? signals.orchestrationProtocolVersion : undefined),
-      "pid" in signals ? signals.pid : 0, "port" in signals ? signals.port : 0];
-    process.stdout.write(("status" in signals ? signals.status + " " : "") + fields.join(" ") + "\n");
-  } catch (cause) {
-    process.stderr.write((cause instanceof Error ? cause.message : "Cannot inspect SSH protocol") + "\n");
-    process.exitCode = 1;
-  }
-})));
+}).pipe(
+  Command.withHandler(({ shell, runtimeFile, portFile, pidFile }) =>
+    Effect.promise(async () => {
+      try {
+        const signals = Option.isSome(runtimeFile)
+          ? await readLiveSshRuntimeProtocol(
+              runtimeFile.value,
+              Option.getOrUndefined(portFile),
+              Option.getOrUndefined(pidFile),
+            )
+          : ownSshRuntimeProtocol();
+        if (!shell) {
+          process.stdout.write(JSON.stringify(signals) + "\n");
+          return;
+        }
+        if ("serverVersion" in signals && !protocolVersion(signals.serverVersion)) {
+          throw new Error("Invalid SSH protocol version token");
+        }
+        const version = "serverVersion" in signals ? signals.serverVersion : "unknown";
+        const integer = (value: unknown) => (protocolInteger(value) ? String(value) : "unknown");
+        const fields = [
+          version,
+          integer(
+            "sshRuntimeProtocolVersion" in signals ? signals.sshRuntimeProtocolVersion : undefined,
+          ),
+          integer(
+            "orchestrationProtocolVersion" in signals
+              ? signals.orchestrationProtocolVersion
+              : undefined,
+          ),
+          "pid" in signals ? signals.pid : 0,
+          "port" in signals ? signals.port : 0,
+        ];
+        process.stdout.write(
+          ("status" in signals ? signals.status + " " : "") + fields.join(" ") + "\n",
+        );
+      } catch (cause) {
+        process.stderr.write(
+          (cause instanceof Error ? cause.message : "Cannot inspect SSH protocol") + "\n",
+        );
+        process.exitCode = 1;
+      }
+    }),
+  ),
+);
 ```
 
 The observer bounds socket inactivity to 1 second, total descriptor time to 1500 ms and response bytes to 64 KiB. A separate TCP check bounded to 1 second distinguishes a missing listener from an unidentifiable answering port without relying on the legacy root readiness probe. Helper tests use held/trickling/oversized real responses and verify bounded completion; the test itself does not sleep. Collected Buffer chunks preserve split UTF-8 code points.
@@ -373,7 +458,9 @@ const requestedRuntime = (runner: RemoteT3RunnerOptions | undefined): PreparedRe
   runner: { ...runner },
   version: isNodeScriptRunner(runner) ? null : runner?.archiveVersion?.trim() || null,
   requestedVersion: isNodeScriptRunner(runner) ? null : runner?.archiveVersion?.trim() || null,
-  source: "requested", requireInstalled: false, retainedRunnerSha256: null,
+  source: "requested",
+  requireInstalled: false,
+  retainedRunnerSha256: null,
   mayUpgradeOwnedServer: runner?.keepExistingRunner !== true,
 });
 const RuntimeSignals = Schema.Struct({
@@ -383,13 +470,14 @@ const RuntimeSignals = Schema.Struct({
   invalid: Schema.optionalKey(Schema.Boolean),
 });
 const matchesSignals = (signals: typeof RuntimeSignals.Type, requested: string) =>
-  !signals.invalid && (
-    (signals.sshRuntimeProtocolVersion === SSH_RUNTIME_PROTOCOL_VERSION
-      && signals.orchestrationProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION)
-    || (signals.serverVersion === requested
-      && (signals.sshRuntimeProtocolVersion === undefined || signals.sshRuntimeProtocolVersion === SSH_RUNTIME_PROTOCOL_VERSION)
-      && (signals.orchestrationProtocolVersion === undefined || signals.orchestrationProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION))
-  );
+  !signals.invalid &&
+  ((signals.sshRuntimeProtocolVersion === SSH_RUNTIME_PROTOCOL_VERSION &&
+    signals.orchestrationProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION) ||
+    (signals.serverVersion === requested &&
+      (signals.sshRuntimeProtocolVersion === undefined ||
+        signals.sshRuntimeProtocolVersion === SSH_RUNTIME_PROTOCOL_VERSION) &&
+      (signals.orchestrationProtocolVersion === undefined ||
+        signals.orchestrationProtocolVersion === ORCHESTRATION_PROTOCOL_VERSION)));
 ```
 
 Insert this shared shell block beside the selected-runtime type; both probe and execution scripts embed the same validators and SHA-256 function:
@@ -439,7 +527,9 @@ Replace `buildRemoteRuntimeProbeScript` completely at its existing function anch
 
 ```ts
 export function buildRemoteRuntimeProbeScript(
-  version: string, stateKey?: string, _keepExistingRunner = false,
+  version: string,
+  stateKey?: string,
+  _keepExistingRunner = false,
 ): string {
   return `set -eu
 V=${shellSingleQuote(version)}
@@ -827,8 +917,11 @@ function buildRemoteRunnerSetupScript(
 ): string {
   const preserve = selection.source === "retained";
   return applyScriptPlaceholders(REMOTE_RUNNER_SETUP_SCRIPT, {
-    T3_REQUESTED_RUNNER: shellSingleQuote(isNodeScriptRunner(input)
-      ? `Node script ${input?.nodeScriptPath?.trim()}` : `GOAT ${selection.requestedVersion}`),
+    T3_REQUESTED_RUNNER: shellSingleQuote(
+      isNodeScriptRunner(input)
+        ? `Node script ${input?.nodeScriptPath?.trim()}`
+        : `GOAT ${selection.requestedVersion}`,
+    ),
     T3_EXPECTED_ARCHIVE_VERSION: shellSingleQuote(selection.version ?? ""),
     T3_SELECTED_VERSION: shellSingleQuote(selection.version ?? ""),
     T3_REQUESTED_VERSION: shellSingleQuote(selection.requestedVersion ?? ""),
@@ -1074,7 +1167,9 @@ Append to existing contracts descriptor tests:
 ```ts
 it("keeps legacy SSH signals absent and preserves explicit integers", () => {
   expect(decodeDescriptor(descriptor).sshRuntimeProtocolVersion).toBeUndefined();
-  expect(decodeDescriptor({ ...descriptor, sshRuntimeProtocolVersion: 1 }).sshRuntimeProtocolVersion).toBe(1);
+  expect(
+    decodeDescriptor({ ...descriptor, sshRuntimeProtocolVersion: 1 }).sshRuntimeProtocolVersion,
+  ).toBe(1);
   for (const value of ["1", 1.5, null]) {
     expect(() => decodeDescriptor({ ...descriptor, sshRuntimeProtocolVersion: value })).toThrow();
   }
@@ -1097,21 +1192,24 @@ The SSH compatibility tests separately reject negative/future integers; `Schema.
 In runtime tests retain the old literal record round-trip (proves backward compatibility); add emitted metadata/format check and enriched persistence round-trip:
 
 ```ts
-it.effect("records build protocols without changing format 1", () => Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const root = yield* fs.makeTempDirectoryScoped();
-  const state = yield* ServerRuntimeState.makePersistedServerRuntimeState({
-    config: { host: undefined, devUrl: undefined }, port: 13773,
-  });
-  assert.equal(state.version, 1);
-  assert.equal(state.serverVersion, packageJson.version);
-  assert.equal(state.sshRuntimeProtocolVersion, SSH_RUNTIME_PROTOCOL_VERSION);
-  assert.equal(state.orchestrationProtocolVersion, ORCHESTRATION_PROTOCOL_VERSION);
-  const path = `${root}/server-runtime.json`;
-  yield* ServerRuntimeState.persistServerRuntimeState({ path, state });
-  const read = yield* ServerRuntimeState.readPersistedServerRuntimeState(path);
-  assert.deepEqual(Option.getOrThrow(read), state);
-}).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+it.effect("records build protocols without changing format 1", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const root = yield* fs.makeTempDirectoryScoped();
+    const state = yield* ServerRuntimeState.makePersistedServerRuntimeState({
+      config: { host: undefined, devUrl: undefined },
+      port: 13773,
+    });
+    assert.equal(state.version, 1);
+    assert.equal(state.serverVersion, packageJson.version);
+    assert.equal(state.sshRuntimeProtocolVersion, SSH_RUNTIME_PROTOCOL_VERSION);
+    assert.equal(state.orchestrationProtocolVersion, ORCHESTRATION_PROTOCOL_VERSION);
+    const path = `${root}/server-runtime.json`;
+    yield* ServerRuntimeState.persistServerRuntimeState({ path, state });
+    const read = yield* ServerRuntimeState.readPersistedServerRuntimeState(path);
+    assert.deepEqual(Option.getOrThrow(read), state);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
 ```
 
 Add imports from shared/contracts and `../package.json` to that existing test. Test invalid protocol fields through `readPersistedServerRuntimeState` with actual file contents; assert `Option.none` and decode log, preserving its existing error behavior.
@@ -1151,15 +1249,24 @@ const startDescriptor = async (value: unknown) => {
   });
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("No loopback port");
-  return { port: address.port, close: () => new Promise<void>((resolve, reject) => {
-    server.close(error => error ? reject(error) : resolve());
-    server.closeAllConnections();
-  }) };
+  return {
+    port: address.port,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+        server.closeAllConnections();
+      }),
+  };
 };
-const descriptor = { environmentId: "helper-fixture", label: "Fixture",
-  platform: { os: "linux", arch: "x64" }, capabilities: {}, serverVersion: packageJson.version,
+const descriptor = {
+  environmentId: "helper-fixture",
+  label: "Fixture",
+  platform: { os: "linux", arch: "x64" },
+  capabilities: {},
+  serverVersion: packageJson.version,
   sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
-  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION };
+  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+};
 
 describe("SSH runtime protocol", () => {
   it("registers the protocol command and prints only build JSON", async () => {
@@ -1172,39 +1279,76 @@ import {Command} from ${JSON.stringify(cliUrl)};
 import {sshHelperCommand} from ${JSON.stringify(moduleUrl)};
 await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['protocol']));`;
     const stdout = await new Promise<string>((resolve, reject) => {
-      NodeChildProcess.execFile(process.execPath, ["--input-type=module", "-e", script],
-        { timeout: 10000 }, (error, stdout, stderr) => {
-          if (error) { reject(error); return; }
-          if (stderr.trim()) { reject(new Error(stderr)); return; }
+      NodeChildProcess.execFile(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        { timeout: 10000 },
+        (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (stderr.trim()) {
+            reject(new Error(stderr));
+            return;
+          }
           resolve(stdout);
-        });
+        },
+      );
     });
-    expect(JSON.parse(stdout)).toEqual({ serverVersion: packageJson.version,
+    expect(JSON.parse(stdout)).toEqual({
+      serverVersion: packageJson.version,
       sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
-      orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION });
+      orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+    });
   });
 
   for (const mode of ["matching", "legacy", "disagreeing", "malformed"] as const) {
     it(`checks a live loopback descriptor: ${mode}`, async () => {
       const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-helper-"));
-      const liveDescriptor = mode === "legacy"
-        ? { ...descriptor, sshRuntimeProtocolVersion: undefined, orchestrationProtocolVersion: undefined }
-        : mode === "malformed" ? { ...descriptor, sshRuntimeProtocolVersion: "1" } : descriptor;
+      const liveDescriptor =
+        mode === "legacy"
+          ? {
+              ...descriptor,
+              sshRuntimeProtocolVersion: undefined,
+              orchestrationProtocolVersion: undefined,
+            }
+          : mode === "malformed"
+            ? { ...descriptor, sshRuntimeProtocolVersion: "1" }
+            : descriptor;
       const server = await startDescriptor(liveDescriptor);
       try {
         const file = NodePath.join(home, "server-runtime.json");
-        NodeFS.writeFileSync(file, JSON.stringify({ version: 1, pid: process.pid,
-          port: server.port, origin: `http://127.0.0.1:${server.port}`, startedAt: new Date().toISOString(),
-          ...(mode === "legacy" ? {} : { serverVersion: packageJson.version,
-            sshRuntimeProtocolVersion: mode === "disagreeing" ? 99 : SSH_RUNTIME_PROTOCOL_VERSION,
-            orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }) }));
+        NodeFS.writeFileSync(
+          file,
+          JSON.stringify({
+            version: 1,
+            pid: process.pid,
+            port: server.port,
+            origin: `http://127.0.0.1:${server.port}`,
+            startedAt: new Date().toISOString(),
+            ...(mode === "legacy"
+              ? {}
+              : {
+                  serverVersion: packageJson.version,
+                  sshRuntimeProtocolVersion:
+                    mode === "disagreeing" ? 99 : SSH_RUNTIME_PROTOCOL_VERSION,
+                  orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+                }),
+          }),
+        );
         const result = await readLiveSshRuntimeProtocol(file);
         expect(result.status).toBe(mode === "matching" || mode === "legacy" ? "live" : "unknown");
         if (result.status === "live") {
           expect(result.serverVersion).toBe(packageJson.version);
-          expect(result.sshRuntimeProtocolVersion).toBe(mode === "legacy" ? undefined : SSH_RUNTIME_PROTOCOL_VERSION);
+          expect(result.sshRuntimeProtocolVersion).toBe(
+            mode === "legacy" ? undefined : SSH_RUNTIME_PROTOCOL_VERSION,
+          );
         }
-      } finally { await server.close(); NodeFS.rmSync(home, { recursive: true, force: true }); }
+      } finally {
+        await server.close();
+        NodeFS.rmSync(home, { recursive: true, force: true });
+      }
     });
   }
 });
@@ -1230,10 +1374,18 @@ In its native process JSON, use `t.buildRemoteLaunchScript(input, selection)`, `
 Add the following executable fixture helper inside the existing POSIX-only real-shell suite. Its tiny binary models own metadata, but calls the **production** observer for live HTTP/identity validation. It imports the source helper through an absolute file URL; that source module resolves its dependencies in the repository, so no dependency symlink or live state is required. Native Node TS support is already used by `nativeScripts`.
 
 ```ts
-const protocolExecutable = (version: string, signals: {
-  ssh?: number; orchestration?: number; missingCommand?: boolean;
-  ownTokens?: string; liveTokens?: string; descriptor404?: boolean;
-}, state: string) => {
+const protocolExecutable = (
+  version: string,
+  signals: {
+    ssh?: number;
+    orchestration?: number;
+    missingCommand?: boolean;
+    ownTokens?: string;
+    liveTokens?: string;
+    descriptor404?: boolean;
+  },
+  state: string,
+) => {
   const helperUrl = new URL("../../../apps/server/src/cli/sshHelper.ts", import.meta.url).href;
   // From packages/ssh/src, ../../../apps resolves the repository apps directory.
   return `#!${process.execPath}
@@ -1328,9 +1480,15 @@ Complete runner fixture construction and action driver:
 
 ```ts
 const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* (input: {
-  live: boolean; kind: "managed" | "external"; oldVersion: string;
-  ssh?: number; orchestration?: number; missingCommand?: boolean;
-  ownTokens?: string; liveTokens?: string; descriptor404?: boolean;
+  live: boolean;
+  kind: "managed" | "external";
+  oldVersion: string;
+  ssh?: number;
+  orchestration?: number;
+  missingCommand?: boolean;
+  ownTokens?: string;
+  liveTokens?: string;
+  descriptor404?: boolean;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -1351,17 +1509,42 @@ const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* (input:
   const oldRunner = (yield* nativeScripts({ archiveVersion: input.oldVersion })).runner + "\n";
   yield* fs.writeFileString(`${state}/run-t3.sh`, oldRunner);
   yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
-  yield* Effect.addFinalizer(() => fs.readFileString(`${test}/pids`).pipe(Effect.flatMap(data =>
-    Effect.sync(() => { for (const pid of data.trim().split("\n").filter(Boolean).map(Number)) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* captured fixture child already exited */ }
-    } })), Effect.ignore));
-  let pid = 0; let port = 0;
+  yield* Effect.addFinalizer(() =>
+    fs.readFileString(`${test}/pids`).pipe(
+      Effect.flatMap((data) =>
+        Effect.sync(() => {
+          for (const pid of data.trim().split("\n").filter(Boolean).map(Number)) {
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {
+              /* captured fixture child already exited */
+            }
+          }
+        }),
+      ),
+      Effect.ignore,
+    ),
+  );
+  let pid = 0;
+  let port = 0;
   if (input.live) {
-    const child = yield* realSpawner.spawn(ChildProcess.make(`${old}/goat`, ["serve", "--test-seed"], {
-      env: { HOME: home, PATH: process.env.PATH ?? "" }, extendEnv: false,
-    }));
-    const ready = JSON.parse(yield* child.stdout.pipe(Stream.decodeText(), Stream.splitLines, Stream.take(1), Stream.mkString)) as { pid: number; port: number };
-    assert.equal(ready.pid, Number(child.pid)); pid = ready.pid; port = ready.port;
+    const child = yield* realSpawner.spawn(
+      ChildProcess.make(`${old}/goat`, ["serve", "--test-seed"], {
+        env: { HOME: home, PATH: process.env.PATH ?? "" },
+        extendEnv: false,
+      }),
+    );
+    const ready = JSON.parse(
+      yield* child.stdout.pipe(
+        Stream.decodeText(),
+        Stream.splitLines,
+        Stream.take(1),
+        Stream.mkString,
+      ),
+    ) as { pid: number; port: number };
+    assert.equal(ready.pid, Number(child.pid));
+    pid = ready.pid;
+    port = ready.port;
     yield* fs.writeFileString(`${state}/pid`, `${pid}\n`);
     yield* fs.writeFileString(`${state}/port`, `${port}\n`);
     yield* fs.writeFileString(`${state}/managed`, input.kind + "\n");
@@ -1369,70 +1552,128 @@ const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* (input:
   const stem = `goat-${ARCHIVE.archiveVersion}-${platform}-${arch}`;
   const stage = `${home}/stage/${stem}`;
   yield* fs.makeDirectory(stage, { recursive: true });
-  yield* fs.writeFileString(`${stage}/goat`, protocolExecutable(ARCHIVE.archiveVersion,
-    { ssh: 1, orchestration: 2 }, state));
+  yield* fs.writeFileString(
+    `${stage}/goat`,
+    protocolExecutable(ARCHIVE.archiveVersion, { ssh: 1, orchestration: 2 }, state),
+  );
   yield* fs.chmod(`${stage}/goat`, 0o700);
-  const packed = yield* realSpawner.spawn(ChildProcess.make("tar", ["-czf", `${cache}/${stem}.tar.gz`, "-C", `${home}/stage`, stem]));
+  const packed = yield* realSpawner.spawn(
+    ChildProcess.make("tar", ["-czf", `${cache}/${stem}.tar.gz`, "-C", `${home}/stage`, stem]),
+  );
   assert.equal(Number(yield* packed.exitCode), 0);
   const crypto = yield* Crypto.Crypto;
-  const sha = Hex.encode(yield* crypto.digest("SHA-256", yield* fs.readFile(`${cache}/${stem}.tar.gz`)));
+  const sha = Hex.encode(
+    yield* crypto.digest("SHA-256", yield* fs.readFile(`${cache}/${stem}.tar.gz`)),
+  );
   yield* fs.writeFileString(`${cache}/${stem}.tar.gz.sha256`, `${sha}  ${stem}.tar.gz\n`);
   const runner = { ...ARCHIVE, archiveDirectory: cache };
   const remoteCommands: ChildProcess.Command[] = [];
-  let uploads = 0; let gh = 0; let cacheReads = 0;
-  const observedFs = FileSystem.FileSystem.of({ ...fs,
-    exists: file => { if (file.startsWith(cache)) cacheReads++; return fs.exists(file); },
-    readFile: file => { if (file.startsWith(cache)) cacheReads++; return fs.readFile(file); },
+  let uploads = 0;
+  let gh = 0;
+  let cacheReads = 0;
+  const observedFs = FileSystem.FileSystem.of({
+    ...fs,
+    exists: (file) => {
+      if (file.startsWith(cache)) cacheReads++;
+      return fs.exists(file);
+    },
+    readFile: (file) => {
+      if (file.startsWith(cache)) cacheReads++;
+      return fs.readFile(file);
+    },
   });
   let beforeCommand: ((script: string) => ReturnType<typeof fs.writeFileString>) | undefined;
-  const setBeforeCommand = (callback: typeof beforeCommand) => { beforeCommand = callback; };
-  const transport = ChildProcessSpawner.make(command => {
+  const setBeforeCommand = (callback: typeof beforeCommand) => {
+    beforeCommand = callback;
+  };
+  const transport = ChildProcessSpawner.make((command) => {
     if (command._tag !== "StandardCommand") return realSpawner.spawn(command);
-    if (command.command === "gh") { gh++; return Effect.die("unexpected gh acquisition"); }
+    if (command.command === "gh") {
+      gh++;
+      return Effect.die("unexpected gh acquisition");
+    }
     const at = command.args.indexOf("sh");
     if (at < 0) return realSpawner.spawn(command);
     remoteCommands.push(command);
-    const args = command.args.slice(at + 1).filter(arg => arg !== "-l");
+    const args = command.args.slice(at + 1).filter((arg) => arg !== "-l");
     if (args.includes("-c")) uploads++;
     // Capture actual submitted bytes; inject races only at an observed command boundary.
     return Effect.gen(function* () {
       const stdin = command.options.stdin;
       if (stdin === undefined || typeof stdin !== "object" || !("stream" in stdin)) {
-        return yield* realSpawner.spawn(ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
-          env: { HOME: home, PATH: process.env.PATH ?? "", LC_ALL: "C" }, extendEnv: false,
-          ...(stdin === undefined ? {} : { stdin }),
-        }));
+        return yield* realSpawner.spawn(
+          ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
+            env: { HOME: home, PATH: process.env.PATH ?? "", LC_ALL: "C" },
+            extendEnv: false,
+            ...(stdin === undefined ? {} : { stdin }),
+          }),
+        );
       }
       const script = yield* stdin.stream.pipe(Stream.decodeText(), Stream.mkString);
       if (beforeCommand !== undefined) yield* beforeCommand(script);
-      return yield* realSpawner.spawn(ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
-        env: { HOME: home, PATH: process.env.PATH ?? "", LC_ALL: "C" }, extendEnv: false,
-        stdin: { ...stdin, stream: Stream.make(new TextEncoder().encode(script)) },
-      }));
+      return yield* realSpawner.spawn(
+        ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
+          env: { HOME: home, PATH: process.env.PATH ?? "", LC_ALL: "C" },
+          extendEnv: false,
+          stdin: { ...stdin, stream: Stream.make(new TextEncoder().encode(script)) },
+        }),
+      );
     });
   });
   const run = (entry: "launch" | "pairing" | "mcp", secondary = false) => {
     const inputRunner = { ...runner, keepExistingRunner: secondary };
-    const action = entry === "launch"
-      ? SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, inputRunner).pipe(Effect.map(result => ({ version: result.selectedRuntime.version, port: result.remotePort })))
-      : entry === "pairing"
-        ? SshTunnel.issueRemotePairingToken(uploadTarget, {}, inputRunner).pipe(Effect.map(result => ({ version: result.credential, port: 0 })))
-        : SshTunnel.issueRemoteMcpClientSession(uploadTarget, { label: "fixture", ttl: "1h", runtimeModeCeiling: null }, {}, inputRunner).pipe(Effect.map(result => ({ version: result.token, port: 0 })));
-    return action.pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport),
-      Effect.provideService(FileSystem.FileSystem, observedFs), Effect.result);
+    const action =
+      entry === "launch"
+        ? SshTunnel.launchOrReuseRemoteServer(uploadTarget, {}, inputRunner).pipe(
+            Effect.map((result) => ({
+              version: result.selectedRuntime.version,
+              port: result.remotePort,
+            })),
+          )
+        : entry === "pairing"
+          ? SshTunnel.issueRemotePairingToken(uploadTarget, {}, inputRunner).pipe(
+              Effect.map((result) => ({ version: result.credential, port: 0 })),
+            )
+          : SshTunnel.issueRemoteMcpClientSession(
+              uploadTarget,
+              { label: "fixture", ttl: "1h", runtimeModeCeiling: null },
+              {},
+              inputRunner,
+            ).pipe(Effect.map((result) => ({ version: result.token, port: 0 })));
+    return action.pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, transport),
+      Effect.provideService(FileSystem.FileSystem, observedFs),
+      Effect.result,
+    );
   };
   const snapshot = Effect.gen(function* () {
     const files = ["run-t3.sh", "pid", "port", "managed"];
     const values: Record<string, string | null> = {};
-    for (const file of files) values[file] = (yield* fs.exists(`${state}/${file}`)) ? yield* fs.readFileString(`${state}/${file}`) : null;
+    for (const file of files)
+      values[file] = (yield* fs.exists(`${state}/${file}`))
+        ? yield* fs.readFileString(`${state}/${file}`)
+        : null;
     const runtime = `${home}/.goat/userdata/server-runtime.json`;
     values.runtime = (yield* fs.exists(runtime)) ? yield* fs.readFileString(runtime) : null;
     values.oldExecutable = yield* fs.readFileString(`${old}/goat`);
     values.oldMarker = yield* fs.readFileString(`${old}/.install-complete`);
     return values;
   });
-  return { home, state, test, old, pid, port, run, snapshot, fs, realSpawner, setBeforeCommand,
-    counters: () => ({ uploads, gh, cacheReads }), remoteCommands };
+  return {
+    home,
+    state,
+    test,
+    old,
+    pid,
+    port,
+    run,
+    snapshot,
+    fs,
+    realSpawner,
+    setBeforeCommand,
+    counters: () => ({ uploads, gh, cacheReads }),
+    remoteCommands,
+  };
 });
 ```
 
@@ -1443,37 +1684,59 @@ Required representative table test (POSIX only, `it.live`, real services/scoped 
 ```ts
 for (const entry of ["launch", "pairing", "mcp"] as const) {
   for (const live of [false, true]) {
-    it.live(`reuses older compatible ${entry}; live=${live}`, () => Effect.gen(function* () {
-      const f = yield* makeProtocolFixture({ live, kind: "external", oldVersion: "1.2.2", ssh: 1, orchestration: 2 });
-      const before = yield* f.snapshot;
-      const result = yield* f.run(entry);
-      assert.isTrue(Result.isSuccess(result));
-      if (Result.isSuccess(result)) {
-        assert.equal(result.success.version, "1.2.2");
-        if (live && entry === "launch") assert.equal(result.success.port, f.port);
-      }
-      assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
-      const after = yield* f.snapshot;
-      assert.equal(after.oldExecutable, before.oldExecutable);
-      assert.equal(after.oldMarker, before.oldMarker);
-      if (live) assert.equal(after.runtime, before.runtime);
-      const events = (yield* f.fs.readFileString(`${f.test}/events`)).trim().split("\n").map(line => JSON.parse(line));
-      assert.isFalse(events.some(event => event.type === "stop"));
-      if (entry !== "launch") assert.equal(events.findLast(event => event.type === "auth")?.version, "1.2.2");
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+    it.live(`reuses older compatible ${entry}; live=${live}`, () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live,
+          kind: "external",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isSuccess(result));
+        if (Result.isSuccess(result)) {
+          assert.equal(result.success.version, "1.2.2");
+          if (live && entry === "launch") assert.equal(result.success.port, f.port);
+        }
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const after = yield* f.snapshot;
+        assert.equal(after.oldExecutable, before.oldExecutable);
+        assert.equal(after.oldMarker, before.oldMarker);
+        if (live) assert.equal(after.runtime, before.runtime);
+        const events = (yield* f.fs.readFileString(`${f.test}/events`))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        assert.isFalse(events.some((event) => event.type === "stop"));
+        if (entry !== "launch")
+          assert.equal(events.findLast((event) => event.type === "auth")?.version, "1.2.2");
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
   }
-  it.live(`preserves incompatible shared server for ${entry}`, () => Effect.gen(function* () {
-    const f = yield* makeProtocolFixture({ live: true, kind: "managed", oldVersion: "1.2.2", ssh: 99, orchestration: 2 });
-    const before = yield* f.snapshot;
-    const result = yield* f.run(entry, true);
-    assert.isTrue(Result.isFailure(result));
-    assert.deepEqual(yield* f.snapshot, before);
-    const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${f.port}/.well-known/t3/environment`));
-    assert.equal(response.status, 200);
-    const events = yield* f.fs.readFileString(`${f.test}/events`);
-    assert.notInclude(events, '"type":"stop"');
-    assert.notInclude(events, '"type":"auth"');
-  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+  it.live(`preserves incompatible shared server for ${entry}`, () =>
+    Effect.gen(function* () {
+      const f = yield* makeProtocolFixture({
+        live: true,
+        kind: "managed",
+        oldVersion: "1.2.2",
+        ssh: 99,
+        orchestration: 2,
+      });
+      const before = yield* f.snapshot;
+      const result = yield* f.run(entry, true);
+      assert.isTrue(Result.isFailure(result));
+      assert.deepEqual(yield* f.snapshot, before);
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${f.port}/.well-known/t3/environment`),
+      );
+      assert.equal(response.status, 200);
+      const events = yield* f.fs.readFileString(`${f.test}/events`);
+      assert.notInclude(events, '"type":"stop"');
+      assert.notInclude(events, '"type":"auth"');
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 }
 ```
 
@@ -1481,90 +1744,132 @@ Add these executable regression rows to the same POSIX suite. They use actual ge
 
 ```ts
 for (const failure of ["stale metadata", "descriptor 404"] as const) {
-  it.live(`owning launch preserves an unknown server: ${failure}`, () => Effect.gen(function* () {
-    const f = yield* makeProtocolFixture({ live: true, kind: "managed", oldVersion: "1.2.2",
-      ssh: 99, orchestration: 2, descriptor404: failure === "descriptor 404" });
-    if (failure === "stale metadata") {
-      const file = `${f.home}/.goat/userdata/server-runtime.json`;
-      const record = JSON.parse(yield* f.fs.readFileString(file));
-      yield* f.fs.writeFileString(file, JSON.stringify({ ...record, serverVersion: "1.2.1" }));
-    }
-    const before = yield* f.snapshot;
-    const result = yield* f.run("launch", false);
-    assert.isTrue(Result.isFailure(result));
-    if (Result.isFailure(result)) assert.include(String(result.failure), "Cannot verify live GOAT");
-    assert.deepEqual(yield* f.snapshot, before); // Includes runner publication/ownership/runtime bytes.
-    yield* Effect.sync(() => process.kill(f.pid, 0)); // Captured fixture PID still alive.
-    const root = yield* Effect.promise(() => fetch(`http://127.0.0.1:${f.port}/`));
-    assert.equal(root.status, 200);
-    const events = yield* f.fs.readFileString(`${f.test}/events`);
-    assert.notInclude(events, '"type":"stop"');
-    assert.notInclude(events, '"type":"auth"');
-    assert.equal(events.split('"type":"start"').length - 1, 1); // Only the seeded process.
-  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+  it.live(`owning launch preserves an unknown server: ${failure}`, () =>
+    Effect.gen(function* () {
+      const f = yield* makeProtocolFixture({
+        live: true,
+        kind: "managed",
+        oldVersion: "1.2.2",
+        ssh: 99,
+        orchestration: 2,
+        descriptor404: failure === "descriptor 404",
+      });
+      if (failure === "stale metadata") {
+        const file = `${f.home}/.goat/userdata/server-runtime.json`;
+        const record = JSON.parse(yield* f.fs.readFileString(file));
+        yield* f.fs.writeFileString(file, JSON.stringify({ ...record, serverVersion: "1.2.1" }));
+      }
+      const before = yield* f.snapshot;
+      const result = yield* f.run("launch", false);
+      assert.isTrue(Result.isFailure(result));
+      if (Result.isFailure(result))
+        assert.include(String(result.failure), "Cannot verify live GOAT");
+      assert.deepEqual(yield* f.snapshot, before); // Includes runner publication/ownership/runtime bytes.
+      yield* Effect.sync(() => process.kill(f.pid, 0)); // Captured fixture PID still alive.
+      const root = yield* Effect.promise(() => fetch(`http://127.0.0.1:${f.port}/`));
+      assert.equal(root.status, 200);
+      const events = yield* f.fs.readFileString(`${f.test}/events`);
+      assert.notInclude(events, '"type":"stop"');
+      assert.notInclude(events, '"type":"auth"');
+      assert.equal(events.split('"type":"start"').length - 1, 1); // Only the seeded process.
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 }
 
 for (const entry of ["launch", "pairing", "mcp"] as const) {
-  it.live(`refuses same-version retained runner replacement before ${entry}`, () => Effect.gen(function* () {
-    const f = yield* makeProtocolFixture({ live: true, kind: "managed", oldVersion: "1.2.2",
-      ssh: 1, orchestration: 2 });
-    let replaced = false;
-    f.setBeforeCommand(script => {
-      if (replaced || !script.includes('RUNNER_FILE="$STATE_DIR/run-t3.sh"')) return Effect.void;
-      replaced = true;
-      return Effect.gen(function* () {
-        const file = `${f.state}/run-t3.sh`;
-        const original = yield* f.fs.readFileString(file);
-        // Keep exactly the same archive version; if executed, log a distinct side effect.
-        const replacement = original.replace("#!/bin/sh\n",
-          `#!/bin/sh\nprintf 'replacement-executed\\n' >> '${f.test}/events'\n`);
-        assert.notEqual(replacement, original);
-        yield* f.fs.writeFileString(file, replacement);
+  it.live(`refuses same-version retained runner replacement before ${entry}`, () =>
+    Effect.gen(function* () {
+      const f = yield* makeProtocolFixture({
+        live: true,
+        kind: "managed",
+        oldVersion: "1.2.2",
+        ssh: 1,
+        orchestration: 2,
       });
-    });
-    const before = yield* f.snapshot;
-    const result = yield* f.run(entry);
-    assert.isTrue(replaced);
-    assert.isTrue(Result.isFailure(result));
-    if (Result.isFailure(result)) assert.include(String(result.failure), "changed since probe");
-    const after = yield* f.snapshot;
-    assert.notEqual(after["run-t3.sh"], before["run-t3.sh"]); // Only our injected replacement persists.
-    assert.deepEqual({ ...after, "run-t3.sh": before["run-t3.sh"] }, before);
-    assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
-    const events = yield* f.fs.readFileString(`${f.test}/events`);
-    assert.notInclude(events, "replacement-executed");
-    assert.notInclude(events, '"type":"stop"');
-    assert.notInclude(events, '"type":"auth"');
-    assert.equal(events.split('"type":"start"').length - 1, 1);
-    yield* Effect.sync(() => process.kill(f.pid, 0));
-  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
-
-  for (const tokens of ["unknown 1 2 0 0", "1.2.3 1 2 garbage garbage",
-    "1.2.3 0 2 0 0", "1.2.3 1 -2 0 0", "1.2.3 01 2 0 0",
-    "1.2.3-01 1 2 0 0", "1.2.3 1 2 0 1234"] as const) {
-    it.live(`rejects malformed own tokens before ${entry}: ${tokens}`, () => Effect.gen(function* () {
-      const f = yield* makeProtocolFixture({ live: false, kind: "managed",
-        oldVersion: ARCHIVE.archiveVersion, ssh: 1, orchestration: 2, ownTokens: tokens });
+      let replaced = false;
+      f.setBeforeCommand((script) => {
+        if (replaced || !script.includes('RUNNER_FILE="$STATE_DIR/run-t3.sh"')) return Effect.void;
+        replaced = true;
+        return Effect.gen(function* () {
+          const file = `${f.state}/run-t3.sh`;
+          const original = yield* f.fs.readFileString(file);
+          // Keep exactly the same archive version; if executed, log a distinct side effect.
+          const replacement = original.replace(
+            "#!/bin/sh\n",
+            `#!/bin/sh\nprintf 'replacement-executed\\n' >> '${f.test}/events'\n`,
+          );
+          assert.notEqual(replacement, original);
+          yield* f.fs.writeFileString(file, replacement);
+        });
+      });
       const before = yield* f.snapshot;
       const result = yield* f.run(entry);
+      assert.isTrue(replaced);
       assert.isTrue(Result.isFailure(result));
-      if (Result.isFailure(result)) assert.include(String(result.failure), "Malformed candidate protocol output");
-      assert.deepEqual(yield* f.snapshot, before);
+      if (Result.isFailure(result)) assert.include(String(result.failure), "changed since probe");
+      const after = yield* f.snapshot;
+      assert.notEqual(after["run-t3.sh"], before["run-t3.sh"]); // Only our injected replacement persists.
+      assert.deepEqual({ ...after, "run-t3.sh": before["run-t3.sh"] }, before);
       assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
       const events = yield* f.fs.readFileString(`${f.test}/events`);
-      for (const type of ["auth", "serve", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+      assert.notInclude(events, "replacement-executed");
+      assert.notInclude(events, '"type":"stop"');
+      assert.notInclude(events, '"type":"auth"');
+      assert.equal(events.split('"type":"start"').length - 1, 1);
+      yield* Effect.sync(() => process.kill(f.pid, 0));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  for (const tokens of [
+    "unknown 1 2 0 0",
+    "1.2.3 1 2 garbage garbage",
+    "1.2.3 0 2 0 0",
+    "1.2.3 1 -2 0 0",
+    "1.2.3 01 2 0 0",
+    "1.2.3-01 1 2 0 0",
+    "1.2.3 1 2 0 1234",
+  ] as const) {
+    it.live(`rejects malformed own tokens before ${entry}: ${tokens}`, () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: ARCHIVE.archiveVersion,
+          ssh: 1,
+          orchestration: 2,
+          ownTokens: tokens,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result))
+          assert.include(String(result.failure), "Malformed candidate protocol output");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["auth", "serve", "start", "stop"])
+          assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
   }
-  it.live(`accepts own not-running tokens and exact legacy fallback for ${entry}`, () => Effect.gen(function* () {
-    for (const missingCommand of [false, true]) {
-      const f = yield* makeProtocolFixture({ live: false, kind: "managed",
-        oldVersion: ARCHIVE.archiveVersion, ssh: 1, orchestration: 2, missingCommand });
-      // A legacy helper cannot inspect remembered state; test cold absence with no runtime/identity files.
-      const result = yield* f.run(entry);
-      assert.isTrue(Result.isSuccess(result));
-      assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
-    }
-  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+  it.live(`accepts own not-running tokens and exact legacy fallback for ${entry}`, () =>
+    Effect.gen(function* () {
+      for (const missingCommand of [false, true]) {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: ARCHIVE.archiveVersion,
+          ssh: 1,
+          orchestration: 2,
+          missingCommand,
+        });
+        // A legacy helper cannot inspect remembered state; test cold absence with no runtime/identity files.
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isSuccess(result));
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+      }
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 }
 ```
 
@@ -1580,43 +1885,70 @@ for (const entry of ["launch", "pairing", "mcp"] as const) {
     { liveTokens: "live unknown 1 2 0 1234" },
     { liveTokens: "live 1.2.3 1 2 garbage garbage" },
   ]) {
-    it.live(`rejects malformed Node ${entry} tokens: ${JSON.stringify(injected)}`, () => Effect.gen(function* () {
-      const f = yield* makeProtocolFixture({ live: false, kind: "managed",
-        oldVersion: "1.2.2", ssh: 1, orchestration: 2 });
-      const cli = `${f.home}/fixture-cli.cjs`;
-      yield* f.fs.writeFileString(cli, protocolExecutable("1.2.3", {
-        ssh: 1, orchestration: 2, ...injected,
-      }, f.state));
-      const scripts = yield* nativeScripts({ nodeScriptPath: cli });
-      const key = f.state.slice(f.state.lastIndexOf("/") + 1);
-      // nativeScripts' default key is an existing fixture constant; preserve all other script bytes.
-      const script = scripts[entry].split("711bc738002d72fd").join(key);
-      const before = yield* f.snapshot;
-      const child = yield* f.realSpawner.spawn(ChildProcess.make("sh", ["-s", "--", key], {
-        env: { HOME: f.home, PATH: process.env.PATH ?? "", LC_ALL: "C" }, extendEnv: false,
-        stdin: { stream: Stream.make(new TextEncoder().encode(script)), endOnDone: true },
-      }));
-      const stderr = yield* child.stderr.pipe(Stream.decodeText(), Stream.mkString);
-      assert.notEqual(Number(yield* child.exitCode), 0);
-      assert.include(stderr, "Malformed");
-      assert.deepEqual(yield* f.snapshot, before);
-      assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
-      const events = yield* f.fs.readFileString(`${f.test}/events`);
-      for (const type of ["auth", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+    it.live(`rejects malformed Node ${entry} tokens: ${JSON.stringify(injected)}`, () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: "1.2.2",
+          ssh: 1,
+          orchestration: 2,
+        });
+        const cli = `${f.home}/fixture-cli.cjs`;
+        yield* f.fs.writeFileString(
+          cli,
+          protocolExecutable(
+            "1.2.3",
+            {
+              ssh: 1,
+              orchestration: 2,
+              ...injected,
+            },
+            f.state,
+          ),
+        );
+        const scripts = yield* nativeScripts({ nodeScriptPath: cli });
+        const key = f.state.slice(f.state.lastIndexOf("/") + 1);
+        // nativeScripts' default key is an existing fixture constant; preserve all other script bytes.
+        const script = scripts[entry].split("711bc738002d72fd").join(key);
+        const before = yield* f.snapshot;
+        const child = yield* f.realSpawner.spawn(
+          ChildProcess.make("sh", ["-s", "--", key], {
+            env: { HOME: f.home, PATH: process.env.PATH ?? "", LC_ALL: "C" },
+            extendEnv: false,
+            stdin: { stream: Stream.make(new TextEncoder().encode(script)), endOnDone: true },
+          }),
+        );
+        const stderr = yield* child.stderr.pipe(Stream.decodeText(), Stream.mkString);
+        assert.notEqual(Number(yield* child.exitCode), 0);
+        assert.include(stderr, "Malformed");
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["auth", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
   }
   for (const liveTokens of ["live unknown 1 2 0 1234", "live 1.2.3 1 2 garbage garbage"]) {
-    it.live(`rejects malformed archive live tokens before ${entry}: ${liveTokens}`, () => Effect.gen(function* () {
-      const f = yield* makeProtocolFixture({ live: false, kind: "managed",
-        oldVersion: ARCHIVE.archiveVersion, ssh: 1, orchestration: 2, liveTokens });
-      const before = yield* f.snapshot;
-      const result = yield* f.run(entry);
-      assert.isTrue(Result.isFailure(result));
-      assert.deepEqual(yield* f.snapshot, before);
-      assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
-      const events = yield* f.fs.readFileString(`${f.test}/events`);
-      for (const type of ["auth", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+    it.live(`rejects malformed archive live tokens before ${entry}: ${liveTokens}`, () =>
+      Effect.gen(function* () {
+        const f = yield* makeProtocolFixture({
+          live: false,
+          kind: "managed",
+          oldVersion: ARCHIVE.archiveVersion,
+          ssh: 1,
+          orchestration: 2,
+          liveTokens,
+        });
+        const before = yield* f.snapshot;
+        const result = yield* f.run(entry);
+        assert.isTrue(Result.isFailure(result));
+        assert.deepEqual(yield* f.snapshot, before);
+        assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
+        const events = yield* f.fs.readFileString(`${f.test}/events`);
+        for (const type of ["auth", "start", "stop"]) assert.notInclude(events, `"type":"${type}"`);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
   }
 }
 ```

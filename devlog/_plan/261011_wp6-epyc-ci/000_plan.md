@@ -30,4 +30,3 @@ on.push.branches [main, "goat/**"] → [main, dev, preview, "goat/**"], pull_req
 ## gate
 
 핸드오프의 source/GitHub/EPYC gate 그대로(ChatView 항목은 ef4748eb7로 충족, 헬퍼 대신 web tsc 0과 해당 effect가 존재하는 store API만 쓰는지로 확인).
-

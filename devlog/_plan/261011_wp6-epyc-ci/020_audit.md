@@ -20,6 +20,7 @@ Raw verdict: FAIL (1 BLOCKER, 3 FIX, 2 NOTE). All findings are resolved in-plan 
 ## Effective verdict
 
 PASS after resolutions (resolutions are mechanical, no design change). Phase B scope:
+
 - `.github/workflows/goat-ci.yml` (handoff body + trigger diff)
 - `.vite-hooks/pre-push`, `.vite-hooks/goat-workflow-guard.mjs`
 - `scripts/goat-workflow-guard.test.ts`

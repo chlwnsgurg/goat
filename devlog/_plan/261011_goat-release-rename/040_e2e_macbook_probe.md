@@ -3,6 +3,7 @@
 # 040 — wp5: end-to-end runtime preparation and probe on juns-macbook-pro
 
 ## Loop spec
+
 - Archetype: satisfy-spec verification cycle (no production code expected; fixes found here loop back to the owning decade doc via P amendment).
 - Trigger: user asked to run a Claude Opus 5.5 probe on the MacBook Pro; the dispatch failed with a pingdotgg 404 (Finding F1).
 - Goal: from the integrated branch (wp2/wp3/wp6/wp4 done), GOAT prepares its runtime on juns-macbook-pro without any pingdotgg request, launches a GOAT server isolated from the host's upstream `~/.t3` state, and a read-only probe thread completes with claude-opus-5-5.
@@ -14,10 +15,12 @@
 - Escalation: any step that would write under the host's `~/.t3`.
 
 ## Preconditions
+
 - D7 decided as `~/.goat` (remote root) and implemented in wp4 (030 §D7-A).
 - juns-macbook-pro is this Mac (Finding F1): the SSH target shares the filesystem with the source worktree, so "remote" paths below are local paths reached over SSH. Evidence still goes through the real SSH path.
 
 ## Steps
+
 Paths assume D7-A: GOAT root on the host is `~/.goat`, runtime `~/.goat/runtime/goat/versions/<v>`, state `~/.goat/ssh-launch`, server home `~/.goat`.
 
 0. Cold-host precondition and snapshot: `ssh juns-macbook-pro 'ls -la ~/.goat 2>&1; ls -la ~/.t3/ssh-launch/*/ ~/.t3/runtime/versions; shasum -a 256 ~/.t3/ssh-launch/*/run-t3.sh'` → `evidence/wp5-before.txt`. If `~/.goat` already exists, record it and do not delete it; use a fresh version suffix only if the user agrees (NEEDS_HUMAN), otherwise continue with explicit artifact-identity checks below.
@@ -77,32 +80,52 @@ Imports/layers: `packages/ssh/src/tunnel.ts:19-32`, `packages/ssh/src/tunnel.tes
 ```ts
 import { resolve } from "node:path";
 import { prepareRemoteRuntime } from "/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/tunnel.ts";
-import { resolveSshTarget, remoteStateKey } from "/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/command.ts";
-import { Effect, Exit, Cause, NodeServices, Crypto, FileSystem, Path,
-  ChildProcessSpawner } from "./effect-runtime.ts";
+import {
+  resolveSshTarget,
+  remoteStateKey,
+} from "/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/command.ts";
+import {
+  Effect,
+  Exit,
+  Cause,
+  NodeServices,
+  Crypto,
+  FileSystem,
+  Path,
+  ChildProcessSpawner,
+} from "./effect-runtime.ts";
 
 if (!process.argv[2]) throw new Error("usage: prepare-runtime.ts <archive-directory>");
 const alias = "juns-macbook-pro";
 const authOptions = { batchMode: "yes" as const, interactiveAuth: false };
 const runner = {
-  archiveVersion: "0.0.45", archiveDirectory: resolve(process.argv[2]),
+  archiveVersion: "0.0.45",
+  archiveDirectory: resolve(process.argv[2]),
   keepExistingRunner: true, // Match the source server's SSH dispatch policy.
 };
-const result = await Effect.runPromiseExit(Effect.gen(function* () {
-  // Resolve each required live service before touching SSH.
-  yield* ChildProcessSpawner.ChildProcessSpawner;
-  yield* Crypto.Crypto;
-  yield* FileSystem.FileSystem;
-  yield* Path.Path;
-  const target = yield* resolveSshTarget(alias);
-  const stateKey = yield* remoteStateKey(target);
-  if (!/^[a-f0-9]{16}$/.test(stateKey)) throw new Error("invalid remote state key");
-  yield* prepareRemoteRuntime(target, authOptions, runner, stateKey);
-  return { target, stateKey };
-}).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+const result = await Effect.runPromiseExit(
+  Effect.gen(function* () {
+    // Resolve each required live service before touching SSH.
+    yield* ChildProcessSpawner.ChildProcessSpawner;
+    yield* Crypto.Crypto;
+    yield* FileSystem.FileSystem;
+    yield* Path.Path;
+    const target = yield* resolveSshTarget(alias);
+    const stateKey = yield* remoteStateKey(target);
+    if (!/^[a-f0-9]{16}$/.test(stateKey)) throw new Error("invalid remote state key");
+    yield* prepareRemoteRuntime(target, authOptions, runner, stateKey);
+    return { target, stateKey };
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
 const ok = !Exit.isFailure(result);
-console.log(JSON.stringify({ ok, alias, runner,
-  ...(ok ? result.value : { error: Cause.pretty(result.cause) }) }));
+console.log(
+  JSON.stringify({
+    ok,
+    alias,
+    runner,
+    ...(ok ? result.value : { error: Cause.pretty(result.cause) }),
+  }),
+);
 process.exitCode = ok ? 0 : 1;
 ```
 
@@ -146,13 +169,21 @@ export class Client {
   async send(method: string, params?: unknown, notification = false) {
     const id = ++this.sequence;
     const response = await fetch(this.endpoint, {
-      method: "POST", signal: AbortSignal.timeout(120_000),
-      headers: { "content-type": "application/json",
-        accept: "application/json, text/event-stream", authorization: `Bearer ${this.token}`,
+      method: "POST",
+      signal: AbortSignal.timeout(120_000),
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${this.token}`,
         "mcp-protocol-version": this.protocol,
-        ...(this.session ? { "mcp-session-id": this.session } : {}) },
-      body: JSON.stringify({ jsonrpc: "2.0", ...(notification ? {} : { id }),
-        method, ...(params === undefined ? {} : { params }) }),
+        ...(this.session ? { "mcp-session-id": this.session } : {}),
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        ...(notification ? {} : { id }),
+        method,
+        ...(params === undefined ? {} : { params }),
+      }),
     });
     this.session = response.headers.get("mcp-session-id") ?? this.session;
     if (!response.ok) {
@@ -187,19 +218,25 @@ export class Client {
         while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
           const event = buffer.slice(0, boundary.index);
           buffer = buffer.slice(boundary.index + boundary[0].length);
-          const data = event.split(/\r?\n/).filter(line => line.startsWith("data:"))
-            .map(line => line.slice(5).trimStart()).join("\n");
+          const data = event
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart())
+            .join("\n");
           if (!data) continue;
           const found = select(JSON.parse(data));
           if (found) return found.result;
         }
       }
-    } finally { await reader.cancel().catch(() => {}); }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
     throw new Error(`MCP ${method}: stream ended without matching result`);
   }
   async catalog() {
     const initialized = await this.send("initialize", {
-      protocolVersion: this.protocol, capabilities: {},
+      protocolVersion: this.protocol,
+      capabilities: {},
       clientInfo: { name: "goat-wp5-external-probe", version: "1" },
     });
     this.protocol = initialized.protocolVersion;
@@ -212,15 +249,15 @@ export class Client {
       tools.push(...page.tools);
       cursor = page.nextCursor;
     } while (cursor);
-    const names = new Set(tools.map(tool => tool.name));
+    const names = new Set(tools.map((tool) => tool.name));
     for (const name of ["goat_ssh_thread_launch", "goat_thread_read", "goat_thread_wait"])
       if (!names.has(name)) throw new Error(`missing integrated tool ${name}`);
-    if (tools.some(tool => tool.name.startsWith("t3_"))) throw new Error("legacy live t3_* tool");
+    if (tools.some((tool) => tool.name.startsWith("t3_"))) throw new Error("legacy live t3_* tool");
     return { initialize: initialized, tools };
   }
   async call(name: string, args: unknown) {
     const result = await this.send("tools/call", { name, arguments: args });
-    const text = result.content?.find(block => block.type === "text")?.text;
+    const text = result.content?.find((block) => block.type === "text")?.text;
     const payload = result.structuredContent ?? (text ? JSON.parse(text) : undefined);
     if (result.isError || payload?.code || payload === undefined)
       throw new Error(`tool ${name} refused: ${JSON.stringify(payload)}`);
@@ -233,12 +270,18 @@ async function readAll(client: Client, threadId: string, view: string) {
   let afterPosition;
   do {
     const page = await client.call("goat_thread_read", {
-      threadId, view, limit: 100, runLimit: 50, maxCharsPerItem: 50_000,
+      threadId,
+      view,
+      limit: 100,
+      runLimit: 50,
+      maxCharsPerItem: 50_000,
       ...(afterPosition === undefined ? {} : { afterPosition }),
     });
     pages.push(page);
-    if (page.items.some(item => item.textTruncated))
-      throw new Error("NEEDS_HUMAN: recover truncated text with itemId/textOffset before acceptance");
+    if (page.items.some((item) => item.textTruncated))
+      throw new Error(
+        "NEEDS_HUMAN: recover truncated text with itemId/textOffset before acceptance",
+      );
     if (!page.hasMore) break;
     if (page.nextPosition === null || page.nextPosition === afterPosition)
       throw new Error("thread_read pagination did not advance");
@@ -264,11 +307,15 @@ if (action === "launch") {
   await marker.writeFile(new Date().toISOString());
   await marker.close();
   const args = {
-    host: "juns-macbook-pro", cwd: "/Users/jun/tmp", workspace: { type: "cwd" },
+    host: "juns-macbook-pro",
+    cwd: "/Users/jun/tmp",
+    workspace: { type: "cwd" },
     title: "GOAT wp5 MacBook 읽기 전용 프로브",
-    runtimeMode: "approval-required", interactionMode: "default",
+    runtimeMode: "approval-required",
+    interactionMode: "default",
     modelSelection: { instanceId: "claudeAgent", model: "claude-opus-5-5" },
-    message: "GOAT SSH 런타임 확인용 읽기 전용 프로브입니다. 파일 작성·수정·삭제, 설치, 서버 재시작, git 변경은 하지 마세요. hostname, whoami, pwd, sw_vers, date 명령만 실행하고 각 결과를 원문으로 보고하세요. 현재 대화의 goat_thread_configuration 도구도 읽기 호출해 provider/model/runtimeMode를 확인하고, 실제 사용 가능한 MCP 도구 이름과 namespace를 함께 보고하세요. 모델은 claude-opus-5-5여야 합니다. 명령 실행에 승인이 필요하면 우회하지 말고 승인 필요 상태를 알려 주세요.",
+    message:
+      "GOAT SSH 런타임 확인용 읽기 전용 프로브입니다. 파일 작성·수정·삭제, 설치, 서버 재시작, git 변경은 하지 마세요. hostname, whoami, pwd, sw_vers, date 명령만 실행하고 각 결과를 원문으로 보고하세요. 현재 대화의 goat_thread_configuration 도구도 읽기 호출해 provider/model/runtimeMode를 확인하고, 실제 사용 가능한 MCP 도구 이름과 namespace를 함께 보고하세요. 모델은 claude-opus-5-5여야 합니다. 명령 실행에 승인이 필요하면 우회하지 말고 승인 필요 상태를 알려 주세요.",
   };
   const launch = await client.call("goat_ssh_thread_launch", args);
   if (typeof launch.threadId !== "string" || launch.runtimeMode !== "approval-required")
@@ -284,11 +331,16 @@ if (action === "launch") {
   let completed = false;
   for (let attempt = 0; attempt < 10; attempt++) {
     const state = await client.call("goat_thread_wait", {
-      threadId: launch.threadId, runId, timeoutMs: 30_000,
+      threadId: launch.threadId,
+      runId,
+      timeoutMs: 30_000,
     });
     waits.push(state);
     if (state.runId !== runId) throw new Error("wait selected another run");
-    if (!state.timedOut) { completed = state.status === "completed"; break; }
+    if (!state.timedOut) {
+      completed = state.status === "completed";
+      break;
+    }
     if (state.status === "waiting") break;
   }
   const messages = await readAll(client, launch.threadId, "messages");
@@ -297,9 +349,14 @@ if (action === "launch") {
   await writeFile(outputFile, JSON.stringify(result, null, 2), { mode: 0o600 });
   console.log(JSON.stringify(result, null, 2));
   const thread = messages[0].thread;
-  if (thread.providerInstanceId !== "claudeAgent" || thread.model !== "claude-opus-5-5" ||
-      thread.runtimeMode !== "approval-required") throw new Error("wrong remote thread configuration");
-  if (!completed) throw new Error("NEEDS_HUMAN/BLOCKED: probe run has not completed; see waits/activity");
+  if (
+    thread.providerInstanceId !== "claudeAgent" ||
+    thread.model !== "claude-opus-5-5" ||
+    thread.runtimeMode !== "approval-required"
+  )
+    throw new Error("wrong remote thread configuration");
+  if (!completed)
+    throw new Error("NEEDS_HUMAN/BLOCKED: probe run has not completed; see waits/activity");
 }
 ```
 
@@ -311,19 +368,27 @@ Protocol/session headers, initialize and notification follow `apps/server/src/mc
 
 ```ts
 import { writeFile } from "node:fs/promises";
-import { resolveSshTarget, remoteStateKey, runSshCommand } from "/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/command.ts";
+import {
+  resolveSshTarget,
+  remoteStateKey,
+  runSshCommand,
+} from "/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/packages/ssh/src/command.ts";
 import { Effect, NodeServices } from "./effect-runtime.ts";
 
-const info = await Effect.runPromise(Effect.gen(function* () {
-  // Same resolution/key used by SshEnvironmentManager.ensureEnvironment.
-  const target = yield* resolveSshTarget("juns-macbook-pro");
-  const key = yield* remoteStateKey(target);
-  if (!/^[a-f0-9]{16}$/.test(key)) throw new Error("invalid remote state key");
-  const remote = (script: string) => runSshCommand(target, {
-    batchMode: "yes", interactiveAuth: false,
-    remoteCommandArgs: ["sh", "-s"], stdin: script,
-  });
-  const metadata = yield* remote(`set -eu
+const info = await Effect.runPromise(
+  Effect.gen(function* () {
+    // Same resolution/key used by SshEnvironmentManager.ensureEnvironment.
+    const target = yield* resolveSshTarget("juns-macbook-pro");
+    const key = yield* remoteStateKey(target);
+    if (!/^[a-f0-9]{16}$/.test(key)) throw new Error("invalid remote state key");
+    const remote = (script: string) =>
+      runSshCommand(target, {
+        batchMode: "yes",
+        interactiveAuth: false,
+        remoteCommandArgs: ["sh", "-s"],
+        stdin: script,
+      });
+    const metadata = yield* remote(`set -eu
 STATE_DIR="$HOME/.goat/ssh-launch/${key}"
 test -f "$STATE_DIR/run-t3.sh"
 PID="$(cat "$STATE_DIR/pid")"
@@ -335,29 +400,41 @@ printf 'GOAT_WP5_HOME %s\\n' "$HOME/.goat"
 ps -p "$PID" -o pid=,command=
 shasum -a 256 "$STATE_DIR/run-t3.sh"
 `);
-  const match = /^GOAT_WP5_META (\d+) (\d+)$/m.exec(metadata.stdout);
-  if (!match) throw new Error("no owned remote server metadata");
-  // Do not issue through a stale runtime; retain evidence and return to wp4.
-  if (!metadata.stdout.includes("/.goat/runtime/goat/versions/0.0.45/goat") ||
+    const match = /^GOAT_WP5_META (\d+) (\d+)$/m.exec(metadata.stdout);
+    if (!match) throw new Error("no owned remote server metadata");
+    // Do not issue through a stale runtime; retain evidence and return to wp4.
+    if (
+      !metadata.stdout.includes("/.goat/runtime/goat/versions/0.0.45/goat") ||
       !metadata.stdout.includes("serve") ||
-      !(() => { const home = /^GOAT_WP5_HOME (.+)$/m.exec(metadata.stdout)?.[1]; return home !== undefined && metadata.stdout.includes("--base-dir " + home); })())
-    throw new Error("remote process identity does not match integrated GOAT archive");
-  const issued = yield* remote(`set -eu
+      !(() => {
+        const home = /^GOAT_WP5_HOME (.+)$/m.exec(metadata.stdout)?.[1];
+        return home !== undefined && metadata.stdout.includes("--base-dir " + home);
+      })()
+    )
+      throw new Error("remote process identity does not match integrated GOAT archive");
+    const issued = yield* remote(`set -eu
 STATE_DIR="$HOME/.goat/ssh-launch/${key}"
 test -x "$STATE_DIR/run-t3.sh"
 "$STATE_DIR/run-t3.sh" auth session issue --base-dir "$HOME/.goat" --subject mcp-client --scope orchestration:read --label goat-wp5-observer --ttl 1h --json
 `);
-  const credentials = JSON.parse(issued.stdout.trim());
-  if (credentials.subject !== "mcp-client" || typeof credentials.token !== "string" ||
-      credentials.scopes.length !== 1 || credentials.scopes[0] !== "orchestration:read")
-    throw new Error("remote observer is not read-only MCP client");
-  // No token is printed or included in normal evidence.
-  yield* Effect.promise(() => writeFile("/tmp/goat-wp5/remote-session.json",
-    JSON.stringify(credentials), { mode: 0o600 }));
-  yield* Effect.promise(() => writeFile("/tmp/goat-wp5/remote-process.txt",
-    metadata.stdout, { mode: 0o600 }));
-  return { target, stateKey: key, pid: Number(match[1]), port: Number(match[2]) };
-}).pipe(Effect.provide(NodeServices.layer), Effect.scoped));
+    const credentials = JSON.parse(issued.stdout.trim());
+    if (
+      credentials.subject !== "mcp-client" ||
+      typeof credentials.token !== "string" ||
+      credentials.scopes.length !== 1 ||
+      credentials.scopes[0] !== "orchestration:read"
+    )
+      throw new Error("remote observer is not read-only MCP client");
+    // No token is printed or included in normal evidence.
+    yield* Effect.promise(() =>
+      writeFile("/tmp/goat-wp5/remote-session.json", JSON.stringify(credentials), { mode: 0o600 }),
+    );
+    yield* Effect.promise(() =>
+      writeFile("/tmp/goat-wp5/remote-process.txt", metadata.stdout, { mode: 0o600 }),
+    );
+    return { target, stateKey: key, pid: Number(match[1]), port: Number(match[2]) };
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
 await writeFile("/tmp/goat-wp5/remote-info.json", JSON.stringify(info, null, 2), { mode: 0o600 });
 console.log(JSON.stringify(info, null, 2));
 ```
@@ -374,7 +451,8 @@ Resolution and key are `packages/ssh/src/command.ts:44-83,333-358`; the manager 
 import { readFile } from "node:fs/promises";
 import { setTimeout as pause } from "node:timers/promises";
 const [origin, pidFile, runtimeFile] = process.argv.slice(2);
-if (!origin || !pidFile) throw new Error("usage: ready.ts <origin> <spawn-pid-file> [runtime-file]");
+if (!origin || !pidFile)
+  throw new Error("usage: ready.ts <origin> <spawn-pid-file> [runtime-file]");
 const pid = Number((await readFile(pidFile, "utf8")).trim());
 if (!Number.isInteger(pid) || pid <= 0) throw new Error("invalid captured PID");
 let ready = false;
@@ -383,12 +461,18 @@ for (let i = 0; i < 120; i++) {
   try {
     if (runtimeFile) {
       const state = JSON.parse(await readFile(runtimeFile, "utf8"));
-      if (state.pid !== pid || state.origin !== origin) throw new Error("wrong source server owner");
+      if (state.pid !== pid || state.origin !== origin)
+        throw new Error("wrong source server owner");
     }
     const response = await fetch(`${origin}/`, { signal: AbortSignal.timeout(1_000) });
     await response.body?.cancel();
-    if (response.ok) { ready = true; break; }
-  } catch { /* Startup/readiness retry; never a test synchronization mechanism. */ }
+    if (response.ok) {
+      ready = true;
+      break;
+    }
+  } catch {
+    /* Startup/readiness retry; never a test synchronization mechanism. */
+  }
   await pause(250);
 }
 if (!ready) throw new Error(`readiness failed for captured PID ${pid}`);
@@ -491,19 +575,23 @@ Do not put `local-session.json`, `remote-session.json`, `server-home`, or the so
 - `completed` plus all five command outputs plus the model/namespace evidence is DONE. `waiting`, failed/interrupted/cancelled, missing credentials/model, stale remote process/binary or truncated timeline is not DONE; retain evidence and return NEEDS_HUMAN/BLOCKED or to the owning work-phase. No automatic retry of launch, privilege increase, remote restart or artifact cleanup is part of this harness.
 
 ## Acceptance
+
 - No pingdotgg URL fetched or embedded in the GOAT runner on the host.
 - GOAT runtime lives under `~/.goat/runtime/goat/versions` with the step-2e post-signing archived binary hash; `~/.t3` listings unchanged.
 - Probe reply contains hostname, whoami, pwd, sw_vers, date and identifies claude-opus-5-5.
 - Tool calls visible as `goat_*` and qualified `mcp__goat__goat_*` for Claude (wp6 is integrated at the stale-check HEAD).
 
 ## Risks / rollback
+
 - Cleanup is ownership-bounded and needs explicit user approval: only paths this cycle created (recorded in step 0/4 evidence) and only after stopping the GOAT server it launched via `~/.goat/ssh-launch/<key>/pid`. Never delete pre-existing `~/.goat` state; never touch `~/.t3`.
 - If the isolated dev server cannot reach Claude credentials, steps 0–4 stay as evidence and step 5 runs through the user's GOAT app after they restart it on this build (NEEDS_HUMAN handoff).
 - Version-only readiness can reuse an earlier unpublished build; step 4's binary-hash comparison is the identity gate.
 
 ## Source delta for this cycle (user docs)
+
 MODIFY docs/user/remote-access.md, section "Desktop-managed SSH": one short paragraph telling users that GOAT keeps its runtime, launch state and server data on the host under `~/.goat` (separate from any T3 Code install in `~/.t3`), and installs its runtime by uploading an archive from this computer: a cached archive in `<GOAT home>/runtime/archives`, otherwise one downloaded with the signed-in GitHub CLI (`gh auth status`) from the goat-si/goat release matching the app version. If neither is available, the connection fails naming the missing release asset. Any fix found by the e2e run is also part of this cycle's delta and goes through review.
 
 ## Audit fold (cycle 5)
+
 1. The isolated server block unsets every inherited `T3CODE_*` variable (including `T3CODE_TRACE_FILE`, which config.ts honors independently of --base-dir) before both source CLI invocations.
 2. The user-doc delta REPLACES the existing passage in docs/user/remote-access.md (Desktop-managed SSH, lines ~167-170) that says the remote downloads into `~/.t3/runtime`, instead of adding a contradictory paragraph, and states the matching goat-si/goat release must carry the platform archive and SHA256SUMS.

@@ -7,12 +7,12 @@ Local gates at 1ea5118af: vp test run scripts/goat-workflow-guard.test.ts 76/76;
 Hosted gate: goat-ci run 38083004166 @ 1ea5118af16a05fd1c3571e4736b6388c9da9e31, conclusion success.
 https://github.com/goat-si/goat/actions/runs/38083004166
 
-| job | result | runner |
-|---|---|---|
-| goat-check | success | goat-epyc-02 |
+| job            | result  | runner       |
+| -------------- | ------- | ------------ |
+| goat-check     | success | goat-epyc-02 |
 | goat-typecheck | success | goat-epyc-01 |
-| goat-test | success | goat-epyc-02 |
-| goat-build | success | goat-epyc-01 |
+| goat-test      | success | goat-epyc-02 |
+| goat-build     | success | goat-epyc-01 |
 
 All jobs requested labels self-hosted,linux,x64,goat,epyc. Across both runs in the repo (2 total), all 8 jobs ran on goat-epyc-01/02; zero jobs on GitHub-hosted runners.
 

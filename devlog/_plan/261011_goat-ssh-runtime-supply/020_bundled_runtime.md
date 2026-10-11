@@ -3,6 +3,7 @@
 Stale check @7476236e5 — amended 16/50 named hunks (content or coordinates/counts); all 50 before-images plus the standalone workflow snippet reverified. Source read-only; no builds/tests.
 
 ## Loop spec
+
 - Archetype: satisfy-spec; parent owns P/A/B/C/D, goal and integration.
 - Trigger: D2 (item 1), after wp1 install-before-switch; source rechecked on 2026-10-11 at post-item-2 HEAD `7476236e53c1cd1e2cd0a57be89c20e05130bc6f`.
 - Goal: a packaged desktop and its agent/backend dispatch can install their own exact GOAT runtime on a cold host from read-only packaged bytes; development can populate its writable runtime archive cache explicitly.
@@ -23,6 +24,7 @@ The **wp2 P post-010 stale check is complete at `7476236e5`**. Item 2 has landed
 Read `000_plan.md` and `001_research.md` first. D1 owns runner publication/restart and retained-runner rules; these hunks change acquisition only. D2 owns this unit. D3/D9 own default data-home identity. At this HEAD, preparation returns no replacement runner; callers retain their runner options. D4 may later change that contract; re-ground the acquisition block if it does. D5 owns all real build/install/dispatch evidence.
 
 Ordered steps:
+
 1. Add a read-only bundle input and mandatory bundle sidecar validation; change cold acquisition precedence.
 2. Connect packaged desktop main, primary backend env and backend dispatch; map the WSL bundle path into its selected distro.
 3. Add packaging inputs, resource staging, archive validation and packaged-resource validation.
@@ -32,29 +34,29 @@ Ordered steps:
 
 Source-of-truth sync: D2 in 000 already states the durable constraint; propose amendments in §10. Existing executable/types/tests own implementation detail. No new internal/user guide is required. This plan is not a proposed repository commit; parent owns any archival decision.
 
-| Change | Exact path | Purpose |
-|---|---|---|
-| MODIFY | packages/ssh/src/tunnel.ts | runner input and bundle → cache → gh acquisition |
-| MODIFY | packages/ssh/src/runtimeArchive.ts | optional mandatory canonical sidecar for packaged input |
-| MODIFY | packages/ssh/src/tunnel.test.ts | real-shell cold/prepared/retained behavior and precedence |
-| MODIFY | packages/ssh/src/runtimeArchive.test.ts | required sidecar missing/malformed/digest mismatch |
-| PRESERVE | packages/ssh/src/fixtures/remote-runner-baseline.json | all nine baseline entries unchanged by D2 |
-| MODIFY | apps/desktop/src/main.ts | resourcesPath bundle creation in packaged mode |
-| MODIFY | apps/desktop/src/ssh/desktopSshCliRunner.ts | bundle field passes through runner options |
-| MODIFY | apps/desktop/src/ssh/desktopSshCliRunner.test.ts | packaged/dev runner resolution |
-| MODIFY | apps/desktop/src/backend/DesktopBackendConfiguration.ts | backend child env; WSL path translation |
-| MODIFY | apps/desktop/src/backend/DesktopBackendConfiguration.test.ts | primary and WSL child config behavior |
-| MODIFY | apps/server/src/sshRemote/SshRemoteDispatch.ts | deserialize bundle env |
-| MODIFY | apps/server/src/sshRemote/SshRemoteDispatch.test.ts | env whitespace/default/custom-cache cases |
-| MODIFY | scripts/build-desktop-artifact.ts | input chain, stage/validate/copy resource set |
-| MODIFY | scripts/build-desktop-artifact.test.ts | real tar/filesystem payload proofs |
-| MODIFY | apps/server/scripts/cli.ts | accept host sentinel without a cross-target download |
-| NEW | scripts/dev-runtime-archive.ts | native host build orchestration and cache publication |
-| NEW | scripts/dev-runtime-archive.test.ts | real child-process isolated-HOME orchestration |
-| NEW | scripts/release-desktop-runtime.test.ts | workflow graph/input contract and wait-script behavior |
-| MODIFY | package.json | dev:runtime-archive entry |
-| MODIFY | .github/workflows/release-desktop.yml | producer-first archive flow, then package |
-| DELETE | none | no runtime or install removal |
+| Change   | Exact path                                                   | Purpose                                                   |
+| -------- | ------------------------------------------------------------ | --------------------------------------------------------- |
+| MODIFY   | packages/ssh/src/tunnel.ts                                   | runner input and bundle → cache → gh acquisition          |
+| MODIFY   | packages/ssh/src/runtimeArchive.ts                           | optional mandatory canonical sidecar for packaged input   |
+| MODIFY   | packages/ssh/src/tunnel.test.ts                              | real-shell cold/prepared/retained behavior and precedence |
+| MODIFY   | packages/ssh/src/runtimeArchive.test.ts                      | required sidecar missing/malformed/digest mismatch        |
+| PRESERVE | packages/ssh/src/fixtures/remote-runner-baseline.json        | all nine baseline entries unchanged by D2                 |
+| MODIFY   | apps/desktop/src/main.ts                                     | resourcesPath bundle creation in packaged mode            |
+| MODIFY   | apps/desktop/src/ssh/desktopSshCliRunner.ts                  | bundle field passes through runner options                |
+| MODIFY   | apps/desktop/src/ssh/desktopSshCliRunner.test.ts             | packaged/dev runner resolution                            |
+| MODIFY   | apps/desktop/src/backend/DesktopBackendConfiguration.ts      | backend child env; WSL path translation                   |
+| MODIFY   | apps/desktop/src/backend/DesktopBackendConfiguration.test.ts | primary and WSL child config behavior                     |
+| MODIFY   | apps/server/src/sshRemote/SshRemoteDispatch.ts               | deserialize bundle env                                    |
+| MODIFY   | apps/server/src/sshRemote/SshRemoteDispatch.test.ts          | env whitespace/default/custom-cache cases                 |
+| MODIFY   | scripts/build-desktop-artifact.ts                            | input chain, stage/validate/copy resource set             |
+| MODIFY   | scripts/build-desktop-artifact.test.ts                       | real tar/filesystem payload proofs                        |
+| MODIFY   | apps/server/scripts/cli.ts                                   | accept host sentinel without a cross-target download      |
+| NEW      | scripts/dev-runtime-archive.ts                               | native host build orchestration and cache publication     |
+| NEW      | scripts/dev-runtime-archive.test.ts                          | real child-process isolated-HOME orchestration            |
+| NEW      | scripts/release-desktop-runtime.test.ts                      | workflow graph/input contract and wait-script behavior    |
+| MODIFY   | package.json                                                 | dev:runtime-archive entry                                 |
+| MODIFY   | .github/workflows/release-desktop.yml                        | producer-first archive flow, then package                 |
+| DELETE   | none                                                         | no runtime or install removal                             |
 
 Field chain: `bundledArchiveDirectory` is created in desktop main from `environment.resourcesPath`, passed through `resolveDesktopSshCliRunner`, consumed by `prepareRemoteRuntime` (desktop manager, pairing and MCP all already call it). Primary child serializes the same path as `T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR`; WSL serializes a translated path; `resolveSshCliRunner` trims/deserializes it and passes it to the same manager. This is process-local configuration: no WebSocket schema, persisted settings, JSON reviver, or renderer serialization. CLI packaging fields flow Flag → BuildCliInput / BuildEnvConfig → ResolvedBuildOptions → stage helper → createBuildConfig extraResources → packaged-resource validation. No empty-string env value creates a bundle path. Scripts' new home input flows Flag → worktree/ambient/default resolver → runtime/archives; it never opens a database.
 
@@ -274,7 +276,7 @@ The equality check is an early warning (E7 service code), not an assertion that 
 +        distroForConfig, environment.path.join(environment.resourcesPath, "ssh-runtime", "archives"),
 +      )
 +    : Option.none<string>();
- 
+
    // Resolve the selected distro's IPv4 address. In mirrored mode the distro
    // reports a host interface, so use loopback instead; a failed probe also
 @@ -754,8 +762,17 @@
@@ -296,7 +298,7 @@ The equality check is an early warning (E7 service code), not an assertion that 
 +    forwardedEnvNames.push("T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR");
    }
    const wslEnv = mergeWslEnv(parentEnvWithoutT3Home.WSLENV, forwardedEnvNames);
- 
+
 @@ -768,6 +785,11 @@
        ...parentEnvWithoutT3Home,
        ...backendChildEnvPatch(),
@@ -331,7 +333,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 @@ -15,6 +15,7 @@
    type DirectoryRecord,
  } from "@electron/asar";
- 
+
 +import { cliArchiveFileName, cliArchiveTarCommand, parseChecksums } from "@t3tools/shared/cliRelease";
  import { fromYaml } from "@t3tools/shared/schemaYaml";
  import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -343,7 +345,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 +  readonly sshRuntimeArchiveDir: Option.Option<string>;
 +  readonly requireAllSshRuntimes: Option.Option<boolean>;
  }
- 
+
  function detectHostBuildPlatform(hostPlatform: string): typeof BuildPlatform.Type | undefined {
 @@ -939,6 +942,8 @@
    readonly mockUpdates: boolean;
@@ -352,7 +354,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 +  readonly sshRuntimeArchiveDir: string | undefined;
 +  readonly requireAllSshRuntimes: boolean;
  }
- 
+
  interface StagePackageJson {
 @@ -986,6 +991,8 @@
    // staging inputs out of app.asar; they are emitted once at resources/.
@@ -371,7 +373,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 +  requireAllSshRuntimes: Config.Boolean("T3CODE_DESKTOP_REQUIRE_ALL_SSH_RUNTIMES").pipe(Config.withDefault(false)),
 +  ci: Config.Boolean("CI").pipe(Config.withDefault(false)),
  });
- 
+
  const MockUpdateServerPortSchema = Schema.NumberFromString.check(
 @@ -1789,6 +1799,8 @@
      mockUpdates,
@@ -381,7 +383,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 +    requireAllSshRuntimes: env.ci || resolveBooleanFlag(input.requireAllSshRuntimes, env.requireAllSshRuntimes),
    } satisfies ResolvedBuildOptions;
  });
- 
+
 @@ -2765,6 +2777,7 @@
    // source file was never written fails the electron-builder step.
    wslRuntimeBundled = false,
@@ -401,7 +403,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 @@ -3028,6 +3042,106 @@
      .map((member) => member.replace(/^\.\//, "").replace(/\/$/, ""))
      .filter((member) => member.length > 0);
- 
+
 +
 +export const SSH_RUNTIME_PLATFORM_KEYS = ["darwin-arm64", "linux-x64", "linux-arm64"] as const;
 +export const SSH_RUNTIME_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/ssh-runtime/archives";
@@ -507,7 +509,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
  // The Windows primary runs from the archive through the asar-aware
 @@ -3609,6 +3723,12 @@
    });
- 
+
    const appVersion = options.version ?? serverPackageJson.version;
 +  if (options.sshRuntimeArchiveDir !== undefined && appVersion !== serverPackageJson.version) {
 +    return yield* Effect.fail(new Error(`Bundled SSH runtime version ${appVersion} must equal packaged server version ${serverPackageJson.version}. Stamp package versions before building; do not use a desktop-only version override.`));
@@ -540,7 +542,7 @@ Validation must read the stage, then the actual packaged resource directory: fil
 +      version: appVersion, requireAll: options.requireAllSshRuntimes,
      });
    }
- 
+
 @@ -4150,6 +4279,12 @@
      Flag.withDescription("Mock update server port (env: T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT)."),
      Flag.optional,
@@ -568,7 +570,7 @@ Actual packaged validation is required in addition to the hunk above: determine 
 @@ -3407,6 +3407,38 @@
    );
  });
- 
+
 +export const validatePackagedSshRuntimeArchives = Effect.fn("validatePackagedSshRuntimeArchives")(function* (input: {
 +  readonly stageDistDir: string;
 +  readonly version: string;
@@ -616,7 +618,7 @@ Actual packaged validation is required in addition to the hunk above: determine 
 +      stageDistDir, version: appVersion, requireAll: options.requireAllSshRuntimes,
      });
    }
- 
+
 ```
 
 Input test literals must acquire both new required Option fields. These are the only three `resolveBuildOptions` object literals in the current test file; preserve every existing assertion.
@@ -643,7 +645,7 @@ Input test literals must acquire both new required Option fields. These are the 
 +        requireAllSshRuntimes: Option.none(),
            }),
          );
- 
+
 @@ -2437,6 +2441,8 @@
          mockUpdates: Option.some(false),
          mockUpdateServerPort: Option.none(),
@@ -862,50 +864,49 @@ p.write_text(s)
 Define `COMMON_SSH_BUNDLE_STEPS` from this literal before running that transformation:
 
 ```yaml
-      - name: Wait for SSH runtime archives
-        shell: bash
-        timeout-minutes: 40
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node --input-type=module <<'NODE'
-          const required = new Map([
-            ["cli-mac-arm64", "Build macOS arm64"],
-            ["cli-linux-x64", "Build Linux x64"],
-            ["cli-linux-arm64", "Build Linux arm64"],
-          ]);
-          const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: "application/vnd.github+json" };
-          const root = `${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-          const deadline = Date.now() + 35 * 60_000;
-          async function get(url) {
-            const response = await fetch(url, { headers });
-            if (!response.ok) throw new Error(`Actions API ${response.status}`);
-            return response.json();
-          }
-          while (Date.now() < deadline) {
-            const jobs = await get(`${root}/attempts/${process.env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`);
-            const missing = [];
-            for (const [artifact, jobName] of required) {
-              const assets = await get(`${root}/artifacts?name=${encodeURIComponent(artifact)}`);
-              if (assets.artifacts.some(a => !a.expired)) continue;
-              const job = jobs.jobs.find(j => j.name.endsWith(jobName));
-              if (job?.conclusion) throw new Error(`${artifact} absent after ${jobName}: ${job.conclusion}`);
-              missing.push(artifact);
-            }
-            if (missing.length === 0) process.exit(0);
-            console.log(`Waiting for ${missing.join(", ")}`);
-            await new Promise(resolve => setTimeout(resolve, 10_000));
-          }
-          throw new Error("SSH runtime archive producers did not upload within 35 minutes");
-          NODE
+- name: Wait for SSH runtime archives
+  shell: bash
+  timeout-minutes: 40
+  env:
+    GH_TOKEN: ${{ github.token }}
+  run: |
+    node --input-type=module <<'NODE'
+    const required = new Map([
+      ["cli-mac-arm64", "Build macOS arm64"],
+      ["cli-linux-x64", "Build Linux x64"],
+      ["cli-linux-arm64", "Build Linux arm64"],
+    ]);
+    const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: "application/vnd.github+json" };
+    const root = `${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+    const deadline = Date.now() + 35 * 60_000;
+    async function get(url) {
+      const response = await fetch(url, { headers });
+      if (!response.ok) throw new Error(`Actions API ${response.status}`);
+      return response.json();
+    }
+    while (Date.now() < deadline) {
+      const jobs = await get(`${root}/attempts/${process.env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`);
+      const missing = [];
+      for (const [artifact, jobName] of required) {
+        const assets = await get(`${root}/artifacts?name=${encodeURIComponent(artifact)}`);
+        if (assets.artifacts.some(a => !a.expired)) continue;
+        const job = jobs.jobs.find(j => j.name.endsWith(jobName));
+        if (job?.conclusion) throw new Error(`${artifact} absent after ${jobName}: ${job.conclusion}`);
+        missing.push(artifact);
+      }
+      if (missing.length === 0) process.exit(0);
+      console.log(`Waiting for ${missing.join(", ")}`);
+      await new Promise(resolve => setTimeout(resolve, 10_000));
+    }
+    throw new Error("SSH runtime archive producers did not upload within 35 minutes");
+    NODE
 
-      - name: Download SSH runtime archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: cli-*
-          merge-multiple: true
-          path: ssh-runtime-archives
-
+- name: Download SSH runtime archives
+  uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+  with:
+    pattern: cli-*
+    merge-multiple: true
+    path: ssh-runtime-archives
 ```
 
 Exact packaging invocation hunk (after the relocation):
@@ -1089,7 +1090,7 @@ The exact unified diff for that relocation follows (use either this or the trans
 +          pattern: cli-*
 +          merge-multiple: true
 +          path: ssh-runtime-archives
- 
+
        # The WSL backend runs the Linux CLI archive inside the distro, so the
        # Windows desktop embeds the same-arch archive the release attaches.
 @@ -398,6 +546,8 @@
@@ -1100,11 +1101,11 @@ The exact unified diff for that relocation follows (use either this or the trans
 +            --require-all-ssh-runtimes
              --verbose
            )
- 
+
 @@ -455,105 +605,6 @@
- 
+
            vp run dist:desktop:artifact "${args[@]}"
- 
+
 -      # The single-executable is built with a Node that supports --build-sea
 -      # (25.7+); the repo itself stays on the engines.node version. It always
 -      # injects into the runner's own Node: tsdown's cross-target download path
@@ -1367,6 +1368,7 @@ Append this block to `packages/ssh/src/tunnel.test.ts`. It uses existing `ARCHIV
 ```
 
 Add these focused follow-ups to the same describe, using the same shell harness rather than generated-string snapshots:
+
 - Wrong bundle version/platform (only the other asset exists) → cache wins; corrupt matching bundle → fails before upload, leaves prior runner, managed ownership files and running process unchanged (reuse wp1's spawned-process harness and await its exit/event signals; no sleeps).
 - Remote ready and retained ready + deliberately invalid bundle sidecar → local invalidity is never read; same runner bytes/process and origin survive. The supplied ready/retained cases already set the bundle sidecar to zero-digest; preserve that bypass oracle. Their remote executables now report their selected exact version so the public pairing/candidate path can execute.
 - Missing bundle and empty cache config → actionable failure; alias-identical bundle/cache config with missing archive → no gh and no bundle writes. Blank bundle config preserves existing cache/gh/mirror behavior.
@@ -1378,6 +1380,7 @@ Add these focused follow-ups to the same describe, using the same shell harness 
 ### Desktop/server input chain
 
 Add config-resolution tests alongside existing descriptions:
+
 - `desktopSshCliRunner.test.ts`: archiveOptions with bundle path containing spaces; packaged runner passes it unchanged; dev node override drops archive options; unpackaged normal runner receives no bundle from main's creator. Keep nightly version assertion.
 - `DesktopBackendConfiguration.test.ts`: `resolvePrimary` with packaged resourcesPath containing spaces exports its exact bundle path and preserves unrelated child env; unpackaged primary clears a stale ambient bundle env. Test real generated start configuration, not private callback wiring.
 - Same backend test, WSL: mock `windowsToWslPath` result `/mnt/c/Program Files/GOAT/resources/ssh-runtime/archives`, assert the Linux child receives it plus WSLENV contains exactly one bare `T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR`; failed translation has no Windows value or residual WSLENV entry; unrelated WSLENV entries survive; selected distro matches runningDistro. Exercise inherited `T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR/p`, bare duplicates, `/l`, `/u`, `/w` and combined flags (concrete regression hunk below). Also check cleanup when unpackaged.
@@ -1386,6 +1389,7 @@ Add config-resolution tests alongside existing descriptions:
 ### Packaging behavior
 
 Append meaningful filesystem/tar cases to existing build-desktop-artifact.test.ts, extending its existing `makeLinuxCliArchiveFixture` to accept the required resource-monitor member via extraMembers:
+
 - Native host-only valid tar → stage emits exactly one archive plus canonical checksum; source directory manifest/bytes/sidecars unchanged; validateSshRuntimeArchives on output returns same hash.
 - Three target fixtures → strict stage succeeds; missing each target, missing source directory, wrong version, tar with wrong top-level stem, missing goat/client/monitor/node-pty, loose bin.mjs, corrupt tar, oversize and bad existing sidecar all fail before destination creation.
 - Missing source sidecar → successful canonicalization; malformed existing sidecar → failure; packaged matching-hash but noncanonical sidecar → failure. Desktop bundle version different from the embedded server package version → reject before staging (including an explicit `--version` override). Existing user input without a sidecar remains allowed only before staging.
@@ -1645,7 +1649,6 @@ The following complete test hunks provide the core executable additions; the mat
 +});
 ```
 
-
 ### MODIFY `apps/desktop/src/backend/DesktopBackendConfiguration.test.ts`
 
 ```diff
@@ -1711,7 +1714,6 @@ Add the following behavior regression immediately before the existing inherited-
 +
    it.effect("resolveWsl preserves existing WSLENV entries when forwarding backend secrets", () =>
 ```
-
 
 ### MODIFY `packages/ssh/src/tunnel.test.ts`
 
@@ -1885,6 +1887,7 @@ These real builds are D5 evidence, not required local unit checks in wp2. An all
 Item 2 at `7476236e5` deliberately regenerated the reviewed runner/launch/pairing baseline; this checked-in post-010 JSON is the D2 baseline (SHA-256 `42ed378fab39fd551f77476d7fe7ef34ed11068916b30ab476ae7ea5429838c4`). Preserve all nine current entries, including exact-version installer and staged candidate bytes. Never regenerate this frozen fixture opportunistically, never copy current generated output over all nine entries, and never call a fixture delta proof of behavior. If a D2 implementation unexpectedly changes a shell entry, stop and amend this document with the exact entry/byte change and a corresponding real-shell behavior test.
 
 Risks and dispositions:
+
 - Private gh fallback still requires local credentials for targets not bundled; bundle hits work offline. Corrupt bundles fail with actionable errors.
 - Full bundle adds three runtime archives to every installer. Local host-only packaging is permitted; release completeness is mandatory. Builds must account for the increased Windows payload file count (three archives + three sidecars); existing 80-file limit must not be silently raised. Reuse the existing counting test and measure the complete payload before choosing any limit amendment.
 - Host executable version mismatch: use package version, no independent --version override. D4 reuse stays deferred.
@@ -1908,11 +1911,13 @@ Document inspection: stale check at `7476236e5` revalidated all 50 named diff hu
 Plan-delivery proof: only this named file was written. Read-only source/skill inspection and `git rev-parse HEAD` ran; no branch-level git, build/test, SSH, source edit, state mutation or child spawn occurred. Remaining independent architect reflection/A and all implementation/verifier results belong to parent.
 
 ## Reflection fold (A2)
+
 - Windows WSL dedupe is deferred: keep the existing WSL staging unchanged in this unit (Windows packaging is not exercised here); disposition recorded in 002 A2.
 - Size: wp5 records the archive sizes, the staged resources size and the final .app/.dmg size in evidence; release builds log them (add a log line in the staging step).
 
 ## Audit fold (cycle 2)
+
 1. dev:runtime-archive: wrap the validation program with `Effect.scoped` before `Effect.runPromise` (spawner requires Scope).
 2. Generated build-tool stand-in (lines ~1502/1519): build the program with `String.raw` (or doubled escapes) and assert it parses (`new Function` / node --check) in the test.
 3. New test file (~1580): `Effect.scoped)));` → `Effect.scoped));`.
-The implementer must run tsc and the focused tests; any further syntax slips in doc hunks are fixed in place and reported.
+   The implementer must run tsc and the focused tests; any further syntax slips in doc hunks are fixed in place and reported.

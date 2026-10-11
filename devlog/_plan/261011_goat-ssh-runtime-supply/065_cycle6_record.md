@@ -1,4 +1,5 @@
 # 065 — Cycle 6 (wp6: restart reconciliation)
+
 User steering 2026-10-11: on app restart/update the app itself must reset/refresh the remote server; decision: refresh an older owned server only when no turns run.
 Design: architect 01a129b0-8ff2 (Carver); MCP-after-restart investigation 01a129b0-8f1b (Dewey: cold restart reinjects fresh MCP for every provider; reported 405 from old t3-code build, not reproduced). Plan 070 audit 01a129e4 FAIL -> PASS (archive-only adoption w/ uid+lstart+exact command+regular files; trigger semantics; secondary matrix; activity coverage; 0.0.44 live fixture).
 Commits: c96310a1a server activity signal (projections incl. background work, held queues excluded; loopback GET /.well-known/t3/activity, 403 elsewhere; capabilities.sshActivity; helper idle|busy|unknown; migration 61 indexes). b6a829960 R1 legacy adoption + R2 desktop once-per-target idle-only refresh, full SemVer precedence, rollback, retry after failed ensure. 7f60b6c68 dash-safe printf (Linux remotes produced invalid launch JSON) + T3_SSH_TEST_SHELL on all 19 real-shell fixtures. d18f83e4e lint/web test double. a77b19874 user doc.

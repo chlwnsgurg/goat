@@ -50,111 +50,111 @@ The own-thread allow wildcard `goat-thread_<id>_*` can also match a foreign thre
 
 Each exact path below is relative to the source root and marked MODIFY. The matching complete diff is in §5. Fixture files are individually enumerated and receive complete real-line hunks.
 
-| Operation | Exact path | Responsibility |
-|---|---|---|
-| MODIFY | `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-cursor/src/server/adapter.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-cursor/src/server/adapter.test.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-muse/src/server/adapter.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-muse/src/server/adapter.test.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-opencode/src/server/adapter.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-acp/src/server/mcpOverAcpBridge.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `apps/server/src/provider/CodexDeveloperInstructions.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `apps/server/src/provider/CodexDeveloperInstructions.test.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-core/src/server/runtimeInstructions.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-core/src/server/runtimeInstructions.test.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-core/src/server/orchestrationInstructions.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `apps/server/src/cli/acpMcpBridge.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `apps/server/src/mcp/McpSessionRegistry.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/contracts/src/settings.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/contracts/src/previewAutomation.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `apps/server/src/provider/acp/AcpJsonRpcConnection.test.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/effect-acp/test/fixtures/acp-mock-peer.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `apps/server/src/orchestration-v2/ClaudeAutomaticDelivery.integration.test.ts` | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names. |
-| MODIFY | `packages/provider-acp/src/server/adapter.ts` | One shared ACP injection path serves generic ACP, Grok and Antigravity. Keep ACP clientInfo unchanged. |
-| MODIFY | `packages/provider-acp/src/server/runtimeModel.ts` | Update prefix/suffix regexes and all three asserted-origin checks together. Explicit foreign metadata still wins; known-tool inventory still gates loose titles. |
-| MODIFY | `packages/provider-acp/src/server/runtimeModel.test.ts` | Replay real ACP title/meta shapes under goat and test foreign-origin precedence and case/whitespace handling. goat_thread_send consumes wp3. |
-| MODIFY | `packages/provider-acp/src/server/mcpOverAcpBridge.test.ts` | The bridge accepts goat only; reject both an unknown origin and the retired registration key before allocating a connection. |
-| MODIFY | `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts` | Final allowlist is mcp__goat__goat_* for wp3-renamed tools and mcp__goat__<unchanged-tool> otherwise; read-only mode never gains wildcard. |
-| MODIFY | `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts` | Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat namespace. Existing tests cover credential rotation and read-only policy. |
-| MODIFY | `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts` | Test Codex wire registration, qualified projected names and resumed tool calls; temporary directory names remain unchanged. |
-| MODIFY | `apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts` | Assert goat in injected stdio server and projected tool identity for the shared ACP adapter. |
-| MODIFY | `packages/provider-opencode/src/server/v2/adapter.ts` | Keep directory registration and same-name cleanup; digest raw ids whenever sanitization is lossy or the name is over 64 characters. Deny legacy names before allowing the current goat thread; record the pre-existing wildcard-overlap residual separately. |
-| MODIFY | `apps/server/src/orchestration-v2/Adapters/OpenCode2AdapterV2.test.ts` | Replay registration and symmetric removal, dual namespace deny rules and own-thread allow, resume/fork policy, exact 64-character lossless boundary and distinct digests for the 59-character lossy collision pair. Keep lossy-id permission expectations consistent; wildcard overlap is a pre-existing residual. |
-| MODIFY | `apps/server/src/orchestration-v2/OpenCode2OrchestratorV2.integration.test.ts` | Replay registration and symmetric removal, dual namespace deny rules and own-thread allow, resume/fork policy, exact 64-character lossless boundary and distinct digests for the 59-character lossy collision pair. Keep lossy-id permission expectations consistent; wildcard overlap is a pre-existing residual. |
-| MODIFY | `packages/provider-pi/src/server/mcpExtensionSource.ts` | Exactly one callable registration per catalog item. Preserve pre-builtin ownership, direct/deferred discovery, cancellation, retry and permissions; no hidden duplicate. |
-| MODIFY | `packages/provider-pi/src/server/mcpExtensionSource.test.ts` | Execute generated Pi extension, count registration attempts before the mock deduplicates, verify discovery and raw HTTP tool name, and retain selected/excluded tool/approval behavior. |
-| MODIFY | `packages/provider-pi/src/server/mcpInjection.test.ts` | Remove source-string assertions that would mirror prefix implementation; the generated-extension execution test above proves the behavior. |
-| MODIFY | `packages/shared/src/t3McpToolPresentation.ts` | Required reader-side companion to D6: add goat without deleting old namespace aliases or changing logo/icon identities. wp3 owns bare goat_* inventory aliases. |
-| MODIFY | `packages/shared/src/t3McpToolPresentation.test.ts` | Retain all old-history assertions and add every new namespace spelling plus per-thread and foreign/unknown rendering behavior. |
-| MODIFY | `packages/shared/src/htmlRender.test.ts` | Verify rendered HTML attachments still resolve from goat qualified names and retained legacy names. |
-| MODIFY | `packages/provider-core/src/server/mcpToolPresentation.test.ts` | GOAT tools use product-owned presentation instead of acquiring a generic integration card; legacy history still behaves the same. |
-| MODIFY | `docs/orchestration-v2/orchestrator-mcp-server.md` | Correct the server key, Codex overrides and Claude wildcard, and replace obsolete Pi hidden-alias guidance with the single-registration/loadout contract. |
-| MODIFY | `docs/internals/providers.md` | Update the existing cross-thread isolation constraint, including the residual old-daemon risk. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/muse_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/muse_permission/muse_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/muse_workflow/muse_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_fork/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_switch/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/simple/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/simple/muse_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/grok_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/muse_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/pi_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence. |
-| MODIFY | `apps/server/src/mcp/McpHttpServer.ts` | Amend only the existing provider reconnect comment; wp3 owns McpServer name and toolkit changes. |
+| Operation | Exact path                                                                                                    | Responsibility                                                                                                                                                                                                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| MODIFY    | `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`                                                 | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-cursor/src/server/adapter.ts`                                                              | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-cursor/src/server/adapter.test.ts`                                                         | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-muse/src/server/adapter.ts`                                                                | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-muse/src/server/adapter.test.ts`                                                           | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-opencode/src/server/adapter.ts`                                                            | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-acp/src/server/mcpOverAcpBridge.ts`                                                        | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/provider/CodexDeveloperInstructions.ts`                                                      | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/provider/CodexDeveloperInstructions.test.ts`                                                 | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-core/src/server/runtimeInstructions.ts`                                                    | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-core/src/server/runtimeInstructions.test.ts`                                               | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-core/src/server/orchestrationInstructions.ts`                                              | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/cli/acpMcpBridge.ts`                                                                         | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/mcp/McpSessionRegistry.ts`                                                                   | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/contracts/src/settings.ts`                                                                          | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/contracts/src/previewAutomation.ts`                                                                 | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/provider/acp/AcpJsonRpcConnection.test.ts`                                                   | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/effect-acp/test/fixtures/acp-mock-peer.ts`                                                          | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/orchestration-v2/ClaudeAutomaticDelivery.integration.test.ts`                                | Use the GOAT registration identity in the existing provider/transport contract; keep APIs and credential environment names.                                                                                                                                                                                        |
+| MODIFY    | `packages/provider-acp/src/server/adapter.ts`                                                                 | One shared ACP injection path serves generic ACP, Grok and Antigravity. Keep ACP clientInfo unchanged.                                                                                                                                                                                                             |
+| MODIFY    | `packages/provider-acp/src/server/runtimeModel.ts`                                                            | Update prefix/suffix regexes and all three asserted-origin checks together. Explicit foreign metadata still wins; known-tool inventory still gates loose titles.                                                                                                                                                   |
+| MODIFY    | `packages/provider-acp/src/server/runtimeModel.test.ts`                                                       | Replay real ACP title/meta shapes under goat and test foreign-origin precedence and case/whitespace handling. goat_thread_send consumes wp3.                                                                                                                                                                       |
+| MODIFY    | `packages/provider-acp/src/server/mcpOverAcpBridge.test.ts`                                                   | The bridge accepts goat only; reject both an unknown origin and the retired registration key before allocating a connection.                                                                                                                                                                                       |
+| MODIFY    | `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`                                                | Final allowlist is mcp__goat__goat_* for wp3-renamed tools and mcp__goat__<unchanged-tool> otherwise; read-only mode never gains wildcard.                                                                                                                                                                         |
+| MODIFY    | `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts`                                           | Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat namespace. Existing tests cover credential rotation and read-only policy.                                                                                                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.test.ts`                                            | Test Codex wire registration, qualified projected names and resumed tool calls; temporary directory names remain unchanged.                                                                                                                                                                                        |
+| MODIFY    | `apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts`                                              | Assert goat in injected stdio server and projected tool identity for the shared ACP adapter.                                                                                                                                                                                                                       |
+| MODIFY    | `packages/provider-opencode/src/server/v2/adapter.ts`                                                         | Keep directory registration and same-name cleanup; digest raw ids whenever sanitization is lossy or the name is over 64 characters. Deny legacy names before allowing the current goat thread; record the pre-existing wildcard-overlap residual separately.                                                       |
+| MODIFY    | `apps/server/src/orchestration-v2/Adapters/OpenCode2AdapterV2.test.ts`                                        | Replay registration and symmetric removal, dual namespace deny rules and own-thread allow, resume/fork policy, exact 64-character lossless boundary and distinct digests for the 59-character lossy collision pair. Keep lossy-id permission expectations consistent; wildcard overlap is a pre-existing residual. |
+| MODIFY    | `apps/server/src/orchestration-v2/OpenCode2OrchestratorV2.integration.test.ts`                                | Replay registration and symmetric removal, dual namespace deny rules and own-thread allow, resume/fork policy, exact 64-character lossless boundary and distinct digests for the 59-character lossy collision pair. Keep lossy-id permission expectations consistent; wildcard overlap is a pre-existing residual. |
+| MODIFY    | `packages/provider-pi/src/server/mcpExtensionSource.ts`                                                       | Exactly one callable registration per catalog item. Preserve pre-builtin ownership, direct/deferred discovery, cancellation, retry and permissions; no hidden duplicate.                                                                                                                                           |
+| MODIFY    | `packages/provider-pi/src/server/mcpExtensionSource.test.ts`                                                  | Execute generated Pi extension, count registration attempts before the mock deduplicates, verify discovery and raw HTTP tool name, and retain selected/excluded tool/approval behavior.                                                                                                                            |
+| MODIFY    | `packages/provider-pi/src/server/mcpInjection.test.ts`                                                        | Remove source-string assertions that would mirror prefix implementation; the generated-extension execution test above proves the behavior.                                                                                                                                                                         |
+| MODIFY    | `packages/shared/src/t3McpToolPresentation.ts`                                                                | Required reader-side companion to D6: add goat without deleting old namespace aliases or changing logo/icon identities. wp3 owns bare goat_* inventory aliases.                                                                                                                                                    |
+| MODIFY    | `packages/shared/src/t3McpToolPresentation.test.ts`                                                           | Retain all old-history assertions and add every new namespace spelling plus per-thread and foreign/unknown rendering behavior.                                                                                                                                                                                     |
+| MODIFY    | `packages/shared/src/htmlRender.test.ts`                                                                      | Verify rendered HTML attachments still resolve from goat qualified names and retained legacy names.                                                                                                                                                                                                                |
+| MODIFY    | `packages/provider-core/src/server/mcpToolPresentation.test.ts`                                               | GOAT tools use product-owned presentation instead of acquiring a generic integration card; legacy history still behaves the same.                                                                                                                                                                                  |
+| MODIFY    | `docs/orchestration-v2/orchestrator-mcp-server.md`                                                            | Correct the server key, Codex overrides and Claude wildcard, and replace obsolete Pi hidden-alias guidance with the single-registration/loadout contract.                                                                                                                                                          |
+| MODIFY    | `docs/internals/providers.md`                                                                                 | Update the existing cross-thread isolation constraint, including the residual old-daemon risk.                                                                                                                                                                                                                     |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/grok_transcript.ndjson`          | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/grok_transcript.ndjson`               | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/grok_transcript.ndjson`     | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/grok_transcript.ndjson`           | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/grok_transcript.ndjson`                       | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/grok_transcript.ndjson`                  | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson`                   | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/pi_transcript.ndjson`                     | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/grok_transcript.ndjson`                         | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/muse_transcript.ndjson`                         | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/pi_transcript.ndjson`                           | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/muse_permission/muse_transcript.ndjson`                    | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/muse_workflow/muse_transcript.ndjson`                      | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/opencode_transcript.ndjson`           | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/opencode_transcript.ndjson`              | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/opencode_transcript.ndjson`           | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_fork/opencode_transcript.ndjson`                 | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/opencode_transcript.ndjson`                | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/opencode_transcript.ndjson`            | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/opencode_transcript.ndjson`    | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/opencode_transcript.ndjson`           | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/opencode_transcript.ndjson`             | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/opencode_transcript.ndjson` | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/opencode_transcript.ndjson`               | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/opencode_transcript.ndjson`               | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/opencode_transcript.ndjson`                | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/opencode_transcript.ndjson`             | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_switch/opencode_transcript.ndjson`               | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/opencode_transcript.ndjson`            | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/pi_transcript.ndjson`                        | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/pi_transcript.ndjson`               | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/grok_transcript.ndjson`                        | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/simple/grok_transcript.ndjson`                             | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/simple/muse_transcript.ndjson`                             | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson`                               | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/pi_transcript.ndjson`                      | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/pi_transcript.ndjson`           | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/grok_transcript.ndjson`                          | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/grok_transcript.ndjson`     | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/grok_transcript.ndjson`                     | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/muse_transcript.ndjson`                     | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/pi_transcript.ndjson`              | Replay-derived fixture adaptation only: preserve command/event ids, timestamps and ordering; update application-owned MCP identity/instructions and dual deny rows. These are edited replay inputs, not newly captured provider evidence.                                                                          |
+| MODIFY    | `apps/server/src/mcp/McpHttpServer.ts`                                                                        | Amend only the existing provider reconnect comment; wp3 owns McpServer name and toolkit changes.                                                                                                                                                                                                                   |
 
 | MODIFY | `packages/provider-opencode/src/server/adapter.test.ts` | Exercise the actual OpenCode 1 openSession boundary: inject goat with scoped HTTP credential only for a managed server, and inject nothing for external servers or absent credentials. |
 
 ## 4. Observable tests and conditional activation
 
-| Scenario / activation | Required observable result | Owning tests |
-|---|---|---|
-| Codex startup/resume/fork with a scoped MCP session | config contains only goat; same endpoint/header; projected GOAT calls remain product tools | CodexAdapterV2.test.ts |
-| Cursor/Muse scoped session | SDK options contain goat with existing authorization; absence path does not inject tools | provider-cursor / provider-muse adapter.test.ts |
-| Generic ACP, Grok, Antigravity through shared ACP adapter | stdio name and advertised MCP-over-ACP serverId both goat; transport selection/fallback unchanged | AcpAdapterV2.test.ts; AcpJsonRpcConnection.test.ts |
-| MCP-over-ACP connect goat / old key / foreign key | goat can message/disconnect; old/foreign rejected with typed bridge error before HTTP | mcpOverAcpBridge.test.ts |
-| ACP wire titles (prefix, suffix, separators, bare), rewritten/titleless updates, qwen/goose origins | known tools recover goat; explicit foreign origin wins; unknown/path-like names remain generic; fallback JSON input retained | runtimeModel.test.ts |
-| OpenCode 1 managed/external server, credential present/absent | actual openSession emits goat mcp.add with scoped credential only on owned server | provider-opencode/src/server/adapter.test.ts |
-| OpenCode 2 resumed/forked full-access/approval/plan session | outbound permissions deny both namespaces then allow only own goat server; registration/removal uses same name and credential | OpenCode2AdapterV2.test.ts; OpenCode2OrchestratorV2.integration.test.ts |
-| OpenCode lossless id length 59 / 60, lossy ids that fit and distinct long ids | Lossless 59-character id stays readable at 64 characters; 60-character or lossy id uses deterministic 21-character raw-id digest; long ids stay distinct | OpenCode2AdapterV2.test.ts |
-| OpenCode exact pair `thread:` + 49 `x` + `a:b` / `a_b` (both 59 characters) | Same-directory HTTP replay registers distinct `goat-a8a5047e3b3ef95f` / `goat-84c3953c7ac1e4ef` with own credentials; unload removes each same name | OpenCode2AdapterV2.test.ts (existing HTTP replay harness) |
-| Pi modern builtin search, absent/disabled/excluded builtin search, tree loadout | one register attempt per item initially, no hidden shadow, correct direct/deferred exposure, excluded calls remain excluded | mcpExtensionSource.test.ts |
-| Pi execute and approval-required tool call | original catalog name sent over HTTP, abort signal forwarded, details.server goat, discovery remains read-only while tool still prompts | mcpExtensionSource.test.ts |
-| Claude full-access vs read-only session, explicit/no allowlist, credential rotation | wildcard only in non-read-only policy; read-only list exactly matches toolkit annotations under final namespace; credential stays out of process args/log projection | ClaudeAdapterV2.test.ts |
-| Fresh goat qualified names and persisted t3-code aliases | same product presentation/HTML reference; foreign or unknown tools remain generic | shared presentation/htmlRender tests; provider-core presentation test |
-| Edited Pi/Grok/Muse/OpenCode replay transcripts | deterministic replay consumes new warning/instruction/key/rule strings without changed scenario outcomes | focused replay integration/contract tests |
+| Scenario / activation                                                                               | Required observable result                                                                                                                                           | Owning tests                                                            |
+| --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Codex startup/resume/fork with a scoped MCP session                                                 | config contains only goat; same endpoint/header; projected GOAT calls remain product tools                                                                           | CodexAdapterV2.test.ts                                                  |
+| Cursor/Muse scoped session                                                                          | SDK options contain goat with existing authorization; absence path does not inject tools                                                                             | provider-cursor / provider-muse adapter.test.ts                         |
+| Generic ACP, Grok, Antigravity through shared ACP adapter                                           | stdio name and advertised MCP-over-ACP serverId both goat; transport selection/fallback unchanged                                                                    | AcpAdapterV2.test.ts; AcpJsonRpcConnection.test.ts                      |
+| MCP-over-ACP connect goat / old key / foreign key                                                   | goat can message/disconnect; old/foreign rejected with typed bridge error before HTTP                                                                                | mcpOverAcpBridge.test.ts                                                |
+| ACP wire titles (prefix, suffix, separators, bare), rewritten/titleless updates, qwen/goose origins | known tools recover goat; explicit foreign origin wins; unknown/path-like names remain generic; fallback JSON input retained                                         | runtimeModel.test.ts                                                    |
+| OpenCode 1 managed/external server, credential present/absent                                       | actual openSession emits goat mcp.add with scoped credential only on owned server                                                                                    | provider-opencode/src/server/adapter.test.ts                            |
+| OpenCode 2 resumed/forked full-access/approval/plan session                                         | outbound permissions deny both namespaces then allow only own goat server; registration/removal uses same name and credential                                        | OpenCode2AdapterV2.test.ts; OpenCode2OrchestratorV2.integration.test.ts |
+| OpenCode lossless id length 59 / 60, lossy ids that fit and distinct long ids                       | Lossless 59-character id stays readable at 64 characters; 60-character or lossy id uses deterministic 21-character raw-id digest; long ids stay distinct             | OpenCode2AdapterV2.test.ts                                              |
+| OpenCode exact pair `thread:` + 49 `x` + `a:b` / `a_b` (both 59 characters)                         | Same-directory HTTP replay registers distinct `goat-a8a5047e3b3ef95f` / `goat-84c3953c7ac1e4ef` with own credentials; unload removes each same name                  | OpenCode2AdapterV2.test.ts (existing HTTP replay harness)               |
+| Pi modern builtin search, absent/disabled/excluded builtin search, tree loadout                     | one register attempt per item initially, no hidden shadow, correct direct/deferred exposure, excluded calls remain excluded                                          | mcpExtensionSource.test.ts                                              |
+| Pi execute and approval-required tool call                                                          | original catalog name sent over HTTP, abort signal forwarded, details.server goat, discovery remains read-only while tool still prompts                              | mcpExtensionSource.test.ts                                              |
+| Claude full-access vs read-only session, explicit/no allowlist, credential rotation                 | wildcard only in non-read-only policy; read-only list exactly matches toolkit annotations under final namespace; credential stays out of process args/log projection | ClaudeAdapterV2.test.ts                                                 |
+| Fresh goat qualified names and persisted t3-code aliases                                            | same product presentation/HTML reference; foreign or unknown tools remain generic                                                                                    | shared presentation/htmlRender tests; provider-core presentation test   |
+| Edited Pi/Grok/Muse/OpenCode replay transcripts                                                     | deterministic replay consumes new warning/instruction/key/rule strings without changed scenario outcomes                                                             | focused replay integration/contract tests                               |
 
 The added/updated assertions exercise generated Pi execution, actual adapter wire options, metadata recovery, public result presentation, permissions and name-limit behavior. No new static-render, callback-wiring or source-string prefix tests are added. Existing Pi materialization prefix string assertions are removed in favor of the execution test. No sleeps/polling are added; replay/effect tests retain their existing drain/terminal barriers.
 
@@ -164,7 +164,7 @@ Each `diff` block is a complete unified patch for its stated file, generated fro
 
 The stale check has refreshed before-images for the integrated wp3 source at `f08a410af`. This extracts every diff block into the parent's temporary directory and checks it without applying. Run only in the source worktree. On any preimage failure, amend this document first; do not force application. The final `git apply` is parent-owned source editing, not a branch/commit operation; this leaf never invokes it.
 
-```sh
+````sh
 python3 - <<'PY_PATCH'
 from pathlib import Path
 import re, subprocess, tempfile
@@ -180,7 +180,7 @@ print(patch_path)
 PY_PATCH
 # Then apply only the checked path printed above, after parent scope review:
 # git apply /absolute/printed/goat-wp6-....patch
-```
+````
 
 ### MODIFY `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`
 
@@ -227,7 +227,7 @@ Use the GOAT registration identity in the existing provider/transport contract; 
 +++ b/packages/provider-cursor/src/server/adapter.test.ts
 @@ -883,7 +883,7 @@
      };
- 
+
      assert.deepEqual(cursorMcpServers(mcpSession), {
 -      "t3-code": {
 +      "goat": {
@@ -316,12 +316,12 @@ Use the GOAT registration identity in the existing provider/transport contract; 
 --- a/apps/server/src/provider/CodexDeveloperInstructions.ts
 +++ b/apps/server/src/provider/CodexDeveloperInstructions.ts
 @@ -9,7 +9,7 @@
- 
+
  const T3_CODE_DEVICE_TOOL_INSTRUCTIONS = `## T3 Code devices
- 
+
 -The \`t3-code\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, using the exact launcher path returned by \`device_open\`. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
 +The \`goat\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, using the exact launcher path returned by \`device_open\`. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
- 
+
  export interface T3CodeToolAvailability {
    readonly browser: boolean;
 @@ -206,7 +206,7 @@
@@ -365,7 +365,7 @@ Use the GOAT registration identity in the existing provider/transport contract; 
 -When the t3-code MCP server exposes link_pull_request, you must use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, call it for every layer, not just the current branch or the top PR. This applies when creating or updating PRs through gh, gh stack, another CLI, or the host API: those operations do not register the PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link any PR from your work that is missing. Do not link unrelated PRs mentioned only as background. If a linking call fails, report that failure instead of claiming the PR is linked. When asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: T3 Code wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.
 +When the goat MCP server exposes link_pull_request, you must use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, call it for every layer, not just the current branch or the top PR. This applies when creating or updating PRs through gh, gh stack, another CLI, or the host API: those operations do not register the PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link any PR from your work that is missing. Do not link unrelated PRs mentioned only as background. If a linking call fails, report that failure instead of claiming the PR is linked. When asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: T3 Code wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.
  </pull_request_linking>`;
- 
+
  /**
 ```
 
@@ -395,32 +395,32 @@ Use the GOAT registration identity in the existing provider/transport contract; 
 --- a/packages/provider-core/src/server/orchestrationInstructions.ts
 +++ b/packages/provider-core/src/server/orchestrationInstructions.ts
 @@ -4,7 +4,7 @@
- 
+
  ## T3 Code orchestration
- 
+
 -The \`t3-code\` MCP server provides app-owned orchestration. Treat these concepts distinctly:
 +The \`goat\` MCP server provides app-owned orchestration. Treat these concepts distinctly:
- 
+
  - A delegated task/subagent is child work owned by the current thread. Use \`orchestrator_capabilities\` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model. Use \`delegate_task\` with that provider instance and model when native tools cannot, including for same-provider work. Also use \`delegate_task\` for cross-provider or explicitly T3-owned child tasks. Retain each returned \`taskId\`, and use \`task_status\` or \`task_cancel\` to manage it. The returned \`childThreadId\` is backing storage for the subagent, not the target for starting another delegated review round.
  - \`goat_thread_launch\` and \`create_threads\` create ordinary top-level T3 conversations. Use them only when the user explicitly asks for separate/new/top-level threads or conversations. Never use them merely because the user said "subagent" or requested parallel delegated work.
 @@ -29,7 +29,7 @@
- 
+
  To work on ANOTHER machine, use the SSH tools instead of running ssh in a terminal: \`goat_ssh_host_list\` names the hosts this machine can reach, \`goat_ssh_browse\` lists a folder there with its Git branch and worktrees, and \`goat_ssh_thread_launch\` starts a thread in that machine's own T3 environment, in the folder (\`workspace:{"type":"cwd"}\`) or a new worktree (\`{"type":"worktree","branch":"feature/x"}\`). Its threadId belongs to that machine, so \`goat_thread_read\` here cannot read it; tell the user to connect that host in Settings to follow it.
- 
+
 -Tool names may include a harness-normalized MCP prefix, such as \`mcp__t3_code__delegate_task\`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show T3 tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known T3 tool name on the next tool step. In Codex code mode, for example, call \`tools.mcp__t3_code__orchestrator_capabilities({})\` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
 +Tool names may include a harness-normalized MCP prefix, such as \`mcp__goat__delegate_task\`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show T3 tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known T3 tool name on the next tool step. In Codex code mode, for example, call \`tools.mcp__goat__orchestrator_capabilities({})\` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
- 
+
  ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the T3 tools are absent and \`T3_ACP_MCP_NODE\` is present, call the same tools through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`T3_ACP_MCP_ENTRYPOINT\` is unset when T3 runs as a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. This is the supported T3 transport fallback, not an ordinary shell-based substitute for delegation.
- 
+
 @@ -42,7 +42,7 @@
- 
+
  ## T3 Code collaborative browser
- 
+
 -You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 +You are running inside T3 Code. The \`goat\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
- 
+
  For browser work, first call \`preview_status\`. If no automation-capable preview is attached, call \`preview_open\` before concluding that the browser is unavailable. Then use \`preview_navigate\`, \`preview_snapshot\`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
- 
+
 ```
 
 ### MODIFY `apps/server/src/cli/acpMcpBridge.ts`
@@ -456,7 +456,7 @@ Use the GOAT registration identity in the existing provider/transport contract; 
 + * the only thing guarding the `goat` toolkits on a remote-reachable server.
   */
  const DEFAULT_LIVENESS_WINDOW_MS = 24 * 60 * 60 * 1_000;
- 
+
 ```
 
 ### MODIFY `packages/contracts/src/settings.ts`
@@ -487,7 +487,7 @@ Use the GOAT registration identity in the existing provider/transport contract; 
 @@ -861,7 +861,7 @@
    }
  }
- 
+
 -/** A `t3-code` MCP tool was called with a credential that does not carry its capability. */
 +/** A `goat` MCP tool was called with a credential that does not carry its capability. */
  export class McpCapabilityUnavailableError extends Schema.TaggedError<McpCapabilityUnavailableError>()(
@@ -655,7 +655,7 @@ Update prefix/suffix regexes and all three asserted-origin checks together. Expl
  const T3_MCP_TITLE_CALL =
 -  /^(?:mcp[-_]{1,2})?t3[-_ ]?code[-_.:/ ]{1,3}(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*)(?::.*)?$/i;
 +  /^(?:mcp[-_]{1,2})?goat[-_.:/ ]{1,3}(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*)(?::.*)?$/i;
- 
+
  /**
   * Gemini CLI titles injected MCP calls "<tool> (<server> MCP Server)" and
   * qwen-code appends ": <args json>" to the same template; Auggie namespaces
@@ -665,7 +665,7 @@ Update prefix/suffix regexes and all three asserted-origin checks together. Expl
  const T3_MCP_TITLE_SUFFIX_CALL =
 -  /^(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*?)(?: \(t3[-_ ]?code MCP Server\)(?::|$)|[-_.]t3[-_ ]?code$)/i;
 +  /^(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*?)(?: \(goat MCP Server\)(?::|$)|[-_.]goat$)/i;
- 
+
  /**
   * glm-acp-agent and Kimi CLI register injected MCP tools under their bare
 @@ -1141,7 +1141,7 @@
@@ -743,7 +743,7 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
 +      rawInput: { server: "goat", tool: "orchestrator_capabilities", arguments: {} },
        _meta: { is_mcp_tool_call: true },
      });
- 
+
      expect(extractMcpToolCallIdentity(toolCall)).toEqual({
 -      server: "t3-code",
 +      server: "goat",
@@ -757,10 +757,10 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
 -    ).toEqual({ server: "t3-code", tool: "delegate_task", input: { task: "x" } });
 +    ).toEqual({ server: "goat", tool: "delegate_task", input: { task: "x" } });
    });
- 
+
    it("recovers T3 identity from pi-acp title-only fallback execs", () => {
 @@ -1465,7 +1465,7 @@
- 
+
      expect(toolCall.title).toBe("Ran command");
      expect(extractMcpToolCallIdentity(toolCall)).toEqual({
 -      server: "t3-code",
@@ -779,7 +779,7 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
        rawInput: {},
 @@ -1494,7 +1494,7 @@
      const merged = mergeToolCallState(created, completed);
- 
+
      expect(extractMcpToolCallIdentity(merged)).toEqual({
 -      server: "t3-code",
 +      server: "goat",
@@ -803,7 +803,7 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
        status: "pending",
        rawInput: { taskId: "node:delegated-task:1" },
      });
- 
+
      expect(extractMcpToolCallIdentity(gemini)).toEqual({
 -      server: "t3-code",
 +      server: "goat",
@@ -812,7 +812,7 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
 -    expect(extractMcpToolCallIdentity(qwen)).toEqual({ server: "t3-code", tool: "task_status" });
 +    expect(extractMcpToolCallIdentity(qwen)).toEqual({ server: "goat", tool: "task_status" });
    });
- 
+
    it("recovers T3 identity across the registry agents' naming conventions", () => {
 @@ -1534,12 +1534,12 @@
      // tail, cline args tail, Auggie tool-first suffix, fast-agent slash,
@@ -852,7 +852,7 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
          },
        },
      });
- 
+
      expect(extractMcpToolCallIdentity(toolCall)).toEqual({
 -      server: "t3-code",
 +      server: "goat",
@@ -866,14 +866,14 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
 -      _meta: { toolName: "mcp::t3-code::goat_thread_send", serverId: "t3-code", provenance: "mcp" },
 +      _meta: { toolName: "mcp::goat::goat_thread_send", serverId: "goat", provenance: "mcp" },
      });
- 
+
      expect(extractMcpToolCallIdentity(toolCall)).toEqual({
 -      server: "t3-code",
 +      server: "goat",
        tool: "goat_thread_send",
      });
    });
- 
+
 @@ -1639,7 +1639,7 @@
        sessionUpdate: "tool_call",
        toolCallId: "foreign-1",
@@ -886,7 +886,7 @@ Replay real ACP title/meta shapes under goat and test foreign-origin precedence 
 @@ -1650,8 +1650,43 @@
      });
    });
- 
+
 +  it.each(["goat-house", "other-orchestrator"])(
 +    "keeps an asserted foreign origin despite a goat title: %s",
 +    (serverId) => {
@@ -940,7 +940,7 @@ The bridge accepts goat only; reject both an unknown origin and the retired regi
 @@ -44,7 +44,7 @@
          },
        });
- 
+
 -      const connected = yield* bridge.connect({ serverId: "t3-code" });
 +      const connected = yield* bridge.connect({ serverId: "goat" });
        expect(connected).toEqual({ connectionId: "connection-1" });
@@ -958,7 +958,7 @@ The bridge accepts goat only; reject both an unknown origin and the retired regi
 @@ -98,14 +98,16 @@
          fetchImplementation: () => Promise.resolve(new Response(null, { status: 202 })),
        });
- 
+
 -      expect(yield* bridge.connect({ serverId: "other" }).pipe(Effect.flip)).toMatchObject({
 -        _tag: "AcpMcpOverAcpError",
 -      });
@@ -970,7 +970,7 @@ The bridge accepts goat only; reject both an unknown origin and the retired regi
        expect(
          yield* bridge.message({ connectionId: "missing", method: "tools/list" }).pipe(Effect.flip),
        ).toMatchObject({ _tag: "AcpMcpOverAcpError" });
- 
+
 -      const connected = yield* bridge.connect({ serverId: "t3-code" });
 +      const connected = yield* bridge.connect({ serverId: "goat" });
        const failure = yield* bridge
@@ -988,10 +988,10 @@ Final allowlist is mcp__goat__goat_* for wp3-renamed tools and mcp__goat__<uncha
 @@ -955,30 +955,30 @@
    return input.cwd === null ? withDirectories : { ...withDirectories, cwd: input.cwd };
  }
- 
+
 -export const CLAUDE_T3_MCP_TOOL_WILDCARD = "mcp__t3-code__*";
 +export const CLAUDE_T3_MCP_TOOL_WILDCARD = "mcp__goat__*";
- 
+
  // Must stay in sync with the Tool.Readonly annotations on OrchestratorToolkit;
  // ClaudeAdapterV2.test.ts cross-checks this list against the toolkit.
  export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
@@ -1034,11 +1034,11 @@ Final allowlist is mcp__goat__goat_* for wp3-renamed tools and mcp__goat__<uncha
 +  "mcp__goat__html_preview",
 +  "mcp__goat__html_render",
  ];
- 
+
  // Claude Code aborts an HTTP MCP call after 60 s ("The operation timed out.")
 @@ -989,7 +989,7 @@
  export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
- 
+
  // The SDK's `allowedTools` only pre-approves tool calls; availability is the
 -// separate `tools` option. Attaching the t3-code MCP server therefore always
 +// separate `tools` option. Attaching the goat MCP server therefore always
@@ -1064,7 +1064,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
 --- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts
 @@ -471,7 +471,7 @@
- 
+
  describe("ClaudeAdapterV2 MCP query overrides", () => {
    const T3_MCP_SERVERS = {
 -    "t3-code": {
@@ -1075,7 +1075,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
 @@ -516,7 +516,7 @@
      assert.deepEqual(overrides, { allowedTools: ["Read"] });
    });
- 
+
 -  it("pre-approves all t3-code tools when attaching an MCP session without an allowlist", () => {
 +  it("pre-approves all goat tools when attaching an MCP session without an allowlist", () => {
      const threadId = ThreadId.make("thread-claude-mcp-no-allowlist");
@@ -1084,7 +1084,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
 @@ -531,23 +531,23 @@
      });
    });
- 
+
 -  it("extends an explicit allowlist with the t3-code wildcard", () => {
 +  it("extends an explicit allowlist with the goat wildcard", () => {
      const threadId = ThreadId.make("thread-claude-mcp-with-allowlist");
@@ -1095,7 +1095,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
 -      allowedTools: ["Read", "mcp__t3-code__*"],
 +      allowedTools: ["Read", "mcp__goat__*"],
      });
- 
+
      assert.deepEqual(overrides, {
 -      allowedTools: ["Read", "mcp__t3-code__*"],
 +      allowedTools: ["Read", "mcp__goat__*"],
@@ -1103,7 +1103,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
        mcpEnvironment: T3_MCP_ENVIRONMENT,
      });
    });
- 
+
 -  it("pre-approves only read-only t3-code tools in a read-only sandbox", () => {
 +  it("pre-approves only read-only goat tools in a read-only sandbox", () => {
      const threadId = ThreadId.make("thread-claude-mcp-read-only");
@@ -1112,7 +1112,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
 @@ -567,7 +567,7 @@
      assert.isFalse(overrides.allowedTools?.includes(ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD));
    });
- 
+
 -  it("pre-approves only read-only t3-code tools in a read-only sandbox without an allowlist", () => {
 +  it("pre-approves only read-only goat tools in a read-only sandbox without an allowlist", () => {
      const threadId = ThreadId.make("thread-claude-mcp-read-only-no-allowlist");
@@ -1125,7 +1125,7 @@ Update query/mcpServers/wildcard and toolkit-annotation cross-check to the goat 
 -      .map((tool) => `mcp__t3-code__${tool.name}`)
 +      .map((tool) => `mcp__goat__${tool.name}`)
        .sort();
- 
+
      assert.deepEqual(
 @@ -676,9 +676,9 @@
        allowedTools: ["Read"],
@@ -1168,7 +1168,7 @@ Test Codex wire registration, qualified projected names and resumed tool calls; 
          arguments: {
 @@ -983,7 +983,7 @@
        });
- 
+
        assert.deepEqual(projection, {
 -        toolName: "t3-code.create_threads",
 +        toolName: "goat.create_threads",
@@ -1212,7 +1212,7 @@ Assert goat in injected stdio server and projected tool identity for the shared 
 --- a/apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts
 +++ b/apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts
 @@ -752,7 +752,7 @@
- 
+
        const mcpServer = runtimeInput?.mcpServers[0];
        if (mcpServer === undefined || !("command" in mcpServer)) {
 -        return yield* Effect.die("ACP runtime must receive the t3-code stdio MCP server");
@@ -1275,7 +1275,7 @@ Keep directory registration and same-name cleanup; digest raw ids whenever sanit
 -  return `t3-code-${Hex.encode(digest).slice(0, 16)}`;
 +  return `goat-${Hex.encode(digest).slice(0, 16)}`;
  });
- 
+
  /**
 @@ -476,7 +478,9 @@
    mcpServerName === null
@@ -1286,9 +1286,9 @@ Keep directory registration and same-name cleanup; digest raw ids whenever sanit
 +        { action: "goat-*", resource: "*", effect: "deny" },
          { action: `${mcpServerName}_*`, resource: "*", effect: "allow" },
        ];
- 
+
 @@ -657,7 +661,7 @@
- 
+
  const INTERRUPT_TIMEOUT = "10 seconds";
  /** The session instructions entry T3 writes its per-turn system prompt to. */
 -const INSTRUCTIONS_KEY = "t3-code";
@@ -1442,7 +1442,7 @@ Replay registration and symmetric removal, dual namespace deny rules and own-thr
 +      assert.notEqual(registered[0], registered[1]);
 +    }).pipe(Effect.scoped, Effect.provide(NodeCrypto.layer)),
    );
- 
+
    it.effect("reads user and assistant text from the session's message list", () =>
 @@ -3210,7 +3287,7 @@
          ...promptInto(SESSION, "msg_recorded_turn_a"),
@@ -1523,7 +1523,7 @@ Exactly one callable registration per catalog item. Preserve pre-builtin ownersh
      });
 @@ -315,35 +315,31 @@
    let started: Promise<void> | undefined;
- 
+
    const registerTools = () => {
 -    // Preserve public names for saved loadouts and tool selectors. Hidden
 -    // canonical names reserve ownership against Pi's configured MCP servers.
@@ -1579,16 +1579,16 @@ Exactly one callable registration per catalog item. Preserve pre-builtin ownersh
 +      });
      }
    };
- 
+
 @@ -363,7 +359,7 @@
    };
- 
+
    // CLI extensions load before builtins, and Pi keeps the first registration
 -  // of a tool name. Register now so the bridge owns the T3 namespace even when
 +  // of a tool name. Register now so the bridge owns the GOAT namespace even when
    // mcp.json configures it; retry a failed connection at session_start.
    await ensureStarted().catch(() => undefined);
- 
+
 @@ -388,7 +384,7 @@
        await ensureStarted();
      } catch (error) {
@@ -1597,7 +1597,7 @@ Exactly one callable registration per catalog item. Preserve pre-builtin ownersh
 +      ctx.ui.notify(\`goat MCP unavailable: \${message}\`, "warning");
      }
    });
- 
+
 ```
 
 ### MODIFY `packages/provider-pi/src/server/mcpExtensionSource.test.ts`
@@ -1614,7 +1614,7 @@ Execute generated Pi extension, count registration attempts before the mock dedu
 +    readonly details: { readonly server: string; readonly tool: string };
    }>;
  }
- 
+
 @@ -74,10 +75,12 @@
      readonly toolSearchAvailable?: boolean;
      readonly toolSearchDisabled?: boolean;
@@ -1661,7 +1661,7 @@ Execute generated Pi extension, count registration attempts before the mock dedu
      transports,
 @@ -166,6 +171,25 @@
  }
- 
+
  describe("Pi MCP tool exposure", () => {
 +  it("calls a wp3-renamed tool through one goat namespace without rewriting its bare id", async () => {
 +    const bridge = await loadMcpBridge({
@@ -1730,7 +1730,7 @@ Execute generated Pi extension, count registration attempts before the mock dedu
 +    });
      assert.equal(bridge.requests.at(-1)?.method, "tools/call");
    });
- 
+
 @@ -227,7 +249,7 @@
            .filter((tool) => tool.exposure !== "hidden")
            .every((tool) => tool.exposure === undefined || tool.exposure === "direct"),
@@ -1743,7 +1743,7 @@ Execute generated Pi extension, count registration attempts before the mock dedu
 @@ -246,12 +268,12 @@
      },
    );
- 
+
 -  it("preserves legacy wildcard tool selection", async () => {
 +  it("honors goat wildcard tool selection", async () => {
      const bridge = await loadMcpBridge({
@@ -1803,7 +1803,7 @@ Execute generated Pi extension, count registration attempts before the mock dedu
      assert.equal(result?.block, true);
 -    assert.deepEqual(confirmations, ["Allow mcp__t3-code__preview_snapshot?"]);
 +    assert.deepEqual(confirmations, ["Allow mcp__goat__preview_snapshot?"]);
- 
+
      // An extension that replaces the search builtin is not known to be read-only.
      searchPath = "/extensions/custom-search.ts";
 ```
@@ -1836,14 +1836,14 @@ Required reader-side companion to D6: add goat without deleting old namespace al
 @@ -82,7 +82,7 @@
    return { displayName, labels, icon, summaryAction };
  }
- 
+
 -const T3_MCP_SERVER_ALIASES = new Set(["t3-code", "t3_code", "t3code"]);
 +const T3_MCP_SERVER_ALIASES = new Set(["goat", "t3-code", "t3_code", "t3code"]);
- 
+
  // Cards, activity rows, summaries, and provider identity recovery share this inventory.
  const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
 @@ -406,7 +406,7 @@
- 
+
  /**
   * ACP agents disagree on how the injected T3 server prefixes its tools:
 - * `mcp__t3-code__x` (Claude/Cursor), `t3-code.x` (Codex), plus single
@@ -1854,7 +1854,7 @@ Required reader-side companion to D6: add goat without deleting old namespace al
 @@ -423,20 +423,21 @@
        : null;
    }
- 
+
 -  const namespaceMatch = /^(?<server>t3-code|t3_code|t3code)(?:[.:/]|\s*·\s*)(?<tool>.+)$/i.exec(
 +  const namespaceMatch = /^(?<server>goat|t3-code|t3_code|t3code)(?:[.:/]|\s*·\s*)(?<tool>.+)$/i.exec(
      label,
@@ -1862,7 +1862,7 @@ Required reader-side companion to D6: add goat without deleting old namespace al
    if (namespaceMatch?.groups) {
      return namespaceMatch.groups.tool ?? null;
    }
- 
+
 -  const prefixed = /^(?:mcp[-_]{1,2})?t3[-_ ]?code(?:__|[-_.:/ ])(?<tool>.+)$/i.exec(label);
 +  const prefixed = /^(?:mcp[-_]{1,2})?(?:goat|t3[-_ ]?code)(?:__|[-_.:/ ])(?<tool>.+)$/i.exec(label);
    const candidate = prefixed?.groups?.tool ?? label;
@@ -1903,7 +1903,7 @@ Retain all old-history assertions and add every new namespace spelling plus per-
 @@ -159,6 +166,13 @@
      }
    });
- 
+
 +  it("renders goat names while leaving unknown and foreign tools generic", () => {
 +    expect(resolveT3McpToolPresentation("goat-thread_child_1_delegate_task")?.displayName).toBe("Delegate a child task");
 +    expect(resolveT3McpToolPresentation("goat-thread_child_1_not_a_tool")).toBeNull();
@@ -1924,7 +1924,7 @@ Verify rendered HTML attachments still resolve from goat qualified names and ret
 --- a/packages/shared/src/htmlRender.test.ts
 +++ b/packages/shared/src/htmlRender.test.ts
 @@ -157,6 +157,9 @@
- 
+
    it("reads the reference from each provider's result envelope", () => {
      for (const [toolName, output] of [
 +      ["mcp__goat__html_render", result],
@@ -1949,7 +1949,7 @@ GOAT tools use product-owned presentation instead of acquiring a generic integra
 +    expect(mcpToolPresentation({ serverName: "goat", toolName: "delegate_task" })).toEqual({});
      expect(mcpToolPresentation({ serverName: "t3-code", toolName: "delegate_task" })).toEqual({});
    });
- 
+
 ```
 
 ### MODIFY `docs/orchestration-v2/orchestrator-mcp-server.md`
@@ -1961,46 +1961,49 @@ Correct the server key, Codex overrides and Claude wildcard, and replace obsolet
 +++ b/docs/orchestration-v2/orchestrator-mcp-server.md
 @@ -34,7 +34,7 @@
  http://127.0.0.1:<server-port>/mcp
- ```
- 
+```
+
 -The provider-visible server key is `t3-code`. The endpoint registers both the
 +The provider-visible server key is `goat`. The endpoint registers both the
- preview toolkit and the orchestration toolkit.
- 
- Before `ProviderSessionManager` opens a new V2 provider session, it asks
+preview toolkit and the orchestration toolkit.
+
+Before `ProviderSessionManager` opens a new V2 provider session, it asks
 @@ -62,8 +62,8 @@
- overrides:
- 
- ```text
+overrides:
+
+```text
 --c mcp_servers.t3-code.url=http://127.0.0.1:<port>/mcp
 --c mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"
 +-c mcp_servers.goat.url=http://127.0.0.1:<port>/mcp
 +-c mcp_servers.goat.bearer_token_env_var="T3_MCP_BEARER_TOKEN"
- ```
- 
- The provider-session token is placed in `T3_MCP_BEARER_TOKEN`. Both the
+```
+
+The provider-session token is placed in `T3_MCP_BEARER_TOKEN`. Both the
 @@ -77,7 +77,7 @@
- ```ts
- {
-   mcpServers: {
+
+```ts
+{
+  mcpServers: {
 -    "t3-code": {
 +    "goat": {
-       type: "http",
-       url: "http://127.0.0.1:<port>/mcp",
-       headers: {
+      type: "http",
+      url: "http://127.0.0.1:<port>/mcp",
+      headers: {
 @@ -87,7 +87,7 @@
-   },
-   allowedTools: [
-     // existing allowed tools
+  },
+  allowedTools: [
+    // existing allowed tools
 -    "mcp__t3-code__*",
 +    "mcp__goat__*",
-   ],
- }
- ```
+  ],
+}
+```
+
 @@ -159,10 +159,11 @@
- T3_MCP_BEARER_TOKEN=<provider-session-token>
- ```
- 
+T3_MCP_BEARER_TOKEN=<provider-session-token>
+
+```
+
 -The extension preserves public names under `mcp__t3-code__` for saved loadouts
 -and tool selectors. Modern Pi also receives hidden `mcp__t3_code__` aliases,
 -which reserve the normalized namespace against configured MCP servers without
@@ -2010,9 +2013,9 @@ Correct the server key, Codex overrides and Claude wildcard, and replace obsolet
 +loadouts or tool selectors using `mcp__t3-code__` or `mcp__t3_code__` must be
 +updated to `mcp__goat__`; the old names remain readable in history but are not
 +registered for execution. On Pi 0.99+,
- `orchestrator_capabilities`, `delegate_task`, and `task_status` remain directly
- available; optional tools are discovered through Pi's builtin `tool_search`.
- On older Pi or without builtin search, all tools remain directly available.
+`orchestrator_capabilities`, `delegate_task`, and `task_status` remain directly
+available; optional tools are discovered through Pi's builtin `tool_search`.
+On older Pi or without builtin search, all tools remain directly available.
 ```
 
 ### MODIFY `docs/internals/providers.md`
@@ -2030,7 +2033,7 @@ Update the existing cross-thread isolation constraint, including the residual ol
 -  thread's entry. See the [2.x adapter](../../packages/provider-opencode/src/server/v2/adapter.ts).
 +  registers its own `goat-<thread>` MCP entry. Session permission rules deny every other
 +  thread's entry and legacy `t3-code-*` entries left on a reused daemon. See the [2.x adapter](../../packages/provider-opencode/src/server/v2/adapter.ts).
- 
+
  External OpenCode servers remain externally owned and can require an external restart to pick up
  configuration changes. OpenCode stores "always" approval grants for the whole project. Automatic
 ```
@@ -2889,7 +2892,7 @@ Exercise the actual OpenCode 1 openSession boundary: inject goat with scoped HTT
      Effect.provideService(ProviderHost.ProviderHost, {
 @@ -241,6 +244,59 @@
  });
- 
+
  describe("OpenCodeAdapterV2", () => {
 +  it.effect.each([
 +    { external: false, withCredential: true },
@@ -3139,4 +3142,5 @@ Plan map totals: 83 MODIFY files (42 replay NDJSON files); 0 NEW, 0 DELETE. Exac
 Artifact validation @f08a410af: all 83 diff blocks / 182 hunks were decoded in memory; every context/removal line matched the read-only source at its refreshed hunk position, both old/new hunk line counts and cumulative new-file offsets matched, and all 42 planned NDJSON after-images parsed as JSON. Eleven original hunks were amended: eight stale-content hunks (orchestrationInstructions ×2, runtimeModel test ×1, Claude allowlist ×1, Codex tests ×3, shared resolver ×1) and three line-position hunks (shared resolver comment ×1, shared presentation tests ×2). Docs before-images already match wp3 and require no stale amendment. The 19 Claude allowlist after-image ids match current read-only toolkit annotations by source inspection; the annotation test remains NOT RUN. All 11 test commands are package-directory recipes confirmed against package.json, with existing package-relative file arguments. No patch was applied; no source test/build/typecheck/lint or backend verifier was run.
 
 ## Audit fold 2 (cycle 3)
+
 Readable OpenCode server names keep the baseline 56-character id ceiling in addition to the lossy-sanitization guard (hunk above). Add regression: owner id = "thread_" + 49×"x" (56 chars) stays readable; child id = owner + "_b" (58 chars) is digested, so the owner's `goat-<owner>_*` allow rule does not match the child's tools (assert via the permission evaluation used by the adapter tests, not only the rule array). Wildcard overlap for ids ≤ 56 remains the pre-existing residual.

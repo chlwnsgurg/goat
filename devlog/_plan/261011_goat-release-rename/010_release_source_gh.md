@@ -42,29 +42,29 @@ Architect consultation/reflection (`002_architect.md`) and A review remain paren
 
 Source root (R): `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename`. Every path below is exact relative to R; full absolute paths label the source hunk sections. NEW files have empty before state. DELETE: none.
 
-| Path under R | Action |
-| --- | --- |
-| packages/shared/src/cliRelease.ts | MODIFY |
-| packages/shared/src/cliRelease.test.ts | MODIFY |
-| packages/ssh/src/runtimeArchive.ts | MODIFY |
-| packages/ssh/src/runtimeArchiveGh.ts | NEW |
-| packages/ssh/src/runtimeArchiveGh.test.ts | NEW |
-| packages/ssh/src/tunnel.ts | MODIFY |
-| packages/ssh/src/tunnel.test.ts | MODIFY |
-| apps/server/src/sshRemote/SshRemoteDispatch.ts | MODIFY |
-| apps/server/src/sshRemote/SshRemoteDispatch.test.ts | MODIFY |
-| packages/ssh/src/fixtures/remote-runner-baseline.json | MODIFY |
-| scripts/install.sh | MODIFY |
-| scripts/install.ps1 | MODIFY |
-| packaging/aur/scripts/release.sh | MODIFY |
-| packaging/aur/t3code-bin/PKGBUILD | MODIFY |
-| packaging/aur/t3code-nightly-bin/PKGBUILD | MODIFY |
-| apps/marketing/src/lib/releases.ts | MODIFY |
-| scripts/build-npm-platform-packages.ts | MODIFY |
-| scripts/build-npm-platform-packages.test.ts | MODIFY |
-| apps/web/src/components/desktopUpdate.logic.ts | MODIFY |
-| apps/web/src/components/desktopUpdate.logic.test.ts | MODIFY |
-| apps/web/src/components/desktopUpdate.toast.test.tsx | MODIFY |
+| Path under R                                                       | Action |
+| ------------------------------------------------------------------ | ------ |
+| packages/shared/src/cliRelease.ts                                  | MODIFY |
+| packages/shared/src/cliRelease.test.ts                             | MODIFY |
+| packages/ssh/src/runtimeArchive.ts                                 | MODIFY |
+| packages/ssh/src/runtimeArchiveGh.ts                               | NEW    |
+| packages/ssh/src/runtimeArchiveGh.test.ts                          | NEW    |
+| packages/ssh/src/tunnel.ts                                         | MODIFY |
+| packages/ssh/src/tunnel.test.ts                                    | MODIFY |
+| apps/server/src/sshRemote/SshRemoteDispatch.ts                     | MODIFY |
+| apps/server/src/sshRemote/SshRemoteDispatch.test.ts                | MODIFY |
+| packages/ssh/src/fixtures/remote-runner-baseline.json              | MODIFY |
+| scripts/install.sh                                                 | MODIFY |
+| scripts/install.ps1                                                | MODIFY |
+| packaging/aur/scripts/release.sh                                   | MODIFY |
+| packaging/aur/t3code-bin/PKGBUILD                                  | MODIFY |
+| packaging/aur/t3code-nightly-bin/PKGBUILD                          | MODIFY |
+| apps/marketing/src/lib/releases.ts                                 | MODIFY |
+| scripts/build-npm-platform-packages.ts                             | MODIFY |
+| scripts/build-npm-platform-packages.test.ts                        | MODIFY |
+| apps/web/src/components/desktopUpdate.logic.ts                     | MODIFY |
+| apps/web/src/components/desktopUpdate.logic.test.ts                | MODIFY |
+| apps/web/src/components/desktopUpdate.toast.test.tsx               | MODIFY |
 | apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx | MODIFY |
 
 No wire fields/enums are added: creation/serialization/deserialization stages N/A. Existing archiveDirectory/releaseBaseUrl/archiveVersion builders are desktop `main.ts` and server `sshRemote/SshRemoteDispatch.ts`; the consumer is prepareRemoteRuntime. Tests inject the existing ChildProcessSpawner service. The internal ghCommand runner option is consumed only by local acquisition; it is never serialized into a remote shell runner or a wire request. The MCP error-channel widening flows through manager `SshEnvironmentEffectError`, which already contains SshLaunchError.
@@ -83,7 +83,7 @@ Apply in ordered step sequence, not necessarily section order. All removed lines
 @@ -5,7 +5,7 @@
   * platform key, so a rename here is a release-breaking change.
   */
- 
+
 -const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
 +export const CLI_RELEASE_REPOSITORY = "goat-si/goat";
  export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
@@ -97,7 +97,7 @@ Apply in ordered step sequence, not necessarily section order. All removed lines
 --- a/packages/shared/src/cliRelease.test.ts
 +++ b/packages/shared/src/cliRelease.test.ts
 @@ -33,7 +33,7 @@
- 
+
    it("resolves download URLs under the tagged release, honoring a mirror", () => {
      expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
 -      "https://github.com/pingdotgg/t3code/releases/download/v1.2.3",
@@ -106,7 +106,7 @@ Apply in ordered step sequence, not necessarily section order. All removed lines
      expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
        "https://mirror.example/t3/v1.2.3",
 @@ -87,7 +87,7 @@
- 
+
    it("pages through the release index at the largest page GitHub allows", () => {
      expect(cliReleaseIndexPageUrl(1)).toBe(
 -      "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
@@ -321,7 +321,7 @@ Before: absent. After: complete module.
  import * as NetService from "@t3tools/shared/Net";
  import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
 @@ -26,6 +31,7 @@
- 
+
  import * as SshAuth from "./auth.ts";
  import { readLocalRuntimeArchive } from "./runtimeArchive.ts";
 +import { downloadRuntimeArchiveWithGh } from "./runtimeArchiveGh.ts";
@@ -419,7 +419,7 @@ Before: absent. After: complete module.
 @@ -598,22 +598,33 @@
    return SshRemoteDispatch.of({ listHosts, browse, launchThread });
  });
- 
+
 +/** Resolve local archive/mirror configuration before building the remote runner. */
 +export const resolveSshCliRunner = (baseDir: string) => Effect.gen(function* () {
 +  const archiveDirectory = yield* Config.String("T3CODE_SSH_RUNTIME_ARCHIVE_DIR").pipe(
@@ -467,14 +467,14 @@ Before: absent. After: complete module.
 +++ b/apps/server/src/sshRemote/SshRemoteDispatch.test.ts
 @@ -1,6 +1,10 @@
  import { describe, expect, it } from "@effect/vitest";
- 
+
 -import { matchRemoteProject, readRemoteToolResult } from "./SshRemoteDispatch.ts";
 +import * as ConfigProvider from "effect/ConfigProvider";
 +import * as Effect from "effect/Effect";
 +import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
 +
 +import { matchRemoteProject, readRemoteToolResult, resolveSshCliRunner } from "./SshRemoteDispatch.ts";
- 
+
  describe("matchRemoteProject", () => {
    const project = { id: "project-1", workspaceRoot: "/home/agent/repo/" };
 @@ -148,3 +152,36 @@
@@ -523,7 +523,7 @@ Before: absent. After: complete module.
 +++ b/packages/ssh/src/tunnel.test.ts
 @@ -97,6 +97,8 @@
  }
- 
+
  const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
 +// Protocol-only cases explicitly select the mirror compatibility path.
 +const PROTOCOL_ARCHIVE = { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror" };
@@ -541,7 +541,7 @@ Before: absent. After: complete module.
      assert.include(script, 'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
 @@ -444,7 +446,7 @@
      const layerProcess = Layer.merge(NodeServices.layer, layerSpawner);
- 
+
      return Effect.gen(function* () {
 -      const result = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, ARCHIVE);
 +      const result = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, PROTOCOL_ARCHIVE);
@@ -549,7 +549,7 @@ Before: absent. After: complete module.
        assert.deepEqual(spawnedCommands[0]?.slice(-5, -1), ["sh", "-l", "-s", "--"]);
      }).pipe(Effect.provide(layerProcess));
 @@ -490,7 +492,7 @@
- 
+
      return Effect.gen(function* () {
        const fiber = yield* Effect.forkChild(
 -        SshTunnel.launchOrReuseRemoteServer(target, undefined, ARCHIVE),
@@ -594,7 +594,7 @@ Before: absent. After: complete module.
          yield* Effect.gen(function* () {
            const manager = yield* SshTunnel.SshEnvironmentManager;
 @@ -907,7 +909,7 @@
- 
+
    it.live.each([
      "uploads the local archive to a cold remote",
 -    "downloads when no local archive exists",
@@ -621,7 +621,7 @@ Before: absent. After: complete module.
 @@ -17,7 +17,7 @@
  # instead of fetching the release again.
  set -eu
- 
+
 -repo="pingdotgg/t3code"
 +repo="goat-si/goat"
  base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
@@ -637,7 +637,7 @@ Before: absent. After: complete module.
 @@ -16,7 +16,7 @@
  $ErrorActionPreference = "Stop"
  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
- 
+
 -$repo = "pingdotgg/t3code"
 +$repo = "goat-si/goat"
  $baseUrl = if ($env:T3CODE_RELEASE_BASE_URL) { $env:T3CODE_RELEASE_BASE_URL.TrimEnd("/") } else { "https://github.com/$repo/releases/download" }
@@ -652,13 +652,13 @@ Before: absent. After: complete module.
 +++ b/packaging/aur/scripts/release.sh
 @@ -2,7 +2,7 @@
  set -euo pipefail
- 
+
  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 -repo='pingdotgg/t3code'
 +repo='goat-si/goat'
  tag="${RELEASE_TAG:?RELEASE_TAG is required}"
  pkgrel="${PKGREL:-1}"
- 
+
 ```
 
 ### `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/marketing/src/lib/releases.ts` — MODIFY
@@ -669,7 +669,7 @@ Before: absent. After: complete module.
 @@ -1,4 +1,4 @@
 -const REPO = "pingdotgg/t3code";
 +const REPO = "goat-si/goat";
- 
+
  export const RELEASES_URL = `https://github.com/${REPO}/releases`;
  export const NIGHTLY_RELEASES_URL = `${RELEASES_URL}?q=nightly&expanded=true`;
 ```
@@ -689,7 +689,7 @@ Before: absent. After: complete module.
  depends=(
    'alsa-lib'
 @@ -45,8 +45,8 @@
- 
+
  _appimage="T3-Code-${pkgver}-x86_64.AppImage"
  source=(
 -  "$_appimage::https://github.com/pingdotgg/t3code/releases/download/v${pkgver}/$_appimage"
@@ -730,7 +730,7 @@ Before: absent. After: complete module.
 
 ### `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.ts` — MODIFY
 
-```diff
+````diff
 --- a/scripts/build-npm-platform-packages.ts
 +++ b/scripts/build-npm-platform-packages.ts
 @@ -163,7 +163,7 @@
@@ -751,7 +751,7 @@ Before: absent. After: complete module.
        "",
      ].join("\\n"),
    );
-```
+````
 
 ### `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/scripts/build-npm-platform-packages.test.ts` — MODIFY
 
@@ -777,13 +777,13 @@ Before: absent. After: complete module.
 @@ -1,8 +1,9 @@
  import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 +import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
- 
+
  export type DesktopUpdateButtonAction = "download" | "install" | "none";
- 
+
 -const DESKTOP_RELEASE_HISTORY_URL = "https://github.com/pingdotgg/t3code/releases";
 +const DESKTOP_RELEASE_HISTORY_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases`;
  const DESKTOP_RELEASE_TAG_URL = `${DESKTOP_RELEASE_HISTORY_URL}/tag`;
- 
+
  /**
 ```
 
@@ -800,23 +800,23 @@ Before: absent. After: complete module.
 +      "https://github.com/goat-si/goat/releases/tag/v0.0.30",
      );
    });
- 
+
    it("builds the nightly release URL without dropping its version suffix", () => {
      expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
 -      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30-nightly.20260728.931",
 +      "https://github.com/goat-si/goat/releases/tag/v0.0.30-nightly.20260728.931",
      );
    });
- 
+
 @@ -199,7 +199,7 @@
- 
+
    it("builds the release history URL", () => {
      expect(getDesktopUpdateReleaseHistoryUrl()).toBe(
 -      "https://github.com/pingdotgg/t3code/releases",
 +      "https://github.com/goat-si/goat/releases",
      );
    });
- 
+
 ```
 
 ### `/Users/jun/Developer/new/700_projects/t3code-lanes/goat-release-rename/apps/web/src/components/desktopUpdate.toast.test.tsx` — MODIFY
@@ -834,7 +834,7 @@ Before: absent. After: complete module.
      });
      expect(testState.addToast).toHaveBeenCalledTimes(1);
 @@ -91,7 +91,7 @@
- 
+
      await vi.waitFor(() => {
        expect(openExternal).toHaveBeenCalledWith(
 -        "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
@@ -851,7 +851,7 @@ Before: absent. After: complete module.
 +++ b/apps/web/src/components/sidebar/SidebarUpdateReleaseNotes.test.tsx
 @@ -87,9 +87,9 @@
      );
- 
+
      expect(anchors.map(({ props }) => props.href)).toEqual([
 -      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.36-nightly.3",
 -      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.36-nightly.2",
@@ -865,12 +865,12 @@ Before: absent. After: complete module.
 @@ -107,7 +107,7 @@
        }),
      );
- 
+
 -    expect(anchors.at(-1)?.props.href).toBe("https://github.com/pingdotgg/t3code/releases");
 +    expect(anchors.at(-1)?.props.href).toBe("https://github.com/goat-si/goat/releases");
      expect(textContent(anchors.at(-1)?.props.children)).toBe("1 older release on GitHub");
    });
- 
+
 @@ -141,7 +141,7 @@
      expect(preventDefault).toHaveBeenCalledOnce();
      await vi.waitFor(() => {
@@ -1367,28 +1367,28 @@ The existing `preserves ordinary runner, launch and pairing script bytes` test c
 
 ## Conditional activation and acceptance
 
-| Condition | Activation in focused test | Observable proof |
-| --- | --- | --- |
-| gh success | cold linux-x64 and empty cache; fake writes binary bytes and uppercase binary-mode SHA256SUMS | probe → gh → upload → launch/pairing/MCP; archive bytes match input; exact sidecar persisted; GH_PROMPT_DISABLED=1; temp removed |
-| missing release/auth/asset at gh | exit 1 for all three entrypoints | contextual SshLaunchError; only probe/gh; no remote runner/upload/session executes |
-| missing executable / A10 | real Node spawner with child PATH pointing to an empty temporary directory; SSH remains fake | gh not found on PATH contextual error from real ENOENT; no archive/sidecar/upload/runner; no global env mutation |
-| ghCommand override | spaced executable path supplied through RemoteT3RunnerOptions | fake process acquisition succeeds, cache bytes persist and upload succeeds |
-| diagnostic stderr / A3 | failed gh emits long stderr with ANSI, controls and a token | public error includes authentication failure and redaction; no controls/token; bounded tail; no upload |
-| checksum mismatch | zero digest versus real bytes | SHA-256 mismatch, no publication/upload/launch and empty cache |
-| missing/malformed manifest entry | manifest has no valid matching asset | error before publication/upload |
-| asset missing after gh exit 0 | SHA256SUMS exists but archive absent | error before publication/upload |
-| timeout | fake exitCode never completes; Deferred marks spawn and TestClock advances | scope finalizer executes; temp removed; cache empty; contextual timeout |
-| explicit mirror | cold host/empty cache/nonblank mirror | probe → launch; no gh; existing real file:// test proves actual remote install |
-| ready host | probe ready=true | no gh/upload; existing managed runner test proves runner and process preservation |
-| cached local build | actual cache bytes, no sidecar | upload then launch, no gh; D9 unpublished-build path preserved |
-| cached gh artifact / A2 | valid sidecar beside archive | verified upload then launch; gh never invoked |
-| cached tampering / A2 | same-size changed archive or malformed sidecar | fail before gh/upload/launch; mirror cannot bypass invalid cached checksum |
-| racing preparation / A13 | two prepareRemoteRuntime fibers; Deferred blocks partial staged download | canonical paths absent while staging partial; sidecar-first whole-file renames observed; one gh, one valid cached archive+sidecar, two exact uploads |
-| server mirror / A3 | actual server config resolver with absent, empty, whitespace and nonblank env | real generated runner uses trimmed mirror only when nonblank; normal default otherwise; cache dir default and keepExistingRunner retained |
-| blank mirror | whitespace override with missing release | gh fails and remote download cannot execute |
-| missing directory | cold default runner lacks archiveDirectory | probe then contextual error, no gh/runner |
-| unsupported platform | darwin-x64 | probe then contextual error identifying unsupported asset, no gh/runner |
-| node runner | existing NODE_SCRIPT tests | archive preparation skipped; existing node timeout/launch behavior preserved |
+| Condition                        | Activation in focused test                                                                    | Observable proof                                                                                                                                     |
+| -------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| gh success                       | cold linux-x64 and empty cache; fake writes binary bytes and uppercase binary-mode SHA256SUMS | probe → gh → upload → launch/pairing/MCP; archive bytes match input; exact sidecar persisted; GH_PROMPT_DISABLED=1; temp removed                     |
+| missing release/auth/asset at gh | exit 1 for all three entrypoints                                                              | contextual SshLaunchError; only probe/gh; no remote runner/upload/session executes                                                                   |
+| missing executable / A10         | real Node spawner with child PATH pointing to an empty temporary directory; SSH remains fake  | gh not found on PATH contextual error from real ENOENT; no archive/sidecar/upload/runner; no global env mutation                                     |
+| ghCommand override               | spaced executable path supplied through RemoteT3RunnerOptions                                 | fake process acquisition succeeds, cache bytes persist and upload succeeds                                                                           |
+| diagnostic stderr / A3           | failed gh emits long stderr with ANSI, controls and a token                                   | public error includes authentication failure and redaction; no controls/token; bounded tail; no upload                                               |
+| checksum mismatch                | zero digest versus real bytes                                                                 | SHA-256 mismatch, no publication/upload/launch and empty cache                                                                                       |
+| missing/malformed manifest entry | manifest has no valid matching asset                                                          | error before publication/upload                                                                                                                      |
+| asset missing after gh exit 0    | SHA256SUMS exists but archive absent                                                          | error before publication/upload                                                                                                                      |
+| timeout                          | fake exitCode never completes; Deferred marks spawn and TestClock advances                    | scope finalizer executes; temp removed; cache empty; contextual timeout                                                                              |
+| explicit mirror                  | cold host/empty cache/nonblank mirror                                                         | probe → launch; no gh; existing real file:// test proves actual remote install                                                                       |
+| ready host                       | probe ready=true                                                                              | no gh/upload; existing managed runner test proves runner and process preservation                                                                    |
+| cached local build               | actual cache bytes, no sidecar                                                                | upload then launch, no gh; D9 unpublished-build path preserved                                                                                       |
+| cached gh artifact / A2          | valid sidecar beside archive                                                                  | verified upload then launch; gh never invoked                                                                                                        |
+| cached tampering / A2            | same-size changed archive or malformed sidecar                                                | fail before gh/upload/launch; mirror cannot bypass invalid cached checksum                                                                           |
+| racing preparation / A13         | two prepareRemoteRuntime fibers; Deferred blocks partial staged download                      | canonical paths absent while staging partial; sidecar-first whole-file renames observed; one gh, one valid cached archive+sidecar, two exact uploads |
+| server mirror / A3               | actual server config resolver with absent, empty, whitespace and nonblank env                 | real generated runner uses trimmed mirror only when nonblank; normal default otherwise; cache dir default and keepExistingRunner retained            |
+| blank mirror                     | whitespace override with missing release                                                      | gh fails and remote download cannot execute                                                                                                          |
+| missing directory                | cold default runner lacks archiveDirectory                                                    | probe then contextual error, no gh/runner                                                                                                            |
+| unsupported platform             | darwin-x64                                                                                    | probe then contextual error identifying unsupported asset, no gh/runner                                                                              |
+| node runner                      | existing NODE_SCRIPT tests                                                                    | archive preparation skipped; existing node timeout/launch behavior preserved                                                                         |
 
 Tests assert outcomes and process boundaries, not UI callback wiring or implementation helper calls. The new suite executes real checksum parsing, hashing, cache rename and SSH payload construction with an injected external-process service; the established tunnel suite supplies real shell upload and mirror extraction proof. No new timer sleeps/polling are added. Timeout uses TestClock and Deferred. This subsystem is library process/filesystem work, not an orchestration outbox change; an effect-worker drain is not applicable.
 
