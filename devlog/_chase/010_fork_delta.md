@@ -22,6 +22,7 @@ upstream 머지에서 충돌이나 의미 회귀를 만드는 것은 아래 영�
 | G10 | 링크로 시작한 스레드 최대화     | `ef4748eb7`                                                 | `apps/web/src/components`                                                                                                             | upstream 우선, GOAT 동작만 다시 얹는다.                                                                                                                                                                                                                                                 |
 | G11 | devlog                          | `24d4ee846` `37073207d`                                     | `devlog/`                                                                                                                             | GOAT 전용, 충돌 없음.                                                                                                                                                                                                                                                                   |
 | G12 | T3 불러오기 제거                | `195bad968`                                                 | `ProjectScriptsControl.tsx`, `settings/ProjectActionsSettings.tsx`, `chat/ThreadDetailsPanel.tsx`, `hooks/useT3ProjectFileScripts.ts` | t3.json 액션 가져오기 메뉴("Import scripts", "From t3.json")는 다시 들이지 않는다. 같은 파일의 다른 upstream 변경은 받는다. upstream이 `ThreadDetailsPanel.test.tsx`를 고치면 삭제를 유지한다. t3.json 기본값, iconPath, 깨진 파일 경고, V1→V2 스레드 마이그레이션은 upstream 그대로다. |
+| G13 | 보이는 문구 GOAT                | `goat/brand-copy`                                           | UI·토스트·CLI 도움말 문자열 전반, `packages/provider-*/src/server`, `provider-core` 안내문, MCP 도구 설명, `docs/user`, `README.md` | upstream 문구 변경을 받고 앱을 가리키는 "T3 Code"/"T3"만 GOAT로 다시 쓴다. 주석과 아래 이름 규칙의 "그대로" 항목은 바꾸지 않는다.   |
 
 ## 깨끗하게 머지되고도 깨지는 것
 
@@ -50,12 +51,17 @@ upstream이 다른 이름으로 쓰면, 이미 GOAT 마이그레이션을 기록
 
 ## 이름 규칙 요약
 
-| 대상               | upstream               | GOAT                                    |
-| ------------------ | ---------------------- | --------------------------------------- |
-| MCP 도구           | `t3_*`                 | `goat_*` (`t3_*`는 표시용 legacy alias) |
-| MCP 서버 표시 이름 | T3 Code                | GOAT                                    |
-| provider 등록 키   | `t3-code`              | `t3-code` (그대로)                      |
-| MCP env            | `T3_MCP_URL` 등        | 그대로                                  |
-| CLI 실행 파일      | `t3`                   | `goat` (npm 패키지 `t3`, bin 둘)        |
-| SSH 호스트 홈      | `~/.t3`                | `~/.goat`                               |
-| 런타임 디렉터리    | `runtime/.../versions` | `runtime/goat/versions`                 |
+| 대상                  | upstream               | GOAT                                                                                                             |
+| --------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| MCP 도구              | `t3_*`                 | `goat_*` (`t3_*`는 표시용 legacy alias)                                                                          |
+| MCP 서버 표시 이름    | T3 Code                | GOAT                                                                                                             |
+| provider 등록 키      | `t3-code`              | `t3-code` (그대로)                                                                                               |
+| MCP env               | `T3_MCP_URL` 등        | 그대로                                                                                                           |
+| CLI 실행 파일         | `t3`                   | `goat` (npm 패키지 `t3`, bin 둘)                                                                                 |
+| SSH 호스트 홈         | `~/.t3`                | `~/.goat`                                                                                                        |
+| 런타임 디렉터리       | `runtime/.../versions` | `runtime/goat/versions`                                                                                          |
+| 보이는 앱 이름        | T3 Code, T3            | GOAT (UI, CLI 출력, 에이전트 안내문, docs/user)                                                                  |
+| upstream 클라우드     | T3 Connect, T3 account | 그대로 (`app.t3.codes` 계정과 릴레이를 그대로 쓴다)                                                              |
+| 외부에 남는 식별 이름 | T3 Code                | 그대로 (Codex `clientInfo`, ChatGPT `agent_name_hint`, Cursor API 키·세션 이름, OpenCode 세션 제목, 커밋 작성자) |
+| 설치된 시스템 통합    | T3 Code                | 그대로 (GNOME 확장, KDE 항목, systemd 유닛, AppArmor 프로필, 원격 실행 스크립트 기준선)                          |
+| 모바일 앱 정체성      | T3 Code                | 그대로 (`apps/mobile/app.config.ts` 이름·번들 id·권한 문구, G5 같은 결정 전)                                     |
