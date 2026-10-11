@@ -737,7 +737,13 @@ check_live_protocol() {
     if [ -e "$DEFAULT_RUNTIME_FILE" ] || [ -e "$PORT_FILE" ] || [ -e "$PID_FILE" ]; then LIVE_STATUS=unknown; fi
   fi
   if [ "$LIVE_STATUS" = unknown ]; then
-    printf 'Cannot verify live GOAT PID=%s port=%s: descriptor unavailable or persisted identity disagrees. Repair the remote runtime metadata/descriptor and reconnect; runner and process were preserved.\\n' "$LIVE_PID" "$LIVE_PORT" >&2; exit 1
+    recorded_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    recorded_port="$(cat "$PORT_FILE" 2>/dev/null || true)"
+    valid_positive "$recorded_pid" || recorded_pid=unknown
+    valid_positive "$recorded_port" || recorded_port=unknown
+    stop_pid="$recorded_pid"
+    [ "$stop_pid" != unknown ] || stop_pid='<pid>'
+    printf 'Cannot verify live GOAT PID=%s port=%s: descriptor unavailable or persisted identity disagrees; it may predate GOAT SSH runtime protocol metadata. It was left running, and the runner and ownership files were preserved. If this is your earlier GOAT server, stop it on the remote host (kill %s) and reconnect.\\n' "$recorded_pid" "$recorded_port" "$stop_pid" >&2; exit 1
   fi
   if [ "$LIVE_STATUS" != none ] && [ "$LIVE_COMPATIBLE" != 1 ]; then
     if [ "$LIVE_STATUS" = live ] && [ "$LIVE_OWNED" = 1 ] && [ "$ALLOW_OWNED_UPGRADE" = 1 ] &&

@@ -3752,8 +3752,16 @@ if (args[0] === "--version") {
           const before = yield* f.snapshot;
           const result = yield* f.run("launch", false);
           assert.isTrue(Result.isFailure(result));
-          if (Result.isFailure(result))
-            assert.include(String(result.failure), "Cannot verify live GOAT");
+          if (Result.isFailure(result)) {
+            const message = String(result.failure);
+            assert.include(message, `Cannot verify live GOAT PID=${f.pid} port=${f.port}`);
+            assert.include(message, "may predate GOAT SSH runtime protocol metadata");
+            assert.include(message, "It was left running");
+            assert.include(
+              message,
+              `If this is your earlier GOAT server, stop it on the remote host (kill ${f.pid}) and reconnect.`,
+            );
+          }
           assert.deepEqual(yield* f.snapshot, before); // Includes runner publication/ownership/runtime bytes.
           yield* Effect.sync(() => process.kill(f.pid, 0)); // Captured fixture PID still alive.
           // @effect-diagnostics-next-line globalFetchInEffect:off - real fixture loopback observation.
