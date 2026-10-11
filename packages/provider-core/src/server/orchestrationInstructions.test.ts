@@ -11,12 +11,20 @@ describe("T3 orchestration provider instructions", () => {
   it("distinguishes delegated subagents from ordinary top-level threads", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Use `delegate_task`");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "ordinary top-level T3 conversations");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Never use them merely");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "never use these tools merely");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "cross-provider");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "call `delegate_task` again");
     assert.include(
       T3_CODE_ORCHESTRATION_INSTRUCTIONS,
       "Do not use `goat_thread_send` on `childThreadId`",
+    );
+  });
+
+  it("sends goal-owning and looping work to a top-level thread", () => {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bounded child work");
+    assert.include(
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      "for work that owns a goal, runs a loop (HOTL, `cxc-loop`, repeated PABCD), or spans several cycles",
     );
   });
 
