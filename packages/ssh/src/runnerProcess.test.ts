@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@t3tools/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -141,30 +142,53 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const path = yield* Path.Path;
           const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
           const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-stop-" });
+          const home = path.join(fixture, "home");
+          const baseDir = path.join(home, ".goat");
+          const stateKey = yield* remoteStateKey({
+            alias: "fixture",
+            hostname: "fixture",
+            username: null,
+            port: null,
+          });
+          const stateDir = path.join(baseDir, "ssh-launch", stateKey);
+          yield* fs.makeDirectory(stateDir, { recursive: true });
           const signalPath = path.join(fixture, "signals");
-          const child = yield* spawner.spawn(
-            ChildProcess.make(
-              process.execPath,
-              [
-                "--input-type=module",
-                "-e",
-                `import * as fs from "node:fs";
+          const cliPath = path.join(fixture, "installed cli.mjs");
+          const port = yield* NetService.make().reserveLoopbackPort();
+          const args = [
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            String(port),
+            "--base-dir",
+            baseDir,
+          ];
+          yield* fs.writeFileString(
+            cliPath,
+            `import * as fs from "node:fs";
 import * as net from "node:net";
 const server = net.createServer((socket) => socket.end());
 let signals = 0;
 process.on("SIGTERM", () => {
-  fs.writeFileSync(process.argv[2], String(++signals));
-  if (process.argv[1] !== "timeout" || signals > 1) server.close();
+  fs.writeFileSync(process.env.T3_TEST_SIGNAL_PATH, String(++signals));
+  if (process.env.T3_TEST_STOP_MODE !== "timeout" || signals > 1) server.close();
 });
-server.listen(0, "127.0.0.1", () => {
-  process.stdout.write(JSON.stringify({ pid: process.pid, port: server.address().port, args: [] }) + "\\n");
+server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1", () => {
+  process.stdout.write(JSON.stringify({ pid: process.pid, port: server.address().port, args: process.argv.slice(2) }) + "\\n");
 });
 `,
-                mode,
-                signalPath,
-              ],
-              { cwd: fixture, detached: false },
-            ),
+          );
+          const child = yield* spawner.spawn(
+            ChildProcess.make(process.execPath, [cliPath, ...args], {
+              cwd: fixture,
+              env: {
+                HOME: home,
+                T3_TEST_STOP_MODE: mode,
+                T3_TEST_SIGNAL_PATH: signalPath,
+              },
+              detached: false,
+            }),
           );
           // A failed assertion must still stop this captured fixture process.
           yield* Effect.addFinalizer(() =>
@@ -179,34 +203,24 @@ server.listen(0, "127.0.0.1", () => {
             ),
           );
           assert.equal(started.pid, child.pid);
+          assert.equal(started.port, port);
+          assert.deepEqual(started.args, args);
           const savedState = {
             pid: `${child.pid}\n`,
             port: `${started.port}\n`,
             managed: mode === "external" ? "external\n" : "managed\n",
+            identity: `${cliPath} ${args.join(" ")}\n`,
           };
           for (const [name, contents] of Object.entries(savedState)) {
-            yield* fs.writeFileString(path.join(fixture, name), contents);
+            yield* fs.writeFileString(path.join(stateDir, name), contents);
           }
-          const script = buildRemoteStopScript(
-            yield* remoteStateKey({
-              alias: "fixture",
-              hostname: "fixture",
-              username: null,
-              port: null,
-            }),
-          );
-          // Redirect only the state directory. Never use the developer's SSH state.
-          const isolatedScript = script.replace(
-            /^STATE_DIR=.*$/mu,
-            'STATE_DIR="$T3_TEST_STATE_DIR"',
-          );
-          assert.notEqual(isolatedScript, script);
+          const script = buildRemoteStopScript(stateKey);
           const runStop = Effect.fn("test.remoteStop")(function* () {
             const stop = yield* spawner.spawn(
               ChildProcess.make("/bin/sh", ["-s"], {
                 cwd: fixture,
-                env: { T3_TEST_STATE_DIR: fixture },
-                stdin: Stream.make(new TextEncoder().encode(isolatedScript)),
+                env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
+                stdin: Stream.make(new TextEncoder().encode(script)),
               }),
             );
             return yield* Effect.all(
@@ -234,15 +248,15 @@ server.listen(0, "127.0.0.1", () => {
             assert.include(result.stderr, "did not stop within 2 seconds");
             assert.equal(yield* fs.readFileString(signalPath), "1");
             for (const [name, contents] of Object.entries(savedState)) {
-              assert.equal(yield* fs.readFileString(path.join(fixture, name)), contents);
+              assert.equal(yield* fs.readFileString(path.join(stateDir, name)), contents);
             }
             result = yield* runStop();
           }
-          assert.equal(result.exitCode, 0);
+          assert.equal(result.exitCode, 0, result.stderr);
           assert.equal(result.stdout, '{"stopped":true}\n');
           assert.equal(result.stderr, "");
           for (const name of Object.keys(savedState)) {
-            assert.isFalse(yield* fs.exists(path.join(fixture, name)));
+            assert.isFalse(yield* fs.exists(path.join(stateDir, name)));
           }
           if (mode === "external") {
             assert.isFalse(yield* fs.exists(signalPath));
