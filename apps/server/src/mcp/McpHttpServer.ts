@@ -764,9 +764,87 @@ const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(funct
   );
 });
 
+const encodeOrchestratorMcpFailure = Schema.encodeSync(OrchestratorMcpFailure);
+
+const undeclaredArgumentsResult = (
+  tool: string,
+  undeclared: ReadonlyArray<string>,
+  declared: ReadonlyArray<string>,
+) => {
+  const accepted =
+    declared.length === 0 ? `${tool} takes no arguments.` : `It takes ${declared.join(", ")}.`;
+  const failure = new OrchestratorMcpFailure({
+    code: "invalid_request",
+    message: `${tool} does not take ${undeclared.join(", ")}, so nothing ran. ${accepted}`,
+  });
+  return new McpSchema.CallToolResult({
+    isError: true,
+    content: [{ type: "text", text: JSON.stringify(encodeOrchestratorMcpFailure(failure)) }],
+  });
+};
+
+const argumentKeys = (payload: unknown) =>
+  typeof payload === "object" && payload !== null && !Array.isArray(payload)
+    ? Object.keys(payload)
+    : [];
+
+/**
+ * Runs tool registrations so that every tool they add refuses top-level
+ * arguments it does not declare, before it runs.
+ *
+ * Effect's tool decoder drops unknown keys, so a misspelled or unsupported
+ * routing argument (`hostId` for `host`, or `host` on a tool without one)
+ * ran the call in this environment and answered with local data as if it came
+ * from another machine. Nested values, such as a modelSelection copied from
+ * another result, keep lenient decoding. The refusal is an ordinary
+ * invalid_request result, which SshRemoteDispatch also reads back from a remote.
+ */
+const refuseUndeclaredArguments = <A, E, R>(register: Effect.Effect<A, E, R>) =>
+  McpServer.McpServer.pipe(
+    Effect.flatMap((server) =>
+      register.pipe(
+        Effect.provideService(
+          McpServer.McpServer,
+          McpServer.McpServer.of({
+            ...server,
+            addTool: (registration) => {
+              const inputSchema = registration.tool.inputSchema;
+              // A parameter schema with an index signature declares its own extra keys.
+              if (typeof inputSchema.additionalProperties === "object")
+                return server.addTool(registration);
+              const properties = inputSchema.properties ?? {};
+              return server.addTool({
+                ...registration,
+                tool: new McpSchema.Tool({
+                  ...registration.tool,
+                  inputSchema: { ...inputSchema, additionalProperties: false },
+                }),
+                handle: (payload) => {
+                  const undeclared = argumentKeys(payload).filter(
+                    (key) => !Object.hasOwn(properties, key),
+                  );
+                  return undeclared.length === 0
+                    ? registration.handle(payload)
+                    : Effect.succeed(
+                        undeclaredArgumentsResult(
+                          registration.tool.name,
+                          undeclared,
+                          Object.keys(properties),
+                        ),
+                      );
+                },
+              });
+            },
+          }),
+        ),
+      ),
+    ),
+  );
+
 /**
  * `McpServer.toolkit` for handlers that declared their access (see
- * `McpToolAccess`). Every toolkit on `/mcp` registers through this.
+ * `McpToolAccess`). Every toolkit on `/mcp` registers through this, and each
+ * tool refuses arguments it does not declare.
  *
  * `McpServer.toolkit` asks for every service its tools declare when it
  * registers them, but the auth middleware provides `McpInvocationContext` to
@@ -777,7 +855,9 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
   toolkit: Toolkit.Toolkit<Tools>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
 ) => {
-  const registration = McpServer.toolkit(toolkit);
+  const registration = Layer.effectDiscard(
+    refuseUndeclaredArguments(McpServer.registerToolkit(toolkit)),
+  ).pipe(Layer.provide(McpServer.McpServer.layer));
   // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off - the auth middleware provides it per request.
   const registered = registration as Layer.Layer<
     never,
@@ -791,7 +871,10 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
 const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, EX, RX>(
   register: Effect.Effect<A, E, R>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
-) => Layer.effectDiscard(register).pipe(Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)));
+) =>
+  Layer.effectDiscard(refuseUndeclaredArguments(register)).pipe(
+    Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)),
+  );
 
 export const layerHtmlToolkit = Layer.mergeAll(
   toolkitRegistration(HtmlRenderToolkit, HtmlHandlers.layerRender),

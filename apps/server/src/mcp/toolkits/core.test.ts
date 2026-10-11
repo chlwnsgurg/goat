@@ -374,6 +374,35 @@ it.effect("returns invalid parameter errors through the production registration"
   ),
 );
 
+it.effect("refuses an undeclared argument before the tool runs", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    // Every service here is an empty mock, so a tool that ran would fail differently.
+    const result = yield* server
+      .callTool({ name: "goat_thread_search", arguments: { query: "release", hostId: "box" } })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(declaredFailure(result)).toEqual({
+      _tag: "OrchestratorMcpFailure",
+      code: "invalid_request",
+      message:
+        "goat_thread_search does not take hostId, so nothing ran. It takes query, limit, projectId.",
+    });
+    const definition = server.tools.find(({ tool }) => tool.name === "goat_thread_search");
+    expect(definition?.tool.inputSchema.additionalProperties).toBe(false);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+      ),
+    ),
+  ),
+);
+
 it.effect("keeps unexpected handler defects private through the production registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
