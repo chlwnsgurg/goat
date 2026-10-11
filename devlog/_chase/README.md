@@ -15,7 +15,7 @@ GOAT는 [pingdotgg/t3code](https://github.com/pingdotgg/t3code)의 포크이고 
 devlog/_chase/
   README.md                    규약 (이 문서)
   000_baseline.md              reviewed-through 기준선과 사이클 로그
-  010_fork_delta.md            GOAT 의도적 분기 레지스트리 (영역 G1-G11, 충돌 정책)
+  010_fork_delta.md            GOAT 의도적 분기 레지스트리 (영역 슬러그, 충돌 정책)
   020_cycle_runbook.md         사이클 절차와 명령
   scan.sh                      기준선, trial merge 충돌, 마이그레이션 id, 이름 누수, workflow 스캔
   10_t3_chase_MOC.md           T3 축 카드 목록과 상태
@@ -58,7 +58,7 @@ upstream이 생기면 `20`을 쓴다. 카드 번호는 축 안에서 단조 증�
 # 10.NNN — 제목
 
 > 사이클: YYMMDD · 상태: ⬜ open | 🟡 in progress | ⛔ needs decision | ✅ fin
-> upstream: <sha> (#PR) · GOAT 영역: G<n> (010 참조)
+> upstream: <sha> (#PR) · GOAT 영역: `<slug>` (010 참조)
 
 ## 무엇이 다른가
 

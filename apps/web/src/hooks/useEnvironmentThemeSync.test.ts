@@ -1,5 +1,5 @@
 import type { EnvironmentTheme } from "@t3tools/contracts";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 const NIGHTFALL_THEME = {
   id: "nightfall",
@@ -86,6 +86,14 @@ async function setupThemeSync(mode: "dark" | "system" = "dark") {
 
   return { publish, palette, root, styles, readSnapshot: () => readSnapshot?.() };
 }
+
+// A cold import of the theme graph can use most of the 15 s test timeout on a
+// loaded CI runner. Transform it once here; every test still imports fresh.
+beforeAll(async () => {
+  await import("../themePalette").catch(() => undefined);
+  await import("./useTheme").catch(() => undefined);
+  vi.resetModules();
+}, 60_000);
 
 afterEach(() => {
   vi.doUnmock("react");
