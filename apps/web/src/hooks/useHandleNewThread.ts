@@ -54,6 +54,26 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
   };
 }
 
+/**
+ * Whether the user picked a different workspace while a new-thread request was
+ * resolving its defaults. The branch selector seeds an empty New worktree base
+ * branch on its own (BranchToolbarBranchSelector's automatic setThreadBranch),
+ * so filling a branch that was empty does not count as a choice; replacing one does.
+ */
+function workspaceSelectionChanged(
+  initial: NewThreadWorkspaceOptions,
+  current: NewThreadWorkspaceOptions,
+): boolean {
+  const branchReplaced =
+    (initial.branch ?? null) !== null && (current.branch ?? null) !== (initial.branch ?? null);
+  return (
+    current.envMode !== initial.envMode ||
+    current.worktreePath !== initial.worktreePath ||
+    current.startFromOrigin !== initial.startFromOrigin ||
+    branchReplaced
+  );
+}
+
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -243,10 +263,11 @@ export function useNewThreadHandler() {
             getComposerDraft(emptyStoredDraftThread.draftId),
           );
           const workspaceChangedMeanwhile =
-            currentDraft?.envMode !== initialWorkspaceContext.envMode ||
-            currentDraft?.branch !== initialWorkspaceContext.branch ||
-            currentDraft?.worktreePath !== initialWorkspaceContext.worktreePath ||
-            currentDraft?.startFromOrigin !== initialWorkspaceContext.startFromOrigin;
+            currentDraft != null &&
+            workspaceSelectionChanged(
+              initialWorkspaceContext,
+              pickExplicitWorkspaceOptions(currentDraft),
+            );
           if (
             openedMeanwhile ||
             promotedMeanwhile ||
@@ -341,10 +362,10 @@ export function useNewThreadHandler() {
             activeNow.environmentId !== latestActiveDraftThread.environmentId ||
             activeNow.projectId !== latestActiveDraftThread.projectId ||
             activeNow.threadId !== latestActiveDraftThread.threadId ||
-            activeNow.envMode !== initialWorkspaceContext.envMode ||
-            activeNow.branch !== initialWorkspaceContext.branch ||
-            activeNow.worktreePath !== initialWorkspaceContext.worktreePath ||
-            activeNow.startFromOrigin !== initialWorkspaceContext.startFromOrigin ||
+            workspaceSelectionChanged(
+              initialWorkspaceContext,
+              pickExplicitWorkspaceOptions(activeNow),
+            ) ||
             readThreadShell(scopeThreadRef(activeNow.environmentId, activeNow.threadId)) !== null ||
             composerDraftHasUserContent(getComposerDraft(currentRouteTarget.draftId))
           )

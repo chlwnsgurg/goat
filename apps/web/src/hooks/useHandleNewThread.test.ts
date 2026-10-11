@@ -297,6 +297,21 @@ describe.each(["stored", "active", "fallback"] as const)("async reuse guards for
     expect(result).toBeNull();
     expect(testState.router.navigate).not.toHaveBeenCalled();
   });
+  it("still resets when the branch selector seeds an empty New worktree base", async () => {
+    seed(path !== "stored", path === "fallback");
+    store().setDraftThreadContext(draftId, { branch: null, worktreePath: null });
+    testState.settings.defaultThreadEnvMode = null;
+    const pending = useNewThreadHandler()(projectRef);
+    // BranchToolbarBranchSelector fills an empty base branch on its own once refs load.
+    store().setDraftThreadContext(draftId, { branch: "main" });
+    testState.completeProjectFileRead({} as T3ProjectFile);
+    await pending;
+    expect(store().getDraftSession(draftId)).toMatchObject({
+      envMode: "local",
+      branch: null,
+      worktreePath: null,
+    });
+  });
   it.each([
     "promotion",
     "shell",
