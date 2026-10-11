@@ -215,7 +215,10 @@ snooze limit stops by default. Providers without a reset time offer manual
 retry and the normal snooze choices.
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
-Stop on a thread also stops the subagents it delegated to.
+Stop ends the thread's current turn. Subagents it delegated in the background keep
+working and report back when they finish; a subagent the turn was waiting on stops
+with it. To stop a background subagent, use its stop button under **Lineage** in the
+thread details, or ask the agent to cancel it.
 
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent

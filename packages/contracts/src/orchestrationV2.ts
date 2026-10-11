@@ -2922,8 +2922,9 @@ export const OrchestrationV2Command = Schema.Union([
     runId: RunId,
     reason: Schema.optional(Schema.String),
     /**
-     * Set by the Stop button. Stop also holds the queue, ends the thread's pull request
-     * watches, and stops every delegated task under the thread.
+     * Set by the Stop button. Stop also holds the queue and ends the thread's pull request
+     * watches. Like any interrupt, it stops the run's wait-mode delegated tasks; async
+     * delegated tasks keep running.
      */
     holdQueue: Schema.optional(Schema.Boolean),
   }),

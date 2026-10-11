@@ -460,6 +460,7 @@ export function layerWithRegistry<Error>(
         getThreadProjection: orchestrator.getThreadProjection,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
         delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
+        stopDelegatedTasks: ThreadManagementService.makeStopDelegatedTasks(orchestrator),
       });
     }),
   ).pipe(Layer.provide(layerOrchestratorProvided));

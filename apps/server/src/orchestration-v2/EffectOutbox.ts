@@ -110,9 +110,13 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
       Schema.Struct({ type: Schema.Literal("regenerate") }),
     ]),
   }),
-  /** Follows a Stop: sends `thread.stop` to every delegated task under the stopped thread. */
+  /**
+   * Follows an interrupt: sends `thread.stop` to the delegated tasks in `childThreadIds`, and
+   * to every task under them. Without `childThreadIds` it reaches every task under the thread.
+   */
   Schema.Struct({
     type: Schema.Literal("delegated-tasks.stop"),
+    childThreadIds: Schema.optional(Schema.Array(ThreadId)),
     reason: Schema.optional(Schema.String),
   }),
 ]);

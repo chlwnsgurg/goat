@@ -2788,9 +2788,9 @@ describe("orchestrator MCP toolkit", () => {
             // Nothing terminalized here, so the offer count must hold.
             yield* expectOffersToStay(0);
 
-            // Stop cancels a queued server-owned delivery for this cohort and
-            // records a barrier before any still-running child reaches a
-            // terminal state.
+            // Interrupting the parent's turn keeps a queued server-owned
+            // delivery for an async task, while the turn's still-running
+            // wait-mode task stops with it and owes no wake.
             const stopQueuedDispatch = yield* orchestrator.dispatch({
               type: "delegated_task.request",
               createdBy: "agent",
@@ -2875,47 +2875,50 @@ describe("orchestrator MCP toolkit", () => {
               reason: "Settle the parent before the legacy child terminalizes.",
             });
             yield* waitForProjection(orchestrator, parentThreadId, (projection) =>
-              projection.runs.every(
-                (run) =>
-                  run.status !== "preparing" &&
-                  run.status !== "starting" &&
-                  run.status !== "running",
+              projection.runs.some(
+                (run) => run.id === parentRun.id && run.status === "interrupted",
               ),
             );
-            const stoppedParent = yield* orchestrator.getThreadProjection(parentThreadId);
-            expect(stoppedParent.runs.some((run) => run.id === parentRun.id)).toBe(true);
             expect(
               parentStop.storedEvents.some(
                 (stored) =>
                   stored.event.type === "run.updated" &&
                   stored.event.payload.id === parentRun.id &&
-                  stored.event.payload.delegatedCompletion?.disposition === "stopped",
+                  stored.event.payload.delegatedCompletion?.disposition !== "open",
               ),
-            ).toBe(true);
+            ).toBe(false);
+            // The queued wake still delivers the async result once the parent stops.
+            yield* waitForProjection(orchestrator, parentThreadId, (projection) =>
+              projection.runs.some(
+                (run) => run.id === queuedStopDeliveryRun.id && run.status === "running",
+              ),
+            );
+            // Interrupting the wake run settles its delivery instead of waking again.
+            yield* orchestrator.dispatch({
+              type: "run.interrupt",
+              commandId: CommandId.make("command:mcp-parent:interrupt-stop-queued-delivery"),
+              threadId: parentThreadId,
+              runId: queuedStopDeliveryRun.id,
+            });
+            const stoppedParent = yield* waitForProjection(
+              orchestrator,
+              parentThreadId,
+              (projection) =>
+                projection.subagents.find((task) => task.id === stopQueuedTaskId)
+                  ?.completionDelivery?.state === "delivered" &&
+                projection.runs.every(
+                  (run) =>
+                    run.status !== "preparing" &&
+                    run.status !== "starting" &&
+                    run.status !== "running",
+                ),
+            );
             expect(
               stoppedParent.runs.find((run) => run.id === parentRun.id)?.delegatedCompletion,
-            ).toMatchObject({ disposition: "stopped", delivery: null });
-            expect(
-              stoppedParent.runs.find((run) => run.id === queuedStopDeliveryRun.id)?.status,
-            ).toBe("cancelled");
+            ).toMatchObject({ disposition: "open", delivery: null });
             expect(
               stoppedParent.subagents.find((task) => task.id === legacyTask.id)?.completionDelivery,
             ).toMatchObject({ state: "disposed" });
-            const legacyChildRun = (yield* orchestrator.getThreadProjection(
-              legacyChildThreadId,
-            )).runs.find((run) => run.status === "running");
-            if (legacyChildRun === undefined) {
-              return yield* Effect.die(
-                new Error("Still-running child was missing after parent Stop."),
-              );
-            }
-            yield* orchestrator.dispatch({
-              type: "run.interrupt",
-              commandId: CommandId.make("command:mcp-parent:interrupt-legacy-after-parent-stop"),
-              threadId: legacyChildThreadId,
-              runId: legacyChildRun.id,
-              reason: "Terminalize after the parent Stop barrier.",
-            });
             yield* waitForProjection(orchestrator, legacyChildThreadId, (projection) =>
               projection.runs.some((run) => run.status === "interrupted"),
             );

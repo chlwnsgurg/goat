@@ -483,6 +483,7 @@ export const layerExecutor: Layer.Layer<
               .stopDelegatedTasks({
                 threadId: effect.threadId,
                 commandId: effect.commandId,
+                childThreadIds: effect.request.childThreadIds,
                 reason: effect.request.reason,
               })
               .pipe(

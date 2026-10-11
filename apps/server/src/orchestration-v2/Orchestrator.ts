@@ -2115,17 +2115,40 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           delegatedCompletion: nextCohort,
         },
       });
-      for (const task of tasks) {
-        if (
-          task.completionDelivery?.state === "acknowledged" ||
-          task.completionDelivery?.state === "delivered" ||
-          task.completionDelivery?.state === "disposed"
-        ) {
-          continue;
-        }
-        yield* emitEvent({
+      yield* disposeTaskCompletionDeliveries({ ...input, tasks });
+      const deliveryRun = completionDeliveryRun(input.projection, cohort?.delivery ?? null);
+      if (input.cancelQueuedDelivery !== false && deliveryRun?.status === "queued") {
+        yield* emitQueuedRunCancellation({
+          command: input.command,
+          events: input.events,
+          projection: input.projection,
+          run: deliveryRun,
+          now: input.now,
+        });
+      }
+    });
+
+  /** Drops the wakes these delegated tasks still owe their parent; settled deliveries stay. */
+  const disposeTaskCompletionDeliveries = (input: {
+    readonly command: OrchestrationV2ServerCommand;
+    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+    readonly tasks: ReadonlyArray<OrchestrationV2Subagent>;
+    readonly now: DateTime.Utc;
+  }) =>
+    Effect.forEach(
+      input.tasks.filter(
+        (task) =>
+          task.completionDelivery?.state !== "acknowledged" &&
+          task.completionDelivery?.state !== "delivered" &&
+          task.completionDelivery?.state !== "disposed",
+      ),
+      (task) =>
+        emit(
+          input.events,
+          input.command,
+        )({
           type: "subagent.updated",
-          threadId: parentRun.threadId,
+          threadId: task.threadId,
           ...(task.runId === null ? {} : { runId: task.runId }),
           nodeId: task.id,
           driver: task.driver,
@@ -2139,19 +2162,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             },
             updatedAt: input.now,
           },
-        });
-      }
-      const deliveryRun = completionDeliveryRun(input.projection, cohort?.delivery ?? null);
-      if (input.cancelQueuedDelivery !== false && deliveryRun?.status === "queued") {
-        yield* emitQueuedRunCancellation({
-          command: input.command,
-          events: input.events,
-          projection: input.projection,
-          run: deliveryRun,
-          now: input.now,
-        });
-      }
-    });
+        }),
+      { discard: true },
+    );
 
   const disposeAllDelegatedCompletionCohorts = (input: {
     readonly command: OrchestrationV2Command;
@@ -8654,10 +8667,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   /**
-   * What Stop holds besides the run it interrupts: queued runs wait for the user, the
-   * thread's pull request watches end, and every wake its delegated tasks still owe is
-   * dropped, since Stop stops those tasks too. Nothing automatic starts the thread again.
-   * `cohortRunIds` are dropped even when they owe nothing, like a plain interrupt's.
+   * What Stop holds besides the run it interrupts: queued runs wait for the user and the
+   * thread's pull request watches end. With `stopsDelegatedTasks`, a `thread.stop` that
+   * stops every task under the thread, every wake those tasks still owe is dropped too, and
+   * `cohortRunIds` are dropped even when they owe nothing. A user Stop leaves its async
+   * delegated tasks running, so their results still wake the thread.
    */
   const holdStoppedThread = (input: {
     readonly command: Extract<
@@ -8667,6 +8681,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
     readonly projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "subagents">;
     readonly cohortRunIds: ReadonlyArray<RunId>;
+    readonly stopsDelegatedTasks: boolean;
     readonly now: DateTime.Utc;
   }) =>
     Effect.gen(function* () {
@@ -8704,6 +8719,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         });
       }
+      if (!input.stopsDelegatedTasks) return;
       const cohortRunIds = new Set(input.cohortRunIds);
       for (const run of runs) {
         if (run.delegatedCompletion?.delivery != null) cohortRunIds.add(run.id);
@@ -8825,6 +8841,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "run.interrupt" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    // Set by `thread.stop`, whose sender stops every delegated task under the thread.
+    stopsDelegatedTasks = false,
   ) =>
     Effect.gen(function* () {
       const projection = yield* loadProjectionForCommand(
@@ -8896,26 +8914,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (candidate) => candidate.id === run.userMessageId,
       );
       const completionCohortRunId = completionMessage?.delegatedCompletion?.parentRunId ?? run.id;
-      // Stop holds the rest of the thread too. A plain interrupt only drops the wakes owed by
-      // this run's delegated tasks, or on a wake run, by the cohort that woke it.
+      // A wait-mode task (`settled_only`) answers the blocking delegate_task call in this
+      // run, which the interrupt ends, so the task stops with the run and owes no wake.
+      // Async tasks run on and still wake the thread; task_cancel stops them.
+      const waitTasks = projection.subagents.filter(
+        (task) =>
+          task.origin === "app_owned" &&
+          task.runId === run.id &&
+          (task.completionWake ?? "settled_only") === "settled_only",
+      );
+      const waitChildThreadIds = waitTasks.flatMap((task) =>
+        task.childThreadId === null || isTerminalDelegatedTaskStatus(task.status)
+          ? []
+          : [task.childThreadId],
+      );
+      // Stop holds the rest of the thread too. `thread.stop` also drops every wake its
+      // delegated tasks owe, or on a wake run, the cohort that woke it.
       const stopRemainingWork = () =>
-        command.holdQueue === true
+        stopsDelegatedTasks
           ? holdStoppedThread({
               command,
               events,
               projection,
               cohortRunIds: [completionCohortRunId],
+              stopsDelegatedTasks: true,
               now,
             })
           : Effect.gen(function* () {
-              yield* disposeDelegatedCompletionCohort({
-                command,
-                events,
-                projection: yield* getProjectionWithPendingEvents(command.threadId, events),
-                parentRunId: completionCohortRunId,
-                disposition: "stopped",
-                now,
-              });
+              if (command.holdQueue === true) {
+                yield* holdStoppedThread({
+                  command,
+                  events,
+                  projection,
+                  cohortRunIds: [],
+                  stopsDelegatedTasks: false,
+                  now,
+                });
+              }
+              yield* disposeTaskCompletionDeliveries({ command, events, tasks: waitTasks, now });
+              if (waitChildThreadIds.length === 0) return;
+              // Runs after commit: a command holds only its own thread's lock.
+              yield* Ref.update(effects, (existing) => [
+                ...existing,
+                {
+                  id: `effect:${command.commandId}:delegated-tasks.stop`,
+                  commandId: command.commandId,
+                  threadId: command.threadId,
+                  request: {
+                    type: "delegated-tasks.stop",
+                    childThreadIds: waitChildThreadIds,
+                    ...(command.reason === undefined ? {} : { reason: command.reason }),
+                  },
+                } satisfies PendingOrchestrationEffectV2,
+              ]);
             });
 
       const emitEvent = emit(events, command);
@@ -9265,6 +9316,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             },
             interruptEvents,
             interruptEffects,
+            true,
           ),
         );
         // A failed interrupt may have written part of its events, so they are kept apart.
@@ -9292,7 +9344,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       for (const run of reached.values()) {
         yield* markStoppedRun({ command, events, thread: projection.thread, run, now });
       }
-      yield* holdStoppedThread({ command, events, projection, cohortRunIds: [], now });
+      yield* holdStoppedThread({
+        command,
+        events,
+        projection,
+        cohortRunIds: [],
+        stopsDelegatedTasks: true,
+        now,
+      });
       return undefined;
     });
 
@@ -10528,21 +10587,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "run.interrupt":
         cancelUnsettledEffects = yield* dispatchRunInterrupt(command, events, effects);
-        // Stop also stops every delegated task under the thread once it commits.
-        if (command.holdQueue === true) {
-          yield* Ref.update(effects, (existing) => [
-            ...existing,
-            {
-              id: `effect:${command.commandId}:delegated-tasks.stop`,
-              commandId: command.commandId,
-              threadId: command.threadId,
-              request: {
-                type: "delegated-tasks.stop",
-                ...(command.reason === undefined ? {} : { reason: command.reason }),
-              },
-            } satisfies PendingOrchestrationEffectV2,
-          ]);
-        }
         break;
       case "thread.stop":
         cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
