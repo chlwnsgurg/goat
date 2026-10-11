@@ -5449,6 +5449,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ...providerTraitsPickerInput,
     size: composerControlsCollapsed ? "xs" : "sm",
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
+    // Effort reads as a dimmer suffix of the model name, one word space after it, like Codex.
+    triggerClassName: composerControlsCollapsed ? "ps-0.5 text-muted-foreground/60" : "ps-0.5",
     onOpenModelPicker: openComposerModelPicker,
   });
   // The footer and the collapsed composer's control row read alike, like Codex: attach and
@@ -6623,11 +6625,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         triggerClassName={
           composerControlsCollapsed
             ? cn(
-                "min-w-13 shrink text-xs!",
+                "min-w-13 shrink pe-0.5 text-muted-foreground text-xs!",
                 !showInlineRestingControls &&
                   "@max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none",
               )
-            : "min-w-13"
+            : "min-w-13 pe-0.5 text-foreground"
         }
         popupAlign="end"
         terminalOpen={terminalOpen}
@@ -6670,6 +6672,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               className={cn(
                 "flex w-max min-w-max shrink-0 items-center gap-1",
                 def.id === "mode" && "order-first",
+                // Cancels the row gap so effort sits right after the model name.
+                def.id === "traits" && "-ms-1",
                 hidden && "pointer-events-none invisible absolute",
                 index >= restingBlockDefs.length - iconOnlyBlockCount &&
                   "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
