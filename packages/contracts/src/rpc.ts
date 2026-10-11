@@ -364,6 +364,13 @@ import {
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
+import {
+  SshWorkspaceLaunchInput,
+  SshWorkspaceLaunchResult,
+  SshWorkspaceFetchBackInput,
+  SshWorkspaceFetchBackResult,
+  SshWorkspaceError,
+} from "./sshWorkspace.ts";
 import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
@@ -426,6 +433,8 @@ export const WS_METHODS = {
   vcsCreateRef: "vcs.createRef",
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
+  sshWorkspaceLaunch: "sshWorkspace.launch",
+  sshWorkspaceFetchBack: "sshWorkspace.fetchBack",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -1399,6 +1408,17 @@ const WsVcsSwitchRefRpc = Rpc.make(WS_METHODS.vcsSwitchRef, {
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsSshWorkspaceLaunchRpc = Rpc.make(WS_METHODS.sshWorkspaceLaunch, {
+  payload: SshWorkspaceLaunchInput,
+  success: SshWorkspaceLaunchResult,
+  error: Schema.Union([SshWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSshWorkspaceFetchBackRpc = Rpc.make(WS_METHODS.sshWorkspaceFetchBack, {
+  payload: SshWorkspaceFetchBackInput,
+  success: SshWorkspaceFetchBackResult,
+  error: Schema.Union([SshWorkspaceError, EnvironmentAuthorizationError]),
+});
+
 const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
   payload: VcsInitInput,
   error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
@@ -1992,6 +2012,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsCreateRefRpc,
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
+  WsSshWorkspaceLaunchRpc,
+  WsSshWorkspaceFetchBackRpc,
   WsReviewGetDiffPreviewRpc,
   WsReviewGetDiffFileContentsRpc,
   WsTerminalOpenRpc,

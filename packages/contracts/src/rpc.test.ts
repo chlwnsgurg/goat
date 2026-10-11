@@ -3,7 +3,12 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
-import { WsRpcGroup, WsSubscribeServerConfigRpc } from "./rpc.ts";
+import {
+  WS_METHODS,
+  RpcScopeAuthorization,
+  WsRpcGroup,
+  WsSubscribeServerConfigRpc,
+} from "./rpc.ts";
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -67,4 +72,18 @@ describe("WebSocket RPC contracts", () => {
       ),
     ).toBe(true);
   });
+});
+
+it("registers only the two SSH workspace methods", () => {
+  expect([...WsRpcGroup.requests.keys()].filter((tag) => tag.startsWith("sshWorkspace."))).toEqual([
+    WS_METHODS.sshWorkspaceLaunch,
+    WS_METHODS.sshWorkspaceFetchBack,
+  ]);
+  for (const tag of [WS_METHODS.sshWorkspaceLaunch, WS_METHODS.sshWorkspaceFetchBack]) {
+    const rpc = WsRpcGroup.requests.get(tag)!;
+    expect(rpc.payloadSchema).toBeDefined();
+    expect(rpc.successSchema).toBeDefined();
+    expect(rpc.errorSchema).toBeDefined();
+    expect(rpc.middlewares.has(RpcScopeAuthorization)).toBe(true);
+  }
 });
