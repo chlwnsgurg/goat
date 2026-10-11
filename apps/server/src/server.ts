@@ -462,20 +462,30 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
     const secrets = yield* ServerSecretStore.ServerSecretStore;
     // The reference holds an effect so each read sees the current link state.
     return Effect.gen(function* () {
-      const [relayUrl, tunnelConfig] = yield* Effect.all([
+      const secretsRead = yield* Effect.all([
         secrets.get(RELAY_URL_SECRET),
         secrets.get(CLOUD_ENDPOINT_RUNTIME_CONFIG),
-      ]).pipe(Effect.orElseSucceed(() => [Option.none(), Option.none()] as const));
-      if (Option.isNone(relayUrl) || Option.isNone(tunnelConfig)) {
-        return { relayHookBaseUrl: null };
+      ]).pipe(Effect.option);
+      // A failed read says nothing about the link, so it reports no reason.
+      if (Option.isNone(secretsRead)) return { relayHookBaseUrl: null };
+      const [relayUrl, tunnelConfig] = secretsRead.value;
+      if (Option.isNone(relayUrl)) {
+        return { relayHookBaseUrl: null, unavailableReason: "relay_not_linked" as const };
+      }
+      if (Option.isNone(tunnelConfig)) {
+        return {
+          relayHookBaseUrl: null,
+          unavailableReason: "managed_tunnel_not_configured" as const,
+        };
       }
       const config = decodeRuntimeConfig(new TextDecoder().decode(tunnelConfig.value));
-      return {
-        relayHookBaseUrl: relayHookBaseUrl({
-          relayUrl: new TextDecoder().decode(relayUrl.value),
-          tunnelName: Option.isSome(config) ? config.value.tunnelName : undefined,
-        }),
-      };
+      const base = relayHookBaseUrl({
+        relayUrl: new TextDecoder().decode(relayUrl.value),
+        tunnelName: Option.isSome(config) ? config.value.tunnelName : undefined,
+      });
+      return base === null
+        ? { relayHookBaseUrl: null, unavailableReason: "managed_tunnel_unrecognized" as const }
+        : { relayHookBaseUrl: base };
     });
   }),
 );

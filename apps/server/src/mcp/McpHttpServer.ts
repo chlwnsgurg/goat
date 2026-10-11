@@ -38,6 +38,7 @@ import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
+import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
 import {
@@ -815,7 +816,11 @@ export const layerPreviewToolkit = Layer.mergeAll(
 export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorToolkit,
   OrchestratorHandlers.layer,
-).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
+).pipe(
+  Layer.provide(HostThreadsMcpService.layer),
+  Layer.provide(OrchestratorMcpService.layer),
+  Layer.provide(ThreadMetadataMcpService.layer),
+);
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
@@ -836,9 +841,7 @@ export const layerEnvironmentToolkit = toolkitRegistration(
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
-const layerSshToolkitRegistration = toolkitRegistration(SshToolkit, SshHandlers.layer).pipe(
-  Layer.provide(SshRemoteDispatch.layer),
-);
+const layerSshToolkitRegistration = toolkitRegistration(SshToolkit, SshHandlers.layer);
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
@@ -886,4 +889,8 @@ export const layer = Layer.mergeAll(
   layerDeviceToolkit,
   layerHtmlToolkit,
   layerSshToolkitRegistration,
-).pipe(Layer.provideMerge(layerMcpTransport));
+).pipe(
+  // One dispatch for the SSH and thread tools, so they share tunnels, sessions and connected hosts.
+  Layer.provide(SshRemoteDispatch.layer),
+  Layer.provideMerge(layerMcpTransport),
+);

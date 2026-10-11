@@ -18,13 +18,14 @@ import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import type { HttpClient } from "effect/http";
 import type { ChildProcessSpawner } from "effect/process";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
-import { callAcpMcpTool } from "../mcp/AcpMcpStdioBridge.ts";
+import { AcpMcpBridgeError, callAcpMcpTool } from "../mcp/AcpMcpStdioBridge.ts";
 import {
   buildRemoteBrowseScript,
   parseRemoteBrowseOutput,
@@ -42,8 +43,21 @@ import {
  */
 
 export class SshRemoteDispatchError extends Data.TaggedError("SshRemoteDispatchError")<{
-  readonly reason: "invalid_request" | "host_unknown" | "ssh_failed" | "remote_refused";
+  /**
+   * host_unavailable: SSH, the tunnel, or the remote server could not be
+   * reached or did not answer in time. remote_refused: the remote answered
+   * and refused; remoteCode carries its failure code when it sent one.
+   * caller_changed: the caller's modes changed while the call was in flight.
+   */
+  readonly reason:
+    | "invalid_request"
+    | "host_unknown"
+    | "ssh_failed"
+    | "host_unavailable"
+    | "remote_refused"
+    | "caller_changed";
   readonly message: string;
+  readonly remoteCode?: string | undefined;
 }> {}
 
 export interface SshDispatchHost {
@@ -109,6 +123,17 @@ export interface SshLaunchResult {
   readonly notes: ReadonlyArray<string>;
 }
 
+/** One tool call on another machine's T3 server. */
+export interface SshHostToolCall {
+  readonly host: string;
+  readonly tool: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  /** Deadline for the remote answer; past it the host counts as unavailable. */
+  readonly timeoutMs: number;
+  /** Writes need a remote that applies the session's runtime-mode ceiling. */
+  readonly writes: boolean;
+}
+
 export class SshRemoteDispatch extends Context.Service<
   SshRemoteDispatch,
   {
@@ -126,6 +151,19 @@ export class SshRemoteDispatch extends Context.Service<
       input: SshLaunchInput,
       beforeLaunch: Effect.Effect<void, E, R>,
     ) => Effect.Effect<SshLaunchResult, SshRemoteDispatchError | E, R>;
+    /**
+     * Calls one of the remote's own MCP tools as an outside client whose
+     * ceiling is the caller's runtime mode. `authorize` reloads the caller and
+     * returns its current runtime mode; it runs before the session is chosen
+     * and again right before the tool request, so a caller whose modes
+     * changed meanwhile sends nothing.
+     */
+    readonly callHostTool: <E, R>(
+      call: SshHostToolCall,
+      authorize: Effect.Effect<RuntimeMode, E, R>,
+    ) => Effect.Effect<unknown, SshRemoteDispatchError | E, R>;
+    /** Hosts this process holds an SSH tunnel to, sorted. */
+    readonly connectedHosts: Effect.Effect<ReadonlyArray<string>>;
   }
 >()("t3/sshRemote/SshRemoteDispatch") {}
 
@@ -209,13 +247,13 @@ interface CallToolResult {
   readonly content?: ReadonlyArray<{ readonly type?: string; readonly text?: string }>;
 }
 
-/** Reads a remote `tools/call` result: its structured payload, or the refusal it returned. */
+/** Reads a remote `tools/call` result: its structured payload, or the refusal and code it returned. */
 export function readRemoteToolResult(
   tool: string,
   raw: unknown,
 ):
   | { readonly ok: true; readonly value: unknown }
-  | { readonly ok: false; readonly message: string } {
+  | { readonly ok: false; readonly message: string; readonly code?: string } {
   const result = (typeof raw === "object" && raw !== null ? raw : {}) as CallToolResult;
   const text = result.content?.find((item) => item.type === "text")?.text;
   let payload: unknown = result.structuredContent;
@@ -227,11 +265,16 @@ export function readRemoteToolResult(
     }
   }
   if (result.isError === true) {
-    const message =
-      typeof payload === "object" && payload !== null && "message" in payload
-        ? String((payload as { readonly message: unknown }).message)
-        : (text ?? "no details");
-    return { ok: false, message: `The remote ${tool} refused: ${message}` };
+    const fields =
+      typeof payload === "object" && payload !== null
+        ? (payload as { readonly message?: unknown; readonly code?: unknown })
+        : {};
+    const message = "message" in fields ? String(fields.message) : (text ?? "no details");
+    return {
+      ok: false,
+      message: `The remote ${tool} refused: ${message}`,
+      ...(typeof fields.code === "string" ? { code: fields.code } : {}),
+    };
   }
   return { ok: true, value: payload };
 }
@@ -243,6 +286,7 @@ const make = Effect.gen(function* () {
     string,
     { readonly token: string; readonly expiresAt: number; readonly ceilingApplied: boolean }
   >();
+  const connected = new Set<string>();
 
   const withRuntime = <A, E>(
     effect: Effect.Effect<A, E, RuntimeServices | SshAuth.SshPasswordPrompt>,
@@ -512,6 +556,7 @@ const make = Effect.gen(function* () {
     const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
       sshFailed(target.alias),
     );
+    connected.add(target.alias);
     // Bootstrap may have taken a while; the session carries the caller's authority.
     yield* beforeLaunch;
     const session = yield* sessionFor(target, input.callerRuntimeMode);
@@ -583,7 +628,7 @@ const make = Effect.gen(function* () {
       );
     }
     notes.push(
-      `The thread lives in the T3 environment on ${target.alias}. Connect to ${target.alias} (Settings → Connections → SSH) to watch it; goat_thread_read here only sees this environment.`,
+      `The thread lives in the T3 environment on ${target.alias}. Follow it from here with goat_thread_wait / goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
     );
     return {
       host: target.alias,
@@ -598,7 +643,105 @@ const make = Effect.gen(function* () {
     } satisfies SshLaunchResult;
   });
 
-  return SshRemoteDispatch.of({ listHosts, browse, launchThread });
+  const unavailable = (alias: string) =>
+    Effect.mapError((error: unknown) =>
+      error instanceof SshRemoteDispatchError && error.reason !== "ssh_failed"
+        ? error
+        : failure(
+            "host_unavailable",
+            `${alias} is unavailable: ${error instanceof SshRemoteDispatchError ? error.message : describe(error)}`,
+          ),
+    );
+
+  const callHostTool = Effect.fn("SshRemoteDispatch.callHostTool")(function* <E, R>(
+    call: SshHostToolCall,
+    authorize: Effect.Effect<RuntimeMode, E, R>,
+  ) {
+    const target = yield* resolveHost(call.host);
+    const ceiling = yield* authorize;
+    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
+      unavailable(target.alias),
+    );
+    connected.add(target.alias);
+    // Right before the request: the caller may have lost authority during SSH.
+    const stillAuthorized = authorize.pipe(
+      Effect.flatMap((current) =>
+        current === ceiling
+          ? Effect.void
+          : Effect.fail(
+              failure(
+                "caller_changed",
+                `The caller's runtime mode changed from ${ceiling} to ${current} during the call; nothing was sent to ${target.alias}.`,
+              ),
+            ),
+      ),
+    );
+
+    const attempt = (retried: boolean): Effect.Effect<unknown, SshRemoteDispatchError | E, R> =>
+      Effect.gen(function* () {
+        const session = yield* sessionFor(target, ceiling).pipe(unavailable(target.alias));
+        if (call.writes && !session.ceilingApplied) {
+          return yield* failure(
+            "remote_refused",
+            `T3 on ${target.alias} is too old to limit what an outside agent may change. Update T3 there before calling ${call.tool} on it.`,
+          );
+        }
+        const answer = yield* callAcpMcpTool({
+          endpoint: new URL("mcp", bootstrap.httpBaseUrl).toString(),
+          authorization: `Bearer ${session.token}`,
+          tool: call.tool,
+          arguments: call.arguments,
+          beforeToolCall: stillAuthorized,
+        }).pipe(Effect.timeoutOption(call.timeoutMs));
+        if (Option.isNone(answer)) {
+          return yield* failure(
+            "host_unavailable",
+            `${target.alias} did not answer ${call.tool} within ${Math.round(call.timeoutMs / 1000)}s.`,
+          );
+        }
+        const result = readRemoteToolResult(call.tool, answer.value);
+        if (!result.ok) {
+          return yield* new SshRemoteDispatchError({
+            reason: "remote_refused",
+            message: result.message,
+            remoteCode: result.code,
+          });
+        }
+        return result.value;
+      }).pipe(
+        Effect.catch((error) => {
+          if (!(error instanceof AcpMcpBridgeError)) return Effect.fail(error);
+          if (error.kind === "http" && error.status === 401) {
+            // Revoked or expired on the remote: issue a fresh session once.
+            sessions.delete(`${target.alias}\u0000${ceiling}`);
+            return retried
+              ? Effect.fail(
+                  failure(
+                    "remote_refused",
+                    `${target.alias} rejected this machine's T3 session twice.`,
+                  ),
+                )
+              : attempt(true);
+          }
+          return Effect.fail(
+            error.kind === "transport" || error.kind === "http"
+              ? failure(
+                  "host_unavailable",
+                  `T3 on ${target.alias} is unavailable: ${describe(error)}`,
+                )
+              : failure(
+                  "remote_refused",
+                  `T3 on ${target.alias} could not run ${call.tool}: ${describe(error)}`,
+                ),
+          );
+        }),
+      );
+    return yield* attempt(false);
+  });
+
+  const connectedHosts = Effect.sync(() => [...connected].toSorted());
+
+  return SshRemoteDispatch.of({ listHosts, browse, launchThread, callHostTool, connectedHosts });
 });
 
 /** Resolve local archive/mirror configuration before building the remote runner. */

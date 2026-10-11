@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as SshConfig from "@t3tools/ssh/config";
+import { SshCommandError } from "@t3tools/ssh/errors";
+import type { RuntimeMode } from "@t3tools/contracts";
 import * as SshTunnel from "@t3tools/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -10,6 +12,7 @@ import { FetchHttpClient } from "effect/http";
 import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
 
 import * as ServerConfig from "../config.ts";
+import { hostFailure } from "../mcp/HostThreadsMcpService.ts";
 import * as SshRemoteDispatch from "./SshRemoteDispatch.ts";
 import {
   matchRemoteProject,
@@ -376,6 +379,277 @@ describe("SSH dispatch packaged runtime", () => {
       );
       expect("bundledArchiveDirectory" in runner).toBe(false);
       expect(runner.archiveDirectory).toBe("/fixture/home/runtime/archives");
+    }),
+  );
+});
+
+describe("SshRemoteDispatch.callHostTool", () => {
+  const host = "build-box";
+  const target = { alias: host, hostname: host, username: null, port: null };
+
+  type ToolAnswer =
+    | { readonly status: number }
+    | { readonly result: unknown }
+    | { readonly rpcError: string }
+    | { readonly throws: string };
+
+  /**
+   * Runs body against a dispatch whose SSH manager and remote /mcp are fakes.
+   * `answer` decides each HTTP request; the record says what reached the remote.
+   */
+  const withRemote = <A, E>(
+    options: {
+      readonly answer: (request: { readonly method: string; readonly tool?: string }) => ToolAnswer;
+      readonly ensureFails?: boolean;
+      readonly ceilingApplied?: boolean;
+    },
+    body: Effect.Effect<A, E, SshRemoteDispatch.SshRemoteDispatch>,
+  ) =>
+    Effect.gen(function* () {
+      const record = { toolCalls: [] as string[], sessionsIssued: 0, requests: 0 };
+      const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
+        record.requests += 1;
+        const request = JSON.parse(String(init?.body)) as {
+          id?: string;
+          method: string;
+          params?: { name?: string };
+        };
+        if (request.method === "tools/call") record.toolCalls.push(request.params?.name ?? "");
+        const answer = options.answer({
+          method: request.method,
+          ...(request.params?.name === undefined ? {} : { tool: request.params.name }),
+        });
+        if ("throws" in answer) throw new TypeError(answer.throws);
+        if ("status" in answer) return new Response(null, { status: answer.status });
+        if (request.method === "notifications/initialized") {
+          return new Response(null, { status: 202 });
+        }
+        if ("rpcError" in answer) {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: -32602, message: answer.rpcError },
+          });
+        }
+        return Response.json({ jsonrpc: "2.0", id: request.id, result: answer.result });
+      });
+      const manager = SshTunnel.SshEnvironmentManager.of({
+        ensureEnvironment: () =>
+          options.ensureFails === true
+            ? Effect.fail(
+                new SshCommandError({
+                  message: "ssh: connect to host build-box port 22: Operation timed out",
+                  command: ["ssh", host],
+                  exitCode: 255,
+                  stderr: "",
+                }),
+              )
+            : Effect.succeed({
+                target,
+                httpBaseUrl: "http://127.0.0.1:41000/",
+                wsBaseUrl: "ws://127.0.0.1:41000/",
+                pairingToken: null,
+              }),
+        disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
+        issueMcpClientSession: () =>
+          Effect.sync(() => {
+            record.sessionsIssued += 1;
+            return {
+              token: `session-${record.sessionsIssued}`,
+              expiresAt: null,
+              runtimeModeCeilingApplied: options.ceilingApplied ?? true,
+            };
+          }),
+        runRemoteScript: () => Effect.die("Unexpected remote script"),
+      });
+      const discoverHosts = vi
+        .spyOn(SshConfig, "discoverSshHosts")
+        .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+      const managerLayer = vi
+        .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+        .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+      vi.stubGlobal("fetch", fetchEndpoint);
+      try {
+        const result = yield* body.pipe(
+          Effect.result,
+          Effect.provide(
+            SshRemoteDispatch.layer.pipe(
+              Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "goat-host-call-test-" })),
+              Layer.provide(FetchHttpClient.layer),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        return { result, record };
+      } finally {
+        vi.unstubAllGlobals();
+        managerLayer.mockRestore();
+        discoverHosts.mockRestore();
+      }
+    });
+
+  const initialize = (request: { readonly method: string }): ToolAnswer | undefined =>
+    request.method === "initialize"
+      ? {
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "GOAT", version: "test" },
+          },
+        }
+      : request.method === "notifications/initialized"
+        ? { result: null }
+        : undefined;
+
+  const readCall = (authorize: Effect.Effect<RuntimeMode> = Effect.succeed("full-access")) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const value = yield* dispatch.callHostTool(
+        {
+          host,
+          tool: "goat_thread_read",
+          arguments: { threadId: "thread-1" },
+          timeoutMs: 5_000,
+          writes: false,
+        },
+        authorize,
+      );
+      return { value, connected: yield* dispatch.connectedHosts };
+    });
+
+  it.effect("returns the remote result and remembers the host as connected", () =>
+    Effect.gen(function* () {
+      const { result, record } = yield* withRemote(
+        {
+          answer: (request) =>
+            initialize(request) ?? { result: { structuredContent: { threadId: "thread-1" } } },
+        },
+        readCall(),
+      );
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(result.success.value).toEqual({ threadId: "thread-1" });
+      expect(result.success.connected).toEqual([host]);
+      expect(record.toolCalls).toEqual(["goat_thread_read"]);
+    }),
+  );
+
+  it.effect("reports a tunnel that cannot be opened as host_unavailable", () =>
+    Effect.gen(function* () {
+      const { result, record } = yield* withRemote(
+        { ensureFails: true, answer: () => ({ result: null }) },
+        readCall(),
+      );
+      expect(result._tag === "Failure" && result.failure.reason).toBe("host_unavailable");
+      expect(record.requests).toBe(0);
+    }),
+  );
+
+  it.effect("reports a remote server that does not answer HTTP as host_unavailable", () =>
+    Effect.gen(function* () {
+      const { result } = yield* withRemote(
+        { answer: () => ({ throws: "fetch failed" }) },
+        readCall(),
+      );
+      expect(result._tag === "Failure" && result.failure.reason).toBe("host_unavailable");
+    }),
+  );
+
+  it.effect("keeps the remote's own failure code, distinct from an unreachable host", () =>
+    Effect.gen(function* () {
+      const { result } = yield* withRemote(
+        {
+          answer: (request) =>
+            initialize(request) ?? {
+              result: {
+                isError: true,
+                structuredContent: {
+                  _tag: "OrchestratorMcpFailure",
+                  code: "thread_not_found",
+                  message: "The thread was not found.",
+                },
+              },
+            },
+        },
+        readCall(),
+      );
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") return;
+      expect(result.failure.reason).toBe("remote_refused");
+      expect(result.failure.remoteCode).toBe("thread_not_found");
+      expect(hostFailure(result.failure).code).toBe("thread_not_found");
+    }),
+  );
+
+  it.effect("treats a JSON-RPC refusal as a refusal, not an unreachable host", () =>
+    Effect.gen(function* () {
+      const { result } = yield* withRemote(
+        { answer: (request) => initialize(request) ?? { rpcError: "Unknown tool" } },
+        readCall(),
+      );
+      expect(result._tag === "Failure" && result.failure.reason).toBe("remote_refused");
+    }),
+  );
+
+  it.effect("signs in anew once when the remote rejects the cached session", () =>
+    Effect.gen(function* () {
+      let rejected = false;
+      const { result, record } = yield* withRemote(
+        {
+          answer: (request) => {
+            if (!rejected) {
+              rejected = true;
+              return { status: 401 };
+            }
+            return initialize(request) ?? { result: { structuredContent: { ok: true } } };
+          },
+        },
+        readCall(),
+      );
+      expect(result._tag).toBe("Success");
+      expect(record.sessionsIssued).toBe(2);
+    }),
+  );
+
+  it.effect("sends nothing when the caller's runtime mode drops during the handshake", () =>
+    Effect.gen(function* () {
+      let checks = 0;
+      const authorize = Effect.sync((): RuntimeMode => {
+        checks += 1;
+        return checks === 1 ? "full-access" : "approval-required";
+      });
+      const { result, record } = yield* withRemote(
+        { answer: (request) => initialize(request) ?? { result: { structuredContent: {} } } },
+        readCall(authorize),
+      );
+      expect(result._tag === "Failure" && result.failure.reason).toBe("caller_changed");
+      expect(record.toolCalls).toEqual([]);
+      expect(result._tag === "Failure" && hostFailure(result.failure).code).toBe(
+        "runtime_mode_escalation_denied",
+      );
+    }),
+  );
+
+  it.effect("refuses writes on a remote that cannot apply the caller's ceiling", () =>
+    Effect.gen(function* () {
+      const { result, record } = yield* withRemote(
+        { ceilingApplied: false, answer: () => ({ result: null }) },
+        Effect.gen(function* () {
+          const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+          return yield* dispatch.callHostTool(
+            {
+              host,
+              tool: "goat_thread_send",
+              arguments: { threadId: "thread-1", message: "status?" },
+              timeoutMs: 5_000,
+              writes: true,
+            },
+            Effect.succeed("full-access"),
+          );
+        }),
+      );
+      expect(result._tag === "Failure" && result.failure.reason).toBe("remote_refused");
+      expect(record.requests).toBe(0);
     }),
   );
 });

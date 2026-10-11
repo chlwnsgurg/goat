@@ -136,6 +136,22 @@ const requireThreadCaller = McpInvocationContext.McpInvocationContext.pipe(
 export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => handle(params));
 
+/**
+ * Changes nothing, but when `reachesHost` says the call goes to another
+ * machine it uses this machine's SSH keys, so it then needs what
+ * goat_ssh_browse needs: thread control, a client approved for more than
+ * read-only access, and a live caller.
+ */
+export const readsOrReachesHost = <P, A, E, R>(
+  reachesHost: (params: P) => boolean,
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) =>
+  declare((params: P) =>
+    reachesHost(params)
+      ? orchestratingCaller.pipe(Effect.flatMap(() => handle(params)))
+      : handle(params),
+  );
+
 /** Reads what belongs to the calling T3 thread, such as its preview tabs or devices. */
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))));

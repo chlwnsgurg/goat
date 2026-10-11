@@ -205,6 +205,14 @@ machine, listed with its other clients. A machine running an older T3 Code
 only accepts approval-required threads in folders that are already projects
 there.
 
+The agent that started the thread can follow it from here: it waits for the
+thread to finish, reads its messages, sends it follow-ups, or stops it, and it
+can list threads across this machine and the ones it is connected to. The
+remote thread cannot report back on its own, so ask the starting agent to wait
+on it. Sending to or stopping a thread on another machine needs an agent in the
+default interaction mode, and that machine still refuses threads that run with
+broader permissions than the agent has.
+
 ## Browser on a remote environment
 
 Browser tabs belong to the environment, so you and your agents see the same

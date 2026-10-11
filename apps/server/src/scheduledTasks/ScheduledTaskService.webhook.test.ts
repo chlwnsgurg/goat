@@ -3,7 +3,11 @@ import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
-import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
+import {
+  ScheduledTaskUpsertInput,
+  type ScheduledTaskWebhookUrlUnavailableReason,
+  SecretRequestError,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -71,7 +75,11 @@ const withService = <A, E>(
     /** Secrets the user entered for an agent, by ref; consuming one removes it. */
     readonly secretsByRef: Map<string, string>;
   }) => Effect.Effect<A, E, never>,
-  options: { readonly gate?: Deferred.Deferred<void>; readonly relayHookBaseUrl?: string } = {},
+  options: {
+    readonly gate?: Deferred.Deferred<void>;
+    readonly relayHookBaseUrl?: string;
+    readonly unavailableReason?: ScheduledTaskWebhookUrlUnavailableReason;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
@@ -98,7 +106,10 @@ const withService = <A, E>(
       }),
       Layer.succeed(
         ScheduledTaskService.ScheduledTaskWebhookOrigin,
-        Effect.succeed({ relayHookBaseUrl: options.relayHookBaseUrl ?? null }),
+        Effect.succeed({
+          relayHookBaseUrl: options.relayHookBaseUrl ?? null,
+          unavailableReason: options.unavailableReason,
+        }),
       ),
     );
     return yield* Effect.gen(function* () {
@@ -168,6 +179,18 @@ it.effect("gives webhook tasks a relay URL when the environment has a managed tu
         );
       }),
     { relayHookBaseUrl: "https://relay.example.com/v1/hooks/0123456789abcdef" },
+  ),
+);
+
+it.effect("says why a webhook task has no public URL", () =>
+  withService(
+    ({ service }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* webhookTaskInput());
+        assert.equal(task.webhook?.url, null);
+        assert.equal(task.webhook?.urlUnavailableReason, "managed_tunnel_not_configured");
+      }),
+    { unavailableReason: "managed_tunnel_not_configured" },
   ),
 );
 

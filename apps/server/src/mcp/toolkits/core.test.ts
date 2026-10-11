@@ -38,6 +38,7 @@ import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
 import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
+import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
 import { dispatchFailure } from "../threadAccess.ts";
@@ -621,6 +622,7 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -659,6 +661,7 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -725,6 +728,7 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
   }).pipe(
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(

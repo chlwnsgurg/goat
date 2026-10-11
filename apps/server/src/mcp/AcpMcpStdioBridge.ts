@@ -25,8 +25,30 @@ import { discardResponseBody, responsePayloads } from "@t3tools/shared/mcpRespon
  * import list lean when changing it.
  */
 
+/**
+ * transport: the endpoint could not be reached or the connection dropped.
+ * http: it answered with a non-2xx status. protocol: it answered with
+ * something that is not a usable MCP response. rpc: it returned a JSON-RPC
+ * error, such as an unknown tool.
+ */
+export type AcpMcpBridgeErrorKind = "transport" | "http" | "protocol" | "rpc";
+
 export class AcpMcpBridgeError extends Error {
   readonly _tag = "AcpMcpBridgeError";
+  readonly kind: AcpMcpBridgeErrorKind;
+  readonly status: number | undefined;
+  constructor(
+    message: string,
+    options?: {
+      readonly cause?: unknown;
+      readonly kind?: AcpMcpBridgeErrorKind;
+      readonly status?: number;
+    },
+  ) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
+    this.kind = options?.kind ?? "transport";
+    this.status = options?.status;
+  }
 }
 
 const bridgeError = (cause: unknown): AcpMcpBridgeError =>
@@ -64,12 +86,18 @@ function protocolVersionOf(entry: unknown): string | null {
   return typeof version === "string" && version.length > 0 ? version : null;
 }
 
-export interface AcpMcpToolCallOptions {
+export interface AcpMcpToolCallOptions<E = never, R = never> {
   readonly endpoint: string;
   readonly authorization: string;
   readonly tool: string;
   readonly arguments: Readonly<Record<string, unknown>>;
   readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+  /**
+   * Runs after the session handshake, right before the tool request is sent.
+   * A failure here sends nothing. Callers use it to re-check authority that
+   * may have changed while the handshake ran.
+   */
+  readonly beforeToolCall?: Effect.Effect<void, E, R>;
 }
 
 /**
@@ -79,9 +107,9 @@ export interface AcpMcpToolCallOptions {
  * `session/new` but fail to expose those tools to their model. Compliant ACP
  * agents continue to use the stdio bridge above.
  */
-export function callAcpMcpTool(
-  options: AcpMcpToolCallOptions,
-): Effect.Effect<unknown, AcpMcpBridgeError> {
+export function callAcpMcpTool<E = never, R = never>(
+  options: AcpMcpToolCallOptions<E, R>,
+): Effect.Effect<unknown, AcpMcpBridgeError | E, R> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
   return Effect.gen(function* () {
     // The bridge is single-fibered at creation time; concurrent sends only
@@ -110,7 +138,10 @@ export function callAcpMcpTool(
         if (!response.ok) {
           yield* discardResponseBody(response);
           return yield* Effect.fail(
-            new AcpMcpBridgeError(`GOAT MCP endpoint responded with HTTP ${response.status}.`),
+            new AcpMcpBridgeError(`GOAT MCP endpoint responded with HTTP ${response.status}.`, {
+              kind: "http",
+              status: response.status,
+            }),
           );
         }
         const payloads = yield* Stream.runCollect(responsePayloads(response, bridgeError));
@@ -134,10 +165,11 @@ export function callAcpMcpTool(
     const initializeResponse = initialized.find((entry) => asEnvelope(entry)?.id === initializeId);
     if (initializeResponse === undefined || asEnvelope(initializeResponse)?.error !== undefined) {
       return yield* Effect.fail(
-        new AcpMcpBridgeError("GOAT MCP endpoint rejected initialization."),
+        new AcpMcpBridgeError("GOAT MCP endpoint rejected initialization.", { kind: "protocol" }),
       );
     }
     yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    if (options.beforeToolCall !== undefined) yield* options.beforeToolCall;
 
     const callId = "t3-acp-cli-tool-call";
     const responses = yield* send({
@@ -152,6 +184,7 @@ export function callAcpMcpTool(
       return yield* Effect.fail(
         new AcpMcpBridgeError(
           `GOAT MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
+          { kind: envelope === null ? "protocol" : "rpc" },
         ),
       );
     }

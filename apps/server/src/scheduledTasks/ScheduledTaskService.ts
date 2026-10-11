@@ -21,6 +21,7 @@ import {
   type ScheduledTaskRunNowResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskUpsertInput,
+  type ScheduledTaskWebhookUrlUnavailableReason,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -73,6 +74,8 @@ const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60;
  */
 interface WebhookOrigin {
   readonly relayHookBaseUrl: string | null;
+  /** Why relayHookBaseUrl is null, when the link state could be read. */
+  readonly unavailableReason?: ScheduledTaskWebhookUrlUnavailableReason | undefined;
 }
 
 const ENDPOINT_KEY = /^[0-9a-f]{16}$/;
@@ -301,9 +304,11 @@ function webhookEndpoint(
 ): ScheduledTask["webhook"] {
   if (row.webhook_token === null) return undefined;
   const base = origin?.relayHookBaseUrl ?? null;
+  const reason = base === null ? origin?.unavailableReason : undefined;
   return {
     path: webhookPath(row.task_id, row.webhook_token),
     url: base === null ? null : `${base}/${encodeURIComponent(row.task_id)}/${row.webhook_token}`,
+    ...(reason === undefined ? {} : { urlUnavailableReason: reason }),
     hasSecret: row.webhook_secret !== null,
   };
 }

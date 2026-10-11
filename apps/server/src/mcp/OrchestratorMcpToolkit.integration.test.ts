@@ -73,6 +73,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
+import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -676,6 +677,7 @@ describe("orchestrator MCP toolkit", () => {
             McpHttpServer.layerOrchestratorToolkit,
             McpHttpServer.layerThreadToolkit,
           ).pipe(
+            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provideMerge(McpServer.McpServer.layer),
             Layer.provideMerge(layerOrchestration),
             Layer.provide(layerRegistry),
@@ -3838,6 +3840,7 @@ describe("orchestrator MCP toolkit", () => {
           }),
         ]);
         const layerTest = McpHttpServer.layerOrchestratorToolkit.pipe(
+          Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
           Layer.provideMerge(McpServer.McpServer.layer),
           Layer.provideMerge(layerOrchestration),
           Layer.provide(

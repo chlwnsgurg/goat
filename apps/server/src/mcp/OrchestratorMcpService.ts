@@ -53,6 +53,7 @@ import {
   type ProviderOptionSelection,
   type RuntimeMode,
   type ScheduledTask,
+  type ScheduledTaskWebhookUrlUnavailableReason,
   type ScheduledTaskUpsertInput,
   type ServerProvider,
   ThreadId,
@@ -234,11 +235,25 @@ function scheduledTaskWorkspaceStrategy(
 }
 
 /**
+ * What an agent tells the user when a webhook task has no public URL. A URL,
+ * when present, shows only that the tunnel is configured, not that it runs.
+ */
+const WEBHOOK_URL_UNAVAILABLE: Record<ScheduledTaskWebhookUrlUnavailableReason, string> = {
+  relay_not_linked:
+    "This environment is not linked to T3 Connect. Ask the user to sign in to T3 Connect and turn on remote access for it.",
+  managed_tunnel_not_configured:
+    "This environment is linked to T3 Connect but has no managed tunnel. Ask the user to turn on remote access for it in Settings → Connections.",
+  managed_tunnel_unrecognized:
+    "This environment's managed tunnel is not one T3 Connect can route webhooks to. Ask the user to turn remote access off and on again in Settings → Connections.",
+};
+
+/**
  * A scheduled task as an agent sees it. `mayRun` says whether the caller may
  * run it: a webhook's URL carries the secret that starts the task's runs, so
  * only such a caller sees it.
  */
 function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
+  const urlUnavailable = task.webhook?.urlUnavailableReason;
   return {
     scheduledTaskId: task.id,
     title: task.title,
@@ -251,6 +266,9 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     lastRunStatus: task.lastRunStatus,
     // A bare path is not a URL anyone can call, so agents never get one to share.
     ...(task.webhook?.url == null || !mayRun ? {} : { webhookUrl: task.webhook.url }),
+    ...(task.webhook?.url !== null || urlUnavailable === undefined || !mayRun
+      ? {}
+      : { webhookUrlUnavailableReason: WEBHOOK_URL_UNAVAILABLE[urlUnavailable] }),
     ...(task.webhook === undefined
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
@@ -676,6 +694,7 @@ function listItemFromShell(
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
+    projectId: shell.projectId,
     title: shell.title,
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
@@ -2288,7 +2307,20 @@ const make = Effect.gen(function* () {
     listThreads: (scope, input) =>
       Effect.gen(function* () {
         const { parent } = yield* loadCaller(scope);
-        const projectId = yield* resolveProjectTarget(parent, input.projectId);
+        if (input.host !== undefined || input.allHosts === true) {
+          // HostThreadsMcpService routes these; reaching here is a wiring bug, not a local list.
+          return yield* failure("invalid_request", "host and allHosts are not handled here.");
+        }
+        if (input.allProjects === true && input.projectId !== undefined) {
+          return yield* failure(
+            "invalid_request",
+            "Pass either projectId or allProjects, not both.",
+          );
+        }
+        const projectId =
+          input.allProjects === true
+            ? undefined
+            : yield* resolveProjectTarget(parent, input.projectId);
         const projectThreads = yield* threadManagement
           .listProjectThreads({
             projectId,
@@ -2324,7 +2356,7 @@ const make = Effect.gen(function* () {
         const page = filtered.slice(cursor, cursor + limit);
         const nextCursor = cursor + page.length < filtered.length ? cursor + page.length : null;
         return {
-          projectId,
+          projectId: projectId ?? null,
           currentThreadId: parent?.thread.id ?? null,
           threads: page.map((shell) => listItemFromShell(shell, nowMs)),
           nextCursor,

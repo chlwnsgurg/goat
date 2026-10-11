@@ -288,8 +288,29 @@ const OrchestratorMcpProjectTarget = Schema.optional(
   }),
 );
 
+/**
+ * Another machine's SSH host alias. Threads are keyed by (host, threadId): a
+ * thread id belongs to the environment that created it.
+ */
+export const OrchestratorMcpHost = TrimmedNonEmptyString.check(Schema.isMaxLength(255)).annotate({
+  description:
+    "Another machine's SSH host alias, from goat_ssh_host_list or the host goat_ssh_thread_launch returned. Omit for this environment.",
+});
+
+/** Set on results that came from another machine; absent for this environment. */
+const OrchestratorMcpResultHost = Schema.optional(Schema.String);
+
 export const OrchestratorMcpThreadListInput = Schema.Struct({
   projectId: OrchestratorMcpProjectTarget,
+  allProjects: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "List every project instead of one; projectId must be omitted. A host other than this environment lists all its projects when projectId is omitted.",
+  }),
+  host: Schema.optional(OrchestratorMcpHost),
+  allHosts: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "List every project on this environment and on each SSH host this environment is connected to, newest first. Returns the newest limit threads without a cursor; truncated says whether more exist. Do not combine with host, projectId, or cursor.",
+  }),
   statuses: Schema.optional(
     Schema.Array(OrchestratorMcpThreadStatus).check(Schema.isMaxLength(10)),
   ),
@@ -304,6 +325,8 @@ export type OrchestratorMcpThreadListInput = typeof OrchestratorMcpThreadListInp
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
+  projectId: Schema.optional(ProjectId),
+  host: OrchestratorMcpResultHost,
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
@@ -328,17 +351,28 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
 export type OrchestratorMcpThreadListItem = typeof OrchestratorMcpThreadListItem.Type;
 
 export const OrchestratorMcpThreadListResult = Schema.Struct({
-  projectId: ProjectId,
+  /** Null when several projects are listed. */
+  projectId: Schema.NullOr(ProjectId),
+  host: OrchestratorMcpResultHost,
   /** The calling thread, or null when the caller is not a T3 thread. */
   currentThreadId: Schema.NullOr(ThreadId),
   threads: Schema.Array(OrchestratorMcpThreadListItem),
   nextCursor: Schema.NullOr(NonNegativeInt),
   total: NonNegativeInt,
+  /** For allHosts: whether more threads matched than were returned. */
+  truncated: Schema.optional(Schema.Boolean),
+  /** For allHosts: hosts that could not be listed, with why. */
+  unavailableHosts: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ host: Schema.String, code: Schema.String, message: Schema.String }),
+    ),
+  ),
 });
 export type OrchestratorMcpThreadListResult = typeof OrchestratorMcpThreadListResult.Type;
 
 export const OrchestratorMcpThreadReadInput = Schema.Struct({
   threadId: ThreadId,
+  host: Schema.optional(OrchestratorMcpHost),
   itemId: Schema.optional(TurnItemId),
   textOffset: Schema.optional(NonNegativeInt),
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
@@ -414,6 +448,7 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
 export type OrchestratorMcpThreadTimelineItem = typeof OrchestratorMcpThreadTimelineItem.Type;
 
 export const OrchestratorMcpThreadReadResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
   thread: OrchestratorMcpThreadDetail,
   recentRuns: Schema.Array(OrchestratorMcpThreadRun),
   items: Schema.Array(OrchestratorMcpThreadTimelineItem),
@@ -424,6 +459,7 @@ export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadRe
 
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
   threadId: ThreadId,
+  host: Schema.optional(OrchestratorMcpHost),
   message: OrchestratorMcpPrompt,
   mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
@@ -431,6 +467,7 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
 
 export const OrchestratorMcpThreadSendResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
   threadId: ThreadId,
   messageId: MessageId,
   runId: RunId,
@@ -443,12 +480,14 @@ export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendRe
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   threadId: ThreadId,
+  host: Schema.optional(OrchestratorMcpHost),
   runId: Schema.optional(RunId),
   timeoutMs: Schema.optional(Schema.Number),
 });
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
 export const OrchestratorMcpThreadWaitResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
@@ -458,6 +497,7 @@ export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitRe
 
 export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
   threadId: ThreadId,
+  host: Schema.optional(OrchestratorMcpHost),
   runId: Schema.optional(RunId),
   reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
@@ -465,6 +505,7 @@ export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
 export type OrchestratorMcpThreadInterruptInput = typeof OrchestratorMcpThreadInterruptInput.Type;
 
 export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   status: Schema.Union([
@@ -556,6 +597,10 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
     description:
       "Public URL to give the sender. Absent when this environment has no T3 Connect managed tunnel; the user must enable T3 Connect remote access first.",
   }),
+  webhookUrlUnavailableReason: Schema.optional(Schema.String).annotate({
+    description:
+      "Why webhookUrl is absent, and what the user should do, when this environment knows.",
+  }),
   webhookSignature: Schema.optional(Schema.Literals(["none", "set"])).annotate({
     description: "Whether requests must carry a valid signature.",
   }),
@@ -644,27 +689,31 @@ export const OrchestratorMcpDeleteScheduledTaskResult = Schema.Struct({
 export type OrchestratorMcpDeleteScheduledTaskResult =
   typeof OrchestratorMcpDeleteScheduledTaskResult.Type;
 
+export const OrchestratorMcpFailureCode = Schema.Literals([
+  "capability_denied",
+  "parent_not_active",
+  "provider_unavailable",
+  "model_unavailable",
+  "runtime_mode_escalation_denied",
+  "interaction_mode_escalation_denied",
+  "task_not_found",
+  "task_not_cancellable",
+  "thread_not_found",
+  "run_not_found",
+  "thread_not_sendable",
+  "thread_not_interruptible",
+  "invalid_request",
+  "orchestration_error",
+  "thread_credential_required",
+  "target_required",
+  "host_unavailable",
+]);
+export type OrchestratorMcpFailureCode = typeof OrchestratorMcpFailureCode.Type;
+
 export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFailure>()(
   "OrchestratorMcpFailure",
   {
-    code: Schema.Literals([
-      "capability_denied",
-      "parent_not_active",
-      "provider_unavailable",
-      "model_unavailable",
-      "runtime_mode_escalation_denied",
-      "interaction_mode_escalation_denied",
-      "task_not_found",
-      "task_not_cancellable",
-      "thread_not_found",
-      "run_not_found",
-      "thread_not_sendable",
-      "thread_not_interruptible",
-      "invalid_request",
-      "orchestration_error",
-      "thread_credential_required",
-      "target_required",
-    ]),
+    code: OrchestratorMcpFailureCode,
     message: Schema.String,
   },
 ) {}

@@ -1,0 +1,279 @@
+import { describe, expect, it } from "@effect/vitest";
+import {
+  EnvironmentId,
+  OrchestratorMcpFailure,
+  type OrchestratorMcpThreadListItem,
+  type OrchestratorMcpThreadListResult,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
+import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+
+const item = (threadId: string, updatedAt: string, host?: string): OrchestratorMcpThreadListItem =>
+  ({
+    threadId: ThreadId.make(threadId),
+    updatedAt,
+    ...(host === undefined ? {} : { host }),
+  }) as OrchestratorMcpThreadListItem;
+
+describe("mergeHostThreadLists", () => {
+  it("keeps the newest threads across environments and says when more exist", () => {
+    const merged = HostThreadsMcpService.mergeHostThreadLists(
+      [
+        {
+          threads: [item("a", "2026-10-11T10:00:00.000Z"), item("b", "2026-10-11T08:00:00.000Z")],
+          total: 5,
+        },
+        {
+          threads: [
+            item("c", "2026-10-11T09:00:00.000Z", "box"),
+            item("d", "2026-10-11T07:00:00.000Z", "box"),
+          ],
+          total: 2,
+        },
+      ],
+      3,
+    );
+    expect(merged.threads.map((thread) => thread.threadId)).toEqual(["a", "c", "b"]);
+    expect(merged.total).toBe(7);
+    expect(merged.truncated).toBe(true);
+  });
+
+  it("orders equal times by thread id, then this environment before a host", () => {
+    const at = "2026-10-11T10:00:00.000Z";
+    const merged = HostThreadsMcpService.mergeHostThreadLists(
+      [
+        { threads: [item("x", at, "box")], total: 1 },
+        { threads: [item("x", at), item("y", at)], total: 2 },
+      ],
+      10,
+    );
+    expect(merged.threads.map((thread) => [thread.threadId, thread.host ?? "here"])).toEqual([
+      ["y", "here"],
+      ["x", "here"],
+      ["x", "box"],
+    ]);
+    expect(merged.truncated).toBe(false);
+  });
+});
+
+const threadId = ThreadId.make("caller-thread");
+const providerInstanceId = ProviderInstanceId.make("codex");
+const scope: McpInvocationScope = {
+  environmentId: EnvironmentId.make("host-threads-test"),
+  requestNamespace: "thread:caller",
+  thread: { threadId, providerSessionId: "session", providerInstanceId },
+  client: undefined,
+  issuedAt: 0,
+  capabilities: new Set(["orchestration"]),
+};
+
+const localList: OrchestratorMcpThreadListResult = {
+  projectId: null,
+  currentThreadId: threadId,
+  threads: [item("local-1", "2026-10-11T10:00:00.000Z")],
+  nextCursor: null,
+  total: 1,
+};
+
+/** The service over fakes: `hostCall` answers each remote call after running its authorization. */
+const runService = <A, E>(
+  options: {
+    readonly interactionMode: "default" | "plan";
+    readonly hosts?: ReadonlyArray<string>;
+    readonly hostCall: (
+      call: SshRemoteDispatch.SshHostToolCall,
+    ) => Effect.Effect<unknown, SshRemoteDispatch.SshRemoteDispatchError>;
+  },
+  body: (service: HostThreadsMcpService.HostThreadsMcpServiceShape) => Effect.Effect<A, E>,
+) => {
+  const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
+  const layer = HostThreadsMcpService.layer.pipe(
+    Layer.provide(
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+        listThreads: () => Effect.succeed(localList),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+        connectedHosts: Effect.succeed(options.hosts ?? []),
+        callHostTool: (call, authorize) => {
+          calls.push(call);
+          return authorize.pipe(Effect.andThen(options.hostCall(call)));
+        },
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadShell: () =>
+          Effect.succeed({
+            id: threadId,
+            runtimeMode: "full-access",
+            interactionMode: options.interactionMode,
+            archivedAt: null,
+            deletedAt: null,
+            activeRunId: "run-1",
+            providerInstanceId,
+          } as never),
+      }),
+    ),
+  );
+  return Effect.gen(function* () {
+    const service = yield* HostThreadsMcpService.HostThreadsMcpService;
+    const result = yield* body(service).pipe(Effect.result);
+    return { result, calls };
+  }).pipe(Effect.provide(layer));
+};
+
+describe("HostThreadsMcpService", () => {
+  it.effect("refuses to change a thread on another machine from a plan-mode caller", () =>
+    Effect.gen(function* () {
+      const sent: string[] = [];
+      const { result } = yield* runService(
+        {
+          interactionMode: "plan",
+          hostCall: (call) => Effect.sync(() => sent.push(call.tool)),
+        },
+        (service) =>
+          service.sendToThread(scope, {
+            host: "box",
+            threadId: ThreadId.make("remote-1"),
+            message: "status?",
+          }),
+      );
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") return;
+      expect(result.failure).toBeInstanceOf(OrchestratorMcpFailure);
+      expect(result.failure.code).toBe("interaction_mode_escalation_denied");
+      expect(sent).toEqual([]);
+    }),
+  );
+
+  it.effect("sends to another machine without the host argument and tags the result", () =>
+    Effect.gen(function* () {
+      const { result, calls } = yield* runService(
+        {
+          interactionMode: "default",
+          hostCall: () =>
+            Effect.succeed({
+              threadId: "remote-1",
+              messageId: "message-1",
+              runId: "run-9",
+              status: "running",
+              delivery: "steered",
+            }),
+        },
+        (service) =>
+          service.sendToThread(scope, {
+            host: "box",
+            threadId: ThreadId.make("remote-1"),
+            message: "status?",
+          }),
+      );
+      expect(result._tag === "Success" && result.success.host).toBe("box");
+      expect(calls[0]?.tool).toBe("goat_thread_send");
+      expect(calls[0]?.writes).toBe(true);
+      expect(calls[0]?.arguments).toEqual({ threadId: "remote-1", message: "status?" });
+    }),
+  );
+
+  it.effect("lists every project on another machine when no projectId is passed", () =>
+    Effect.gen(function* () {
+      const { result, calls } = yield* runService(
+        {
+          interactionMode: "plan",
+          hostCall: () =>
+            Effect.succeed({
+              projectId: null,
+              currentThreadId: null,
+              threads: [],
+              nextCursor: null,
+              total: 0,
+            }),
+        },
+        (service) => service.listThreads(scope, { host: "box" }),
+      );
+      expect(result._tag === "Success" && result.success.host).toBe("box");
+      expect(calls[0]?.arguments).toEqual({ allProjects: true });
+      expect(calls[0]?.writes).toBe(false);
+    }),
+  );
+
+  it.effect("lists every connected host and reports the unreachable one", () =>
+    Effect.gen(function* () {
+      const { result } = yield* runService(
+        {
+          interactionMode: "default",
+          hosts: ["box", "gone"],
+          hostCall: (call) =>
+            call.host === "gone"
+              ? Effect.fail(
+                  new SshRemoteDispatch.SshRemoteDispatchError({
+                    reason: "host_unavailable",
+                    message: "gone is unavailable",
+                  }),
+                )
+              : Effect.succeed({
+                  projectId: null,
+                  currentThreadId: null,
+                  threads: [
+                    {
+                      ...item("remote-1", "2026-10-11T11:00:00.000Z"),
+                      projectId: "project-r",
+                      title: "Remote",
+                      createdBy: "user",
+                      creationSource: "web",
+                      status: "idle",
+                      latestRunId: null,
+                      providerInstanceId: "codex",
+                      model: "gpt",
+                      runtimeMode: "full-access",
+                      interactionMode: "default",
+                      linkedPullRequest: null,
+                      settled: false,
+                      settledAt: null,
+                      snoozed: false,
+                      snoozedUntil: null,
+                      parentThreadId: null,
+                      relationshipToParent: null,
+                      itemCount: 1,
+                      createdAt: "2026-10-11T11:00:00.000Z",
+                    },
+                  ],
+                  nextCursor: null,
+                  total: 1,
+                }),
+        },
+        (service) => service.listThreads(scope, { allHosts: true, limit: 10 }),
+      );
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect(result.success.threads.map((thread) => [thread.threadId, thread.host])).toEqual([
+        ["remote-1", "box"],
+        ["local-1", undefined],
+      ]);
+      expect(result.success.unavailableHosts).toEqual([
+        { host: "gone", code: "host_unavailable", message: "gone is unavailable" },
+      ]);
+      expect(result.success.total).toBe(2);
+      expect(result.success.nextCursor).toBeNull();
+    }),
+  );
+
+  it.effect("refuses a cursor with allHosts", () =>
+    Effect.gen(function* () {
+      const { result } = yield* runService(
+        { interactionMode: "default", hostCall: () => Effect.succeed(null) },
+        (service) => service.listThreads(scope, { allHosts: true, cursor: 50 }),
+      );
+      expect(result._tag === "Failure" && result.failure.code).toBe("invalid_request");
+    }),
+  );
+});

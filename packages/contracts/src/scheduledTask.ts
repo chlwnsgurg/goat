@@ -161,11 +161,27 @@ export const ScheduledTaskRunStatus = Schema.Literals(["never", "running", "succ
 export type ScheduledTaskRunStatus = typeof ScheduledTaskRunStatus.Type;
 
 /** Where a webhook task receives requests. Present only on webhook tasks. */
+/**
+ * Why a webhook task has no public URL. relay_not_linked: the environment is
+ * not linked to T3 Connect. managed_tunnel_not_configured: it is linked, but
+ * remote access has not created its managed tunnel. managed_tunnel_unrecognized:
+ * the tunnel's name does not carry the key the relay routes by.
+ */
+export const ScheduledTaskWebhookUrlUnavailableReason = Schema.Literals([
+  "relay_not_linked",
+  "managed_tunnel_not_configured",
+  "managed_tunnel_unrecognized",
+]);
+export type ScheduledTaskWebhookUrlUnavailableReason =
+  typeof ScheduledTaskWebhookUrlUnavailableReason.Type;
+
 export const ScheduledTaskWebhookEndpoint = Schema.Struct({
   /** Environment-relative path including the secret token; works on any origin that reaches the environment. */
   path: TrimmedNonEmptyString,
   /** Public T3 Connect URL, or null when the environment is not linked to T3 Connect. */
   url: Schema.NullOr(TrimmedNonEmptyString),
+  /** Set when url is null and the cause is known. */
+  urlUnavailableReason: Schema.optional(ScheduledTaskWebhookUrlUnavailableReason),
   hasSecret: Schema.Boolean,
 });
 export type ScheduledTaskWebhookEndpoint = typeof ScheduledTaskWebhookEndpoint.Type;
