@@ -2,7 +2,6 @@ import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/Th
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
-  resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
   shouldDockDraftHeroForSubmission,
   resolveVisibleWorktreeSetup,
@@ -10015,14 +10014,7 @@ export default function ChatView(props: ChatViewProps) {
         markPromotedDraftThreadByRef(backgroundThreadRef);
         try {
           backgroundDraftOpened = Boolean(
-            await handleNewThread(
-              scopeProjectRef(activeProject.environmentId, activeProject.id),
-              resolveBackgroundDraftWorkspaceOptions({
-                envMode: sendEnvMode,
-                branch: activeThreadBranch,
-                startFromOrigin,
-              }),
-            ),
+            await handleNewThread(scopeProjectRef(activeProject.environmentId, activeProject.id)),
           );
         } catch (error) {
           clearBackgroundDraftSubmissionByRef(backgroundThreadRef);

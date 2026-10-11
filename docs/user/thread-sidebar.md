@@ -7,7 +7,9 @@ need a separate branch and working directory.
 
 On web and desktop, a new thread keeps the current project and carries your model
 and mode selections, unless the destination project has its own model default.
-Its branch and workspace mode come from your configured defaults. To continue in
+Its workspace starts from the project's configured default, which falls back to
+**Local**. Starting a new thread also resets an empty draft's workspace selection.
+A draft with text or attachments stays saved with its selection. To continue in
 an existing worktree, use **New thread in this worktree** from the branch toolbar.
 
 When you change a new thread's project, GOAT stays in the current environment
@@ -35,8 +37,9 @@ directory itself sits inside a Git checkout.
 
 In a desktop browser or the desktop app, press `Cmd+Enter` on macOS or `Ctrl+Enter`
 on Windows and Linux to start a new thread and immediately open another draft. The
-next draft keeps the workspace mode and base branch you selected. With **New
-worktree**, each background submission creates its own worktree.
+next draft uses the project's workspace default, which falls back to **Local**.
+Choose **New worktree** again when the next task needs a separate checkout, or set
+it as the project's default.
 
 To send the same prompt to several models on web or desktop, **Shift-click** models
 in a new thread's model picker to add or remove them. A regular click returns to a

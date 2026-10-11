@@ -38,7 +38,6 @@ import {
   agentControlledBrowserCloseConfirmation,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getAntigravitySendBlockReason,
-  resolveBackgroundDraftWorkspaceOptions,
   resolveComposerInteractionMode,
   restorePlanFollowUpComposer,
   resolveComposerProviderSelection,
@@ -1687,23 +1686,6 @@ describe("resolveComposerInteractionMode", () => {
         interactionMode: "plan",
       }),
     ).toEqual({ enabled: false, interactionMode: "default" });
-  });
-});
-
-describe("resolveBackgroundDraftWorkspaceOptions", () => {
-  it("keeps New worktree selected without reusing the launched worktree", () => {
-    expect(
-      resolveBackgroundDraftWorkspaceOptions({
-        envMode: "worktree",
-        branch: "main",
-        startFromOrigin: true,
-      }),
-    ).toEqual({
-      envMode: "worktree",
-      branch: "main",
-      worktreePath: null,
-      startFromOrigin: true,
-    });
   });
 });
 
