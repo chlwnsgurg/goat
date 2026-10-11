@@ -1,5 +1,19 @@
 # 040 wp4 / PR4: Fetch branch to this device
 
+## Stale check at wp4 P (branch goat/ws-picker-3-ssh-ui 4454bbe95 = PR1 + PR2 + PR3)
+
+These amendments override older excerpts; line anchors below are historical (ba65eae6b).
+
+1. PR2 is implemented: `createVcsEnvironmentAtoms(...).sshWorkspaceFetchBack` (packages/client-runtime/src/state/vcs.ts),
+   input `{ target, remoteWorkspaceRoot, branch }`, result `{ sourceProjectId, localWorkspaceRoot, localRef, commitOid, remoteBranch }`.
+   No extra state/sshWorkspace.ts bridge exists or is needed.
+2. Fetch failure coverage includes `project_read_failed` (SshWorkspaceSync fetchBack) next to the listed codes.
+3. PR3 is implemented: reuse its saved SSH profile helpers in apps/web/src/lib/sshWorktree.ts for host lookup and its
+   error copy helper for fetch errors instead of adding parallel ones.
+4. Moved anchors: saved SSH profile in packages/client-runtime/src/connection/catalog.ts, desktop guards in
+   apps/web/src/connection/platform.ts, `requestGuarded` in rpc/client.ts; re-locate by content.
+5. User docs use the GOAT brand.
+
 Depends on [030_phase3_ssh_picker_ui.md](./030_phase3_ssh_picker_ui.md), which depends on
 [020_phase2_ssh_workspace_service.md](./020_phase2_ssh_workspace_service.md).
 Implementation branch: `goat/ws-picker-4-fetch-back`; PR base: `goat/ws-picker-3-ssh-ui`.
