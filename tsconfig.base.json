@@ -54,7 +54,7 @@
         },
         "overrides": [
           {
-            "include": ["**/*.test.ts", "**/*.test.tsx"],
+            "include": ["**/*.test.ts", "**/*.test.tsx", "**/*.fixture.ts"],
             "options": { "diagnosticSeverity": { "preferSchemaOverJson": "off" } }
           }
         ]
