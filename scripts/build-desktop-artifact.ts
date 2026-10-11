@@ -23,7 +23,7 @@ import {
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 import gnomeCaptureBundle from "../apps/desktop/gnome-extension/bundle.json" with { type: "json" };
@@ -329,6 +329,35 @@ export class BuildCommandFailedError extends Schema.TaggedError<BuildCommandFail
     return `Command exited with non-zero exit code (${this.exitCode})${outputSuffix}`;
   }
 }
+
+export class VpNotFoundError extends Schema.TaggedError<VpNotFoundError>()("VpNotFoundError", {
+  repoVpPath: Schema.String,
+}) {
+  override get message(): string {
+    return `vp was not found at ${this.repoVpPath} or on PATH. Install dependencies with 'pnpm install', then run this script as 'pnpm run dist:desktop:artifact <flags>'.`;
+  }
+}
+
+/**
+ * The vp this script runs: the repository's own, else one on PATH. Running the
+ * script as `node scripts/build-desktop-artifact.ts` leaves node_modules/.bin
+ * off PATH, while filtered CI installs can skip the root package and rely on
+ * the vp that setup-vp puts on PATH.
+ */
+export const resolveVp = Effect.fn("resolveVp")(function* (repoRoot: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const repoVp = path.join(
+    repoRoot,
+    "node_modules",
+    ".bin",
+    platform === "win32" ? "vp.cmd" : "vp",
+  );
+  if (yield* fs.exists(repoVp).pipe(Effect.orElseSucceed(() => false))) return repoVp;
+  if (yield* isCommandAvailable("vp")) return "vp";
+  return yield* new VpNotFoundError({ repoVpPath: repoVp });
+});
 
 export const LINUX_DESKTOP_BUILD_PREREQUISITES = [
   { id: "cargo", description: "Rust compiler and Cargo", packages: ["cargo", "rustc"] },
@@ -3329,6 +3358,8 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   readonly overrides: Record<string, string>;
   readonly asarPath: string;
   readonly verbose: boolean;
+  /** The vp to run; see resolveVp. */
+  readonly vp: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -3379,7 +3410,7 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   }
 
   yield* Effect.log("[desktop-artifact] Installing server sidecar runtime externals...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installCommand = yield* resolveSpawnCommand(input.vp, [...STAGE_INSTALL_ARGS]);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
       cwd: serverStageDir,
@@ -3813,6 +3844,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcess.Platform;
+  const vp = yield* resolveVp(repoRoot);
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
   }
@@ -3901,7 +3933,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
+    const spawnCommand = yield* resolveSpawnCommand(vp, ["run", "build:desktop"]);
     yield* runCommand(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: repoRoot,
@@ -4192,7 +4224,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  const installCommand = yield* resolveSpawnCommand(vp, [...STAGE_INSTALL_ARGS]);
   yield* runCommand(
     ChildProcess.make(installCommand.command, installCommand.args, {
       cwd: stageAppDir,
@@ -4219,6 +4251,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       overrides: resolvedOverrides,
       asarPath: windowsServerAsarPath,
       verbose: options.verbose,
+      vp,
     });
   }
   yield* stageCursorSdkPlatformPackages(
@@ -4308,7 +4341,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     "--publish",
     "never",
   ];
-  const builderCommand = yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv });
+  const builderCommand = yield* resolveSpawnCommand(vp, builderArgs, { env: buildEnv });
   yield* runCommand(
     ChildProcess.make(builderCommand.command, builderCommand.args, {
       cwd: repoRoot,

@@ -58,6 +58,8 @@ import {
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
   resolveResourceMonitorRustTargets,
+  resolveVp,
+  VpNotFoundError,
   resolveWindowsServerAsarIgnoreGlobs,
   resourceMonitorExecutableName,
   resolveGitHubPublishConfig,
@@ -1134,6 +1136,39 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             path.join(unpackedRoot, "node_modules/node-pty/third_party/conpty/1.0.0/win10-arm64"),
           ),
         );
+      }),
+    ),
+  );
+
+  it.effect("prefers the repository's vp, then PATH, and says how to run without either", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-repo-vp-test-" });
+        const pathDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-path-vp-test-" });
+        const onHost = (platform: NodeJS.Platform, env: NodeJS.ProcessEnv) =>
+          resolveVp(repoRoot).pipe(
+            Effect.provideService(HostProcess.Environment, env),
+            Effect.provideService(HostProcess.Platform, platform),
+          );
+
+        // The shared resolver caches misses per PATH, so this step uses its own.
+        const missing = yield* Effect.flip(onHost("darwin", { PATH: "" }));
+        assert.instanceOf(missing, VpNotFoundError);
+        assert.include(missing.message, "pnpm run dist:desktop:artifact");
+
+        const pathVp = path.join(pathDir, "vp");
+        yield* fs.writeFileString(pathVp, "#!/bin/sh\n");
+        yield* fs.chmod(pathVp, 0o755);
+        assert.equal(yield* onHost("darwin", { PATH: pathDir }), "vp");
+
+        const binDir = path.join(repoRoot, "node_modules/.bin");
+        yield* fs.makeDirectory(binDir, { recursive: true });
+        yield* fs.writeFileString(path.join(binDir, "vp"), "");
+        yield* fs.writeFileString(path.join(binDir, "vp.cmd"), "");
+        assert.equal(yield* onHost("darwin", { PATH: pathDir }), path.join(binDir, "vp"));
+        assert.equal(yield* onHost("win32", { PATH: "" }), path.join(binDir, "vp.cmd"));
       }),
     ),
   );
