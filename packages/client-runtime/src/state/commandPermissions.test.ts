@@ -1,3 +1,7 @@
+import * as Schema from "effect/Schema";
+import { SshWorkspaceLaunchInput, SshWorkspaceLaunchResult } from "@t3tools/contracts";
+import * as Persistence from "../platform/persistence.ts";
+import { createVcsEnvironmentAtoms } from "./vcs.ts";
 import { requestGuarded, runStreamGuarded } from "../rpc/client.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import * as SubscriptionRef from "effect/SubscriptionRef";
@@ -286,5 +290,214 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     }).pipe(Stream.runDrain, Effect.provideService(EnvironmentSupervisor, supervisor), Effect.flip);
     expect(streamed._tag).toBe("EnvironmentAuthorizationError");
     expect(writes).toBe(0);
+  }),
+);
+
+const sshLaunchPayload = Schema.decodeUnknownSync(SshWorkspaceLaunchInput)({
+  sourceProjectId: "source",
+  destination: {
+    connectionId: "saved",
+    expectedEnvironmentId: "remote",
+    target: { alias: "box", hostname: "box", username: null, port: null },
+  },
+  title: "Work",
+  modelSelection: { instanceId: "codex", model: "model" },
+  runtimeMode: "approval-required",
+  interactionMode: "default",
+  initialMessage: { text: "Implement" },
+});
+const sshLaunchSuccess = Schema.decodeUnknownSync(SshWorkspaceLaunchResult)({
+  operationId: "12345678",
+  snapshotRef: "refs/goat/snapshots/12345678",
+  snapshotOid: "a".repeat(40),
+  remoteEnvironmentId: "remote",
+  remoteProjectId: "rp",
+  remoteThreadId: "rt",
+  remoteRepoPath: "/home/test/.goat/repos/repo-12345678",
+  branch: "goat/ssh/12345678",
+});
+const sshFetchPayload = {
+  target: sshLaunchPayload.destination.target,
+  remoteWorkspaceRoot: sshLaunchSuccess.remoteRepoPath,
+  branch: sshLaunchSuccess.branch,
+};
+const sshFetchSuccess = {
+  sourceProjectId: sshLaunchPayload.sourceProjectId,
+  localWorkspaceRoot: "/repo",
+  localRef: "refs/remotes/goat-ssh/box/goat/ssh/12345678",
+  commitOid: "a".repeat(40),
+  remoteBranch: sshFetchPayload.branch,
+};
+const sshCommandFixture = (onLaunch = async () => sshLaunchSuccess) =>
+  Effect.gen(function* () {
+    let calls = 0;
+    const session = {
+      client: {
+        [WS_METHODS.sshWorkspaceLaunch]: () =>
+          Effect.promise(async () => {
+            calls++;
+            return await onLaunch();
+          }),
+        [WS_METHODS.sshWorkspaceFetchBack]: () =>
+          Effect.sync(() => {
+            calls++;
+            return sshFetchSuccess;
+          }),
+      },
+    } as unknown as RpcSession;
+    const supervisor = {
+      target: { environmentId: env, label: "source" },
+      session: yield* SubscriptionRef.make(Option.some(session)),
+    } as unknown as EnvironmentSupervisor["Service"];
+    const commandRuntime = Atom.runtime(
+      Layer.mergeAll(
+        Layer.succeed(EnvironmentRegistry, {
+          run: (id: EnvironmentId, effect: Effect.Effect<unknown>) =>
+            effect.pipe(
+              Effect.provideService(EnvironmentSupervisor, {
+                ...supervisor,
+                target: { ...supervisor.target, environmentId: id },
+              }),
+            ),
+        } as unknown as EnvironmentRegistry["Service"]),
+        Layer.mock(Persistence.EnvironmentCacheStore)({}),
+      ),
+    );
+    const commands = createVcsEnvironmentAtoms(commandRuntime);
+    const registry = AtomRegistry.make();
+    registry.mount(sessions(env));
+    registry.mount(sessions(other));
+    const setGrant = (id: EnvironmentId, scopes: NonNullable<AuthSessionState["scopes"]>) =>
+      registry.set(
+        sessions(id),
+        AsyncResult.success({ ...grant(false), scopes, permissions: scopes }),
+      );
+    return { commands, registry, setGrant, calls: () => calls, dispose: () => registry.dispose() };
+  });
+it.effect("SSH launch availability and execution require both grants", () =>
+  Effect.gen(function* () {
+    const f = yield* sshCommandFixture();
+    yield* Effect.promise(async () => {
+      try {
+        for (const scopes of [[], [AuthSourceControlWriteScope], [AuthOrchestrationOperateScope]]) {
+          f.setGrant(env, scopes);
+          expect(f.registry.get(f.commands.sshWorkspaceLaunch.permissionAtom(env))).toBe(false);
+          expect(
+            (
+              await f.commands.sshWorkspaceLaunch.run(f.registry, {
+                environmentId: env,
+                input: sshLaunchPayload,
+              })
+            )._tag,
+          ).toBe("Failure");
+        }
+        expect(f.calls()).toBe(0);
+        f.setGrant(env, [AuthSourceControlWriteScope, AuthOrchestrationOperateScope]);
+        expect(f.registry.get(f.commands.sshWorkspaceLaunch.permissionAtom(env))).toBe(true);
+        expect(
+          (
+            await f.commands.sshWorkspaceLaunch.run(f.registry, {
+              environmentId: env,
+              input: sshLaunchPayload,
+            })
+          )._tag,
+        ).toBe("Success");
+        expect(f.calls()).toBe(1);
+      } finally {
+        f.dispose();
+      }
+    });
+  }),
+);
+it.effect("SSH fetchBack requires only source-control write", () =>
+  Effect.gen(function* () {
+    const f = yield* sshCommandFixture();
+    yield* Effect.promise(async () => {
+      try {
+        f.setGrant(env, [AuthOrchestrationOperateScope]);
+        expect(f.registry.get(f.commands.sshWorkspaceFetchBack.permissionAtom(env))).toBe(false);
+        expect(
+          (
+            await f.commands.sshWorkspaceFetchBack.run(f.registry, {
+              environmentId: env,
+              input: sshFetchPayload,
+            })
+          )._tag,
+        ).toBe("Failure");
+        expect(f.calls()).toBe(0);
+        f.setGrant(env, [AuthSourceControlWriteScope]);
+        expect(f.registry.get(f.commands.sshWorkspaceFetchBack.permissionAtom(env))).toBe(true);
+        expect(
+          (
+            await f.commands.sshWorkspaceFetchBack.run(f.registry, {
+              environmentId: env,
+              input: sshFetchPayload,
+            })
+          )._tag,
+        ).toBe("Success");
+        expect(f.calls()).toBe(1);
+      } finally {
+        f.dispose();
+      }
+    });
+  }),
+);
+it.effect("SSH launch rechecks source environment grant after serial queue", () =>
+  Effect.gen(function* () {
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const f = yield* sshCommandFixture(async () => {
+      started();
+      await gate;
+      return sshLaunchSuccess;
+    });
+    yield* Effect.promise(async () => {
+      try {
+        f.setGrant(env, [AuthSourceControlWriteScope, AuthOrchestrationOperateScope]);
+        const target = { environmentId: env, input: sshLaunchPayload };
+        const first = f.commands.sshWorkspaceLaunch.run(f.registry, target);
+        await entered;
+        const second = f.commands.sshWorkspaceLaunch.run(f.registry, target);
+        f.setGrant(env, []);
+        release();
+        expect((await first)._tag).toBe("Success");
+        expect((await second)._tag).toBe("Failure");
+        expect(f.calls()).toBe(1);
+      } finally {
+        release();
+        f.dispose();
+      }
+    });
+  }),
+);
+it.effect("SSH command cannot borrow a grant from the selected remote environment", () =>
+  Effect.gen(function* () {
+    const f = yield* sshCommandFixture();
+    yield* Effect.promise(async () => {
+      try {
+        f.setGrant(env, []);
+        f.setGrant(other, [AuthSourceControlWriteScope, AuthOrchestrationOperateScope]);
+        expect(
+          (
+            await f.commands.sshWorkspaceLaunch.run(f.registry, {
+              environmentId: env,
+              input: {
+                ...sshLaunchPayload,
+                destination: { ...sshLaunchPayload.destination, expectedEnvironmentId: other },
+              },
+            })
+          )._tag,
+        ).toBe("Failure");
+        expect(f.calls()).toBe(0);
+      } finally {
+        f.dispose();
+      }
+    });
   }),
 );

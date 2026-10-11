@@ -308,6 +308,18 @@ export function createVcsEnvironmentAtoms<R, E>(
       concurrency: vcsCommandConcurrency,
       onSettled: invalidateRefs,
     }),
+    sshWorkspaceLaunch: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:vcs:ssh-workspace-launch",
+      tag: WS_METHODS.sshWorkspaceLaunch,
+      concurrency: {
+        mode: "serial",
+        key: (target) => `${target.environmentId}:${target.input.sourceProjectId}`,
+      },
+    }),
+    sshWorkspaceFetchBack: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:vcs:ssh-workspace-fetch-back",
+      tag: WS_METHODS.sshWorkspaceFetchBack,
+    }),
     createWorktree: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:create-worktree",
       tag: WS_METHODS.vcsCreateWorktree,
