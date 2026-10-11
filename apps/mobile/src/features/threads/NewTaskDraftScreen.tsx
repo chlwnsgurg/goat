@@ -1594,7 +1594,7 @@ export function NewTaskDraftScreen(props: {
   const workspaceControls = (
     <View className="flex-row items-center gap-1 px-2">
       <ComposerInlineControl
-        accessibilityHint={`Switches to ${flow.workspaceMode === "local" ? "a new worktree" : "the Local"}`}
+        accessibilityHint={`Switches to ${flow.workspaceMode === "local" ? "a new worktree" : "Local"}`}
         accessibilityLabel={workspaceLabel}
         disabled={isComposerInteractionLocked || voiceInput.isBusy}
         renderIcon={(size) => (

@@ -220,6 +220,7 @@ export function useNewThreadHandler() {
             currentRouteTarget.draftId === emptyStoredDraftThread.draftId;
           // Deliberate new-thread requests reset empty drafts, including an
           // already-open one. State written while defaults load wins instead.
+          const initialWorkspaceContext = pickExplicitWorkspaceOptions(emptyStoredDraftThread);
           const workspaceContext = await resolveRequestedWorkspaceContext();
           if (routeChangedSinceRequest()) return null;
           const routeTargetNow = getCurrentRouteTarget();
@@ -241,7 +242,18 @@ export function useNewThreadHandler() {
           const investedMeanwhile = composerDraftHasUserContent(
             getComposerDraft(emptyStoredDraftThread.draftId),
           );
-          if (openedMeanwhile || promotedMeanwhile || remappedMeanwhile || investedMeanwhile)
+          const workspaceChangedMeanwhile =
+            currentDraft?.envMode !== initialWorkspaceContext.envMode ||
+            currentDraft?.branch !== initialWorkspaceContext.branch ||
+            currentDraft?.worktreePath !== initialWorkspaceContext.worktreePath ||
+            currentDraft?.startFromOrigin !== initialWorkspaceContext.startFromOrigin;
+          if (
+            openedMeanwhile ||
+            promotedMeanwhile ||
+            remappedMeanwhile ||
+            investedMeanwhile ||
+            workspaceChangedMeanwhile
+          )
             return null;
           setDraftThreadContext(emptyStoredDraftThread.draftId, {
             ...workspaceContext,
@@ -318,6 +330,7 @@ export function useNewThreadHandler() {
         !composerDraftHasUserContent(getComposerDraft(currentRouteTarget.draftId))
       ) {
         return (async () => {
+          const initialWorkspaceContext = pickExplicitWorkspaceOptions(latestActiveDraftThread);
           const workspaceContext = await resolveRequestedWorkspaceContext();
           if (routeChangedSinceRequest()) return null;
           const activeNow = getDraftSession(currentRouteTarget.draftId);
@@ -328,6 +341,10 @@ export function useNewThreadHandler() {
             activeNow.environmentId !== latestActiveDraftThread.environmentId ||
             activeNow.projectId !== latestActiveDraftThread.projectId ||
             activeNow.threadId !== latestActiveDraftThread.threadId ||
+            activeNow.envMode !== initialWorkspaceContext.envMode ||
+            activeNow.branch !== initialWorkspaceContext.branch ||
+            activeNow.worktreePath !== initialWorkspaceContext.worktreePath ||
+            activeNow.startFromOrigin !== initialWorkspaceContext.startFromOrigin ||
             readThreadShell(scopeThreadRef(activeNow.environmentId, activeNow.threadId)) !== null ||
             composerDraftHasUserContent(getComposerDraft(currentRouteTarget.draftId))
           )

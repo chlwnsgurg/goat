@@ -12,7 +12,6 @@ import {
   resolveBranchTriggerLabel,
   resolveBranchToolbarPrBranch,
   resolveBranchToolbarValue,
-  resolveLockedWorkspaceLabel,
   resolveLocalCheckoutBranchMismatch,
   resolveWorkspaceChipLabel,
   sanitizeNewRefName,
@@ -465,22 +464,6 @@ describe("resolveCurrentWorkspaceLabel", () => {
   });
 });
 
-describe("resolveLockedWorkspaceLabel", () => {
-  it("uses a shorter label for the main repo checkout", () => {
-    expect(resolveLockedWorkspaceLabel(null, "local")).toBe("Local");
-  });
-
-  it("uses a shorter label for an attached worktree", () => {
-    expect(resolveLockedWorkspaceLabel("/repo/.t3/worktrees/feature-a", "worktree")).toBe(
-      "Worktree",
-    );
-  });
-
-  it("describes a worktree that is still being created as a new worktree", () => {
-    expect(resolveLockedWorkspaceLabel(null, "worktree")).toBe("New worktree");
-  });
-});
-
 describe("deriveLocalBranchNameFromRemoteRef", () => {
   it("strips the remote prefix from a remote ref", () => {
     expect(deriveLocalBranchNameFromRemoteRef("origin/feature/demo")).toBe("feature/demo");
@@ -799,6 +782,27 @@ describe("sanitizeNewRefName", () => {
 });
 
 describe("resolveWorkspaceChipLabel", () => {
+  it("labels the main repo checkout as Local", () => {
+    expect(resolveWorkspaceChipLabel({ activeWorktreePath: null, effectiveEnvMode: "local" })).toBe(
+      "Local",
+    );
+  });
+
+  it("labels an attached worktree as Worktree", () => {
+    expect(
+      resolveWorkspaceChipLabel({
+        activeWorktreePath: "/repo/.t3/worktrees/feature-a",
+        effectiveEnvMode: "worktree",
+      }),
+    ).toBe("Worktree");
+  });
+
+  it("describes a worktree that is still being created as a new worktree", () => {
+    expect(
+      resolveWorkspaceChipLabel({ activeWorktreePath: null, effectiveEnvMode: "worktree" }),
+    ).toBe("New worktree");
+  });
+
   it.each([
     ["local", null, true, "Local"],
     ["worktree", null, true, "New worktree"],

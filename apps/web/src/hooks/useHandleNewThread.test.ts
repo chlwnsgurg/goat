@@ -280,6 +280,24 @@ it("background follow-up resolves defaults after promotion", async () => {
 });
 describe.each(["stored", "active", "fallback"] as const)("async reuse guards for %s", (path) => {
   it.each([
+    { envMode: "local" as const },
+    { branch: "selected-base" },
+    { worktreePath: "/selected/wt" },
+    { startFromOrigin: false },
+  ])("preserves workspace picked during defaults read: %j", async (selection) => {
+    seed(path !== "stored", path === "fallback");
+    testState.settings.defaultThreadEnvMode = null;
+    testState.settings.newWorktreesStartFromOrigin = true;
+    const pending = useNewThreadHandler()(projectRef);
+    store().setDraftThreadContext(draftId, selection);
+    const selectedDraft = store().getDraftSession(draftId);
+    testState.completeProjectFileRead({ defaultThreadEnvMode: "worktree" } as T3ProjectFile);
+    const result = await pending;
+    expect(store().getDraftSession(draftId)).toEqual(selectedDraft);
+    expect(result).toBeNull();
+    expect(testState.router.navigate).not.toHaveBeenCalled();
+  });
+  it.each([
     "promotion",
     "shell",
     "mapping",

@@ -109,14 +109,6 @@ export function resolveCurrentWorkspaceLabel(activeWorktreePath: string | null):
 
 // A locked thread in worktree mode with no path is still creating its
 // worktree, so it reads as a new worktree rather than the project checkout.
-export function resolveLockedWorkspaceLabel(
-  activeWorktreePath: string | null,
-  effectiveEnvMode: EnvMode,
-): string {
-  if (activeWorktreePath) return "Worktree";
-  return resolveEnvModeLabel(effectiveEnvMode);
-}
-
 export function resolveWorkspaceChipLabel(input: {
   activeWorktreePath: string | null;
   effectiveEnvMode: EnvMode;
