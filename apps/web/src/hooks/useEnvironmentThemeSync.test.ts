@@ -92,7 +92,6 @@ async function setupThemeSync(mode: "dark" | "system" = "dark") {
 beforeAll(async () => {
   await import("../themePalette").catch(() => undefined);
   await import("./useTheme").catch(() => undefined);
-  await import("./useEnvironmentTheme").catch(() => undefined);
   vi.resetModules();
 }, 60_000);
 
