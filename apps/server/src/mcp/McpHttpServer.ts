@@ -63,7 +63,6 @@ import {
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import * as SshHandlers from "./toolkits/ssh/handlers.ts";
 import { SshToolkit } from "./toolkits/ssh/tools.ts";
-import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
 
 /** Where an MCP client discovers how to sign in (RFC 9728), at this request's own origin. */
@@ -988,7 +987,5 @@ export const layer = Layer.mergeAll(
   // One launch-watch store for the launch, send and watch tools, following
   // threads with the same dispatch they use.
   Layer.provide(LaunchWatchService.layer),
-  // One dispatch for the SSH and thread tools, so they share tunnels, sessions and connected hosts.
-  Layer.provide(SshRemoteDispatch.layer),
   Layer.provideMerge(layerMcpTransport),
 );

@@ -1,3 +1,5 @@
+import * as Schema from "effect/Schema";
+import { SshWorkspaceLaunchInput } from "@t3tools/contracts";
 import {
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
@@ -473,5 +475,116 @@ it.effect("denies manual cleanup before the handler without settings permission"
       requiredPermission: AuthSettingsWriteScope,
     });
     expect(handled).toBe(false);
+  }).pipe(Effect.scoped),
+);
+
+const sshGroup = WsRpcGroup.omit(
+  ...[...WsRpcGroup.requests.keys()].filter(
+    (
+      tag,
+    ): tag is Exclude<
+      keyof typeof RPC_REQUIRED_SCOPES,
+      typeof WS_METHODS.sshWorkspaceLaunch | typeof WS_METHODS.sshWorkspaceFetchBack
+    > => tag !== WS_METHODS.sshWorkspaceLaunch && tag !== WS_METHODS.sshWorkspaceFetchBack,
+  ),
+);
+const sshLaunchInput = Schema.decodeUnknownSync(SshWorkspaceLaunchInput)({
+  sourceProjectId: "source",
+  destination: {
+    connectionId: "saved",
+    expectedEnvironmentId: "remote",
+    target: { alias: "box", hostname: "box", username: null, port: null },
+  },
+  title: "Work",
+  modelSelection: { instanceId: "codex", model: "model" },
+  runtimeMode: "approval-required",
+  interactionMode: "default",
+  initialMessage: { text: "Implement" },
+});
+const sshFetchInput = {
+  target: sshLaunchInput.destination.target,
+  remoteWorkspaceRoot: "/home/test/.goat/repos/repo-12345678",
+  branch: "feature/result",
+};
+it.effect.each(
+  (
+    [
+      [
+        "SSH launch rejects missing source-control write before handler",
+        WS_METHODS.sshWorkspaceLaunch,
+        [AuthOrchestrationOperateScope],
+        AuthSourceControlWriteScope,
+      ],
+      [
+        "SSH launch rejects missing orchestration operate before handler",
+        WS_METHODS.sshWorkspaceLaunch,
+        [AuthSourceControlWriteScope],
+        AuthOrchestrationOperateScope,
+      ],
+      [
+        "SSH fetchBack rejects read-only grant before handler",
+        WS_METHODS.sshWorkspaceFetchBack,
+        [],
+        AuthSourceControlWriteScope,
+      ],
+    ] as const
+  ).map(([name, method, scopes, required]) => [name, [name, method, scopes, required]] as const),
+)("%s", ([_name, [_caseName, method, scopes, required]]) =>
+  Effect.gen(function* () {
+    let handled = 0;
+    const client = yield* RpcTest.makeClient(sshGroup).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          sshGroup.toLayerHandler(WS_METHODS.sshWorkspaceLaunch, () =>
+            Effect.sync(() => {
+              handled++;
+            }).pipe(Effect.andThen(Effect.never)),
+          ),
+          sshGroup.toLayerHandler(WS_METHODS.sshWorkspaceFetchBack, () =>
+            Effect.sync(() => {
+              handled++;
+            }).pipe(Effect.andThen(Effect.never)),
+          ),
+          RpcAuthorization.layer(scopes),
+        ),
+      ),
+    );
+    const error =
+      method === WS_METHODS.sshWorkspaceLaunch
+        ? yield* client[method](sshLaunchInput).pipe(Effect.flip)
+        : yield* client[method](sshFetchInput).pipe(Effect.flip);
+    expect(error).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+      requiredPermission: required,
+    });
+    expect(handled).toBe(0);
+  }).pipe(Effect.scoped),
+);
+it.effect("SSH fetchBack permits source-control write without orchestration operate", () =>
+  Effect.gen(function* () {
+    let handled = 0;
+    const output = {
+      sourceProjectId: sshLaunchInput.sourceProjectId,
+      localWorkspaceRoot: "/repo",
+      localRef: "refs/remotes/goat-ssh/box/feature/result",
+      commitOid: "a".repeat(40),
+      remoteBranch: sshFetchInput.branch,
+    };
+    const client = yield* RpcTest.makeClient(sshGroup).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          sshGroup.toLayerHandler(WS_METHODS.sshWorkspaceLaunch, () => Effect.never),
+          sshGroup.toLayerHandler(WS_METHODS.sshWorkspaceFetchBack, () =>
+            Effect.sync(() => {
+              handled++;
+              return output;
+            }),
+          ),
+          RpcAuthorization.layer([AuthSourceControlWriteScope]),
+        ),
+      ),
+    );
+    expect(yield* client[WS_METHODS.sshWorkspaceFetchBack](sshFetchInput)).toEqual(output);
+    expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );
