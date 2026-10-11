@@ -1265,11 +1265,12 @@ if [ -z "$REMOTE_PORT" ]; then
   fi
 fi
 refresh_fields=
+# Double quotes are literal inside single quotes; dash preserves unsupported printf escapes.
 case "$REFRESH_DECISION" in
-  replaced|reused-busy|reused-unknown) refresh_fields="$(printf ',\\"refresh\\":\\"%s\\"' "$REFRESH_DECISION")" ;;
+  replaced|reused-busy|reused-unknown) refresh_fields="$(printf ',"refresh":"%s"' "$REFRESH_DECISION")" ;;
 esac
 if [ "$REFRESH_DECISION" = reused-busy ] || [ "$REFRESH_DECISION" = reused-unknown ]; then
-  refresh_fields="$refresh_fields$(printf ',\\"selectedVersion\\":\\"%s\\"' "$LIVE_VERSION")"
+  refresh_fields="$refresh_fields$(printf ',"selectedVersion":"%s"' "$LIVE_VERSION")"
 fi
 printf '{"remotePort":%s,"serverKind":"%s"%s}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}" "$refresh_fields"
 `;

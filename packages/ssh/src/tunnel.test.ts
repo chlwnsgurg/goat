@@ -26,6 +26,12 @@ import { SshCommandError, SshLaunchError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
 import baseline from "./fixtures/remote-runner-baseline.json" with { type: "json" };
 
+// Select the shell for every real remote-script fixture, including direct runner-file execution.
+// Generated scripts invoke nested runners themselves; changing those invocations would alter
+// the production script under test. Runner bytes also stay intact for retained-hash checks.
+const remoteShell = process.env.T3_SSH_TEST_SHELL ?? "sh";
+const remoteShellCommand = `'${remoteShell.replaceAll("'", "'\\''")}'`;
+
 const TEST_NODE_ENGINE_RANGE = "^22.16 || ^23.11 || >=24.10";
 
 const makeSuccessfulProcess = (stdout: string) => {
@@ -1148,7 +1154,7 @@ else exit 2; fi
             calls.push("probe");
             // Execute the real probe against the isolated remote HOME.
             return yield* realSpawner.spawn(
-              ChildProcess.make("sh", ["-s"], {
+              ChildProcess.make(remoteShell, ["-s"], {
                 env: { HOME: root },
                 stdin: Stream.make(data),
               }),
@@ -1298,7 +1304,7 @@ else {
             ? command.options.stdin
             : Stream.make(encoder.encode(scripts.pairing));
         return realSpawner.spawn(
-          ChildProcess.make("sh", remoteArgs, {
+          ChildProcess.make(remoteShell, remoteArgs, {
             env: { HOME: root, PATH: `${root}/.test/identity-bin:${process.env.PATH ?? ""}` },
             stdin,
           }),
@@ -1382,16 +1388,20 @@ else {
             }
             const remoteArgs = args.slice(args.indexOf("sh"));
             return yield* realSpawner.spawn(
-              ChildProcess.make("sh", ["-c", remoteArgs.join(" ")], {
-                env: { HOME: root },
-                stdin: command.options.stdin,
-              }),
+              ChildProcess.make(
+                remoteShell,
+                ["-c", [remoteShellCommand, ...remoteArgs.slice(1)].join(" ")],
+                {
+                  env: { HOME: root },
+                  stdin: command.options.stdin,
+                },
+              ),
             );
           }
           if (missing) {
             const installer = yield* realSpawner.spawn(
               ChildProcess.make(
-                "sh",
+                remoteShell,
                 ["-c", SshTunnel.buildRemoteT3RunnerScript(runner), "--", "--version"],
                 { env: { HOME: root } },
               ),
@@ -1588,7 +1598,7 @@ describe("archive runner script", () => {
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
-        ChildProcess.make("sh", args, {
+        ChildProcess.make(remoteShell, args, {
           env: { PATH: process.env.PATH ?? "", HOME: home },
           extendEnv: false,
           ...(bytes === undefined
@@ -1677,7 +1687,7 @@ describe("archive runner script", () => {
       `tar -czf '${release}/${stem}.tar.gz' -C '${root}/stage' '${stem}'`,
       `cd '${release}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
     ].join("\n");
-    const child = yield* spawner.spawn(ChildProcess.make("sh", ["-c", script]));
+    const child = yield* spawner.spawn(ChildProcess.make(remoteShell, ["-c", script]));
     assert.equal(Number(yield* child.exitCode), 0);
     return `file://${root}/mirror`;
   });
@@ -1859,7 +1869,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     ) {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
-        ChildProcess.make("sh", ["-s", "--", ...args], {
+        ChildProcess.make(remoteShell, ["-s", "--", ...args], {
           env: { HOME: home, PATH: pathValue, LC_ALL: "C" },
           extendEnv: false,
           stdin: { stream: Stream.make(encoder.encode(script)), endOnDone: true },
@@ -2229,9 +2239,9 @@ console.log("goat v" + (count === 0 ? version : "9.9.9"));`,
             const args = command.args.slice(index);
             return yield* realSpawner.spawn(
               ChildProcess.make(
-                "sh",
+                remoteShell,
                 command.args.includes("-c")
-                  ? ["-c", args.join(" ")]
+                  ? ["-c", [remoteShellCommand, ...args.slice(1)].join(" ")]
                   : args.slice(1).filter((arg) => arg !== "-l"),
                 {
                   env: {
@@ -2952,8 +2962,10 @@ describe("bundled runtime acquisition", () => {
             const remoteArgs = command.args.slice(index);
             return yield* realSpawner.spawn(
               ChildProcess.make(
-                "sh",
-                command.args.includes("-c") ? ["-c", remoteArgs.join(" ")] : ["-s"],
+                remoteShell,
+                command.args.includes("-c")
+                  ? ["-c", [remoteShellCommand, ...remoteArgs.slice(1)].join(" ")]
+                  : ["-s"],
                 {
                   env: { HOME: home, PATH: process.env.PATH ?? "" },
                   extendEnv: false,
@@ -3171,7 +3183,7 @@ cat "$HOME/.test/command"
 }
 `;
         const child = yield* spawner.spawn(
-          ChildProcess.make("sh", ["-s"], {
+          ChildProcess.make(remoteShell, ["-s"], {
             env: { HOME: home, PATH: `${bin}:${nodeBin}:${process.env.PATH ?? ""}`, LC_ALL: "C" },
             extendEnv: false,
             stdin: {
@@ -3293,7 +3305,7 @@ fi
 }
 `;
           const child = yield* spawner.spawn(
-            ChildProcess.make("sh", ["-s", "--", key], {
+            ChildProcess.make(remoteShell, ["-s", "--", key], {
               env: { HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, LC_ALL: "C" },
               extendEnv: false,
               stdin: {
@@ -3659,7 +3671,7 @@ if (args[0] === "--version") {
             !Stream.isStream(stdin.stream)
           ) {
             return yield* remoteSpawn(
-              ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
+              ChildProcess.make(remoteShell, ["-c", [remoteShellCommand, ...args].join(" ")], {
                 env: { HOME: home, PATH: remotePath, LC_ALL: "C" },
                 extendEnv: false,
                 ...(stdin === undefined ? {} : { stdin }),
@@ -3669,7 +3681,7 @@ if (args[0] === "--version") {
           const script = yield* stdin.stream.pipe(Stream.decodeText(), Stream.mkString);
           if (beforeCommand !== undefined) yield* beforeCommand(script);
           return yield* remoteSpawn(
-            ChildProcess.make("sh", ["-c", ["sh", ...args].join(" ")], {
+            ChildProcess.make(remoteShell, ["-c", [remoteShellCommand, ...args].join(" ")], {
               env: { HOME: home, PATH: remotePath, LC_ALL: "C" },
               extendEnv: false,
               stdin: { ...stdin, stream: Stream.make(new TextEncoder().encode(script)) },
@@ -4718,7 +4730,7 @@ console.log(command);
         const script = scripts[entry].split("711bc738002d72fd").join(key);
         const before = yield* f.snapshot;
         const child = yield* f.realSpawner.spawn(
-          ChildProcess.make("sh", ["-s", "--", key], {
+          ChildProcess.make(remoteShell, ["-s", "--", key], {
             env: { HOME: f.home, PATH: process.env.PATH ?? "", LC_ALL: "C" },
             extendEnv: false,
             stdin: { stream: Stream.make(new TextEncoder().encode(script)), endOnDone: true },
@@ -4970,7 +4982,7 @@ console.log(command);
           const bin = `${f.test}/bin`;
           yield* f.fs.makeDirectory(bin);
           const curl = yield* f.realSpawner.spawn(
-            ChildProcess.make("sh", ["-c", "command -v curl"]),
+            ChildProcess.make(remoteShell, ["-c", "command -v curl"]),
           );
           const curlPath = (yield* curl.stdout.pipe(Stream.decodeText(), Stream.mkString)).trim();
           assert.equal(Number(yield* curl.exitCode), 0);
@@ -5413,7 +5425,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           const scripts = yield* nativeScripts({ nodeScriptPath: cli });
           const key = f.state.slice(f.state.lastIndexOf("/") + 1);
           const child = yield* f.realSpawner.spawn(
-            ChildProcess.make("sh", ["-s", "--", key], {
+            ChildProcess.make(remoteShell, ["-s", "--", key], {
               env: {
                 HOME: f.home,
                 PATH: process.env.PATH ?? "",

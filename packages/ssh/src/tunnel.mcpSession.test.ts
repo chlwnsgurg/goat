@@ -11,6 +11,10 @@ import * as Effect from "effect/Effect";
 
 import { buildRemoteMcpSessionScript, decodeRemoteMcpSessionOutput } from "./tunnel.ts";
 
+const remoteShell = process.env.T3_SSH_TEST_SHELL ?? "/bin/sh";
+// The generated MCP script invokes nested runners itself; changing those invocations would
+// alter the production script under test. Runner bytes also stay intact for SHA-chain checks.
+
 describe("remote MCP session script", () => {
   const stateKey = "session-test";
   const archiveVersion = "0.0.45";
@@ -91,7 +95,7 @@ JSON
     runtimeModeCeiling: string | null = options.runtimeModeCeiling,
     retainedSha = NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(runner)).digest("hex"),
   ) => {
-    const stdout = NodeChildProcess.execFileSync("/bin/sh", [], {
+    const stdout = NodeChildProcess.execFileSync(remoteShell, [], {
       input: buildRemoteMcpSessionScript(
         stateKey,
         { ...options, runtimeModeCeiling },

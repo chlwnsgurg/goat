@@ -15,6 +15,9 @@ import * as NodeNet from "node:net";
 import { remoteStateKey } from "./command.ts";
 import { buildRemoteStopScript, buildRemoteT3RunnerScript } from "./tunnel.ts";
 
+// An absolute default also works in the runner fixture's deliberately minimal PATH.
+const remoteShell = process.env.T3_SSH_TEST_SHELL ?? "/bin/sh";
+
 const Started = Schema.Struct({
   pid: Schema.Number,
   port: Schema.Number,
@@ -60,7 +63,7 @@ server.listen(Number(process.env.T3_TEST_PORT ?? 0), "127.0.0.1", () => {
         const runServer = (port = 0) =>
           Effect.gen(function* () {
             const child = yield* spawner.spawn(
-              ChildProcess.make("/bin/sh", ["-s", "--", "serve", "a path with spaces"], {
+              ChildProcess.make(remoteShell, ["-s", "--", "serve", "a path with spaces"], {
                 cwd: fixture,
                 env: {
                   PATH: bin,
@@ -217,7 +220,7 @@ server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0
           const script = buildRemoteStopScript(stateKey);
           const runStop = Effect.fn("test.remoteStop")(function* () {
             const stop = yield* spawner.spawn(
-              ChildProcess.make("/bin/sh", ["-s"], {
+              ChildProcess.make(remoteShell, ["-s"], {
                 cwd: fixture,
                 env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" },
                 stdin: Stream.make(new TextEncoder().encode(script)),
