@@ -313,7 +313,10 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             yield* f.fs.writeFileString(
               `${nodeBin}/node`,
               `#!/bin/sh
-if [ "$1" = - ] && [ "\${2:-}" = '${f.state}/port' ]; then printf 'pick-port\\n' >> "$HOME/.test/discovered-helpers"; fi
+if [ "$1" = - ] && [ "\${2:-}" = '${f.state}/port' ]; then
+  printf 'pick-port\\n' >> "$HOME/.test/discovered-helpers"
+  a=$1; b=$2; shift 3; set -- "$a" "$b" '${f.pickPort}' "$@"
+fi
 exec '${process.execPath.replaceAll("'", "'\\''")}' "$@"
 `,
             );
@@ -351,6 +354,7 @@ export PATH
           }).pipe(Effect.provide(layer(entry, true)), Effect.scoped);
           const pid = (yield* f.fs.readFileString(`${f.state}/pid`)).trim();
           const port = (yield* f.fs.readFileString(`${f.state}/port`)).trim();
+          assert.equal(port, String(f.pickPort));
           const identity = `${entry} serve --host 127.0.0.1 --port ${port} --base-dir ${f.home}/.goat\n`;
           assert.equal(yield* f.fs.readFileString(`${f.state}/identity`), identity);
           // Read real ps: the shim execs the native binary, not its own pathname.

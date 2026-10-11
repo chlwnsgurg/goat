@@ -157,6 +157,30 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
   const old = `${home}/.goat/runtime/goat/versions/${input.oldVersion}`;
   const cache = `${home}/cache`;
   for (const dir of [state, test, old, cache]) yield* fs.makeDirectory(dir, { recursive: true });
+  // Node-mode launches pick a port from the production default (3773). Parallel test files and
+  // concurrent CI jobs on one host would race for it, so start this fixture's pick at its own
+  // reserved port. The shim only rewrites that argument; argv0 stays "node" for ps checks.
+  const pickPort = yield* NetService.make().reserveLoopbackPort();
+  const portShim = `${test}/port-shim`;
+  yield* fs.makeDirectory(portShim);
+  yield* fs.writeFileString(
+    `${portShim}/node`,
+    `#!/bin/bash
+if [ "$#" -eq 4 ] && [ "$1" = - ] && [ "\${2##*/}" = port ] && [ "$3" = 3773 ] && [ "$4" = 200 ]; then
+  printf '%s\\n' "$3" >> "$HOME/.test/pick-port-defaults"
+  set -- "$1" "$2" ${pickPort} "$4"
+fi
+exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
+`,
+  );
+  yield* fs.chmod(`${portShim}/node`, 0o700);
+  const inherited = process.env.PATH ?? "";
+  // Insert the shim where the inherited PATH starts, so test-provided bins still win and
+  // tests that replace PATH entirely (e.g. "/usr/bin:/bin") are untouched.
+  const withPortShim = (path: string) =>
+    inherited !== "" && path.endsWith(inherited)
+      ? path.slice(0, path.length - inherited.length) + `${portShim}:${inherited}`
+      : path;
   yield* fs.writeFileString(`${test}/events`, "");
   yield* fs.writeFileString(`${test}/pids`, "");
   const fifo = yield* realSpawner.spawn(ChildProcess.make("mkfifo", [`${test}/ready.fifo`]));
@@ -335,7 +359,7 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
       ) {
         return yield* remoteSpawn(
           ChildProcess.make(remoteShell, ["-c", [remoteShellCommand, ...args].join(" ")], {
-            env: { HOME: home, PATH: remotePath, LC_ALL: "C" },
+            env: { HOME: home, PATH: withPortShim(remotePath), LC_ALL: "C" },
             extendEnv: false,
             ...(stdin === undefined ? {} : { stdin }),
           }),
@@ -345,7 +369,7 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
       if (beforeCommand !== undefined) yield* beforeCommand(script);
       return yield* remoteSpawn(
         ChildProcess.make(remoteShell, ["-c", [remoteShellCommand, ...args].join(" ")], {
-          env: { HOME: home, PATH: remotePath, LC_ALL: "C" },
+          env: { HOME: home, PATH: withPortShim(remotePath), LC_ALL: "C" },
           extendEnv: false,
           stdin: { ...stdin, stream: Stream.make(new TextEncoder().encode(script)) },
         }),
@@ -410,6 +434,8 @@ export const makeProtocolFixture = Effect.fn("test.protocol.fixture")(function* 
     test,
     old,
     nodeEntry,
+    pickPort,
+    withPortShim,
     pid,
     port,
     run,

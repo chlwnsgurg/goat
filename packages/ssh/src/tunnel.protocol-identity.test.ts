@@ -218,7 +218,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
             ChildProcess.make(remoteShell, ["-s", "--", key], {
               env: {
                 HOME: f.home,
-                PATH: process.env.PATH ?? "",
+                PATH: f.withPortShim(process.env.PATH ?? ""),
                 LC_ALL: "C",
                 T3CODE_HOME: upstream,
               },
@@ -240,6 +240,11 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
             { concurrency: "unbounded" },
           );
           assert.equal(Number(output.code), 0, output.stderr);
+          if (entry === "launch")
+            assert.equal(
+              (yield* f.fs.readFileString(`${f.state}/port`)).trim(),
+              String(f.pickPort),
+            );
           assert.equal(yield* f.fs.readFileString(`${upstream}/sentinel`), "upstream bytes");
           assert.deepEqual(f.counters(), { uploads: 0, gh: 0, cacheReads: 0 });
           const events = (yield* f.fs.readFileString(`${f.test}/events`))
