@@ -4,7 +4,12 @@ import {
   ProviderDriverKind,
   type ProviderOptionDescriptor,
 } from "@t3tools/contracts";
-import { buildTraitsTriggerDisplay, buildUnavailableModelOptionDescriptors } from "./TraitsPicker";
+import {
+  buildTraitsTriggerDisplay,
+  buildUnavailableModelOptionDescriptors,
+  findReasoningDescriptor,
+  resolveEffortStepIndex,
+} from "./TraitsPicker";
 
 function selectDescriptor(
   id: string,
@@ -316,4 +321,49 @@ it("shows Unknown until a matching provider report provides Default", () => {
       reportedModelSelection: { ...selection, options: [{ id: "variant", value: "default" }] },
     }).label,
   ).toBe("Default");
+});
+
+describe("effort slider", () => {
+  const steps = selectDescriptor(
+    "effort",
+    [
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium", isDefault: true },
+      { id: "high", label: "High" },
+      { id: "ultrathink", label: "Ultrathink" },
+    ],
+    "",
+  );
+
+  it("drives the reasoning select even when context window comes first", () => {
+    expect(findReasoningDescriptor([CONTEXT_WINDOW, EFFORT])).toBe(EFFORT);
+  });
+
+  it("hides the slider for models without a reasoning choice", () => {
+    expect(findReasoningDescriptor([CONTEXT_WINDOW, serviceTierDescriptor("default")])).toBeNull();
+    expect(
+      findReasoningDescriptor([
+        selectDescriptor("effort", [{ id: "high", label: "High" }], "high"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("places the thumb on the selected step, then the provider default", () => {
+    expect(resolveEffortStepIndex(steps, "ultrathink")).toBe(3);
+    expect(resolveEffortStepIndex(steps, null)).toBe(1);
+    expect(resolveEffortStepIndex(steps, "retired")).toBe(1);
+    expect(
+      resolveEffortStepIndex(
+        selectDescriptor(
+          "effort",
+          [
+            { id: "a", label: "A" },
+            { id: "b", label: "B" },
+          ],
+          "",
+        ),
+        null,
+      ),
+    ).toBe(0);
+  });
 });

@@ -12,6 +12,20 @@ import { getTriggerDisplayModelName, type ModelEsque } from "./providerIconUtils
 const CLAUDE_RESUME_COMPACTION_MINUTES = 70;
 const CLAUDE_RESUME_COMPACTION_TOKENS = 100_000;
 
+/**
+ * The share of the context window still free, rounded the way the used share is shown
+ * (one decimal under 10% used, whole numbers above) so the two always add up to 100%.
+ */
+export function formatContextWindowRemainingPercentage(
+  usedPercentage: number | null,
+): string | null {
+  if (usedPercentage === null || !Number.isFinite(usedPercentage)) return null;
+  const precise = usedPercentage < 10;
+  const shownUsed = precise ? Math.round(usedPercentage * 10) / 10 : Math.round(usedPercentage);
+  const remaining = Math.max(0, Math.round((100 - shownUsed) * 10) / 10);
+  return `${remaining.toFixed(precise ? 1 : 0).replace(/\.0$/, "")}%`;
+}
+
 export function providerSupportsManualCompaction(
   provider: ProviderInstanceEntry | null | undefined,
 ): boolean {

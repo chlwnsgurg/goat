@@ -6,6 +6,7 @@ import {
   hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
   formatContextWindowCost,
+  formatContextWindowRemainingPercentage,
   resolveContextWindowModelDisplayName,
   shouldOfferResumeCompaction,
   shouldReserveContextWindowMeter,
@@ -292,5 +293,15 @@ describe("formatContextWindowCost", () => {
   it("keeps ordinary and sub-cent ACP costs readable", () => {
     expect(formatContextWindowCost({ amount: 0.42, currency: "USD" })).toBe("USD 0.42");
     expect(formatContextWindowCost({ amount: 0.0042, currency: "USD" })).toBe("USD 0.0042");
+  });
+});
+
+describe("formatContextWindowRemainingPercentage", () => {
+  it("adds up to 100% with the used share as displayed", () => {
+    expect(formatContextWindowRemainingPercentage(4.5)).toBe("95.5%");
+    expect(formatContextWindowRemainingPercentage(4)).toBe("96%");
+    expect(formatContextWindowRemainingPercentage(39.4)).toBe("61%");
+    expect(formatContextWindowRemainingPercentage(120)).toBe("0%");
+    expect(formatContextWindowRemainingPercentage(null)).toBeNull();
   });
 });

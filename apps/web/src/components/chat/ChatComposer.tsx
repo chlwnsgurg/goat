@@ -1079,9 +1079,9 @@ import {
   FileIcon,
   BotIcon,
   CircleAlertIcon,
-  PaperclipIcon,
   PencilRulerIcon,
   PlayIcon,
+  PlusIcon,
   ShieldIcon,
   XIcon,
 } from "lucide-react";
@@ -1259,47 +1259,43 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
       : "Default mode — click to enter plan mode";
 
   const interactionModeToggle = props.showInteractionModeToggle ? (
-    <>
-      <ComposerControlSeparator size={size} />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <ComposerControl
-              size={size}
-              className="shrink-0 whitespace-nowrap"
-              aria-pressed={props.interactionMode === "plan"}
-              type="button"
-              onClick={props.onToggleInteractionMode}
-              aria-label={interactionModeTooltip}
-            />
-          }
-        >
-          {props.interactionMode === "plan" ? (
-            <ComposerControlIcon
-              icon={PencilRulerIcon}
-              size={size}
-              className="text-current opacity-100"
-            />
-          ) : (
-            <ComposerControlIcon
-              icon={BotIcon}
-              size={size}
-              opticalSize={size === "xs" ? "default" : "large"}
-            />
-          )}
-          <span data-composer-control-label className="sr-only sm:not-sr-only">
-            {props.interactionMode === "plan" ? "Plan" : "Build"}
-          </span>
-        </TooltipTrigger>
-        <TooltipPopup side="top">{interactionModeTooltip}</TooltipPopup>
-      </Tooltip>
-    </>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <ComposerControl
+            size={size}
+            className="shrink-0 whitespace-nowrap"
+            aria-pressed={props.interactionMode === "plan"}
+            type="button"
+            onClick={props.onToggleInteractionMode}
+            aria-label={interactionModeTooltip}
+          />
+        }
+      >
+        {props.interactionMode === "plan" ? (
+          <ComposerControlIcon
+            icon={PencilRulerIcon}
+            size={size}
+            className="text-current opacity-100"
+          />
+        ) : (
+          <ComposerControlIcon
+            icon={BotIcon}
+            size={size}
+            opticalSize={size === "xs" ? "default" : "large"}
+          />
+        )}
+        <span data-composer-control-label className="sr-only sm:not-sr-only">
+          {props.interactionMode === "plan" ? "Plan" : "Build"}
+        </span>
+      </TooltipTrigger>
+      <TooltipPopup side="top">{interactionModeTooltip}</TooltipPopup>
+    </Tooltip>
   ) : null;
+  const isFullAccess = props.runtimeMode === "full-access";
 
   return (
     <>
-      <ComposerControlSeparator size={size} />
-
       <Tooltip>
         <Select
           open={open}
@@ -1313,10 +1309,18 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                 data-composer-shortcut="composer.mode"
                 size={size}
                 aria-label="Runtime mode"
+                showChevron={false}
+                className={cn(
+                  isFullAccess && "text-warning-foreground hover:text-warning-foreground",
+                )}
               />
             }
           >
-            <ComposerControlIcon icon={RuntimeModeIcon} size={size} />
+            <ComposerControlIcon
+              icon={RuntimeModeIcon}
+              size={size}
+              className={isFullAccess ? "text-current" : undefined}
+            />
             <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
@@ -2411,6 +2415,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ? selectedProviderStatus.reportsContextWindow === true
       : null,
   });
+  const activeContextWindowForMeter = settings.contextWindowMeterEnabled
+    ? activeContextWindow
+    : null;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -2440,6 +2447,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  // The effort popover's model row hands off to the model picker. Opening on the next frame
+  // lets the effort popover finish closing and return focus before the picker takes it.
+  const openComposerModelPicker = useCallback(() => {
+    requestAnimationFrame(() => setIsComposerModelPickerOpen(true));
+  }, []);
   const isMobileViewport = useMediaQuery("max-sm");
   const {
     isComposerFocused,
@@ -5454,18 +5466,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ...providerTraitsPickerInput,
     size: composerControlsCollapsed ? "xs" : "sm",
     hidden: composerControlsHidden || restingHiddenBlockCount > 1,
+    onOpenModelPicker: openComposerModelPicker,
   });
+  // The expanded footer reads like Codex: access on the left, then context, model, and effort
+  // on the right. Visual order comes from CSS so the overflow priority below (mode folds into
+  // the menu first, then effort) and the measured DOM stay unchanged.
+  const expandedFooterLayout = !composerControlsCollapsed;
   const restingBlockDefs = [
     ...(providerTraitsPicker
       ? [
           {
             id: "traits",
-            content: (
-              <>
-                <ComposerControlSeparator size={composerControlsCollapsed ? "xs" : "sm"} />
-                {restingProviderTraitsPicker}
-              </>
-            ),
+            content: restingProviderTraitsPicker,
           },
         ]
       : []),
@@ -5513,6 +5525,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           className="@max-[400px]/composer-surface:hidden"
           data-resting-controls-separator="true"
         />
+      ) : null}
+      {expandedFooterLayout ? (
+        <>
+          <span
+            aria-hidden="true"
+            data-resting-controls-spacer
+            className="-order-1 min-w-2 flex-1"
+          />
+          {activeContextWindowForMeter ? (
+            <span data-resting-fixed-control className="flex shrink-0 items-center">
+              <ContextWindowMeter
+                usage={activeContextWindowForMeter}
+                modelDisplayName={activeThreadModelDisplayName}
+                onCompact={compactCommandAvailable ? compactThreadContext : undefined}
+                compactDisabled={
+                  compactDisabled || noProviderAvailable || isSendBusy || isConnecting
+                }
+                compactDisabledReason={resolvedCompactDisabledReason}
+              />
+            </span>
+          ) : reserveContextWindowMeter ? (
+            <span data-resting-fixed-control className="flex shrink-0 items-center">
+              <ContextWindowMeterPlaceholder />
+            </span>
+          ) : null}
+        </>
       ) : null}
       <ProviderModelPicker
         compact={false}
@@ -5576,8 +5614,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 !showInlineRestingControls &&
                   "@max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none",
               )
-            : "-ms-2.5 min-w-13"
+            : "min-w-13"
         }
+        {...(expandedFooterLayout ? { popupAlign: "end" as const } : {})}
         terminalOpen={terminalOpen}
         open={isComposerModelPickerOpen}
         instanceIndicatorBackground={
@@ -5617,6 +5656,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               inert={hidden || undefined}
               className={cn(
                 "flex w-max min-w-max shrink-0 items-center gap-1",
+                expandedFooterLayout && def.id === "mode" && "order-first",
                 hidden && "pointer-events-none invisible absolute",
                 index >= restingBlockDefs.length - iconOnlyBlockCount &&
                   "[&_[data-composer-control-label]]:pointer-events-none [&_[data-composer-control-label]]:invisible [&_[data-composer-control-label]]:absolute [&_[data-composer-control-label]]:w-max [&_[data-composer-control-label]]:max-w-none [&_[data-composer-control-compact-icon]]:[visibility:inherit] [&_[data-composer-control-compact-icon]]:relative",
@@ -5632,6 +5672,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           inert={hiddenRestingBlockIds.length === 0 || undefined}
           className={cn(
             "min-w-0 shrink-0",
+            expandedFooterLayout && "order-first",
             hiddenRestingBlockIds.length === 0 && "pointer-events-none invisible absolute",
           )}
         >
@@ -6646,6 +6687,44 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   // Render
   // ------------------------------------------------------------------
+  const composerAttachAction = showComposerAttachAction ? (
+    <>
+      <input
+        ref={attachmentInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          // Inserting a chip refocuses the editor after the draft renders;
+          // focusing synchronously here would report the editor's stale text
+          // over the prompt that was just written.
+          void addComposerAttachments(files).then((inserted) => {
+            if (!inserted) focusComposer();
+          });
+        }}
+      />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => attachmentInputRef.current?.click()}
+              aria-label="Attach files"
+            />
+          }
+        >
+          <PlusIcon />
+        </TooltipTrigger>
+        <TooltipPopup>Attach files</TooltipPopup>
+      </Tooltip>
+    </>
+  ) : null;
+
   return (
     <form
       ref={composerFormRef}
@@ -7590,12 +7669,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     (showInlineRestingControls ? "bottom-[calc(2rem+1px)]" : "bottom-px"),
                 )}
               >
+                {isComposerResting ? null : composerAttachAction}
                 <div
                   ref={expandedControlsLayout.attachControls}
                   data-chat-composer-controls="left"
                   data-chat-composer-footer-controls="true"
                   className={cn(
-                    "relative -m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                    "relative -m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                    composerAttachAction ? "ms-0" : "-ms-3.5 ps-3.5",
                     isComposerResting && "hidden",
                   )}
                 >
@@ -7612,50 +7693,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   }
                   className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
                 >
-                  {showComposerAttachAction ? (
-                    <>
-                      <input
-                        ref={attachmentInputRef}
-                        type="file"
-                        multiple
-                        className="hidden"
-                        onChange={(event) => {
-                          const files = Array.from(event.currentTarget.files ?? []);
-                          event.currentTarget.value = "";
-                          // Inserting a chip refocuses the editor after the draft renders;
-                          // focusing synchronously here would report the editor's stale text
-                          // over the prompt that was just written.
-                          void addComposerAttachments(files).then((inserted) => {
-                            if (!inserted) focusComposer();
-                          });
-                        }}
-                      />
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              onPointerDown={(event) => event.preventDefault()}
-                              onClick={() => attachmentInputRef.current?.click()}
-                              aria-label="Attach files"
-                            />
-                          }
-                        >
-                          <PaperclipIcon />
-                        </TooltipTrigger>
-                        <TooltipPopup>Attach files</TooltipPopup>
-                      </Tooltip>
-                    </>
-                  ) : null}
+                  {isComposerResting ? composerAttachAction : null}
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}
                     activeContextWindow={
-                      settings.contextWindowMeterEnabled ? activeContextWindow : null
+                      // The expanded footer shows the meter beside the model picker.
+                      isComposerResting ? activeContextWindowForMeter : null
                     }
-                    reserveContextWindowMeter={reserveContextWindowMeter}
+                    reserveContextWindowMeter={isComposerResting && reserveContextWindowMeter}
                     activeThreadModelDisplayName={activeThreadModelDisplayName}
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}

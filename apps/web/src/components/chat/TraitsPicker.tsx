@@ -16,8 +16,9 @@ import {
   isClaudeUltrathinkPrompt,
   normalizeModelSlug,
 } from "@t3tools/shared/model";
-import { memo, useCallback } from "react";
-import { BrainIcon } from "lucide-react";
+import { memo, useCallback, useRef } from "react";
+import { Slider as SliderPrimitive } from "@base-ui/react/slider";
+import { BrainIcon, ChevronRightIcon } from "lucide-react";
 import {
   Menu,
   MenuGroup,
@@ -31,6 +32,9 @@ import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { Switch } from "../ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   ComposerControl,
@@ -39,6 +43,7 @@ import {
   type ComposerControlSize,
 } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
+import { getTriggerDisplayModelName } from "./providerIconUtils";
 import { useComposerMenuState } from "./useComposerMenuState";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
@@ -281,9 +286,46 @@ export interface TraitsMenuContentProps {
   planModeEnabled: boolean;
   triggerClassName?: string;
   isComposerOwned?: boolean;
+  /** Composer only: the effort popover's model row reopens the model picker. */
+  onOpenModelPicker?: () => void;
 }
 
-export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
+type SelectDescriptor = Extract<ProviderOptionDescriptor, { type: "select" }>;
+
+const REASONING_DESCRIPTOR_IDS = new Set([
+  "reasoningEffort",
+  "reasoning",
+  "effort",
+  "variant",
+  "thinking",
+]);
+
+/** The reasoning select the composer's effort slider drives, or null when the model has none. */
+export function findReasoningDescriptor(
+  selectDescriptors: ReadonlyArray<SelectDescriptor>,
+): SelectDescriptor | null {
+  return (
+    selectDescriptors.find(
+      (descriptor) => REASONING_DESCRIPTOR_IDS.has(descriptor.id) && descriptor.options.length > 1,
+    ) ?? null
+  );
+}
+
+/** The slider step for a selected value, falling back to the provider default, then the first. */
+export function resolveEffortStepIndex(
+  descriptor: SelectDescriptor,
+  selectedValue: string | null,
+): number {
+  const selected = descriptor.options.findIndex((option) => option.id === selectedValue);
+  if (selected >= 0) return selected;
+  return Math.max(
+    0,
+    descriptor.options.findIndex((option) => option.isDefault),
+  );
+}
+
+/** Shared selection state and writers for the traits menu and the composer effort popover. */
+function useTraitsController({
   provider,
   instanceId,
   models,
@@ -294,8 +336,10 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   reportedModelSelection,
   allowPromptInjectedEffort = true,
   planModeEnabled,
-  ...persistence
-}: TraitsMenuContentProps & TraitsPersistence) {
+  persistence,
+}: Omit<TraitsMenuContentProps, "triggerClassName" | "isComposerOwned" | "onOpenModelPicker"> & {
+  persistence: TraitsPersistence;
+}) {
   const modelSelection =
     instanceId && model ? { instanceId, model, options: modelOptions ?? [] } : null;
   const setProviderModelOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
@@ -317,16 +361,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     },
     [instanceId, model, persistence, provider, setProviderModelOptions],
   );
-  const {
-    descriptors,
-    selectDescriptors,
-    booleanDescriptors,
-    primarySelectDescriptor,
-    ultrathinkPromptControlled,
-    ultrathinkInBodyText,
-    hasAnyControls,
-    modelIsUnavailable,
-  } = getTraitsSectionVisibility({
+  const visibility = getTraitsSectionVisibility({
     provider,
     models,
     model,
@@ -335,14 +370,13 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     allowPromptInjectedEffort,
     planModeEnabled,
   });
+  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled, ultrathinkInBodyText } =
+    visibility;
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
     updateModelOptions(buildProviderOptionSelectionsFromDescriptors(nextDescriptors));
   };
 
-  const handleSelectChange = (
-    descriptor: Extract<ProviderOptionDescriptor, { type: "select" }>,
-    value: string,
-  ) => {
+  const handleSelectChange = (descriptor: SelectDescriptor, value: string) => {
     if (!value) return;
     if (descriptor.promptInjectedValues?.includes(value)) {
       const nextPrompt =
@@ -359,6 +393,68 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     }
     updateDescriptors(replaceDescriptorCurrentValue(descriptors, descriptor.id, value));
   };
+  const handleBooleanChange = (descriptorId: string, value: boolean) => {
+    updateDescriptors(replaceDescriptorCurrentValue(descriptors, descriptorId, value));
+  };
+  /** The selected value, reading prompt-controlled ultrathink back into the primary select. */
+  const selectedSelectValue = (descriptor: SelectDescriptor) =>
+    ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id
+      ? "ultrathink"
+      : getDescriptorStringValue(descriptor, modelSelection, reportedModelSelection);
+  /** Body text that says "ultrathink" pins the primary select until the user removes it. */
+  const isSelectLocked = (descriptor: SelectDescriptor) =>
+    ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id;
+
+  return {
+    ...visibility,
+    modelSelection,
+    handleSelectChange,
+    handleBooleanChange,
+    selectedSelectValue,
+    isSelectLocked,
+  };
+}
+
+export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
+  provider,
+  instanceId,
+  models,
+  model,
+  prompt,
+  onPromptChange,
+  modelOptions,
+  reportedModelSelection,
+  allowPromptInjectedEffort = true,
+  planModeEnabled,
+  triggerClassName: _triggerClassName,
+  isComposerOwned: _isComposerOwned,
+  onOpenModelPicker: _onOpenModelPicker,
+  ...persistence
+}: TraitsMenuContentProps & TraitsPersistence) {
+  const {
+    descriptors,
+    selectDescriptors,
+    booleanDescriptors,
+    hasAnyControls,
+    modelIsUnavailable,
+    modelSelection,
+    handleSelectChange,
+    handleBooleanChange,
+    selectedSelectValue,
+    isSelectLocked,
+  } = useTraitsController({
+    provider,
+    ...(instanceId ? { instanceId } : {}),
+    models,
+    model,
+    prompt,
+    onPromptChange,
+    modelOptions,
+    reportedModelSelection,
+    allowPromptInjectedEffort,
+    planModeEnabled,
+    persistence,
+  });
 
   if (!hasAnyControls) {
     return null;
@@ -393,10 +489,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   return (
     <>
       {selectDescriptors.map((descriptor, index) => {
-        const selectedValue =
-          ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id
-            ? "ultrathink"
-            : (getDescriptorStringValue(descriptor, modelSelection, reportedModelSelection) ?? "");
+        const selectedValue = selectedSelectValue(descriptor) ?? "";
 
         return (
           <div key={descriptor.id}>
@@ -405,7 +498,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
               <div className="px-2 pt-1.5 pb-1 font-medium text-muted-foreground text-xs">
                 {descriptor.label}
               </div>
-              {ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id ? (
+              {isSelectLocked(descriptor) ? (
                 <div className="px-2 pb-1.5 text-muted-foreground/80 text-xs">
                   Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change this
                   option.
@@ -423,7 +516,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                     // Base UI keeps radio menus open by default. Close on pick so
                     // the traits menu behaves like the model picker.
                     closeOnClick
-                    disabled={ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id}
+                    disabled={isSelectLocked(descriptor)}
                   >
                     <span className="flex w-full min-w-0 flex-col">
                       <span className="flex w-full min-w-0 items-center justify-between gap-3">
@@ -463,9 +556,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
               <MenuRadioGroup
                 value={selectedValue}
                 onValueChange={(value) => {
-                  updateDescriptors(
-                    replaceDescriptorCurrentValue(descriptors, descriptor.id, value === "on"),
-                  );
+                  handleBooleanChange(descriptor.id, value === "on");
                 }}
               >
                 {(["on", "off"] as const).map((value) => (
@@ -579,6 +670,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   planModeEnabled,
   triggerClassName,
   isComposerOwned,
+  onOpenModelPicker,
   size = "sm",
   hidden = false,
   disabled = false,
@@ -624,6 +716,32 @@ export const TraitsPicker = memo(function TraitsPicker({
     reportedModelSelection,
   });
   const isCodexStyle = provider === "codex";
+
+  if (isComposerOwned) {
+    return (
+      <ComposerTraitsPicker
+        traitsInput={{
+          provider,
+          ...(instanceId ? { instanceId } : {}),
+          models,
+          model,
+          prompt,
+          onPromptChange,
+          modelOptions,
+          reportedModelSelection,
+          allowPromptInjectedEffort,
+          planModeEnabled,
+          persistence,
+        }}
+        triggerLabel={triggerLabel}
+        size={size}
+        hidden={hidden}
+        disabled={disabled}
+        {...(triggerClassName !== undefined ? { triggerClassName } : {})}
+        {...(onOpenModelPicker ? { onOpenModelPicker } : {})}
+      />
+    );
+  }
 
   return (
     <Menu
@@ -696,3 +814,239 @@ export const TraitsPicker = memo(function TraitsPicker({
     </Menu>
   );
 });
+
+const EFFORT_THUMB_SIZE = "2rem";
+
+/** The effort slider's dots sit under each thumb stop, so they share its edge-aligned math. */
+function effortStopPosition(index: number, stepCount: number): string {
+  const fraction = stepCount > 1 ? index / (stepCount - 1) : 0;
+  return `calc(${EFFORT_THUMB_SIZE} / 2 + (100% - ${EFFORT_THUMB_SIZE}) * ${fraction})`;
+}
+
+/**
+ * The composer's reasoning control: a bare label that opens the current step, the model it
+ * applies to, and a slider over the model's reasoning steps. Remaining traits (speed, context,
+ * agent) stay reachable below the slider.
+ */
+function ComposerTraitsPicker({
+  traitsInput,
+  triggerLabel,
+  size,
+  hidden,
+  disabled,
+  triggerClassName,
+  onOpenModelPicker,
+}: {
+  traitsInput: Parameters<typeof useTraitsController>[0];
+  triggerLabel: string;
+  size: ComposerControlSize;
+  hidden: boolean;
+  disabled: boolean;
+  triggerClassName?: string;
+  onOpenModelPicker?: () => void;
+}) {
+  const composerFloatingLayerProps = useComposerMenuProps();
+  const [open, setOpen] = useComposerMenuState(hidden || disabled);
+  const sliderInputRef = useRef<HTMLInputElement>(null);
+  const controller = useTraitsController(traitsInput);
+  const reasoningDescriptor = controller.modelIsUnavailable
+    ? null
+    : findReasoningDescriptor(controller.selectDescriptors);
+  const stepIndex = reasoningDescriptor
+    ? resolveEffortStepIndex(
+        reasoningDescriptor,
+        controller.selectedSelectValue(reasoningDescriptor),
+      )
+    : 0;
+  const steps = reasoningDescriptor?.options ?? [];
+  const reasoningLocked = reasoningDescriptor
+    ? controller.isSelectLocked(reasoningDescriptor)
+    : false;
+  const heading = steps[stepIndex]?.label ?? triggerLabel;
+  const otherSelects = controller.modelIsUnavailable
+    ? []
+    : controller.selectDescriptors.filter((descriptor) => descriptor !== reasoningDescriptor);
+  const booleans = controller.modelIsUnavailable ? [] : controller.booleanDescriptors;
+  const normalizedModel = normalizeModelSlug(traitsInput.model, traitsInput.provider);
+  const modelEntry = traitsInput.models.find((candidate) => candidate.slug === normalizedModel);
+  const modelLabel = modelEntry
+    ? getTriggerDisplayModelName(modelEntry)
+    : (traitsInput.model ?? "");
+
+  return (
+    <Popover open={open} onOpenChange={(next) => setOpen(next && !disabled)}>
+      <PopoverTrigger
+        render={
+          <ComposerControl
+            disabled={disabled}
+            aria-label={`Reasoning: ${triggerLabel}`}
+            data-composer-shortcut="composer.effort"
+            data-chat-composer-traits-trigger="true"
+            size={size}
+            className={cn(
+              "min-w-0 max-w-40 shrink-0 font-normal text-muted-foreground sm:max-w-48",
+              triggerClassName,
+            )}
+          />
+        }
+      >
+        <span className="min-w-0 truncate">{triggerLabel}</span>
+      </PopoverTrigger>
+      <PopoverPopup
+        {...composerFloatingLayerProps}
+        side="top"
+        align="end"
+        padding="none"
+        width="sm"
+        initialFocus={reasoningDescriptor && !reasoningLocked ? sliderInputRef : true}
+      >
+        <div className="flex flex-col gap-3 p-3" data-chat-composer-traits-popover="true">
+          <div className="flex min-w-0 flex-col items-center gap-0.5">
+            <div className="font-semibold text-base text-primary leading-6" aria-live="polite">
+              {heading}
+            </div>
+            {modelLabel ? (
+              onOpenModelPicker ? (
+                <button
+                  type="button"
+                  className="flex max-w-full cursor-pointer items-center gap-0.5 rounded-sm px-1 text-muted-foreground text-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  aria-label={`Change model, current ${modelLabel}`}
+                  onClick={() => {
+                    setOpen(false);
+                    onOpenModelPicker();
+                  }}
+                >
+                  <span className="min-w-0 truncate">{modelLabel}</span>
+                  <ChevronRightIcon aria-hidden="true" className="size-3.5 shrink-0" />
+                </button>
+              ) : (
+                <div className="max-w-full truncate text-muted-foreground text-sm">
+                  {modelLabel}
+                </div>
+              )
+            ) : null}
+          </div>
+          {reasoningDescriptor ? (
+            <SliderPrimitive.Root
+              value={stepIndex}
+              min={0}
+              max={steps.length - 1}
+              step={1}
+              thumbAlignment="edge"
+              disabled={reasoningLocked}
+              onValueChange={(value) => {
+                const option = steps[value];
+                if (option && value !== stepIndex) {
+                  controller.handleSelectChange(reasoningDescriptor, option.id);
+                }
+              }}
+              className="w-full data-disabled:opacity-64"
+            >
+              <SliderPrimitive.Control className="relative flex h-8 w-full cursor-pointer touch-none select-none items-center data-disabled:cursor-not-allowed">
+                <SliderPrimitive.Track className="relative h-8 w-full overflow-hidden rounded-full bg-foreground/8">
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-y-0 start-0 rounded-full bg-primary"
+                    style={{
+                      width: `calc(${EFFORT_THUMB_SIZE} + (100% - ${EFFORT_THUMB_SIZE}) * ${
+                        steps.length > 1 ? stepIndex / (steps.length - 1) : 0
+                      })`,
+                    }}
+                  />
+                  {steps.map((option, index) => (
+                    <span
+                      key={option.id}
+                      aria-hidden="true"
+                      className={cn(
+                        "absolute top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full",
+                        index < stepIndex ? "bg-primary-foreground/70" : "bg-muted-foreground/50",
+                      )}
+                      style={{ left: effortStopPosition(index, steps.length) }}
+                    />
+                  ))}
+                  <SliderPrimitive.Thumb
+                    inputRef={sliderInputRef}
+                    getAriaLabel={() => reasoningDescriptor.label}
+                    getAriaValueText={(_formatted, value) => steps[value]?.label ?? ""}
+                    className="size-8 rounded-full bg-white shadow-md ring-1 ring-black/8 outline-none has-focus-visible:ring-2 has-focus-visible:ring-inset has-focus-visible:ring-ring"
+                  />
+                </SliderPrimitive.Track>
+              </SliderPrimitive.Control>
+            </SliderPrimitive.Root>
+          ) : null}
+          {reasoningLocked ? (
+            <div className="text-pretty text-muted-foreground text-xs">
+              Your prompt contains &quot;ultrathink&quot; in the text. Remove it to change{" "}
+              {reasoningDescriptor?.label.toLowerCase()}.
+            </div>
+          ) : null}
+          {controller.modelIsUnavailable
+            ? controller.descriptors.map((descriptor) => {
+                const value = getProviderOptionCurrentLabel(
+                  descriptor,
+                  controller.modelSelection,
+                  traitsInput.reportedModelSelection,
+                );
+                if (!value) return null;
+                return (
+                  <div
+                    key={descriptor.id}
+                    className="flex items-center justify-between gap-3 text-xs"
+                  >
+                    <span className="text-muted-foreground">{descriptor.label}</span>
+                    <span className="truncate text-foreground">{value}</span>
+                  </div>
+                );
+              })
+            : null}
+          {otherSelects.map((descriptor) => {
+            const selectedValue = controller.selectedSelectValue(descriptor) ?? "";
+            return (
+              <div key={descriptor.id} className="flex flex-col gap-1.5">
+                <span className="font-medium text-muted-foreground text-xs">
+                  {descriptor.label}
+                </span>
+                <ToggleGroup
+                  aria-label={descriptor.label}
+                  className="w-full flex-wrap"
+                  value={[selectedValue]}
+                  disabled={controller.isSelectLocked(descriptor)}
+                  onValueChange={(values) => {
+                    const value = values[0];
+                    if (typeof value === "string") controller.handleSelectChange(descriptor, value);
+                  }}
+                >
+                  {descriptor.options.map((option) => (
+                    <ToggleGroupItem
+                      key={option.id}
+                      value={option.id}
+                      className="flex-1"
+                      {...(option.description ? { title: option.description } : {})}
+                    >
+                      {option.label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+              </div>
+            );
+          })}
+          {booleans.map((descriptor) => (
+            <label
+              key={descriptor.id}
+              className="flex cursor-pointer items-center justify-between gap-3 text-xs"
+            >
+              <span className="font-medium text-muted-foreground">{descriptor.label}</span>
+              <Switch
+                size="sm"
+                checked={descriptor.currentValue === true}
+                onCheckedChange={(checked) =>
+                  controller.handleBooleanChange(descriptor.id, checked)
+                }
+              />
+            </label>
+          ))}
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}

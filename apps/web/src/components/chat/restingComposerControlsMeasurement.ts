@@ -93,16 +93,30 @@ export function measureRestingComposerControls(
   const separatorWidth = separator ? elementOuterWidth(separator) : 0;
   const overflow = controls.querySelector<HTMLElement>("[data-resting-controls-overflow]");
   const separatorAndGapWidth = separatorWidth > 0 ? separatorWidth + gap : 0;
+  // The expanded footer also holds the context meter and a flexible spacer that splits the
+  // row into left and right groups. Both always stay visible, so they count as fixed width;
+  // the spacer contributes only its minimum.
+  let extraFixedWidth = 0;
+  for (const fixed of controls.querySelectorAll<HTMLElement>("[data-resting-fixed-control]")) {
+    const width = elementOuterWidth(fixed);
+    if (width > 0) extraFixedWidth += width + gap;
+  }
+  const spacer = controls.querySelector<HTMLElement>("[data-resting-controls-spacer]");
+  if (spacer) {
+    extraFixedWidth += (Number.parseFloat(getComputedStyle(spacer).minWidth) || 0) + gap;
+  }
   const blocks = Array.from(controls.querySelectorAll<HTMLElement>("[data-resting-block]"));
   const widths = blocks.map(controlBlockWidths);
   return {
     gap,
     naturalFixedWidth:
       (picker ? providerModelPickerNaturalWidth(picker) : elementOuterWidth(leadingControl)) +
-      separatorAndGapWidth,
+      separatorAndGapWidth +
+      extraFixedWidth,
     minimumFixedWidth:
       (picker ? providerModelPickerMinimumWidth(picker) : elementOuterWidth(leadingControl)) +
-      separatorAndGapWidth,
+      separatorAndGapWidth +
+      extraFixedWidth,
     blockWidths: widths.map((width) => width.natural),
     iconOnlyBlockWidths: widths.map((width) => width.iconOnly),
     overflowWidth: overflow ? elementOuterWidth(overflow) : 0,

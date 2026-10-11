@@ -50,6 +50,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   terminalOpen?: boolean;
   open?: boolean;
   triggerClassName?: string;
+  /** Which trigger edge the picker popup lines up with. */
+  popupAlign?: "start" | "end";
   /** Aggregate settings can show a neutral value without claiming one provider is selected. */
   triggerLabel?: string;
   triggerAriaLabel?: string;
@@ -280,13 +282,15 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             </Badge>
           ) : null}
         </span>
-        <span aria-hidden="true" className="flex items-center">
-          <ComposerControlChevron size={size} />
-        </span>
+        {props.isComposerOwned ? null : (
+          <span aria-hidden="true" className="flex items-center">
+            <ComposerControlChevron size={size} />
+          </span>
+        )}
       </PopoverTrigger>
       <PopoverPopup
         {...(props.isComposerOwned ? composerFloatingLayerProps : {})}
-        align="start"
+        align={props.popupAlign ?? "start"}
         className="before:hidden"
         padding="none"
       >
