@@ -25,9 +25,9 @@ Use `mod+shift+m` to choose a model and `mod+shift+h` to choose a host.
 To step a new thread to the next machine instead of opening the menu, bind
 **Composer: Cycle Host** in Keybindings. It has no default shortcut.
 Use `mod+shift+e` for effort, `mod+shift+a` for access mode, `mod+shift+x` for the
-workspace, and `mod+shift+g` for the Git branch. The workspace menu includes the
-current checkout, a new worktree, and the previous worktree when available.
-Use `mod+shift+l` to reuse the previous worktree directly.
+workspace, and `mod+shift+g` for the Git branch. Choose **Local** or **New
+worktree** from the workspace menu. To continue in an existing worktree, use
+**New thread in this worktree** from the branch toolbar.
 
 In the model picker, press Left in an empty search field or Shift+Tab to reach
 the provider list. Use Up/Down to move and Enter to choose. Right returns to

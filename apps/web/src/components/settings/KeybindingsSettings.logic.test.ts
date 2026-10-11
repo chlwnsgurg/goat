@@ -30,7 +30,6 @@ describe("KeybindingsSettings.logic", () => {
       "composer.mode",
       "composer.workspace",
       "composer.branch",
-      "composer.previousWorktree",
       "modelPicker.previousProvider",
       "modelPicker.nextProvider",
       "thread.copyReference",
@@ -430,4 +429,17 @@ describe("KeybindingsSettings.logic", () => {
       }),
     ).toEqual(["Chat: New Local"]);
   });
+});
+
+it("does not offer the retired previous-worktree command", () => {
+  expect(
+    buildKeybindingRows(DEFAULT_RESOLVED_KEYBINDINGS, "").some(
+      (row) => String(row.command) === "composer.previousWorktree",
+    ),
+  ).toBe(false);
+  expect(
+    buildKeybindingCommandOptions([]).some(
+      (command) => String(command) === "composer.previousWorktree",
+    ),
+  ).toBe(false);
 });

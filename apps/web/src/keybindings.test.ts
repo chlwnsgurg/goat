@@ -1449,7 +1449,6 @@ describe("composer and pull request shortcuts", () => {
     ["a", "composer.mode"],
     ["x", "composer.workspace"],
     ["g", "composer.branch"],
-    ["l", "composer.previousWorktree"],
     ["c", "thread.copyReference"],
     ["k", "pullRequest.copyNumber"],
     ["Enter", "thread.steerQueuedMessage"],
@@ -1689,4 +1688,24 @@ describe("Usage shortcuts", () => {
       }),
     );
   });
+});
+
+it.each(["MacIntel", "Win32", "Linux"])("mod+shift+l has no default action on %s", (platform) => {
+  const key = event({
+    key: "l",
+    shiftKey: true,
+    metaKey: platform === "MacIntel",
+    ctrlKey: platform !== "MacIntel",
+  });
+  assert.strictEqual(
+    resolveShortcutCommand(key, DEFAULT_RESOLVED_KEYBINDINGS, {
+      platform,
+      context: { terminalFocus: false, draftThreadRoute: true },
+    }),
+    null,
+  );
+  const custom = compileResolvedKeybindingsConfig([
+    { key: "mod+shift+l", command: "composer.workspace" },
+  ]);
+  assert.strictEqual(resolveShortcutCommand(key, custom, { platform }), "composer.workspace");
 });
