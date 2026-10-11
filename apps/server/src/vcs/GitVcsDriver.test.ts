@@ -1220,6 +1220,65 @@ it.effect("workspace snapshot captures HEAD plus current tracked and untracked d
     assert.sameMembers([...result.addedUntrackedPaths], [".gitignore", "untracked.txt"]);
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
+it.effect("workspace snapshot keeps force-added ignored files with current disk content", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const cwd = yield* fs.makeTempDirectoryScoped();
+    const { git } = yield* makeCheckpointFixture(driver, cwd);
+    const added = [
+      "added.txt",
+      ".env",
+      "odd [name]\nfile.txt",
+      ":(exclude)literal.txt",
+      "-dash.txt",
+    ];
+    yield* fs.writeFileString(path.join(cwd, ".gitignore"), "*\n");
+    for (const name of [...added, "deleted.txt"])
+      yield* fs.writeFileString(path.join(cwd, name), "staged fixture");
+    yield* fs.symlink("missing-target", path.join(cwd, "ignored-link"));
+    yield* git(["--literal-pathspecs", "add", "-f", "--", ...added, "deleted.txt", "ignored-link"]);
+    for (const name of added) yield* fs.writeFileString(path.join(cwd, name), "disk fixture");
+    yield* fs.remove(path.join(cwd, "deleted.txt"));
+    yield* fs.writeFileString(path.join(cwd, "ignored-untracked.txt"), "excluded fixture");
+    const index = yield* fs.readFile(path.join(cwd, ".git/index"));
+    const result = yield* driver.captureWorkspaceSnapshot({
+      cwd,
+      snapshotRef: "refs/goat/snapshots/test",
+    });
+    assert.deepEqual(yield* fs.readFile(path.join(cwd, ".git/index")), index);
+    const treePaths = (yield* git([
+      "ls-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      result.commitOid,
+    ])).stdout.split("\0");
+    for (const name of added) assert.include(treePaths, name);
+    for (const name of added)
+      assert.strictEqual(
+        (yield* git(["show", `${result.commitOid}:${name}`])).stdout,
+        "disk fixture",
+      );
+    assert.strictEqual(
+      (yield* git(["show", `${result.commitOid}:ignored-link`])).stdout,
+      "missing-target",
+    );
+    assert.strictEqual(
+      (yield* git([
+        "ls-tree",
+        "-r",
+        result.commitOid,
+        "--",
+        "deleted.txt",
+        "ignored-untracked.txt",
+      ])).stdout,
+      "",
+    );
+    assert.deepEqual(result.addedUntrackedPaths, []);
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
 it.effect("workspace snapshot preserves index HEAD working tree and merge state", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -1357,8 +1416,50 @@ it.effect("workspace snapshot rejects HEAD movement before publishing", () =>
     );
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
+it.effect.each(["--others", "ls-tree"])(
+  "workspace snapshot rejects HEAD movement during final scan: %s",
+  (command) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const process = yield* VcsProcess.VcsProcess;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fs.makeTempDirectoryScoped();
+      const { git } = yield* makeCheckpointFixture(driver, cwd);
+      let untrackedScans = 0;
+      let movedHead = false;
+      const snapshot = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+        Effect.provideService(VcsProcess.VcsProcess, {
+          run: (input) =>
+            process.run(input).pipe(
+              Effect.tap(() => {
+                if (input.args.includes("--others")) untrackedScans++;
+                if (
+                  !movedHead &&
+                  input.args.includes(command) &&
+                  (command === "ls-tree" || untrackedScans === 2)
+                ) {
+                  movedHead = true;
+                  return git(["commit", "--allow-empty", "-m", "HEAD moves during final scan"]);
+                }
+                return Effect.void;
+              }),
+            ),
+        }),
+      );
+      const result = yield* snapshot
+        .captureWorkspaceSnapshot({ cwd, snapshotRef: "refs/goat/snapshots/test" })
+        .pipe(Effect.result);
+      assert.isTrue(movedHead);
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") assert.deepInclude(result.failure, { code: "head_changed" });
+      assert.strictEqual(
+        (yield* git(["show-ref", "--verify", "refs/goat/snapshots/test"]).pipe(Effect.result))._tag,
+        "Failure",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
 it.effect.each(
-  ["--others", "ls-tree"].map(
+  ["--others", "ls-tree", "--diff-filter=A", "--deleted"].map(
     (command) => [`workspace snapshot rejects truncated path scans: ${command}`, command] as const,
   ),
 )("%s", ([_name, command]) =>

@@ -1026,6 +1026,57 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         }
       }
 
+      if (input.strict) {
+        // Newly staged paths belong to the snapshot even when ignore rules match them.
+        // Read the real index, then stage disk content only into the private index.
+        const additions = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: [
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--name-only",
+            "--diff-filter=A",
+            "-z",
+            capturedHead!,
+            "--",
+          ],
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        const deletions = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: ["ls-files", "--deleted", "-z"],
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        if (additions.stdoutTruncated || deletions.stdoutTruncated)
+          return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+        // Git's deletion scan retains dangling symlinks, unlike a filesystem stat.
+        const deletedPaths = new Set(splitNullSeparatedGitStdoutPaths(deletions));
+        const presentPaths = splitNullSeparatedGitStdoutPaths(additions).filter(
+          (name) => !deletedPaths.has(name),
+        );
+        if (presentPaths.length > 0) {
+          yield* execute({
+            operation,
+            cwd: input.cwd,
+            args: [
+              "--literal-pathspecs",
+              ...indexConfig,
+              ...durableWrite,
+              "add",
+              ...(sparseCheckout ? ["--sparse"] : []),
+              "-f",
+              "--pathspec-from-file=-",
+              "--pathspec-file-nul",
+            ],
+            stdin: presentPaths.join("\0") + "\0",
+            env: commitEnv,
+          });
+        }
+      }
+
       const stageFiles = (exclusions: ReadonlyArray<string>) =>
         execute({
           operation,
@@ -1162,11 +1213,37 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const addedUntrackedPaths = [...new Set([...untrackedBefore, ...untrackedAfter])].filter(
         (name) => capturedPaths.has(name),
       );
-      yield* execute({
-        operation,
-        cwd: input.cwd,
-        args: [...durableWrite, "update-ref", input.ref, commitOid, ...(input.strict ? [""] : [])],
-      });
+      if (input.strict) {
+        // Hold HEAD's ref lock through publication so the captured parent stays current.
+        const published = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: [...durableWrite, "update-ref", "--stdin"],
+          stdin: `start\nverify HEAD ${capturedHead}\ncreate ${input.ref} ${commitOid}\nprepare\ncommit\n`,
+          allowNonZeroExit: true,
+        });
+        if (published.exitCode !== 0) {
+          if (
+            /cannot lock ref 'HEAD':.*(?:but expected|unable to resolve reference)/u.test(
+              published.stderr,
+            )
+          )
+            return yield* new GitWorkspaceSnapshotError({ code: "head_changed" });
+          return yield* new VcsProcessExitError({
+            operation,
+            command: "git update-ref",
+            cwd: input.cwd,
+            exitCode: published.exitCode,
+            detail: "Snapshot ref transaction failed.",
+          });
+        }
+      } else {
+        yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: [...durableWrite, "update-ref", input.ref, commitOid],
+        });
+      }
       return { snapshotRef: input.ref, commitOid, addedUntrackedPaths };
     }).pipe(Effect.ensuring(cleanupTempIndex));
   });
