@@ -247,6 +247,11 @@ opens it when selected. Your prompt only carries a reference: the agent reads th
 history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
 thread does not change it, and the agent cannot send messages to it unless you ask.
 
+In the desktop app you can also drop a thread from a machine you connected over SSH into a
+thread that runs on this computer; the agent reads it through that SSH connection. An
+environment connected only through T3 Connect or a URL has no such route, and neither does an
+agent running on another machine, so those drops are refused with the reason.
+
 Images keep their thumbnail shelf above the text and also get a chip at your cursor, so you can
 say exactly which image you mean. Deleting an image chip leaves the image on the shelf; removing
 the thumbnail asks first when the image is still mentioned in your text, then removes both. Files

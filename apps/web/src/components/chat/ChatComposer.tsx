@@ -246,6 +246,9 @@ import {
 import { matchComposerThreadItems } from "@t3tools/client-runtime/composerThreadItems";
 import { THREAD_CONTEXT_DROP_EVENT, threadContextDropTargetProps } from "./threadContextDrag";
 import { readThreadShell, useThreadShells } from "~/state/entities";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { environmentCatalog } from "~/connection/catalog";
+import { routeThreadContextRecords, settleThreadContextsForAgent } from "~/lib/threadContextRoute";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import type { ComposerContextClipboardFragment, ComposerContextRecord } from "@t3tools/contracts";
@@ -3279,6 +3282,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [attachmentTargetKey, runAttachmentImport],
   );
   /**
+   * Settles how this composer's agent reaches each attached thread: its own threads directly,
+   * another environment's through the saved SSH alias. Unreachable ones are dropped with the
+   * reason, read from the catalog at attach time so a just-added connection counts.
+   */
+  const routeThreadContexts = useCallback(
+    (records: ReadonlyArray<ThreadContextRecord>): ReadonlyArray<ThreadContextRecord> => {
+      const { routed, refusal } = routeThreadContextRecords({
+        records,
+        agentEnvironmentId: environmentId,
+        entries: appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries,
+        isDesktopRenderer: window.desktopBridge !== undefined,
+      });
+      if (refusal) toastManager.add({ type: "error", ...refusal });
+      return routed;
+    },
+    [environmentId],
+  );
+  /**
    * Brings records into this draft (paste, stash restore). Binaries are transferred only
    * when `sourceEnvironmentId` is given; the stash restores its own images and files.
    */
@@ -3290,6 +3311,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const rewritten = new Map<string, string>();
       const dependentAttachmentLocalIds = new Map<string, string>();
       const skippedDependentAttachmentIds = new Set<string>();
+      const importedThreads: ThreadContextRecord[] = [];
       // Resolve annotations before their dependent screenshot records even if a foreign
       // clipboard producer emitted the records in a different order.
       const orderedRecords = records.toSorted((left, right) =>
@@ -3366,12 +3388,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             break;
           }
           case "thread": {
-            // The agent can only read threads on its own server; a pasted foreign one is dropped.
-            if (record.environmentId !== environmentId) break;
-            addComposerDraftThreadContexts(composerDraftTarget, [record], {
-              appendReference: false,
-            });
-            rewritten.set(record.contextId, record.contextId);
+            // Routed together after the loop so a refused batch shows one reason.
+            importedThreads.push(record);
             break;
           }
           case "image":
@@ -3391,6 +3409,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             break;
         }
       }
+      const routedThreads = importedThreads.length > 0 ? routeThreadContexts(importedThreads) : [];
+      if (routedThreads.length > 0) {
+        addComposerDraftThreadContexts(composerDraftTarget, routedThreads, {
+          appendReference: false,
+        });
+        for (const record of routedThreads) rewritten.set(record.contextId, record.contextId);
+      }
       return rewritten;
     },
     [
@@ -3402,8 +3427,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       addComposerDraftThreadContexts,
       composerContextRecords,
       composerDraftTarget,
-      environmentId,
       importAttachmentRecord,
+      routeThreadContexts,
     ],
   );
   const importContextFragment = useCallback(
@@ -6100,23 +6125,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (!form) return;
     const onThreadDrop = (event: Event) => {
       const refs = (event as CustomEvent<ReadonlyArray<ScopedThreadRef>>).detail;
-      if (refs.some((ref) => ref.environmentId !== environmentId)) {
-        toastManager.add({
-          type: "error",
-          title: "Use threads from this environment",
-          description: "The agent can only read threads on its own server.",
-        });
-        return;
-      }
       const records = refs.flatMap((ref) => {
         const shell = readThreadShell(ref);
         return shell ? [threadContextRecord(ref, shell.title)] : [];
       });
-      if (records.length > 0) addComposerDraftThreadContexts(composerDraftTarget, records);
+      const routed = records.length > 0 ? routeThreadContexts(records) : [];
+      if (routed.length > 0) addComposerDraftThreadContexts(composerDraftTarget, routed);
     };
     form.addEventListener(THREAD_CONTEXT_DROP_EVENT, onThreadDrop);
     return () => form.removeEventListener(THREAD_CONTEXT_DROP_EVENT, onThreadDrop);
-  }, [addComposerDraftThreadContexts, composerDraftTarget, environmentId]);
+  }, [addComposerDraftThreadContexts, composerDraftTarget, routeThreadContexts]);
 
   const onComposerMentionDragLeaveCapture = (event: React.DragEvent<HTMLFormElement>) => {
     if (!dataTransferHasComposerMention(event.dataTransfer.types)) return;
@@ -6391,7 +6409,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         terminalContexts: composerTerminalContextsRef.current,
         previewAnnotations: composerPreviewAnnotations,
         reviewComments: composerReviewComments,
-        threadContexts: composerThreadContexts,
+        threadContexts: [
+          ...settleThreadContextsForAgent({
+            records: composerThreadContexts,
+            agentEnvironmentId: environmentId,
+            entries: appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries,
+            isDesktopRenderer: window.desktopBridge !== undefined,
+          }),
+        ],
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -6442,6 +6467,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerTerminalContextsRef,
       composerPreviewAnnotations,
       composerReviewComments,
+      composerThreadContexts,
       focusComposer,
       environmentId,
       primaryEnvironmentId,

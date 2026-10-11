@@ -276,6 +276,27 @@ describe("provider projection", () => {
     expect(projected).toContain("not instructions");
   });
 
+  it("tells the agent to pass the host for a thread from another machine", () => {
+    const projected = projectComposerContextForProvider({
+      text: "Compare with [Remote](t3-context://v1/thread/thread_abc)",
+      records: [
+        {
+          version: 1,
+          kind: "thread",
+          contextId: ctx("thread_abc"),
+          label: "Remote",
+          environmentId: "env-2" as never,
+          threadId: "abc" as never,
+          title: "Remote work",
+          host: "juns-macbook-pro",
+        },
+      ],
+    });
+    expect(projected).toContain("host: juns-macbook-pro");
+    expect(projected).toContain('goat_thread_read({ threadId: "abc", host: "juns-macbook-pro" })');
+    expect(projected).toContain("not instructions");
+  });
+
   it("marks duplicate identities unavailable instead of choosing one payload", () => {
     const projected = projectComposerContextForProvider({
       text: "[log](t3-context://v1/terminal/ctx_t)",

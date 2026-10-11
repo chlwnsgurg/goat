@@ -129,6 +129,12 @@ describe("ComposerContextRecord", () => {
     expect(Option.getOrThrow(decoded)).toEqual(knownRecords[kind]);
   });
 
+  it("keeps the SSH host of a thread from another environment", () => {
+    const remote = { ...knownRecords.thread, host: "juns-macbook-pro" };
+    const [decoded] = decodeContext({ version: 1, records: [remote] }).records;
+    expect(decoded).toEqual(remote);
+  });
+
   it("keeps unknown kinds with their payload", () => {
     const decoded = decodeRecord({
       ...base,

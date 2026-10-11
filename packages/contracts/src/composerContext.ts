@@ -222,8 +222,10 @@ export const SkillContextRecord = Schema.Struct({
 export type SkillContextRecord = typeof SkillContextRecord.Type;
 
 /**
- * Another thread on the same server, attached so the agent can read its history through
- * `goat_thread_read`. Only identity travels; the title is a display snapshot.
+ * Another thread, attached so the agent can read its history through `goat_thread_read`.
+ * Only identity travels; the title is a display snapshot. A thread from another environment
+ * carries `host`, the SSH alias the agent's own server routes the thread tools to; a thread
+ * on the agent's server omits it.
  */
 export const ThreadContextRecord = Schema.Struct({
   ...recordBase,
@@ -231,6 +233,7 @@ export const ThreadContextRecord = Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
   title: ContextLabel,
+  host: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(255))),
 });
 export type ThreadContextRecord = typeof ThreadContextRecord.Type;
 
