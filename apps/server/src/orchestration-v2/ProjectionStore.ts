@@ -136,6 +136,15 @@ export class ProjectionStoreReadError extends Schema.TaggedError<ProjectionStore
   }
 }
 
+export class ServerActivityReadError extends Schema.TaggedError<ServerActivityReadError>()(
+  "ServerActivityReadError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Failed to read server activity.";
+  }
+}
+
 export const ProjectionStoreV2Error = Schema.Union([
   ProjectionStoreSetupError,
   ProjectionStoreApplyEventError,
@@ -352,6 +361,7 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
+  readonly getServerActivity: () => Effect.Effect<"idle" | "busy", ServerActivityReadError>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
@@ -5938,6 +5948,57 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       canStartQueuedRun,
       getPendingNativeUserInputs,
       hasUnpairedRunInterruptRequest,
+      getServerActivity: () =>
+        sql<{ busy: number }>`SELECT EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_runs
+        WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+          AND (status <> 'queued' OR json_extract(payload_json, '$.queueHeld') IS NOT 1)
+        LIMIT 1
+      ) OR EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_nodes AS work
+        WHERE work.status IN ('pending', 'running', 'waiting')
+          AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run
+            WHERE run.run_id = work.run_id AND (run.status = 'rolled_back'
+              OR (work.status = 'pending' AND work.started_at IS NULL AND run.status = 'queued'
+                AND json_extract(run.payload_json, '$.queueHeld') IS 1)))
+        LIMIT 1
+      ) OR EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_subagents AS work
+        WHERE work.status IN ('pending', 'running', 'waiting')
+          AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run
+            WHERE run.run_id = work.run_id AND (run.status = 'rolled_back'
+              OR (work.status = 'pending' AND work.started_at IS NULL AND run.status = 'queued'
+                AND json_extract(run.payload_json, '$.queueHeld') IS 1)))
+        LIMIT 1
+      ) OR EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_turn_items AS work
+        WHERE work.type IN ('command_execution', 'dynamic_tool', 'subagent')
+          AND work.status IN ('pending', 'running', 'waiting')
+          AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run
+            WHERE run.run_id = work.run_id AND (run.status = 'rolled_back'
+              OR (work.status = 'pending' AND json_extract(work.payload_json, '$.startedAt') IS NULL AND run.status = 'queued'
+                AND json_extract(run.payload_json, '$.queueHeld') IS 1)))
+        LIMIT 1
+      ) OR EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_provider_turns AS work
+        LEFT JOIN orchestration_v2_projection_nodes AS node ON node.node_id = work.node_id
+        WHERE work.status IN ('pending', 'running')
+          AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run
+            WHERE run.run_id = node.run_id AND (run.status = 'rolled_back'
+              OR (work.status = 'pending' AND work.started_at IS NULL AND run.status = 'queued'
+                AND json_extract(run.payload_json, '$.queueHeld') IS 1)))
+        LIMIT 1
+      ) OR EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_provider_threads
+        WHERE has_pending_background_work = 1
+        LIMIT 1
+      ) OR EXISTS(
+        SELECT 1 FROM orchestration_v2_projection_runtime_requests WHERE status = 'pending'
+        LIMIT 1
+      ) AS busy`.pipe(
+          Effect.map((rows) => (rows[0]?.busy === 1 ? ("busy" as const) : ("idle" as const))),
+          Effect.mapError((cause) => new ServerActivityReadError({ cause })),
+        ),
       getMessageCount,
       getNextTurnItemOrdinal,
       getTurnItem,
@@ -6195,6 +6256,80 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             !projection.turnItems.some((item) => item.id === resultId)
           );
         }),
+      getServerActivity: () =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            Array.from(state.projections.values()).some(
+              (projection) =>
+                projection.runs.some(
+                  (run) =>
+                    ["preparing", "starting", "running", "waiting"].includes(run.status) ||
+                    (run.status === "queued" && run.queueHeld !== true),
+                ) ||
+                projection.nodes.some(
+                  (work) =>
+                    ["pending", "running", "waiting"].includes(work.status) &&
+                    !projection.runs.some(
+                      (run) =>
+                        run.id === work.runId &&
+                        (run.status === "rolled_back" ||
+                          (work.status === "pending" &&
+                            work.startedAt === null &&
+                            run.status === "queued" &&
+                            run.queueHeld === true)),
+                    ),
+                ) ||
+                projection.subagents.some(
+                  (work) =>
+                    ["pending", "running", "waiting"].includes(work.status) &&
+                    !projection.runs.some(
+                      (run) =>
+                        run.id === work.runId &&
+                        (run.status === "rolled_back" ||
+                          (work.status === "pending" &&
+                            work.startedAt === null &&
+                            run.status === "queued" &&
+                            run.queueHeld === true)),
+                    ),
+                ) ||
+                projection.turnItems.some(
+                  (work) =>
+                    ["command_execution", "dynamic_tool", "subagent"].includes(work.type) &&
+                    ["pending", "running", "waiting"].includes(work.status) &&
+                    !projection.runs.some(
+                      (run) =>
+                        run.id === work.runId &&
+                        (run.status === "rolled_back" ||
+                          (work.status === "pending" &&
+                            work.startedAt === null &&
+                            run.status === "queued" &&
+                            run.queueHeld === true)),
+                    ),
+                ) ||
+                projection.providerTurns.some(
+                  (work) =>
+                    ["pending", "running"].includes(work.status) &&
+                    !projection.runs.some(
+                      (run) =>
+                        (run.status === "rolled_back" ||
+                          (work.status === "pending" &&
+                            work.startedAt === null &&
+                            run.status === "queued" &&
+                            run.queueHeld === true)) &&
+                        projection.nodes.some(
+                          (node) => node.id === work.nodeId && node.runId === run.id,
+                        ),
+                    ),
+                ) ||
+                projection.providerThreads.some(
+                  (thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0,
+                ) ||
+                projection.runtimeRequests.some((request) => request.status === "pending"),
+            )
+              ? ("busy" as const)
+              : ("idle" as const),
+          ),
+        ),
       getMessageCount: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) => state.projections.get(threadId)?.messages.length ?? 0),

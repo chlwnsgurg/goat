@@ -1,8 +1,11 @@
+import packageJson from "../package.json" with { type: "json" };
+import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  EnvironmentHttpForbiddenError,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
@@ -266,7 +269,12 @@ export function isLoopbackHostname(hostname: string): boolean {
     .trim()
     .toLowerCase()
     .replace(/^\[(.*)\]$/, "$1");
-  return LOOPBACK_HOSTNAMES.has(normalizedHostname);
+  if (LOOPBACK_HOSTNAMES.has(normalizedHostname)) return true;
+  const ipv4 = normalizedHostname.replace(/^::ffff:/, "");
+  return (
+    /^127\.(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d{0,2})$/.test(ipv4) &&
+    ipv4.split(".").every((part) => Number(part) <= 255)
+  );
 }
 
 export function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
@@ -304,15 +312,33 @@ export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
   "metadata",
   Effect.fnUntraced(function* (handlers) {
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
-    return handlers.handle(
-      "descriptor",
-      Effect.fn("environment.metadata.descriptor")(function* (args) {
-        yield* annotateEnvironmentRequest(args.endpoint.name);
-        return yield* serverEnvironment.getDescriptor;
-      }, traceRelayRequest),
-    );
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    return handlers
+      .handle(
+        "descriptor",
+        Effect.fn("environment.metadata.descriptor")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* serverEnvironment.getDescriptor;
+        }, traceRelayRequest),
+      )
+      .handle(
+        "sshActivity",
+        Effect.fn("environment.metadata.sshActivity")(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const remoteAddress = Option.getOrUndefined(request.remoteAddress);
+          if (remoteAddress !== undefined && !isLoopbackHostname(remoteAddress)) {
+            return yield* new EnvironmentHttpForbiddenError({
+              message: "SSH activity requires a loopback peer.",
+            });
+          }
+          const activity = yield* projections
+            .getServerActivity()
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+          return { activity, serverVersion: packageJson.version, pid: process.pid };
+        }),
+      );
   }),
-);
+).pipe(Layer.provide(ProjectionStore.layer));
 
 class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{
   readonly cause: unknown;

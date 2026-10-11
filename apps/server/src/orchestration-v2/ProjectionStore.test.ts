@@ -4963,3 +4963,487 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 });
+
+it.effect("reads server activity using a bounded projection query", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    assert.strictEqual(yield* store.getServerActivity(), "idle");
+    for (const status of [
+      "preparing",
+      "starting",
+      "running",
+      "waiting",
+      "queued",
+      "completed",
+      "failed",
+      "interrupted",
+    ]) {
+      yield* sql`DELETE FROM orchestration_v2_projection_runs`;
+      yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('activity-run', 'activity-thread', 1, 'codex', ${status}, '2026-10-11T00:00:00Z', '{}')`;
+      assert.strictEqual(
+        yield* store.getServerActivity(),
+        ["preparing", "starting", "running", "waiting", "queued"].includes(status)
+          ? "busy"
+          : "idle",
+      );
+    }
+    yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'queued', payload_json = '{"queueHeld":true}'`;
+    assert.strictEqual(yield* store.getServerActivity(), "idle");
+    yield* sql`UPDATE orchestration_v2_projection_runs SET payload_json = '{"queueHeld":false}'`;
+    assert.strictEqual(yield* store.getServerActivity(), "busy");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+for (const [name, layer] of [
+  ["SQLite", layerTest],
+  ["replay", ProjectionStore.layerMemory],
+] as const) {
+  it.effect(`${name} keeps post-root background work busy until it finishes`, () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("activity-background");
+      const now = yield* DateTime.now;
+      const projection = yield* store.getThreadProjection(threadId);
+      const run = projection.runs[0]!;
+      const item = projection.turnItems[0]!;
+      if (item.type !== "command_execution" || run.rootNodeId === null)
+        throw new Error("Invalid root fixture");
+      const rootNodeId = run.rootNodeId;
+      yield* store.apply({
+        id: EventId.make("activity:item-ended"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...item, status: "completed", completedAt: now },
+      });
+      yield* store.apply({
+        id: EventId.make("activity:root-ended"),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...run, status: "completed", completedAt: now },
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "idle");
+      const nodeId = NodeId.make("activity:native-child");
+      const node = {
+        id: nodeId,
+        threadId,
+        runId: null,
+        parentNodeId: rootNodeId,
+        rootNodeId: rootNodeId,
+        kind: "subagent" as const,
+        status: "running" as const,
+        countsForRun: false,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      };
+      yield* store.apply({
+        id: EventId.make("activity:child-started"),
+        type: "node.updated",
+        threadId,
+        occurredAt: now,
+        payload: node,
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "busy");
+      yield* store.apply({
+        id: EventId.make("activity:child-ended"),
+        type: "node.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...node, status: "completed", completedAt: now },
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "idle");
+      const task = {
+        id: nodeId,
+        threadId,
+        runId: run.id,
+        parentNodeId: rootNodeId,
+        origin: "provider_native" as const,
+        createdBy: "agent" as const,
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Background work",
+        title: null,
+        model: null,
+        status: "running" as const,
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      };
+      yield* store.apply({
+        id: EventId.make("activity:task-started"),
+        type: "subagent.updated",
+        threadId,
+        occurredAt: now,
+        payload: task,
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "busy");
+      yield* store.apply({
+        id: EventId.make("activity:task-ended"),
+        type: "subagent.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...task, status: "completed", completedAt: now },
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "idle");
+      for (const type of ["command_execution", "dynamic_tool", "subagent"] as const) {
+        const base = {
+          ...item,
+          id: TurnItemId.make(`activity:${type}`),
+          runId: null,
+          status: "running" as const,
+        };
+        const work =
+          type === "command_execution"
+            ? { ...base, type, input: "background work" }
+            : type === "dynamic_tool"
+              ? { ...base, type, input: "background work", toolName: "tool" }
+              : {
+                  ...base,
+                  type,
+                  prompt: "background work",
+                  childThreadId: null,
+                  subagentId: nodeId,
+                  origin: "provider_native" as const,
+                  driver,
+                  providerInstanceId,
+                  result: null,
+                };
+        yield* store.apply({
+          id: EventId.make(`activity:${type}:started`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: work,
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "busy");
+        yield* store.apply({
+          id: EventId.make(`activity:${type}:ended`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...work, status: "completed", completedAt: now },
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "idle");
+      }
+      const providerTurn = {
+        id: ProviderTurnId.make("activity:provider-turn"),
+        providerThreadId: ProviderThreadId.make("activity:provider"),
+        nodeId,
+        runAttemptId: null,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running" as const,
+        startedAt: now,
+        completedAt: null,
+      };
+      yield* store.apply({
+        id: EventId.make("activity:provider-turn-started"),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: providerTurn,
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "busy");
+      yield* store.apply({
+        id: EventId.make("activity:provider-turn-ended"),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...providerTurn, status: "completed", completedAt: now },
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "idle");
+      const request = {
+        id: RuntimeRequestId.make("activity:input"),
+        nodeId,
+        providerTurnId: providerTurn.id,
+        nativeRequestRef: null,
+        kind: "user_input" as const,
+        status: "pending" as const,
+        responseCapability: { type: "message" as const },
+        createdAt: now,
+        resolvedAt: null,
+      };
+      yield* store.apply({
+        id: EventId.make("activity:input-pending"),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: now,
+        payload: request,
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "busy");
+      yield* store.apply({
+        id: EventId.make("activity:input-resolved"),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...request, status: "resolved", resolvedAt: now },
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "idle");
+      const providerThread = {
+        id: ProviderThreadId.make("activity:provider"),
+        driver,
+        providerInstanceId,
+        providerSessionId: null,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle" as const,
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        pendingBackgroundTasks: [{ taskId: "native-background", kind: "subagent" as const }],
+      };
+      yield* store.apply({
+        id: EventId.make("activity:roster-started"),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        payload: providerThread,
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "busy");
+      yield* store.apply({
+        id: EventId.make("activity:roster-ended"),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...providerThread, pendingBackgroundTasks: [] },
+      });
+      assert.strictEqual(yield* store.getServerActivity(), "idle");
+    }).pipe(Effect.provide(layer)),
+  );
+}
+
+for (const [name, layer] of [
+  ["SQLite", layerTest],
+  ["replay", ProjectionStore.layerMemory],
+] as const) {
+  it.effect(
+    `${name} ignores pending work owned by a held queue but counts runnable and started work`,
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = yield* addRolledBackRecoveryCandidate("activity-held");
+        const now = yield* DateTime.now;
+        const projection = yield* store.getThreadProjection(threadId);
+        const run = projection.runs[0]!;
+        const item = projection.turnItems[0]!;
+        if (run.rootNodeId === null) throw new Error("Root node missing");
+        const rootNodeId = run.rootNodeId;
+        const heldRun = {
+          ...run,
+          status: "queued" as const,
+          queueHeld: true,
+          startedAt: null,
+          completedAt: null,
+        };
+        yield* store.apply({
+          id: EventId.make("held:run"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: heldRun,
+        });
+        yield* store.apply({
+          id: EventId.make("held:item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...item, status: "pending", startedAt: null, completedAt: null },
+        });
+        const node = {
+          id: rootNodeId,
+          threadId,
+          runId: run.id,
+          parentNodeId: null,
+          rootNodeId,
+          kind: "root_turn" as const,
+          status: "pending" as const,
+          countsForRun: true,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: null,
+          completedAt: null,
+        };
+        yield* store.apply({
+          id: EventId.make("held:node"),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: node,
+        });
+        const turn = {
+          id: ProviderTurnId.make("held:turn"),
+          providerThreadId: ProviderThreadId.make("held:provider"),
+          nodeId: rootNodeId,
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "pending" as const,
+          startedAt: null,
+          completedAt: null,
+        };
+        yield* store.apply({
+          id: EventId.make("held:turn"),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt: now,
+          payload: turn,
+        });
+        const task = {
+          id: NodeId.make("held:task"),
+          threadId,
+          runId: run.id,
+          parentNodeId: rootNodeId,
+          origin: "app_owned" as const,
+          createdBy: "agent" as const,
+          driver,
+          providerInstanceId,
+          providerThreadId: null,
+          childThreadId: null,
+          nativeTaskRef: null,
+          prompt: "Queued delegation",
+          title: null,
+          model: null,
+          status: "pending" as const,
+          result: null,
+          startedAt: null,
+          completedAt: null,
+          updatedAt: now,
+        };
+        yield* store.apply({
+          id: EventId.make("held:task"),
+          type: "subagent.updated",
+          threadId,
+          occurredAt: now,
+          payload: task,
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "idle");
+        yield* store.apply({
+          id: EventId.make("held:runnable"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...heldRun, queueHeld: false },
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "busy");
+        yield* store.apply({
+          id: EventId.make("held:held-again"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: heldRun,
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "idle");
+        yield* store.apply({
+          id: EventId.make("held:pending-but-started"),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...node, startedAt: now },
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "busy");
+        yield* store.apply({
+          id: EventId.make("held:already-running"),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...node, status: "running", startedAt: now },
+        });
+        assert.strictEqual(yield* store.getServerActivity(), "busy");
+      }).pipe(Effect.provide(layer)),
+  );
+}
+
+it.effect("uses indexed activity predicates on populated projections", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const tables = [
+      [
+        "runs",
+        "run_id,thread_id,ordinal,provider,status,requested_at,payload_json",
+        "'run:'||n,'history:'||n,1,'codex','completed','2026-10-11','{}'",
+      ],
+      [
+        "nodes",
+        "node_id,thread_id,root_node_id,kind,status,payload_json",
+        "'node:'||n,'history:'||n,'node:'||n,'root_turn','completed','{}'",
+      ],
+      [
+        "subagents",
+        "subagent_id,thread_id,parent_node_id,provider,origin,status,updated_at,payload_json",
+        "'task:'||n,'history:'||n,'node:'||n,'codex','provider_native','completed','2026-10-11','{}'",
+      ],
+      [
+        "turn_items",
+        "turn_item_id,thread_id,ordinal,type,status,updated_at,payload_json",
+        "'item:'||n,'history:'||n,1,'command_execution','completed','2026-10-11','{}'",
+      ],
+      [
+        "provider_turns",
+        "provider_turn_id,thread_id,provider_thread_id,node_id,ordinal,status,payload_json",
+        "'turn:'||n,'history:'||n,'provider:'||n,'node:'||n,1,'completed','{}'",
+      ],
+      [
+        "provider_threads",
+        "provider_thread_id,provider,status,updated_at,payload_json",
+        "'provider:'||n,'codex','idle','2026-10-11','{}'",
+      ],
+      [
+        "runtime_requests",
+        "runtime_request_id,thread_id,node_id,kind,status,created_at,payload_json",
+        "'request:'||n,'history:'||n,'node:'||n,'user_input','resolved','2026-10-11','{}'",
+      ],
+    ];
+    for (const [table, columns, values] of tables) {
+      yield* sql.unsafe(`WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM history WHERE n < 1000)
+      INSERT INTO orchestration_v2_projection_${table} (${columns}) SELECT ${values} FROM history`);
+    }
+    yield* sql`ANALYZE`;
+    const { statements, tracer } = traceSqlStatements();
+    assert.strictEqual(yield* store.getServerActivity().pipe(Effect.withTracer(tracer)), "idle");
+    const query = statements.find((statement) => statement.includes("AS busy"));
+    assert.isDefined(query);
+    const plan = yield* sql.unsafe<{ detail: string }>(`EXPLAIN QUERY PLAN ${query}`);
+    const details = plan.map((row) => row.detail);
+    assert.isFalse(
+      details.some((detail) => /^SCAN (?!CONSTANT ROW)/.test(detail)),
+      details.join("\n"),
+    );
+    for (const name of [
+      "nodes",
+      "subagents",
+      "turn_items",
+      "provider_turns",
+      "provider_threads",
+      "runtime_requests",
+    ]) {
+      assert.isTrue(
+        details.some((detail) =>
+          detail.includes(`orchestration_v2_projection_${name}_activity_idx`),
+        ),
+        details.join("\n"),
+      );
+    }
+  }).pipe(Effect.provide(layerTest)),
+);

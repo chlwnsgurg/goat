@@ -446,11 +446,24 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
-class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
-  HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
-    success: ExecutionEnvironmentDescriptor,
-  }),
-) {}
+export const SshServerActivity = Schema.Struct({
+  activity: Schema.Literals(["idle", "busy"]),
+  serverVersion: Schema.String,
+  pid: Schema.Int,
+});
+
+class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata")
+  .add(
+    HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
+      success: ExecutionEnvironmentDescriptor,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("sshActivity", "/.well-known/t3/activity", {
+      success: SshServerActivity,
+      error: [EnvironmentInternalError, EnvironmentHttpForbiddenError],
+    }),
+  ) {}
 
 class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   .add(

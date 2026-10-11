@@ -387,7 +387,72 @@ const protocol = Command.make("protocol", {
   ),
 );
 
+export const readSshServerActivity = async (
+  port: number,
+  pid?: number,
+): Promise<"idle" | "busy" | "unknown"> => {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "unknown";
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: "idle" | "busy" | "unknown") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      request.destroy();
+      resolve(value);
+    };
+    const request = NodeHttp.get(
+      { hostname: "127.0.0.1", port, path: "/.well-known/t3/activity" },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 4096) {
+            finish("unknown");
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.once("error", () => finish("unknown"));
+        response.once("end", () => {
+          try {
+            const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            if (
+              response.statusCode !== 200 ||
+              !value ||
+              !["idle", "busy"].includes(value.activity) ||
+              !protocolVersion(value.serverVersion) ||
+              !protocolInteger(value.pid) ||
+              (pid !== undefined && value.pid !== pid)
+            )
+              finish("unknown");
+            else finish(value.activity);
+          } catch {
+            finish("unknown");
+          }
+        });
+      },
+    );
+    const deadline = setTimeout(() => finish("unknown"), 1500);
+    request.once("error", () => finish("unknown"));
+  });
+};
+
+const activity = Command.make("activity", {
+  port: Flag.Int("port"),
+  pid: Flag.Int("pid").pipe(Flag.optional),
+  shell: Flag.Boolean("shell").pipe(Flag.withDefault(false)),
+}).pipe(
+  Command.withHandler(({ port, pid }) =>
+    Effect.promise(async () => {
+      const value = await readSshServerActivity(port, Option.getOrUndefined(pid));
+      process.stdout.write(value + "\n");
+    }),
+  ),
+);
+
 export const sshHelperCommand = Command.make("__ssh-helper").pipe(
   Command.unlisted,
-  Command.withSubcommands([pickPort, waitReady, runtimePort, protocol]),
+  Command.withSubcommands([pickPort, waitReady, runtimePort, protocol, activity]),
 );

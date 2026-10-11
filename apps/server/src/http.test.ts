@@ -1,3 +1,4 @@
+import * as Option from "effect/Option";
 import { expect, it } from "@effect/vitest";
 import { describe, vi } from "vite-plus/test";
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
@@ -761,3 +762,144 @@ describe("downloadContentDisposition", () => {
     );
   });
 });
+
+describe("SSH activity HTTP", () => {
+  it.each([
+    { peer: "127.0.0.1", status: 200 },
+    { peer: "192.0.2.1", status: 403 },
+  ])(
+    "returns the activity response for peer $peer with status $status",
+    async ({ peer, status }) => {
+      const Etag = await import("effect/http/Etag");
+      const HttpApi = await import("effect/http-api/HttpApi");
+      const HttpApiBuilder = await import("effect/http-api/HttpApiBuilder");
+      const { EnvironmentHttpApi, EnvironmentId } = await import("@t3tools/contracts");
+      const ServerEnvironment = await import("./environment/ServerEnvironment.ts");
+      const Sqlite = await import("./persistence/Sqlite.ts");
+      const layerApp = HttpApiBuilder.layer(
+        HttpApi.make("environment").add(EnvironmentHttpApi.groups.metadata),
+      ).pipe(
+        Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
+        Layer.provide(
+          Layer.succeed(ServerEnvironment.ServerEnvironment, {
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("test")),
+            getDescriptor: Effect.die("Activity must not load descriptor"),
+          }),
+        ),
+        Layer.provide(Sqlite.layerMemory),
+        Layer.provide(Etag.layer),
+        Layer.provide(NodeHttpPlatform.layer),
+        Layer.provide(NodeServices.layer),
+      );
+      const { HttpServerRequest } = await import("effect/http");
+      const { handler, dispose } = HttpRouter.toWebHandler(layerApp, {
+        disableLogger: true,
+        middleware: (effect) =>
+          Effect.gen(function* () {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            return yield* effect.pipe(
+              Effect.provideService(
+                HttpServerRequest.HttpServerRequest,
+                request.modify({ remoteAddress: Option.some(peer) }),
+              ),
+            );
+          }),
+      });
+      try {
+        const response = await handler(
+          new Request("http://127.0.0.1/.well-known/t3/activity"),
+          Context.empty(),
+        );
+        expect(response.status).toBe(status);
+        if (status === 403) {
+          expect(await response.json()).toEqual({
+            _tag: "EnvironmentHttpForbiddenError",
+            message: "SSH activity requires a loopback peer.",
+          });
+          return;
+        }
+        expect(await response.json()).toEqual({
+          activity: "idle",
+          serverVersion: (await import("../package.json", { with: { type: "json" } })).default
+            .version,
+          pid: process.pid,
+        });
+      } finally {
+        await dispose();
+      }
+    },
+  );
+});
+
+it.effect("serves SSH activity to a real IPv4-mapped loopback peer", () =>
+  Effect.gen(function* () {
+    const HttpApi = yield* Effect.promise(() => import("effect/http-api/HttpApi"));
+    const HttpApiBuilder = yield* Effect.promise(() => import("effect/http-api/HttpApiBuilder"));
+    const { HttpServer, HttpServerRequest } = yield* Effect.promise(() => import("effect/http"));
+    const { EnvironmentHttpApi, EnvironmentId } = yield* Effect.promise(
+      () => import("@t3tools/contracts"),
+    );
+    const ServerEnvironment = yield* Effect.promise(
+      () => import("./environment/ServerEnvironment.ts"),
+    );
+    const Sqlite = yield* Effect.promise(() => import("./persistence/Sqlite.ts"));
+    const { readSshServerActivity } = yield* Effect.promise(() => import("./cli/sshHelper.ts"));
+    const peers: string[] = [];
+    const capturePeer = HttpRouter.middleware(
+      (effect) =>
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          peers.push(Option.getOrElse(request.remoteAddress, () => "unknown"));
+          return yield* effect;
+        }),
+      { global: true },
+    );
+    const layerApp = HttpApiBuilder.layer(
+      HttpApi.make("environment").add(EnvironmentHttpApi.groups.metadata),
+    ).pipe(
+      Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
+      Layer.provide(
+        Layer.succeed(ServerEnvironment.ServerEnvironment, {
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("native-activity-test")),
+          getDescriptor: Effect.die("unused descriptor"),
+        }),
+      ),
+      Layer.provide(Sqlite.layerMemory),
+    );
+    const services = yield* Layer.build(
+      HttpRouter.serve(Layer.merge(layerApp, capturePeer), { disableListenLog: true }).pipe(
+        Layer.provideMerge(NodeHttpServer.layerTest),
+      ),
+    );
+    const server = Context.get(services, HttpServer.HttpServer);
+    const origin = new URL(HttpServer.formatAddress(server.address));
+    origin.hostname = "127.0.0.1";
+    const client = HttpClient.mapRequest(
+      Context.get(services, HttpClient.HttpClient),
+      HttpClientRequest.setUrl(new URL("/.well-known/t3/activity", origin)),
+    );
+    const response = yield* client.get("/.well-known/t3/activity");
+    expect(response.status).toBe(200);
+    expect(yield* response.json).toMatchObject({
+      activity: "idle",
+      pid: process.pid,
+    });
+    expect(peers).toEqual(["::ffff:127.0.0.1"]);
+    expect(
+      yield* Effect.promise(() => readSshServerActivity(Number(origin.port), process.pid)),
+    ).toBe("idle");
+  }).pipe(Effect.scoped),
+);
+
+it.each(["::ffff:127.0.0.1", "::ffff:127.2.3.4", "::1", "127.9.8.7"])(
+  "accepts loopback peer %s",
+  (peer) => {
+    expect(isLoopbackHostname(peer)).toBe(true);
+  },
+);
+it.each(["::ffff:128.0.0.1", "::ffff:127.0.0.999", "192.0.2.1", "2001:db8::1"])(
+  "rejects non-loopback peer %s",
+  (peer) => {
+    expect(isLoopbackHostname(peer)).toBe(false);
+  },
+);

@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
 import packageJson from "../../package.json" with { type: "json" };
-import { readLiveSshRuntimeProtocol } from "./sshHelper.ts";
+import { readLiveSshRuntimeProtocol, readSshServerActivity } from "./sshHelper.ts";
 
 const startDescriptor = async (value: unknown) => {
   const server = NodeHttp.createServer((request, response) => {
@@ -284,5 +284,82 @@ it("bounds an active incomplete response by its total deadline", async () => {
       server.closeAllConnections();
     });
     NodeFS.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+describe("SSH server activity", () => {
+  it.each([
+    { activity: "idle", expected: "idle", status: 200 },
+    { activity: "busy", expected: "busy", status: 200 },
+    { activity: "broken", expected: "unknown", status: 200 },
+    { activity: "idle", expected: "unknown", status: 404 },
+  ])("handles $activity with HTTP $status", async ({ activity, expected, status }) => {
+    const server = NodeHttp.createServer((request, response) => {
+      expect(request.url).toBe("/.well-known/t3/activity");
+      response.writeHead(status);
+      response.end(
+        JSON.stringify({ activity, serverVersion: packageJson.version, pid: process.pid }),
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing port");
+    try {
+      expect(await readSshServerActivity(address.port, process.pid)).toBe(expected);
+      expect(await readSshServerActivity(address.port, process.pid + 1)).toBe("unknown");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+  it("returns unknown for unreachable servers", async () => {
+    const server = NodeHttp.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing port");
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    expect(await readSshServerActivity(address.port)).toBe("unknown");
+  });
+});
+
+it("activity CLI prints unknown with exit zero", async () => {
+  const moduleUrl = new URL("./sshHelper.ts", import.meta.url).href;
+  const script = `import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};
+import {Command} from ${JSON.stringify(import.meta.resolve("effect/cli"))};
+import {sshHelperCommand} from ${JSON.stringify(moduleUrl)};
+await Effect.runPromise(Command.runWith(sshHelperCommand,{version:'test'})(['activity','--port','0','--shell']));`;
+  const stdout = await new Promise<string>((resolve, reject) => {
+    NodeChildProcess.execFile(
+      process.execPath,
+      ["--input-type=module", "-e", script],
+      { timeout: 10000 },
+      (error, stdout, stderr) => {
+        if (error) reject(error);
+        else if (stderr.trim()) reject(new Error(stderr));
+        else resolve(stdout);
+      },
+    );
+  });
+  expect(stdout).toBe("unknown\n");
+});
+
+it("returns unknown when an activity response exceeds the deadline", async () => {
+  let received!: () => void;
+  const requestReceived = new Promise<void>((resolve) => {
+    received = resolve;
+  });
+  const server = NodeHttp.createServer(() => received());
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing port");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const result = readSshServerActivity(address.port);
+    await requestReceived;
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(await result).toBe("unknown");
+  } finally {
+    vi.useRealTimers();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
