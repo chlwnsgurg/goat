@@ -12,6 +12,7 @@ import * as Repositories from "../../../sourceControl/SourceControlRepositorySer
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
@@ -193,12 +194,36 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         );
         const thread = result.projection.thread;
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
+        const watching =
+          caller !== undefined && input.notifyOnCompletion !== false
+            ? yield* LaunchWatchService.LaunchWatchService.pipe(
+                Effect.flatMap((watches) =>
+                  watches.register({
+                    launcherThreadId: caller.id,
+                    host: null,
+                    threadId: thread.id,
+                    projectId: thread.projectId,
+                    title: thread.title,
+                    runId: run?.id ?? null,
+                  }),
+                ),
+                Effect.as(true),
+                // The thread exists either way; a watch that failed to save is reported, not fatal.
+                Effect.catch((error) =>
+                  Effect.logWarning("launch watch not recorded", {
+                    threadId: thread.id,
+                    cause: error,
+                  }).pipe(Effect.as(false)),
+                ),
+              )
+            : false;
         return {
           threadId: thread.id,
           projectId: thread.projectId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
           status: run?.status ?? null,
+          watching,
         };
       }),
   ),

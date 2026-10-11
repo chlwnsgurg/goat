@@ -495,6 +495,49 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
+/**
+ * A thread the calling thread is told about without polling: one it launched
+ * (goat_thread_launch, goat_ssh_thread_launch) or asked to watch. The caller is
+ * woken when a followed run ends, when the thread waits on a question, and
+ * once when its host stays unreachable.
+ */
+export const OrchestratorMcpThreadWatch = Schema.Struct({
+  host: OrchestratorMcpResultHost,
+  threadId: ThreadId,
+  title: Schema.NullOr(Schema.String),
+  /** Runs still to report; empty while the watch waits for the next goat_thread_send. */
+  pendingRunIds: Schema.Array(RunId),
+  lastReportedRunId: Schema.NullOr(RunId),
+  /** Set while the host cannot be reached. */
+  hostUnavailableSince: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type OrchestratorMcpThreadWatch = typeof OrchestratorMcpThreadWatch.Type;
+
+export const OrchestratorMcpThreadWatchInput = Schema.Struct({
+  threadId: ThreadId,
+  host: Schema.optional(OrchestratorMcpHost),
+});
+export type OrchestratorMcpThreadWatchInput = typeof OrchestratorMcpThreadWatchInput.Type;
+
+export const OrchestratorMcpThreadWatchResult = Schema.Struct({
+  watch: OrchestratorMcpThreadWatch,
+});
+export type OrchestratorMcpThreadWatchResult = typeof OrchestratorMcpThreadWatchResult.Type;
+
+export const OrchestratorMcpThreadUnwatchResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
+  threadId: ThreadId,
+  removed: Schema.Boolean,
+});
+export type OrchestratorMcpThreadUnwatchResult = typeof OrchestratorMcpThreadUnwatchResult.Type;
+
+export const OrchestratorMcpThreadWatchListResult = Schema.Struct({
+  watches: Schema.Array(OrchestratorMcpThreadWatch),
+});
+export type OrchestratorMcpThreadWatchListResult = typeof OrchestratorMcpThreadWatchListResult.Type;
+
 export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
   threadId: ThreadId,
   host: Schema.optional(OrchestratorMcpHost),

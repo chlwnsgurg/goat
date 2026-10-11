@@ -41,6 +41,7 @@ import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
+import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
 import {
@@ -984,6 +985,9 @@ export const layer = Layer.mergeAll(
   layerSshToolkitRegistration,
   layerConnectionToolkit,
 ).pipe(
+  // One launch-watch store for the launch, send and watch tools, following
+  // threads with the same dispatch they use.
+  Layer.provide(LaunchWatchService.layer),
   // One dispatch for the SSH and thread tools, so they share tunnels, sessions and connected hosts.
   Layer.provide(SshRemoteDispatch.layer),
   Layer.provideMerge(layerMcpTransport),

@@ -25,13 +25,31 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
+import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-it.effect("attributes a launched thread's first message to the calling thread", () =>
+type Registration = Parameters<LaunchWatchService.LaunchWatchServiceShape["register"]>[0];
+
+/** Records the launch watches a handler asks for. */
+const launchWatches = (registrations: Array<Registration> = []) =>
+  Layer.mock(LaunchWatchService.LaunchWatchService)({
+    register: (input) =>
+      Effect.sync(() => {
+        registrations.push(input);
+        return {} as never;
+      }),
+  });
+
+/** Launches from a T3 thread caller over mocks; returns what the handler did. */
+const launchFromThread = (params: {
+  readonly title: string;
+  readonly message?: string;
+  readonly notifyOnCompletion?: boolean;
+}) =>
   Effect.gen(function* () {
     const sourceThreadId = ThreadId.make("source-thread");
     const projectId = ProjectId.make("project");
@@ -49,8 +67,10 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       deletedAt: null,
     } as OrchestrationV2ThreadShell;
     let launchedSender: ThreadId | undefined;
+    const registrations: Array<Registration> = [];
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      launchWatches(registrations),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
@@ -69,11 +89,15 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         launch: (input) => {
           launchedSender = input.initialMessage?.senderThreadId;
+          const messageId = input.initialMessage?.messageId;
           return Effect.succeed({
             threadId: input.threadId,
             projection: {
-              thread: { id: input.threadId, projectId, modelSelection },
-              runs: [],
+              thread: { id: input.threadId, projectId, modelSelection, title: input.title },
+              runs:
+                messageId === undefined
+                  ? []
+                  : [{ id: "launched-run", userMessageId: messageId, status: "preparing" }],
             },
             resumed: false,
           } as unknown as ThreadLaunch.ThreadLaunchResult);
@@ -95,10 +119,57 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       ),
     );
     const result = yield* toolkit
-      .handle("goat_thread_launch", { title: "Audit", message: "Review the change" })
+      .handle("goat_thread_launch", params)
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
-    expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
-    expect(launchedSender).toBe(sourceThreadId);
+    return {
+      result: result.at(-1)?.result,
+      launchedSender,
+      registrations,
+      sourceThreadId,
+      projectId,
+      modelSelection,
+    };
+  });
+
+it.effect("attributes a launched thread's first message to the calling thread", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({ title: "Audit", message: "Review the change" });
+    expect(launched.result).toMatchObject({
+      projectId: launched.projectId,
+      modelSelection: launched.modelSelection,
+    });
+    expect(launched.launchedSender).toBe(launched.sourceThreadId);
+  }),
+);
+
+it.effect("watches the launched thread's first run for the calling thread", () =>
+  Effect.gen(function* () {
+    const launched = yield* launchFromThread({ title: "Audit", message: "Review the change" });
+    expect(launched.result).toMatchObject({ runId: "launched-run", watching: true });
+    expect(launched.registrations).toEqual([
+      expect.objectContaining({
+        launcherThreadId: launched.sourceThreadId,
+        host: null,
+        projectId: launched.projectId,
+        title: "Audit",
+        runId: "launched-run",
+      }),
+    ]);
+  }),
+);
+
+it.effect("records a dormant watch for an idle launch, and none when the caller opts out", () =>
+  Effect.gen(function* () {
+    const idle = yield* launchFromThread({ title: "Idle" });
+    expect(idle.registrations).toEqual([expect.objectContaining({ runId: null })]);
+
+    const optedOut = yield* launchFromThread({
+      title: "Audit",
+      message: "Review the change",
+      notifyOnCompletion: false,
+    });
+    expect(optedOut.result).toMatchObject({ runId: "launched-run", watching: false });
+    expect(optedOut.registrations).toEqual([]);
   }),
 );
 
@@ -122,6 +193,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      launchWatches(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
@@ -219,6 +291,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
     };
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      launchWatches(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
@@ -310,6 +383,7 @@ const clientLaunchHarness = (input: {
   const modelSelection = { instanceId: ProviderInstanceId.make("claude"), model: "claude-opus" };
   const layerDependencies = Layer.mergeAll(
     NodeCrypto.layer,
+    launchWatches(),
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
       requestNamespace: "client:session-1",
@@ -521,6 +595,7 @@ it.effect("lists and reads another machine's projects through that machine's own
     const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      launchWatches(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",

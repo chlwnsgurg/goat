@@ -11,6 +11,7 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
+import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const shared = {
@@ -20,6 +21,7 @@ const shared = {
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     SshRemoteDispatch.SshRemoteDispatch,
+    LaunchWatchService.LaunchWatchService,
   ],
 };
 
@@ -110,7 +112,7 @@ export const SshLaunchWorkspace = Schema.Union([
 const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
   ...shared,
   description:
-    "Start a thread on ANOTHER machine, in that machine's own GOAT environment, over SSH. Use it when the user asks to run work on a different computer. Pick host from goat_ssh_host_list and cwd from goat_ssh_browse. cwd must be a project folder: the filesystem root, the home directory, a folder above home, or another top-level folder is refused unless the user explicitly asked for it and allowBroadWorkspaceRoot is true. The folder becomes (or reuses) a project on the remote, then the thread starts in the folder or in a worktree per workspace, and its agent gets message. GOAT is launched on the remote if it is not running. Omitted modelSelection uses the calling thread's model, which the remote must also offer. Needs a full-access caller. The thread lives on the remote: follow it from here with goat_thread_wait / goat_thread_read and steer it with goat_thread_send, passing the same host and the returned threadId; the user can watch it by connecting to that host in Settings → Connections. Each call creates a new thread; after a lost response, check goat_thread_list with host before retrying.",
+    "Start a thread on ANOTHER machine, in that machine's own GOAT environment, over SSH. Use it when the user asks to run work on a different computer. Pick host from goat_ssh_host_list and cwd from goat_ssh_browse. cwd must be a project folder: the filesystem root, the home directory, a folder above home, or another top-level folder is refused unless the user explicitly asked for it and allowBroadWorkspaceRoot is true. The folder becomes (or reuses) a project on the remote, then the thread starts in the folder or in a worktree per workspace, and its agent gets message. GOAT is launched on the remote if it is not running. Omitted modelSelection uses the calling thread's model, which the remote must also offer. Needs a full-access caller. The thread lives on the remote. A calling GOAT thread is woken with a message when its run ends, waits on a question, or the host stays unreachable, so do not poll it; read it with goat_thread_read and steer it with goat_thread_send, passing the same host and the returned threadId; the user can watch it by connecting to that host in Settings → Connections. Each call creates a new thread; after a lost response, check goat_thread_list with host before retrying.",
   parameters: Schema.Struct({
     host: HostAlias,
     cwd: TrimmedNonEmptyString.annotate({
@@ -127,6 +129,12 @@ const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
       description:
         "Set true only when the user explicitly wants the filesystem root, the home directory, a folder above home, or another top-level folder as the workspace. Otherwise such a cwd is refused.",
     }),
+    notifyOnCompletion: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Default true for a calling T3 thread: this machine follows the remote thread over SSH and wakes the caller with a message when its run ends, waits on a question, or its host stays unreachable. Pass false to follow it yourself.",
+      }),
+    ),
   }),
   success: Schema.Struct({
     host: Schema.String,
@@ -134,9 +142,12 @@ const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
     projectId: Schema.String,
     projectCreated: Schema.Boolean,
     threadId: Schema.String,
+    runId: Schema.NullOr(Schema.String),
     workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
     runtimeMode: RuntimeMode,
     remoteServerKind: Schema.NullOr(Schema.Literals(["external", "managed"])),
+    /** Whether the calling thread will be told when the remote thread finishes. */
+    watching: Schema.Boolean,
     notes: Schema.Array(Schema.String),
   }),
 })

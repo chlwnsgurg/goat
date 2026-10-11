@@ -25,8 +25,12 @@ import {
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadSendResult,
+  OrchestratorMcpThreadUnwatchResult,
   OrchestratorMcpThreadWaitInput,
   OrchestratorMcpThreadWaitResult,
+  OrchestratorMcpThreadWatchInput,
+  OrchestratorMcpThreadWatchListResult,
+  OrchestratorMcpThreadWatchResult,
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
 } from "@t3tools/contracts";
@@ -271,6 +275,52 @@ const ThreadInterruptTool = Tool.make("goat_thread_interrupt", {
   .annotate(Tool.Title, "Interrupt a GOAT thread")
   .annotate(Tool.Destructive, true);
 
+const WATCH_REPORTS =
+  " A watched thread wakes the calling thread with a message when a followed run ends, when the thread waits on a question, and once if its host stays unreachable; goat_thread_launch and goat_ssh_thread_launch start one automatically, and each goat_thread_send from the caller to the thread is followed the same way.";
+
+const ThreadWatchTool = Tool.make("goat_thread_watch", {
+  description:
+    "Watch a T3 thread so the calling thread is told when it finishes, instead of polling with goat_thread_wait. The thread's active run is followed; when it is idle, its latest run is reported if this caller was not told about it yet, otherwise the watch waits for the caller's next goat_thread_send. Use it to resume a watch after goat_thread_unwatch, or after a launch whose response was lost (find the thread with goat_thread_list first). Needs an agent running inside a T3 thread." +
+    WATCH_REPORTS +
+    ON_ANOTHER_MACHINE,
+  parameters: OrchestratorMcpThreadWatchInput,
+  success: OrchestratorMcpThreadWatchResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: hostThreadDependencies,
+})
+  .annotate(Tool.Title, "Watch a T3 thread")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const ThreadUnwatchTool = Tool.make("goat_thread_unwatch", {
+  description:
+    "Stop the calling thread's watch on a T3 thread: no more messages about its runs, questions or host. removed is false when there was no watch. The thread itself keeps running.",
+  parameters: OrchestratorMcpThreadWatchInput,
+  success: OrchestratorMcpThreadUnwatchResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: hostThreadDependencies,
+})
+  .annotate(Tool.Title, "Stop watching a T3 thread")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const ThreadWatchListTool = Tool.make("goat_thread_watch_list", {
+  description:
+    "List the threads the calling thread watches, here and on other machines: runs still to report, the last reported run, and whether the host is unreachable." +
+    WATCH_REPORTS,
+  // No parameters: an explicit empty struct is not a valid MCP input schema.
+  success: OrchestratorMcpThreadWatchListResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: hostThreadDependencies,
+})
+  .annotate(Tool.Title, "List watched T3 threads")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
@@ -288,4 +338,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadSendTool,
   ThreadWaitTool,
   ThreadInterruptTool,
+  ThreadWatchTool,
+  ThreadUnwatchTool,
+  ThreadWatchListTool,
 );

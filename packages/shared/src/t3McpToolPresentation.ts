@@ -20,6 +20,9 @@ export type T3McpToolSummaryAction =
   | "thread-read"
   | "thread-send"
   | "thread-wait"
+  | "thread-watch"
+  | "thread-unwatch"
+  | "thread-watch-list"
   | "thread-interrupt"
   | "thread-configuration"
   | "thread-configure"
@@ -144,6 +147,15 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   goat_thread_read: tool(["Read", "Reading", "Read", "a GOAT thread"], "thread-read"),
   goat_thread_send: tool(["Send", "Sending", "Sent", "to a GOAT thread"], "thread-send"),
   goat_thread_wait: tool(["Wait", "Waiting", "Waited", "for a GOAT thread"], "thread-wait"),
+  goat_thread_watch: tool(["Watch", "Watching", "Watched", "a GOAT thread"], "thread-watch"),
+  goat_thread_unwatch: tool(
+    ["Stop watching", "Stopping watch of", "Stopped watching", "a GOAT thread"],
+    "thread-unwatch",
+  ),
+  goat_thread_watch_list: tool(
+    ["List", "Listing", "Listed", "watched GOAT threads"],
+    "thread-watch-list",
+  ),
   goat_thread_interrupt: tool(
     ["Interrupt", "Interrupting", "Requested an interrupt of", "a GOAT thread"],
     "thread-interrupt",
