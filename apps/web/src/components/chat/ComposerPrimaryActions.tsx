@@ -79,7 +79,15 @@ const formatPendingPrimaryActionLabel = (input: {
 // The composer's labeled primary actions (Submit, Refine, Implement) share the send button's
 // message-action pill, so they are composer-owned buttons rather than restyled Buttons.
 const messageActionPillClassName =
-  "inline-flex shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full bg-message-action font-medium text-base text-message-action-foreground shadow-xs shadow-message-action/24 outline-none hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:text-sm";
+  "relative inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-full bg-message-action font-medium text-base text-message-action-foreground shadow-xs shadow-message-action/24 outline-none hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:text-sm pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11";
+
+/**
+ * Round primary actions (send, stop) sit in the footer's 28px control row, like the model and
+ * reasoning controls beside them. Coarse pointers keep a 44px hit area through a transparent
+ * overlay, the same way ComposerControl does, so the visual size stays small on touch screens.
+ */
+export const composerRoundActionClassName =
+  "relative flex size-7 shrink-0 items-center justify-center rounded-full pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 [&_svg]:pointer-events-none";
 
 const preventPointerFocus: PointerEventHandler<HTMLElement> = (event) => {
   event.preventDefault();
@@ -131,15 +139,15 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     environmentIdentificationMode === "artwork",
   );
 
-  const renderStopGenerationButton = (insidePendingAction: boolean) => (
+  const renderStopGenerationButton = () => (
     <Tooltip key="interrupt">
       <TooltipTrigger
         render={
           <button
             type="button"
             className={cn(
-              "flex shrink-0 cursor-pointer items-center justify-center rounded-full bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-control-highlight transition-colors duration-150 hover:bg-destructive active:inset-shadow-control-pressed active:shadow-none [&_svg]:pointer-events-none",
-              insidePendingAction ? "size-8 sm:size-7" : "size-8 sm:h-8 sm:w-8",
+              composerRoundActionClassName,
+              "cursor-pointer bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-control-highlight transition-colors duration-150 hover:bg-destructive active:inset-shadow-control-pressed active:shadow-none",
             )}
             {...pointerFocusProps}
             disabled={!canOperateThread}
@@ -161,7 +169,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   if (pendingAction) {
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
-        {canInterrupt ? renderStopGenerationButton(true) : null}
+        {canInterrupt ? renderStopGenerationButton() : null}
         {pendingAction.questionIndex > 0 ? (
           compact ? (
             <Button
@@ -188,7 +196,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         ) : null}
         <button
           type="submit"
-          className={cn(messageActionPillClassName, "h-8 sm:h-7", compact ? "px-3" : "px-4")}
+          className={cn(messageActionPillClassName, compact ? "px-3" : "px-4")}
           {...pointerFocusProps}
           disabled={
             !canOperateThread ||
@@ -213,7 +221,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       return (
         <button
           type="submit"
-          className={cn(messageActionPillClassName, "h-9 sm:h-8", compact ? "px-3" : "px-4")}
+          className={cn(messageActionPillClassName, compact ? "px-3" : "px-4")}
           {...pointerFocusProps}
           disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
         >
@@ -226,7 +234,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       <div data-chat-composer-implement-actions="true" className="flex items-center justify-end">
         <button
           type="submit"
-          className={cn(messageActionPillClassName, "h-9 rounded-r-none px-4 sm:h-8")}
+          className={cn(messageActionPillClassName, "rounded-r-none px-4")}
           {...pointerFocusProps}
           disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
         >
@@ -239,7 +247,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                 type="button"
                 className={cn(
                   messageActionPillClassName,
-                  "h-9 rounded-l-none border-l border-message-action-foreground/20 px-2 sm:h-8",
+                  "rounded-l-none border-l border-message-action-foreground/20 px-2",
                 )}
                 aria-label="Implementation actions"
                 {...pointerFocusProps}
@@ -265,7 +273,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   }
 
   if (canInterrupt && !hasSendableContent && !isEditingQueuedMessage) {
-    return renderStopGenerationButton(false);
+    return renderStopGenerationButton();
   }
 
   const showResume = canResume && !hasSendableContent && !isEditingQueuedMessage;
@@ -311,7 +319,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     <button
       type={showResume ? "button" : "submit"}
       className={cn(
-        "relative isolate flex h-9 w-9 items-center justify-center overflow-hidden rounded-full shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-control-highlight hover:scale-105 active:inset-shadow-control-pressed active:shadow-none disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8 [&_svg]:pointer-events-none",
+        composerRoundActionClassName,
+        "isolate shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-control-highlight hover:scale-105 active:inset-shadow-control-pressed active:shadow-none disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none disabled:hover:scale-100",
         stageBackdropVariant
           ? "bg-transparent text-white enabled:shadow-black/24 enabled:hover:brightness-110"
           : "bg-message-action text-message-action-foreground enabled:shadow-message-action/24 hover:bg-message-action-hover",
@@ -328,18 +337,22 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       aria-label={submitStatus ?? submitLabel}
     >
       {stageBackdropVariant ? (
-        <span className="pointer-events-none absolute inset-0 -z-10" aria-hidden="true">
+        // The art clips itself so the button can extend its touch overlay past the circle.
+        <span
+          className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-full"
+          aria-hidden="true"
+        >
           <StageBackdropButtonArt variant={stageBackdropVariant} />
         </span>
       ) : null}
       {isConnecting || isSendBusy ? (
         <Spinner size="sm" aria-hidden="true" />
       ) : showResume ? (
-        <PlayIcon className="size-4 fill-current" aria-hidden="true" />
+        <PlayIcon className="size-3.5 fill-current" aria-hidden="true" />
       ) : isEditingQueuedMessage ? (
-        <CheckIcon className="size-4" aria-hidden="true" />
+        <CheckIcon className="size-3.5" aria-hidden="true" />
       ) : isRunning ? (
-        <MorphIcon className="size-4" icon={isQueuing ? ListPlus : CornerUpRight} />
+        <MorphIcon className="size-3.5" icon={isQueuing ? ListPlus : CornerUpRight} />
       ) : (
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
           <path
@@ -370,7 +383,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             <button
               type="button"
               className={cn(
-                "flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-64 sm:h-8 [&_svg]:pointer-events-none [&_svg]:size-3.5",
+                "relative flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-2.5 text-xs tabular-nums outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-64 pointer-coarse:after:absolute pointer-coarse:after:size-full pointer-coarse:after:min-h-11 [&_svg]:pointer-events-none [&_svg]:size-3.5",
                 keepFullHistory
                   ? "border-border text-muted-foreground hover:text-foreground"
                   : "border-warning/40 text-warning hover:bg-warning/8",
