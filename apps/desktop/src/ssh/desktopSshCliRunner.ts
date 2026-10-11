@@ -1,0 +1,33 @@
+import * as Option from "effect/Option";
+import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
+
+import type * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+
+/**
+ * The remote runs the exact release this app is on, from its self-contained
+ * archive, so it needs neither Node nor npm. Development can point the remote
+ * at a source checkout instead so the two sides can be iterated together.
+ *
+ * An unpackaged app reports Electron's own version, which names no GOAT
+ * release, so it uses the server package version that packaging would stamp.
+ */
+export const resolveDesktopSshCliRunner = (
+  environment: Pick<
+    DesktopEnvironment.DesktopEnvironment["Service"],
+    "appVersion" | "isPackaged" | "isDevelopment" | "devRemoteT3ServerEntryPath"
+  >,
+  archiveOptions: Pick<RemoteT3RunnerOptions, "archiveDirectory" | "releaseBaseUrl">,
+  serverPackage: { readonly version: string; readonly engines: { readonly node: string } },
+): RemoteT3RunnerOptions => {
+  const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteT3ServerEntryPath);
+  if (environment.isDevelopment && devRemoteEntryPath !== undefined) {
+    return {
+      nodeScriptPath: devRemoteEntryPath,
+      nodeEngineRange: serverPackage.engines.node,
+    };
+  }
+  return {
+    archiveVersion: environment.isPackaged ? environment.appVersion : serverPackage.version,
+    ...archiveOptions,
+  };
+};

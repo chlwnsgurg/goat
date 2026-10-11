@@ -19,7 +19,6 @@ import * as Electron from "electron";
 
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
 import * as DesktopIpc from "./ipc/DesktopIpc.ts";
@@ -61,6 +60,7 @@ import * as DesktopPreReadyFileSystem from "./app/DesktopPreReadyFileSystem.ts";
 import * as DesktopPreReadyPlatform from "./app/DesktopPreReadyPlatform.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
+import { resolveDesktopSshCliRunner } from "./ssh/desktopSshCliRunner.ts";
 import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopLegacyLocalStorage from "./app/DesktopLegacyLocalStorage.ts";
@@ -104,23 +104,6 @@ const layerDesktopEnvironment = Layer.unwrap(
   }),
 );
 
-// The remote runs the exact release this app is on, from its self-contained
-// archive, so it needs neither Node nor npm. Development points the remote at
-// a source checkout instead so the two sides can be iterated together.
-const resolveDesktopSshCliRunner = (
-  environment: DesktopEnvironment.DesktopEnvironment["Service"],
-  archiveOptions: Pick<RemoteT3RunnerOptions, "archiveDirectory" | "releaseBaseUrl">,
-): RemoteT3RunnerOptions => {
-  const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteT3ServerEntryPath);
-  if (environment.isDevelopment && devRemoteEntryPath !== undefined) {
-    return {
-      nodeScriptPath: devRemoteEntryPath,
-      nodeEngineRange: serverPackageJson.engines.node,
-    };
-  }
-  return { archiveVersion: environment.appVersion, ...archiveOptions };
-};
-
 const layerDesktopSshEnvironment = Layer.unwrap(
   Effect.gen(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -128,12 +111,16 @@ const layerDesktopSshEnvironment = Layer.unwrap(
     const releaseBaseUrl = Option.getOrUndefined(config.cliReleaseBaseUrl);
     return DesktopSshEnvironment.layer({
       resolveCliRunner: Effect.succeed(
-        resolveDesktopSshCliRunner(environment, {
-          archiveDirectory: Option.getOrElse(config.sshRuntimeArchiveDir, () =>
-            environment.path.join(environment.baseDir, "runtime", "archives"),
-          ),
-          ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
-        }),
+        resolveDesktopSshCliRunner(
+          environment,
+          {
+            archiveDirectory: Option.getOrElse(config.sshRuntimeArchiveDir, () =>
+              environment.path.join(environment.baseDir, "runtime", "archives"),
+            ),
+            ...(releaseBaseUrl === undefined ? {} : { releaseBaseUrl }),
+          },
+          serverPackageJson,
+        ),
       ),
     });
   }),
