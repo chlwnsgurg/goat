@@ -47,6 +47,7 @@ import {
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
+  CloudDownloadIcon,
   ArrowLeftIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
@@ -86,6 +87,7 @@ import { useAtomValue } from "@effect/atom-react";
 
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
+import { useSshWorkspaceFetchBack } from "~/hooks/useSshWorkspaceFetchBack";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
@@ -155,6 +157,7 @@ import {
   resolveWslProjectSelection,
 } from "../wslPaths";
 import {
+  buildSshFetchBackActionItem,
   ADDON_ICON_CLASS,
   browseInputEndPaddingClass,
   buildBrowseGroups,
@@ -713,6 +716,14 @@ function OpenCommandPaletteDialog(props: {
 }) {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (location) => location.pathname });
+  const routeThreadRef = useParams({
+    strict: false,
+    select: (params) => {
+      const target = resolveThreadRouteTarget(params);
+      return target?.kind === "server" ? target.threadRef : null;
+    },
+  });
+  const sshFetchBack = useSshWorkspaceFetchBack(routeThreadRef);
   const { clearOpenIntent, openIntent, openOverlayMode, setOpen } = props;
   const [query, setQuery] = useState(openIntent?.kind === "search" ? openIntent.query : "");
   const [linkedThreadSearch, setLinkedThreadSearch] = useState(
@@ -1975,6 +1986,12 @@ function OpenCommandPaletteDialog(props: {
       run: copyActiveThreadReference,
     });
   }
+
+  const sshFetchBackItem = buildSshFetchBackActionItem({
+    ...sshFetchBack,
+    icon: <CloudDownloadIcon className={ITEM_ICON_CLASS} />,
+  });
+  if (sshFetchBackItem !== null) actionItems.push(sshFetchBackItem);
 
   if (
     activeThread !== null &&

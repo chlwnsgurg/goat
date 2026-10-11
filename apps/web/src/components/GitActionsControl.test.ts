@@ -1,3 +1,14 @@
+vi.mock("~/hooks/useSshWorkspaceFetchBack", () => ({
+  useSshWorkspaceFetchBack: () => ({
+    visible: false,
+    disabled: true,
+    isPending: false,
+    disabledReason: null,
+    label: "Fetch branch to this device",
+    run: async () => {},
+  }),
+}));
+
 import {
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,

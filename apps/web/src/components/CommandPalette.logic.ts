@@ -621,3 +621,24 @@ export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): str
       return "Enter path (e.g. ~/projects/my-app)";
   }
 }
+
+export function buildSshFetchBackActionItem(input: {
+  readonly visible: boolean;
+  readonly disabled: boolean;
+  readonly label: string;
+  readonly disabledReason: string | null;
+  readonly run: () => Promise<void>;
+  readonly icon: ReactNode;
+}): CommandPaletteActionItem | null {
+  if (!input.visible) return null;
+  return {
+    kind: "action",
+    value: "action:ssh-workspace-fetch-back",
+    title: input.label,
+    searchTerms: ["fetch", "branch", "ssh", "this device", "local", "bring back"],
+    disabled: input.disabled,
+    ...(input.disabledReason === null ? {} : { description: input.disabledReason }),
+    icon: input.icon,
+    run: input.run,
+  };
+}
