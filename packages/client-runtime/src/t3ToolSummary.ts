@@ -158,6 +158,19 @@ export function summarizeT3ToolCalls(
           : phrase("Waited on", "wait on", targets);
       break;
     }
+    case "thread-watch":
+      label = phrase("Watched", "watch", quantity(countEntities(threadIds), "thread"));
+      break;
+    case "thread-unwatch":
+      label = phrase(
+        "Stopped watching",
+        "stop watching",
+        quantity(countEntities(threadIds), "thread"),
+      );
+      break;
+    case "thread-watch-list":
+      label = phrase("Listed", "list", `watched threads ${times}`);
+      break;
     case "thread-list":
       label = phrase("Listed", "list", `threads ${times}`);
       break;

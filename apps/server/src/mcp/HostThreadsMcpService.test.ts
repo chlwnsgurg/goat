@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
+import * as LaunchWatchService from "./LaunchWatchService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
@@ -95,7 +96,13 @@ const runService = <A, E>(
   body: (service: HostThreadsMcpService.HostThreadsMcpServiceShape) => Effect.Effect<A, E>,
 ) => {
   const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
+  const rearms: Array<Parameters<LaunchWatchService.LaunchWatchServiceShape["rearm"]>[0]> = [];
   const layer = HostThreadsMcpService.layer.pipe(
+    Layer.provide(
+      Layer.mock(LaunchWatchService.LaunchWatchService)({
+        rearm: (input) => Effect.sync(() => void rearms.push(input)),
+      }),
+    ),
     Layer.provide(
       Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
         listThreads: () => Effect.succeed(localList),
@@ -128,7 +135,7 @@ const runService = <A, E>(
   return Effect.gen(function* () {
     const service = yield* HostThreadsMcpService.HostThreadsMcpService;
     const result = yield* body(service).pipe(Effect.result);
-    return { result, calls };
+    return { result, calls, rearms };
   }).pipe(Effect.provide(layer));
 };
 
@@ -136,7 +143,7 @@ describe("HostThreadsMcpService", () => {
   it.effect("refuses to change a thread on another machine from a plan-mode caller", () =>
     Effect.gen(function* () {
       const sent: string[] = [];
-      const { result } = yield* runService(
+      const { result, rearms } = yield* runService(
         {
           interactionMode: "plan",
           hostCall: (call) => Effect.sync(() => sent.push(call.tool)),
@@ -153,12 +160,14 @@ describe("HostThreadsMcpService", () => {
       expect(result.failure).toBeInstanceOf(OrchestratorMcpFailure);
       expect(result.failure.code).toBe("interaction_mode_escalation_denied");
       expect(sent).toEqual([]);
+      // A send that did not happen starts no run to report.
+      expect(rearms).toEqual([]);
     }),
   );
 
   it.effect("sends to another machine without the host argument and tags the result", () =>
     Effect.gen(function* () {
-      const { result, calls } = yield* runService(
+      const { result, calls, rearms } = yield* runService(
         {
           interactionMode: "default",
           hostCall: () =>
@@ -181,6 +190,10 @@ describe("HostThreadsMcpService", () => {
       expect(calls[0]?.tool).toBe("goat_thread_send");
       expect(calls[0]?.writes).toBe(true);
       expect(calls[0]?.arguments).toEqual({ threadId: "remote-1", message: "status?" });
+      // The caller's watch on that thread, if any, follows the run the send joined.
+      expect(rearms).toEqual([
+        { launcherThreadId: threadId, host: "box", threadId: "remote-1", runId: "run-9" },
+      ]);
     }),
   );
 

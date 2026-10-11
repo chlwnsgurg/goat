@@ -5,21 +5,29 @@ import {
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
+  OrchestratorMcpThreadUnwatchResult,
   OrchestratorMcpThreadWaitResult,
+  OrchestratorMcpThreadWatchListResult,
+  OrchestratorMcpThreadWatchResult,
   type OrchestratorMcpThreadInterruptInput,
   type OrchestratorMcpThreadListInput,
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadWaitInput,
+  type OrchestratorMcpThreadWatch,
+  type OrchestratorMcpThreadWatchInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import type { LaunchWatch } from "./launchWatch.ts";
+import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { assertLiveCaller, readCaller } from "./threadAccess.ts";
@@ -116,6 +124,25 @@ const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpThreadWaitResult);
 const decodeSend = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 const decodeInterrupt = Schema.decodeUnknownEffect(OrchestratorMcpThreadInterruptResult);
 
+const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+
+/** A stored watch as the watch tools show it. */
+export function watchView(watch: LaunchWatch): OrchestratorMcpThreadWatch {
+  return {
+    ...(watch.host === null ? {} : { host: watch.host }),
+    threadId: watch.threadId,
+    title: watch.title,
+    pendingRunIds: [...watch.pendingRuns],
+    lastReportedRunId: watch.reportedRuns.at(-1) ?? null,
+    hostUnavailableSince: watch.outage === null ? null : iso(watch.outage.since),
+    createdAt: iso(watch.createdAt),
+    updatedAt: iso(watch.updatedAt),
+  };
+}
+
+const storeFailure = (error: LaunchWatchService.LaunchWatchStoreError) =>
+  failure("orchestration_error", error.message);
+
 export interface HostThreadsMcpServiceShape {
   readonly listThreads: (
     scope: McpInvocationScope,
@@ -150,6 +177,18 @@ export interface HostThreadsMcpServiceShape {
     },
     decode: (value: unknown) => Effect.Effect<A, E>,
   ) => Effect.Effect<A & { readonly host: string }, OrchestratorMcpFailure>;
+  /** Starts or re-arms the calling thread's watch on a thread here or on a host. */
+  readonly watchThread: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadWatchInput,
+  ) => Effect.Effect<OrchestratorMcpThreadWatchResult, OrchestratorMcpFailure>;
+  readonly unwatchThread: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadWatchInput,
+  ) => Effect.Effect<OrchestratorMcpThreadUnwatchResult, OrchestratorMcpFailure>;
+  readonly listWatches: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<OrchestratorMcpThreadWatchListResult, OrchestratorMcpFailure>;
 }
 
 export class HostThreadsMcpService extends Context.Service<
@@ -182,6 +221,46 @@ const make = Effect.gen(function* () {
   const local = yield* OrchestratorMcpService.OrchestratorMcpService;
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
   const threads = yield* ThreadManagementService.ThreadManagementService;
+  const launchWatches = yield* LaunchWatchService.LaunchWatchService;
+
+  /** Only an agent inside a T3 thread owns watches; it is woken in that thread. */
+  const watcherOf = (scope: McpInvocationScope) =>
+    scope.thread === undefined
+      ? Effect.fail(
+          failure(
+            "invalid_request",
+            "Watching a thread needs an agent running inside a GOAT thread.",
+          ),
+        )
+      : Effect.succeed(scope.thread.threadId);
+
+  /**
+   * A send from a watching thread is followed like its launch: the run it
+   * started or joined is reported when it ends. Bookkeeping must never fail
+   * the send itself.
+   */
+  const rearmAfterSend = (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadSendInput,
+    result: OrchestratorMcpThreadSendResult,
+  ) =>
+    scope.thread === undefined
+      ? Effect.void
+      : launchWatches
+          .rearm({
+            launcherThreadId: scope.thread.threadId,
+            host: input.host,
+            threadId: input.threadId,
+            runId: result.runId,
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("launch watch: send not followed", {
+                threadId: input.threadId,
+                cause: error,
+              }),
+            ),
+          );
 
   const call = (
     scope: McpInvocationScope,
@@ -326,6 +405,48 @@ const make = Effect.gen(function* () {
     } satisfies OrchestratorMcpThreadListResult;
   });
 
+  const readThread: HostThreadsMcpServiceShape["readThread"] = (scope, input) =>
+    input.host === undefined
+      ? local.readThread(scope, input)
+      : onHost(
+          scope,
+          {
+            host: input.host,
+            tool: "goat_thread_read",
+            arguments: withoutHost(input),
+            writes: false,
+          },
+          decodeRead,
+        );
+
+  const watchThread: HostThreadsMcpServiceShape["watchThread"] = Effect.fn(
+    "HostThreadsMcpService.watchThread",
+  )(function* (scope, input) {
+    const launcherThreadId = yield* watcherOf(scope);
+    if (input.host === undefined && input.threadId === launcherThreadId) {
+      return yield* failure("invalid_request", "A thread cannot watch itself.");
+    }
+    // Reading the thread checks the caller may see it, here or on the host.
+    const read = yield* readThread(scope, {
+      threadId: input.threadId,
+      ...(input.host === undefined ? {} : { host: input.host }),
+      limit: 1,
+      runLimit: 1,
+    });
+    const watch = yield* launchWatches
+      .register({
+        launcherThreadId,
+        host: input.host,
+        threadId: input.threadId,
+        projectId: input.host === undefined ? read.thread.projectId : null,
+        title: read.thread.title,
+        // An idle thread's latest run is reported unless this watcher heard about it already.
+        runId: read.thread.activeRunId ?? read.thread.latestRunId,
+      })
+      .pipe(Effect.mapError(storeFailure));
+    return { watch: watchView(watch) } satisfies OrchestratorMcpThreadWatchResult;
+  });
+
   return HostThreadsMcpService.of({
     listThreads: (scope, input) =>
       input.allHosts === true
@@ -333,19 +454,7 @@ const make = Effect.gen(function* () {
         : input.host === undefined
           ? local.listThreads(scope, input)
           : listOnHost(scope, input.host, input),
-    readThread: (scope, input) =>
-      input.host === undefined
-        ? local.readThread(scope, input)
-        : onHost(
-            scope,
-            {
-              host: input.host,
-              tool: "goat_thread_read",
-              arguments: withoutHost(input),
-              writes: false,
-            },
-            decodeRead,
-          ),
+    readThread,
     waitForThread: (scope, input) => {
       if (input.host === undefined) return local.waitForThread(scope, input);
       const timeoutMs = Math.min(MAX_WAIT_MS, Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_MS));
@@ -363,7 +472,7 @@ const make = Effect.gen(function* () {
       );
     },
     sendToThread: (scope, input) =>
-      input.host === undefined
+      (input.host === undefined
         ? local.sendToThread(scope, input)
         : onHost(
             scope,
@@ -374,7 +483,8 @@ const make = Effect.gen(function* () {
               writes: true,
             },
             decodeSend,
-          ),
+          )
+      ).pipe(Effect.tap((result) => rearmAfterSend(scope, input, result))),
     interruptThread: (scope, input) =>
       input.host === undefined
         ? local.interruptThread(scope, input)
@@ -389,6 +499,27 @@ const make = Effect.gen(function* () {
             decodeInterrupt,
           ),
     readOnHost: (scope, input, decode) => onHost(scope, { ...input, writes: false }, decode),
+    watchThread,
+    unwatchThread: (scope, input) =>
+      Effect.gen(function* () {
+        const launcherThreadId = yield* watcherOf(scope);
+        const removed = yield* launchWatches
+          .unwatch({ launcherThreadId, host: input.host, threadId: input.threadId })
+          .pipe(Effect.mapError(storeFailure));
+        return {
+          ...(input.host === undefined ? {} : { host: input.host }),
+          threadId: input.threadId,
+          removed,
+        } satisfies OrchestratorMcpThreadUnwatchResult;
+      }),
+    listWatches: (scope) =>
+      Effect.gen(function* () {
+        const launcherThreadId = yield* watcherOf(scope);
+        const watches = yield* launchWatches
+          .list(launcherThreadId)
+          .pipe(Effect.mapError(storeFailure));
+        return { watches: watches.map(watchView) } satisfies OrchestratorMcpThreadWatchListResult;
+      }),
   });
 });
 

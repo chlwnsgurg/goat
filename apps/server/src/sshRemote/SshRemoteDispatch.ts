@@ -119,6 +119,8 @@ export interface SshLaunchResult {
   readonly projectId: string;
   readonly projectCreated: boolean;
   readonly threadId: string;
+  /** The thread's first run, when a message started one. */
+  readonly runId: string | null;
   readonly workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
   readonly runtimeMode: RuntimeMode;
   readonly remoteServerKind: "external" | "managed" | null;
@@ -662,7 +664,7 @@ const make = Effect.gen(function* () {
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
         ...(input.message === undefined ? {} : { message: input.message }),
       },
-    })) as { readonly threadId?: string };
+    })) as { readonly threadId?: string; readonly runId?: string | null };
     if (typeof launched?.threadId !== "string") {
       return yield* failure(
         "remote_refused",
@@ -670,7 +672,7 @@ const make = Effect.gen(function* () {
       );
     }
     notes.push(
-      `The thread lives in the GOAT environment on ${target.alias}. Follow it from here with goat_thread_wait / goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
+      `The thread lives in the GOAT environment on ${target.alias}. Read it with goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
     );
     return {
       host: target.alias,
@@ -678,6 +680,7 @@ const make = Effect.gen(function* () {
       projectId: project.id,
       projectCreated,
       threadId: launched.threadId,
+      runId: typeof launched.runId === "string" ? launched.runId : null,
       workspaceStrategy,
       runtimeMode: input.runtimeMode,
       remoteServerKind: bootstrap.remoteServerKind ?? null,

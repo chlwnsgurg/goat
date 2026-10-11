@@ -30,6 +30,7 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as HostThreadsMcpService from "../../HostThreadsMcpService.ts";
+import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const shared = {
@@ -122,7 +123,7 @@ const ProjectCloneTool = Tool.make("goat_project_clone", {
 const ThreadLaunchTool = Tool.make("goat_thread_launch", {
   ...shared,
   description:
-    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree, and for work that owns a goal, runs a loop (HOTL, cxc-loop, repeated PABCD), or spans several cycles, even when the user calls it a subagent: top-level threads appear in the sidebar, where the user can open, steer, and resume them. Use delegate_task for bounded child subagents that report back and end. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings from the calling thread; a caller outside a GOAT thread must pass projectId and gets the project\'s default model. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId and use goat_thread_read/goat_thread_wait to follow preparation. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; GOAT shows the thread\'s current title. After errors or lost responses, inspect goat_thread_list before retrying. Attachments must be pending uploads. The new thread may not run with broader runtime or interaction modes than the caller: the calling GOAT thread\'s own modes, or the permission mode an outside agent was approved with.',
+    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree, and for work that owns a goal, runs a loop (HOTL, cxc-loop, repeated PABCD), or spans several cycles, even when the user calls it a subagent: top-level threads appear in the sidebar, where the user can open, steer, and resume them. Use delegate_task for bounded child subagents that report back and end. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings from the calling thread; a caller outside a GOAT thread must pass projectId and gets the project\'s default model. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId. A calling GOAT thread is woken with a message when the run of the new thread ends or waits on a question, so do not poll it with goat_thread_wait; notifyOnCompletion:false opts out. To link a thread for the user, write `[title](t3-thread://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; GOAT shows the thread\'s current title. After errors or lost responses, inspect goat_thread_list before retrying. Attachments must be pending uploads. The new thread may not run with broader runtime or interaction modes than the caller: the calling GOAT thread\'s own modes, or the permission mode an outside agent was approved with.',
   parameters: Schema.Struct({
     projectId: Schema.optional(ProjectId),
     scratch: Schema.optional(
@@ -148,6 +149,12 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
       }),
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
+    notifyOnCompletion: Schema.optional(
+      Schema.Boolean.annotate({
+        description:
+          "Default true for a calling GOAT thread: it is woken with a message when the new thread's run ends, waits on a question, or later runs you start with goat_thread_send end. Pass false to follow it yourself.",
+      }),
+    ),
   }),
   success: Schema.Struct({
     threadId: ThreadId,
@@ -155,6 +162,8 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
+    /** Whether the calling thread will be told when the new thread finishes. */
+    watching: Schema.Boolean,
   }),
   dependencies: [
     ...shared.dependencies,
@@ -163,6 +172,7 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
     GitVcsDriver.GitVcsDriver,
     FileSystem.FileSystem,
     ServerConfig.ServerConfig,
+    LaunchWatchService.LaunchWatchService,
   ],
 })
   .annotate(Tool.Destructive, true)

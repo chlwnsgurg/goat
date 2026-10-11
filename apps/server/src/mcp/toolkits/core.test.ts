@@ -39,6 +39,7 @@ import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
+import * as LaunchWatchService from "../LaunchWatchService.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
 import { dispatchFailure } from "../threadAccess.ts";
@@ -158,13 +159,16 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
     "goat_thread_send",
     "goat_thread_send_attachments",
     "goat_thread_transfers",
+    "goat_thread_unwatch",
     "goat_thread_update",
     "goat_thread_wait",
+    "goat_thread_watch",
+    "goat_thread_watch_list",
     "goat_worktree_handoff",
     "goat_worktree_list",
     "goat_worktree_status",
   ]);
-  expect(names.size).toBe(86);
+  expect(names.size).toBe(89);
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
@@ -657,6 +661,9 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
+        ),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -696,6 +703,9 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
+        ),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
@@ -763,6 +773,9 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
     Effect.provide(
       McpHttpServer.layerOrchestratorToolkit.pipe(
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
+        ),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(

@@ -1,7 +1,8 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { OrchestratorMcpFailure, RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
+import * as LaunchWatchService from "../../LaunchWatchService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
@@ -80,7 +81,43 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
             error instanceof SshRemoteDispatch.SshRemoteDispatchError ? toMcpFailure(error) : error,
           ),
         );
-      return { ...result, notes: [...result.notes] };
+      const launcher = caller.caller;
+      const watching =
+        launcher !== undefined && input.notifyOnCompletion !== false
+          ? yield* LaunchWatchService.LaunchWatchService.pipe(
+              Effect.flatMap((watches) =>
+                watches.register({
+                  launcherThreadId: launcher.id,
+                  host: result.host,
+                  threadId: ThreadId.make(result.threadId),
+                  projectId: null,
+                  title: input.title,
+                  runId: result.runId === null ? null : RunId.make(result.runId),
+                }),
+              ),
+              Effect.as(true),
+              // The remote thread exists either way; a watch that failed to save is reported, not fatal.
+              Effect.catch((error) =>
+                Effect.logWarning("launch watch not recorded", {
+                  host: result.host,
+                  threadId: result.threadId,
+                  cause: error,
+                }).pipe(Effect.as(false)),
+              ),
+            )
+          : false;
+      return {
+        ...result,
+        watching,
+        notes: [
+          ...result.notes,
+          ...(watching
+            ? [
+                `This machine follows the thread over SSH and wakes this thread when its run ends, when it waits on a question, or if ${result.host} stays unreachable; do not poll it. goat_thread_unwatch stops that.`,
+              ]
+            : []),
+        ],
+      };
     }),
   ),
 });
