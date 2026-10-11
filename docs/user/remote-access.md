@@ -211,9 +211,10 @@ An agent can also list, add, and remove the connections saved in
 sidebar without a trip to Settings. This works while the desktop app is open on
 the machine the agent runs on; web and mobile clients keep their own saved
 connections. Adding uses only SSH keys or ssh-agent, never a password, and
-adding a host that is already saved changes nothing. Adding and removing need a
-full-access thread or a full-access outside agent. Settings shows the change
-right away, and the saved connection records which agent added it.
+adding a host that is already saved returns the saved one. Adding and removing
+need a full-access thread or a full-access outside agent. Settings shows the
+change right away, and the agent's connection list shows which agent added each
+connection.
 
 The agent that started the thread can follow it from here: it waits for the
 thread to finish, reads its messages, sends it follow-ups, or stops it, and it

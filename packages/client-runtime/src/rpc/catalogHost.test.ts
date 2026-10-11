@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
@@ -72,6 +73,7 @@ describe("connection catalog RPC host", () => {
               Stream.make(
                 ...requestIds.map((requestId) => ({
                   requestId,
+                  expiresAt: "1970-01-01T00:10:00.000Z",
                   operation: { type: "list" as const },
                 })),
               ).pipe(Stream.concat(Stream.never)),
@@ -150,9 +152,11 @@ describe("connection catalog RPC host", () => {
       yield* Deferred.await(refused);
       const acceptedClient = {
         [WS_METHODS.connectionCatalogServe]: () =>
-          Stream.succeed({ requestId: "accepted", operation: { type: "list" as const } }).pipe(
-            Stream.concat(Stream.never),
-          ),
+          Stream.succeed({
+            requestId: "accepted",
+            expiresAt: "1970-01-01T00:10:00.000Z",
+            operation: { type: "list" as const },
+          }).pipe(Stream.concat(Stream.never)),
         [WS_METHODS.connectionCatalogRespond]: () =>
           Effect.gen(function* () {
             responses++;
@@ -164,5 +168,109 @@ describe("connection catalog RPC host", () => {
       expect(responses).toBe(1);
       yield* Fiber.interrupt(host);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("skips requests that expire waiting in the serial lane and runs the next one", () =>
+    Effect.gen(function* () {
+      const { activeSession, supervisor } = yield* makeHarness;
+      const firstStarted = yield* Deferred.make<void>();
+      const releaseFirst = yield* Deferred.make<void>();
+      const done = yield* Deferred.make<void>();
+      const handled: string[] = [];
+      const responses: string[] = [];
+      const client = {
+        [WS_METHODS.connectionCatalogServe]: () =>
+          Stream.make(
+            {
+              requestId: "first",
+              expiresAt: "1970-01-01T00:10:00.000Z",
+              operation: { type: "list" as const },
+            },
+            {
+              requestId: "expired",
+              expiresAt: "1970-01-01T00:00:30.000Z",
+              operation: { type: "remove" as const, environmentId: EnvironmentId.make("expired") },
+            },
+            {
+              requestId: "next",
+              expiresAt: "1970-01-01T00:10:00.000Z",
+              operation: { type: "remove" as const, environmentId: EnvironmentId.make("next") },
+            },
+          ).pipe(Stream.concat(Stream.never)),
+        [WS_METHODS.connectionCatalogRespond]: (response: ConnectionCatalogHostResponse) =>
+          Effect.gen(function* () {
+            responses.push(response.requestId);
+            if (response.requestId === "next") yield* Deferred.succeed(done, undefined);
+          }),
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      const host = yield* serveConnectionCatalog((operation) =>
+        Effect.gen(function* () {
+          handled.push(operation.type === "remove" ? operation.environmentId : "first");
+          if (operation.type === "list") {
+            yield* Deferred.succeed(firstStarted, undefined);
+            yield* Deferred.await(releaseFirst);
+          }
+          return { type: "list" as const, connections: [] };
+        }),
+      ).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(firstStarted);
+      yield* TestClock.adjust(30_000);
+      yield* Deferred.succeed(releaseFirst, undefined);
+      yield* Deferred.await(done);
+      expect(handled).toEqual(["first", "next"]);
+      expect(responses).toEqual(["first", "next"]);
+      yield* Fiber.interrupt(host);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "finishes an in-progress operation and replies on its original session when interrupted",
+    () =>
+      Effect.gen(function* () {
+        const { activeSession, supervisor } = yield* makeHarness;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const responses: ConnectionCatalogHostResponse[] = [];
+        let completed = false;
+        const client = {
+          [WS_METHODS.connectionCatalogServe]: () =>
+            Stream.succeed({
+              requestId: "add",
+              expiresAt: "1970-01-01T00:10:00.000Z",
+              operation: { type: "list" as const },
+            }).pipe(Stream.concat(Stream.never)),
+          [WS_METHODS.connectionCatalogRespond]: (response: ConnectionCatalogHostResponse) =>
+            Effect.sync(() => {
+              responses.push(response);
+            }),
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        const host = yield* serveConnectionCatalog(() =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+            completed = true;
+            return { type: "list" as const, connections: [] };
+          }),
+        ).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(started);
+        yield* SubscriptionRef.set(activeSession, Option.none());
+        const interrupted = yield* Fiber.interrupt(host).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(interrupted);
+        expect(completed).toBe(true);
+        expect(responses).toEqual([
+          { requestId: "add", result: { type: "list", connections: [] } },
+        ]);
+      }).pipe(Effect.scoped),
   );
 });

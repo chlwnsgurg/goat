@@ -160,7 +160,8 @@ it.effect("maps no desktop host to actionable host_unavailable", () =>
       .pipe(Stream.unwrap, Stream.runCollect);
     expect(result.at(-1)?.result).toMatchObject({
       code: "host_unavailable",
-      message: expect.stringContaining("Web-only and mobile clients cannot save SSH connections"),
+      message:
+        "No GOAT desktop app is serving saved connections for this environment. Saved connections belong to the desktop app that runs this environment as its main local environment: open it on this machine, or add the host in Settings → Connections → SSH. Web-only, mobile and desktop WSL-backend environments cannot save SSH connections through agents.",
     });
   }).pipe(
     Effect.provide(

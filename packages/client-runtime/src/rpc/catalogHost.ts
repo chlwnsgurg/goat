@@ -4,6 +4,7 @@ import {
   type ConnectionCatalogResult,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Stream from "effect/Stream";
 
 import { subscribeDynamicWithSession } from "./client.ts";
@@ -19,18 +20,27 @@ export function serveConnectionCatalog<R>(
       Effect.logDebug("Connection catalog host subscription stopped.", { cause }),
   }).pipe(
     Stream.runForEach(([session, request]) =>
-      handle(request.operation).pipe(
-        Effect.flatMap((result) =>
-          session.client[WS_METHODS.connectionCatalogRespond]({
+      Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        if (
+          DateTime.toEpochMillis(now) >=
+          DateTime.toEpochMillis(DateTime.makeUnsafe(request.expiresAt))
+        ) {
+          yield* Effect.logDebug("Expired connection catalog host request skipped.", {
             requestId: request.requestId,
-            result,
-          }).pipe(
-            Effect.catch((cause) =>
-              Effect.logDebug("Connection catalog host response failed.", { cause }),
-            ),
+          });
+          return;
+        }
+        const result = yield* handle(request.operation);
+        yield* session.client[WS_METHODS.connectionCatalogRespond]({
+          requestId: request.requestId,
+          result,
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logDebug("Connection catalog host response failed.", { cause }),
           ),
-        ),
-      ),
+        );
+      }).pipe(Effect.uninterruptible),
     ),
   );
 }

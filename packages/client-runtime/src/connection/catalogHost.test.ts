@@ -96,7 +96,12 @@ const relay = {
 function run(
   operation: ConnectionCatalogOperation,
   initial: ConnectionCatalogEntry[],
-  options?: { fail?: boolean; resolved?: DesktopSshEnvironmentTarget },
+  options?: {
+    fail?: boolean;
+    failureMessage?: string;
+    registeredEntry?: ConnectionCatalogEntry;
+    resolved?: DesktopSshEnvironmentTarget;
+  },
 ) {
   return Effect.gen(function* () {
     const entries = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>>(
@@ -138,15 +143,21 @@ function run(
       registerSsh: (input) =>
         Effect.gen(function* () {
           inputs.push(input);
+          if (options?.failureMessage)
+            return yield* new ConnectionBlockedError({
+              reason: "authentication",
+              detail: options.failureMessage,
+            });
           if (options?.fail)
             return yield* new ConnectionBlockedError({
               reason: "authentication",
               detail: "key-based login failed",
             });
+          const entry = options?.registeredEntry ?? sshEntry(input.target);
           yield* SubscriptionRef.update(entries, (current) =>
-            new Map(current).set(id, sshEntry(input.target)),
+            new Map(current).set(entry.target.environmentId, entry),
           );
-          return id;
+          return entry.target.environmentId;
         }),
     });
     const result = yield* handleConnectionCatalogOperation(operation, () =>
@@ -245,6 +256,66 @@ describe("connection catalog host", () => {
     Effect.gen(function* () {
       const { result } = yield* run({ type: "add_ssh", host: "devbox", addedBy }, [], {
         fail: true,
+      });
+      expect(result).toEqual({
+        type: "failure",
+        reason: "connection_failed",
+        message: "key-based login failed",
+      });
+    }),
+  );
+  it.effect.each([
+    ["direct", direct],
+    ["T3 Connect", { ...relay, enabled: true }],
+  ] as const)("adds an SSH route to an existing %s machine with created:false", ([_name, entry]) =>
+    Effect.gen(function* () {
+      const registeredEntry = {
+        ...entry,
+        alternateRoutes: [{ target: sshEntry().target, profile: sshEntry().profile }],
+      };
+      const { result, inputs } = yield* run({ type: "add_ssh", host: "devbox", addedBy }, [entry], {
+        registeredEntry,
+      });
+      expect(inputs).toHaveLength(1);
+      expect(result).toMatchObject({
+        type: "add_ssh",
+        created: false,
+        connection: {
+          environmentId: id,
+          routes: expect.arrayContaining([
+            { kind: "ssh", host: "devbox", hostname: target.hostname, username: null, port: null },
+          ]),
+        },
+      });
+    }),
+  );
+  it.effect.each([
+    primary,
+    {
+      ...direct,
+      target: new BearerConnectionTarget({
+        environmentId: id,
+        label: "WSL",
+        connectionId: "local:wsl:Ubuntu",
+      }),
+    },
+  ])("refuses an SSH host that resolves to a platform environment", (entry) =>
+    Effect.gen(function* () {
+      const { result } = yield* run({ type: "add_ssh", host: "devbox", addedBy }, [entry], {
+        registeredEntry: entry,
+      });
+      expect(result).toEqual({
+        type: "failure",
+        reason: "refused",
+        message: "devbox reaches this machine's own environment; it is already in the sidebar.",
+      });
+    }),
+  );
+  it.effect("strips Electron and tagged error prefixes from key-only failures", () =>
+    Effect.gen(function* () {
+      const { result } = yield* run({ type: "add_ssh", host: "devbox", addedBy }, [], {
+        failureMessage:
+          "Error invoking remote method 'desktop:ensure-ssh-environment': SshPasswordPromptError: key-based login failed",
       });
       expect(result).toEqual({
         type: "failure",

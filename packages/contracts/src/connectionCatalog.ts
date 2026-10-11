@@ -65,6 +65,7 @@ export type ConnectionCatalogRequestId = typeof ConnectionCatalogRequestId.Type;
 /** An operation the server asks the desktop renderer to run. */
 export const ConnectionCatalogHostRequest = Schema.Struct({
   requestId: ConnectionCatalogRequestId,
+  expiresAt: IsoDateTime,
   operation: ConnectionCatalogOperation,
 });
 export type ConnectionCatalogHostRequest = typeof ConnectionCatalogHostRequest.Type;
@@ -81,7 +82,7 @@ export const ConnectionCatalogResult = Schema.Union([
   Schema.Struct({ type: Schema.Literal("list"), connections: Schema.Array(SavedConnection) }),
   Schema.Struct({
     type: Schema.Literal("add_ssh"),
-    /** False when the host was already saved; nothing was changed. */
+    /** False when the machine was already saved: nothing changed, or an SSH route was added to it. */
     created: Schema.Boolean,
     connection: SavedConnection,
   }),

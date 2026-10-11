@@ -35,7 +35,7 @@ const ListTool = Tool.make("goat_connection_list", {
 const AddSshTool = Tool.make("goat_connection_add_ssh", {
   ...shared,
   description:
-    "Save an SSH host in Settings → Connections of the GOAT desktop app on this machine so its threads appear in the sidebar. Key-based SSH only (keys or ssh-agent); a password host fails. Adding an already saved host returns it with created:false. The first connection may take minutes. Needs a full-access caller. Requires the GOAT desktop app to be running on this machine.",
+    "Save an SSH host in Settings → Connections of the GOAT desktop app on this machine so its threads appear in the sidebar. Key-based SSH only (keys or ssh-agent); a password host fails. An already saved machine (by alias or endpoint) is returned with created:false. A machine saved through another route gains this SSH route with created:false. The first connection may take minutes. Needs a full-access caller. Requires the GOAT desktop app to be running on this machine.",
   parameters: Schema.Struct({
     host: TrimmedNonEmptyString.annotate({
       description: "SSH alias or host from goat_ssh_host_list.",

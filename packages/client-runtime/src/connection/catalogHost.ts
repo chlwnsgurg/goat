@@ -115,7 +115,17 @@ export const handleConnectionCatalogOperation = <E>(
             reason: "connection_failed",
             message: "The SSH connection was not saved.",
           };
-        return { type: "add_ssh", created: true, connection: savedConnection(entry) };
+        if (isPlatformEntry(entry))
+          return {
+            type: "failure",
+            reason: "refused",
+            message: `${operation.host} reaches this machine's own environment; it is already in the sidebar.`,
+          };
+        return {
+          type: "add_ssh",
+          created: !entries.has(environmentId),
+          connection: savedConnection(entry),
+        };
       }
       case "remove": {
         const entry = entries.get(operation.environmentId);
@@ -145,10 +155,14 @@ export const handleConnectionCatalogOperation = <E>(
   }).pipe(
     Effect.catchCause((cause) => {
       const error = Cause.squash(cause);
+      const message = (error instanceof Error ? error.message : String(error))
+        .replace(/^Error invoking remote method '[^']+':\s*/u, "")
+        .replace(/^[A-Za-z][A-Za-z0-9]*Error:\s*/u, "")
+        .trim();
       return Effect.succeed({
         type: "failure" as const,
         reason: "connection_failed" as const,
-        message: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
+        message: message.slice(0, 2000),
       });
     }),
   );

@@ -5,6 +5,7 @@ import type {
   ConnectionCatalogResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -97,7 +98,13 @@ const make = Effect.gen(function* () {
           return host;
         }).pipe(lock.withPermit),
         detach,
-      ).pipe(Effect.map((host) => Stream.fromQueue(host.queue))),
+      ).pipe(
+        Effect.map((host) =>
+          Stream.fromQueue(host.queue).pipe(
+            Stream.filter((request) => pending.has(request.requestId)),
+          ),
+        ),
+      ),
     );
 
   const respond: ConnectionCatalogBroker["Service"]["respond"] = (connectionId, response) =>
@@ -118,8 +125,11 @@ const make = Effect.gen(function* () {
             // Set insertion order makes the newest live renderer preferred.
             const host = Array.from(hosts).at(-1);
             if (host === undefined) return yield* new ConnectionCatalogHostUnavailable();
+            const expiresAt = DateTime.formatIso(
+              DateTime.add(yield* DateTime.now, { milliseconds: timeoutMs }),
+            );
             pending.set(requestId, { host, answer });
-            yield* Queue.offer(host.queue, { requestId, operation });
+            yield* Queue.offer(host.queue, { requestId, expiresAt, operation });
           }).pipe(lock.withPermit),
           () => Effect.sync(() => pending.delete(requestId)),
         );

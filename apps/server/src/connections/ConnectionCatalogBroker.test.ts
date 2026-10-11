@@ -23,6 +23,7 @@ it.effect("relays requests and ignores unknown ids and responses from another co
     const invoke = yield* broker.invoke({ type: "list" }, 30_000).pipe(Effect.forkChild);
     const [request] = yield* pull;
     expect(request.operation).toEqual({ type: "list" });
+    expect(request.expiresAt).toBe("1970-01-01T00:00:30.000Z");
     yield* broker.respond("desktop", {
       requestId: "unknown",
       result: { type: "list", connections: [] },
@@ -104,5 +105,33 @@ it.effect("times out with a tagged error and ignores the late response", () =>
       requestId: request.requestId,
       result: { type: "list", connections: [] },
     });
+  }).pipe(Effect.provide(ConnectionCatalogBroker.layer)),
+);
+
+it.effect("does not deliver a queued request after it times out", () =>
+  Effect.gen(function* () {
+    const broker = yield* ConnectionCatalogBroker.ConnectionCatalogBroker;
+    const pull = yield* Stream.toPull(broker.attach("desktop"));
+    const warmup = yield* broker.invoke({ type: "list" }, 30_000).pipe(Effect.forkChild);
+    const [warmupRequest] = yield* pull;
+    yield* broker.respond("desktop", {
+      requestId: warmupRequest.requestId,
+      result: { type: "list", connections: [] },
+    });
+    yield* Fiber.join(warmup);
+    const expired = yield* Effect.flip(broker.invoke({ type: "list" }, 30_000)).pipe(
+      Effect.forkChild,
+    );
+    yield* TestClock.adjust(30_000);
+    expect((yield* Fiber.join(expired))._tag).toBe("ConnectionCatalogTimeout");
+    const next = yield* broker.invoke({ type: "list" }, 30_000).pipe(Effect.forkChild);
+    const [request] = yield* pull;
+    expect(request.requestId).toBe("3");
+    expect(request.expiresAt).toBe("1970-01-01T00:01:00.000Z");
+    yield* broker.respond("desktop", {
+      requestId: request.requestId,
+      result: { type: "list", connections: [] },
+    });
+    expect(yield* Fiber.join(next)).toEqual({ type: "list", connections: [] });
   }).pipe(Effect.provide(ConnectionCatalogBroker.layer)),
 );

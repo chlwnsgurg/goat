@@ -14,7 +14,7 @@ import { ConnectionToolkit } from "./tools.ts";
 const CATALOG_TIMEOUT_MS = 30_000;
 const SSH_ADD_TIMEOUT_MS = 10 * 60_000;
 const NO_HOST_MESSAGE =
-  "No GOAT desktop app is attached to this environment. Saved connections belong to the desktop app: open it on this machine, or add the host in Settings → Connections → SSH. Web-only and mobile clients cannot save SSH connections.";
+  "No GOAT desktop app is serving saved connections for this environment. Saved connections belong to the desktop app that runs this environment as its main local environment: open it on this machine, or add the host in Settings → Connections → SSH. Web-only, mobile and desktop WSL-backend environments cannot save SSH connections through agents.";
 
 const invoke = <const T extends ConnectionCatalogOperation["type"]>(
   operation: ConnectionCatalogOperation & { readonly type: T },
