@@ -5,8 +5,14 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import { it as effectIt } from "@effect/vitest";
+import * as Layer from "effect/Layer";
+import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import * as DesktopConfig from "./DesktopConfig.ts";
 
-import { type CliShimTarget, renderCliShim } from "./DesktopCliShim.ts";
+import { type CliShimTarget, launcherPath, renderCliShim } from "./DesktopCliShim.ts";
 
 const directories: Array<string> = [];
 afterEach(() => {
@@ -72,6 +78,61 @@ const fakeAppImage = (canMount = true) => {
 };
 
 describe("renderCliShim", () => {
+  effectIt.effect(
+    "executes a packaged GOAT shim in a scratch HOME, respecting overrides and preserving upstream data",
+    () =>
+      Effect.gen(function* () {
+        const root = tempRoot();
+        const old = NodePath.join(root, ".t3", "sentinel");
+        NodeFS.mkdirSync(NodePath.dirname(old), { recursive: true });
+        NodeFS.writeFileSync(old, "upstream data");
+        const executable = NodePath.join(root, "app");
+        writeExecutable(executable, REPORTER);
+        for (const override of [undefined, NodePath.join(root, "custom")]) {
+          const environment = yield* DesktopEnvironment.DesktopEnvironment.pipe(
+            Effect.provide(
+              DesktopEnvironment.layer({
+                dirname: "/repo/apps/desktop/dist-electron",
+                homeDirectory: root,
+                platform: "darwin",
+                processArch: "arm64",
+                appVersion: "1.2.3",
+                appPath: "/install/app.asar",
+                isPackaged: true,
+                resourcesPath: "/install",
+                runningUnderArm64Translation: false,
+              }).pipe(
+                Layer.provide(
+                  Layer.mergeAll(
+                    NodeServices.layer,
+                    DesktopConfig.layerTest({ T3CODE_HOME: override }),
+                  ),
+                ),
+              ),
+            ),
+          );
+          const shim = launcherPath(environment);
+          const selected = override ?? NodePath.join(root, ".goat", "desktop");
+          expect(environment.baseDir).toBe(selected);
+          const content = renderCliShim({
+            target: { kind: "direct", executable, entry: "/bin.mjs" },
+            shimPath: shim,
+            t3Home: environment.baseDir,
+          });
+          expect(content).toContain(selected);
+          expect(content).not.toContain(".t3");
+          writeExecutable(shim, content);
+          const result = run(shim, [], { HOME: root });
+          expect(result.status).toBe(3);
+          expect(result.stdout).toContain(`home=${selected}`);
+          expect(
+            run(shim, [], { HOME: root, T3CODE_HOME: `${root}/runtime-override` }).stdout,
+          ).toContain(`home=${root}/runtime-override`);
+        }
+        expect(NodeFS.readFileSync(old, "utf8")).toBe("upstream data");
+        expect(NodeFS.readdirSync(NodePath.dirname(old))).toEqual(["sentinel"]);
+      }),
+  );
   it("runs the AppImage's bundled CLI with every argument and unmounts after", () => {
     const { root, image, shim } = fakeAppImage();
     const result = run(shim, ["browser", "setup", "a b"]);

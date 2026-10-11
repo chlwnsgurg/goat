@@ -48,6 +48,7 @@ import {
   resolveMacWebAuthnEntitlements,
   resolveClerkPasskeyNativeArtifacts,
   resolveMacPasskeySigningConfiguration,
+  resolveOptionalMacPasskeySigningConfiguration,
   resolveDesktopRuntimeDependencies,
   resolveMergedStageDependencies,
   resolveFffNativeDependencies,
@@ -299,14 +300,156 @@ const stageWindowsSshRuntimeFixture = Effect.fn("test.stageWindowsSshRuntimeFixt
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect("disables feeds for local builds and unrelated repositories", () =>
+    Effect.gen(function* () {
+      for (const env of [
+        {
+          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GITHUB_REPOSITORY: "goat-si/goat",
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: "",
+        },
+        {
+          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GITHUB_REPOSITORY: "goat-si/goat",
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: "  ",
+        },
+        {},
+        { GITHUB_REPOSITORY: "pingdotgg/t3code" },
+        { GITHUB_REPOSITORY: "goat-si/goat" },
+        { T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true", GITHUB_REPOSITORY: "goat-si/goat" },
+        { T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat" },
+        { T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true", GITHUB_REPOSITORY: "some/fork" },
+        {
+          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GITHUB_REPOSITORY: "goat-si/goat",
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+        },
+        {
+          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat/extra",
+        },
+      ]) {
+        const config = yield* createBuildConfig(
+          "mac",
+          "dmg",
+          "1.2.3",
+          false,
+          false,
+          undefined,
+          undefined,
+        ).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))));
+        assert.strictEqual(config.publish, null);
+        assert.equal(config.appId, "si.goat.desktop");
+        assert.equal(config.productName, "GOAT");
+        assert.equal(config.artifactName, "GOAT-${version}-${arch}.${ext}");
+      }
+    }),
+  );
+
+  it.effect("configures only an opted-in canonical nightly feed and keeps previews off", () =>
+    Effect.gen(function* () {
+      const feed = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3-nightly.20261011.1",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal(feed.appId, "si.goat.desktop.nightly");
+      assert.deepStrictEqual(feed.publish, [
+        {
+          provider: "github",
+          owner: "goat-si",
+          repo: "goat",
+          releaseType: "prerelease",
+          channel: "nightly",
+        },
+      ]);
+      for (const version of ["1.2.3-pr.4.1", "1.2.3-preview.20261011.1"]) {
+        const preview = yield* createBuildConfig(
+          "mac",
+          "dmg",
+          version,
+          false,
+          true,
+          3999,
+          undefined,
+        );
+        assert.strictEqual(preview.publish, null);
+      }
+      const mock = yield* createBuildConfig("mac", "dmg", "1.2.3", false, true, 3999, undefined);
+      assert.deepStrictEqual(mock.publish, [{ provider: "generic", url: "http://localhost:3999" }]);
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: {
+              T3CODE_DESKTOP_UPDATE_REPOSITORY: " goat-si/goat ",
+              GITHUB_REPOSITORY: "some/fork",
+              T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+            },
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it("requires provisioning only for explicitly opted-in signed macOS builds", () => {
+    const local = { platform: "mac" as const, signed: true, macPasskeys: false, version: "1.2.3" };
+    assert.isUndefined(resolveOptionalMacPasskeySigningConfiguration(local, {}));
+    assert.isUndefined(
+      resolveOptionalMacPasskeySigningConfiguration(
+        { ...local, signed: false, macPasskeys: true },
+        {},
+      ),
+    );
+    assert.isUndefined(
+      resolveOptionalMacPasskeySigningConfiguration(
+        { ...local, platform: "linux", macPasskeys: true },
+        {},
+      ),
+    );
+    assert.throws(() =>
+      resolveOptionalMacPasskeySigningConfiguration({ ...local, macPasskeys: true }, {}),
+    );
+    const entitled = resolveOptionalMacPasskeySigningConfiguration(
+      { ...local, macPasskeys: true, version: "1.2.3-nightly.20261011.1" },
+      {
+        T3CODE_APPLE_TEAM_ID: "ABC1234567",
+        T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/goat.provisionprofile",
+        T3CODE_CLERK_PASSKEY_RP_DOMAINS: "clerk.example.com",
+      },
+    );
+    assert.equal(entitled?.appId, "si.goat.desktop.nightly");
+  });
+
+  it.effect("keeps normal signing available without a passkey profile", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = config.mac as Record<string, unknown>;
+      assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+      assert.notProperty(mac, "provisioningProfile");
+      assert.notProperty(mac, "entitlements");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "GOAT");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "GOAT (Nightly)");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -335,7 +478,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+                T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat",
               },
             }),
           ),
@@ -346,7 +490,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                GITHUB_REPOSITORY: "pingdotgg/t3code",
+                T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat",
               },
             }),
           ),
@@ -355,14 +500,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.deepStrictEqual(latestConfig, {
         provider: "github",
-        owner: "pingdotgg",
-        repo: "t3code",
+        owner: "goat-si",
+        repo: "goat",
         releaseType: "release",
       });
       assert.deepStrictEqual(nightlyConfig, {
         provider: "github",
-        owner: "pingdotgg",
-        repo: "t3code",
+        owner: "goat-si",
+        repo: "goat",
         releaseType: "prerelease",
         channel: "nightly",
       });
@@ -400,20 +545,25 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
 
-      assert.notProperty(preview, "publish");
-      assert.notProperty(previewChannel, "publish");
+      assert.strictEqual(preview.publish, null);
+      assert.strictEqual(previewChannel.publish, null);
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
-          owner: "pingdotgg",
-          repo: "t3code",
+          owner: "goat-si",
+          repo: "goat",
           releaseType: "release",
         },
       ]);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ConfigProvider.fromEnv({
+            env: {
+              T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+              T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat",
+            },
+          }),
         ),
       ),
     ),
@@ -717,7 +867,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Alpha) 1.2.3 Installer",
+        title: "GOAT 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -732,11 +882,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       // Linux must register the renderer schemes so the generated .desktop
       // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "GOAT", schemes: ["t3code", "t3code-dev"] },
       ]);
       // macOS also offers itself as a web browser, so it can be chosen as the default.
       assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "GOAT", schemes: ["t3code", "t3code-dev"] },
         { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
       // macOS lists a default browser only when it also opens web pages as documents.
@@ -760,7 +910,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.propertyVal(
         (mac.mac as Record<string, unknown>).extendInfo as Record<string, unknown>,
         "NSLocalNetworkUsageDescription",
-        "T3 Code connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
+        "GOAT connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
       );
       for (const config of [linux, win]) {
         assert.deepStrictEqual(config.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);
@@ -1999,7 +2149,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "si.goat.desktop",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -2022,7 +2172,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.si.goat.desktop</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -2189,12 +2339,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code");
+      assert.equal(config.appId, "si.goat.desktop");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
       assert.deepStrictEqual(mac.protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "GOAT", schemes: ["t3code", "t3code-dev"] },
         { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
@@ -2434,7 +2584,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it.effect("resolves default platform and architecture from host references", () =>
     Effect.gen(function* () {
-      const resolved = yield* resolveBuildOptions({
+      const input = {
         platform: Option.none(),
         target: Option.none(),
         arch: Option.none(),
@@ -2449,7 +2599,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         wslRuntime: Option.none(),
         sshRuntimeArchiveDir: Option.none(),
         requireAllSshRuntimes: Option.none(),
-      }).pipe(
+      };
+      const resolved = yield* resolveBuildOptions(input).pipe(
         Effect.provide(
           Layer.mergeAll(
             Layer.succeed(HostProcess.Platform, "win32"),
@@ -2466,6 +2617,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ),
       );
 
+      const optedIn = yield* resolveBuildOptions(input).pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                T3CODE_DESKTOP_MAC_PASSKEYS: "true",
+                T3CODE_DESKTOP_SIGNED: "true",
+              },
+            }),
+          ),
+        ),
+      );
+      assert.equal(optedIn.macPasskeys, true);
+      assert.equal(optedIn.signed, true);
+      assert.equal(resolved.macPasskeys, false);
       assert.equal(resolved.platform, "win");
       assert.equal(resolved.target, "nsis");
       assert.equal(resolved.arch, "arm64");

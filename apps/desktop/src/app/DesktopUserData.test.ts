@@ -3,71 +3,55 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import * as PlatformError from "effect/PlatformError";
-
 import { resolveUserDataPath } from "./DesktopUserData.ts";
 
-it.effect("identifies a failed source read and preserves its cause", () => {
-  const sourceState = "/profiles/t3code/Local State";
-  const cause = PlatformError.systemError({
-    _tag: "PermissionDenied",
-    module: "FileSystem",
-    method: "readFileString",
-    pathOrDescriptor: sourceState,
-  });
-  return Effect.gen(function* () {
-    const error = yield* resolveUserDataPath({
-      appDataDirectory: "/profiles",
-      isDevelopment: false,
-      platform: "win32",
-    }).pipe(Effect.flip);
-    assert.equal(error.operation, "read");
-    assert.equal(error.resourcePath, sourceState);
-    assert.equal(error.category, "PermissionDenied");
-    assert.strictEqual(error.cause, cause);
-  }).pipe(
-    Effect.provideService(
-      FileSystem.FileSystem,
-      FileSystem.makeNoop({
-        exists: (path) => Effect.succeed(path === sourceState),
-        readFileString: () => Effect.fail(cause),
-      }),
-    ),
-    Effect.provide(NodeServices.layer),
-  );
-});
-
-it.effect.each(["t3code", "T3 Code (Alpha)"])(
-  "preserves Windows credential keys from %s without copying browser databases",
-  (sourceName) =>
+it.effect.each(["darwin", "linux", "win32"] as const)(
+  "isolates GOAT channels without importing upstream profiles on %s",
+  (platform) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-profile-" });
-      const source = path.join(directory, sourceName);
-      const destination = path.join(directory, "t3code-v2");
-      const state = '{"os_crypt":{"encrypted_key":"test-encrypted-key"}}';
-      yield* fs.makeDirectory(path.join(directory, "T3 Code (Alpha)"), { recursive: true });
-      yield* fs.makeDirectory(path.join(source, "IndexedDB"), { recursive: true });
-      yield* fs.writeFileString(path.join(source, "Local State"), state);
-      yield* fs.writeFileString(path.join(source, "IndexedDB", "LOCK"), "V1 owns this database");
-      yield* resolveUserDataPath({
-        appDataDirectory: directory,
-        isDevelopment: false,
-        platform: "win32",
-      });
-      assert.equal(yield* fs.readFileString(path.join(destination, "Local State")), state);
-      assert.equal(yield* fs.readFileString(path.join(source, "Local State")), state);
-      assert.isFalse(yield* fs.exists(path.join(destination, "IndexedDB")));
-      yield* fs.writeFileString(path.join(destination, "Local State"), "existing V2 state");
-      yield* resolveUserDataPath({
-        appDataDirectory: directory,
-        isDevelopment: false,
-        platform: "win32",
-      });
-      assert.equal(
-        yield* fs.readFileString(path.join(destination, "Local State")),
-        "existing V2 state",
-      );
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-profile-" });
+      for (const name of ["t3code-v2", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"]) {
+        yield* fs.makeDirectory(path.join(root, name, "IndexedDB"), { recursive: true });
+        yield* fs.writeFileString(path.join(root, name, "Local State"), "upstream keys");
+        yield* fs.writeFileString(path.join(root, name, "IndexedDB", "LOCK"), "upstream database");
+      }
+      for (const [version, development, profile] of [
+        ["1.2.3", false, "goat-desktop"],
+        ["1.2.3-nightly.20261011.1", false, "goat-desktop-nightly"],
+        ["1.2.3", true, "goat-desktop-dev"],
+      ] as const) {
+        const actual = yield* resolveUserDataPath({
+          appDataDirectory: root,
+          isDevelopment: development,
+          platform,
+          appVersion: version,
+        });
+        assert.equal(actual, path.join(root, profile));
+        assert.isFalse(yield* fs.exists(path.join(actual, "Local State")));
+        yield* fs.makeDirectory(actual, { recursive: true });
+        yield* fs.writeFileString(path.join(actual, "Local State"), profile);
+        assert.equal(
+          yield* resolveUserDataPath({
+            appDataDirectory: root,
+            isDevelopment: development,
+            platform,
+            appVersion: version,
+          }),
+          actual,
+        );
+        assert.equal(yield* fs.readFileString(path.join(actual, "Local State")), profile);
+      }
+      for (const name of ["t3code-v2", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"]) {
+        assert.equal(
+          yield* fs.readFileString(path.join(root, name, "Local State")),
+          "upstream keys",
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(root, name, "IndexedDB", "LOCK")),
+          "upstream database",
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

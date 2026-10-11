@@ -82,8 +82,8 @@ const make = Effect.gen(function* () {
   });
 
   const load = Effect.fn("desktop.legacyLocalStorage.load")(function* (userDataPath: string) {
-    // Development already shares its profile between versions.
-    if (environment.isDevelopment) return;
+    // GOAT uses its own profile; importing upstream V1 preferences is never implicit.
+    if (environment.isDevelopment || environment.branding.baseName === "GOAT") return;
     const marker = path.join(userDataPath, MARKER_FILE_NAME);
     if (yield* fs.exists(marker).pipe(Effect.orElseSucceed(() => true))) return;
     yield* Ref.set(markerPath, Option.some(marker));

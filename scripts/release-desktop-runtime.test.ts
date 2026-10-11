@@ -2,10 +2,20 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import {
+  createBuildConfig,
+  resolveOptionalMacPasskeySigningConfiguration,
+  resolveMacWebAuthnEntitlements,
+  renderMacPasskeyEntitlements,
+} from "./build-desktop-artifact.ts";
 
 const decode = Schema.decodeUnknownEffect(
   fromYaml(
@@ -28,6 +38,138 @@ const decode = Schema.decodeUnknownEffect(
 );
 
 describe("desktop release runtime supply", () => {
+  it.effect(
+    "signs macOS with passkeys off and provisions entitlements only with explicit opt-in",
+    () =>
+      Effect.gen(function* () {
+        const raw = yield* Effect.tryPromise(() =>
+          NodeFSP.readFile(
+            new URL("../.github/workflows/release-desktop.yml", import.meta.url),
+            "utf8",
+          ),
+        );
+        const workflow = yield* decode(raw);
+        const step = workflow.jobs.build.steps.find((s) => s.name === "Build desktop artifact")!;
+        assert.equal(step.env?.T3CODE_DESKTOP_MAC_PASSKEYS, "${{ inputs.mac_passkeys }}");
+        const declaration = yield* Schema.decodeUnknownEffect(
+          fromYaml(
+            Schema.Struct({
+              on: Schema.Struct({
+                workflow_call: Schema.Struct({
+                  inputs: Schema.Struct({
+                    mac_passkeys: Schema.Struct({ default: Schema.Boolean }),
+                  }),
+                }),
+              }),
+            }),
+          ),
+        )(raw);
+        assert.isFalse(declaration.on.workflow_call.inputs.mac_passkeys.default);
+        const runner = yield* Effect.acquireRelease(
+          Effect.tryPromise(() =>
+            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-release-signing-")),
+          ),
+          (dir) => Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true })),
+        );
+        const version = "1.2.3-nightly.20261011.1";
+        const profile =
+          '<?xml version="1.0"?><plist><dict><key>Entitlements</key><dict><key>keychain-access-groups</key><array><string>ABC1234567.si.goat.desktop.nightly.webauthn</string></array><key>com.apple.developer.web-browser.public-key-credential</key><true/></dict></dict></plist>';
+        for (const [enabled, supplied, status] of [
+          [false, false, 0],
+          [false, true, 0],
+          [true, false, 1],
+          [true, true, 0],
+        ] as const) {
+          const shell = step
+            .run!.replace(
+              /\$\{\{ inputs\.([^ }]+) \}\}/g,
+              (_match, key: string) =>
+                ({
+                  platform: "mac",
+                  target: "dmg",
+                  arch: "arm64",
+                  version,
+                  ssh_runtime_bundle: "false",
+                })[key as "platform"] ?? "fixture",
+            )
+            .replace(
+              'vp run dist:desktop:artifact "${args[@]}"',
+              'printf "args=%s\\n" "${args[*]}"; printf "key=%s profile=%s passkeys=%s\\n" "$APPLE_API_KEY" "${T3CODE_MACOS_PROVISIONING_PROFILE:-}" "$T3CODE_DESKTOP_MAC_PASSKEYS"',
+            );
+          const result = NodeChildProcess.spawnSync(
+            "bash",
+            [
+              "-eu",
+              "-c",
+              'security() { printf "profile-validated\\n"; }; base64() { "' +
+                process.execPath +
+                "\" -e \"process.stdin.on('data', x => process.stdout.write(Buffer.from(x.toString(), 'base64')));\"; };\n" +
+                shell,
+            ],
+            {
+              encoding: "utf8",
+              env: {
+                PATH: process.env.PATH,
+                RUNNER_TEMP: runner,
+                GITHUB_WORKSPACE: runner,
+                CSC_LINK: "fixture-cert",
+                CSC_KEY_PASSWORD: "fixture",
+                APPLE_API_KEY: "fixture-key",
+                APPLE_API_KEY_ID: "fixture",
+                APPLE_API_ISSUER: "fixture",
+                APPLE_TEAM_ID: supplied ? "ABC1234567" : "",
+                MACOS_PROVISIONING_PROFILE: supplied ? Buffer.from(profile).toString("base64") : "",
+                T3CODE_DESKTOP_MAC_PASSKEYS: String(enabled),
+              },
+            },
+          );
+          assert.equal(result.status, status, result.stderr);
+          if (status !== 0) {
+            assert.include(result.stderr, "Passkey opt-in requires");
+            continue;
+          }
+          assert.include(result.stdout, "--signed");
+          assert.include(result.stdout, `key=${runner}/AuthKey_fixture.p8`);
+          assert.equal(result.stdout.includes(`profile=${runner}/goat.provisionprofile`), enabled);
+          const passkeys = resolveOptionalMacPasskeySigningConfiguration(
+            { platform: "mac", signed: true, macPasskeys: enabled, version },
+            supplied
+              ? {
+                  T3CODE_APPLE_TEAM_ID: "ABC1234567",
+                  T3CODE_MACOS_PROVISIONING_PROFILE: `${runner}/goat.provisionprofile`,
+                  T3CODE_CLERK_PASSKEY_RP_DOMAINS: "clerk.example.com",
+                }
+              : {},
+          );
+          const config = yield* createBuildConfig(
+            "mac",
+            "dmg",
+            version,
+            true,
+            false,
+            undefined,
+            passkeys
+              ? {
+                  entitlementsPath: "/fixture/entitlements.mac.plist",
+                  provisioningProfilePath: passkeys.provisioningProfilePath,
+                }
+              : undefined,
+          ).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))));
+          const mac = config.mac as Record<string, unknown>;
+          assert.match(String(mac.sign), /sign-macos\.ts$/);
+          assert.equal(mac.provisioningProfile !== undefined, enabled);
+          assert.equal(mac.entitlements !== undefined, enabled);
+          if (passkeys) {
+            const xml = renderMacPasskeyEntitlements(
+              passkeys,
+              resolveMacWebAuthnEntitlements(profile, passkeys),
+            );
+            assert.include(xml, "ABC1234567.si.goat.desktop.nightly");
+            assert.include(xml, "ABC1234567.si.goat.desktop.nightly.webauthn");
+          }
+        }
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
   it.effect("uploads producer archives before waiting and packages the complete bundle", () =>
     Effect.gen(function* () {
       const raw = yield* Effect.tryPromise(() =>

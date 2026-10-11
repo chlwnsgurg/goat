@@ -8,9 +8,39 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeOS from "node:os";
 import { assert, it, vi } from "vite-plus/test";
 
-import { fixPath, hydratePosixHome } from "./os-jank.ts";
+import { fixPath, hydratePosixHome, resolveBaseDir } from "./os-jank.ts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 vi.mock("node:child_process", { spy: true });
+
+effectIt.effect(
+  "keeps the standalone default at T3 home and respects explicit GOAT and custom homes",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-base-" });
+      yield* fs.makeDirectory(path.join(home, ".t3", "userdata"), { recursive: true });
+      const sentinel = path.join(home, ".t3", "userdata", "settings.json");
+      yield* fs.writeFileString(sentinel, "upstream sentinel");
+      for (const raw of [undefined, "", " "]) {
+        assert.equal(
+          yield* resolveBaseDir(raw).pipe(Effect.provideService(HostProcess.HomeDirectory, home)),
+          path.join(home, ".t3"),
+        );
+      }
+      assert.equal(
+        yield* resolveBaseDir("~/.goat").pipe(
+          Effect.provideService(HostProcess.HomeDirectory, home),
+        ),
+        path.join(home, ".goat"),
+      );
+      assert.equal(yield* resolveBaseDir(path.join(home, "chosen")), path.join(home, "chosen"));
+      assert.equal(yield* fs.readFileString(sentinel), "upstream sentinel");
+      assert.isFalse(yield* fs.exists(path.join(home, ".goat")));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 it("hydrates HOME for minimal service environments from the user account", () => {
   const env: NodeJS.ProcessEnv = {};

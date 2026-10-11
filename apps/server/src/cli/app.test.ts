@@ -206,6 +206,36 @@ describe("goat server command safety", () => {
 });
 
 describe("goat app", () => {
+  it.effect(
+    "finds the packaged GOAT desktop first and keeps explicit home overrides authoritative",
+    () =>
+      withTempDirectory("goat-app-packaged-home-", (root) =>
+        Effect.gen(function* () {
+          const packaged = yield* fakeDesktop({ baseDir: NodePath.join(root, ".goat", "desktop") });
+          const legacyHome = NodePath.join(root, ".t3");
+          const legacy = yield* fakeDesktop({ baseDir: legacyHome });
+          const development = yield* fakeDesktop({ baseDir: legacyHome, stateSubdirectory: "dev" });
+          yield* runCli(["app"]);
+          yield* runCli(["app"], { T3CODE_HOME: "  " });
+          expect(packaged.received).toHaveLength(2);
+          expect(legacy.received).toHaveLength(0);
+          expect(development.received).toHaveLength(0);
+          yield* runCli(["app"], { T3CODE_HOME: legacyHome });
+          yield* runCli(["app", "--base-dir", legacyHome], {
+            T3CODE_HOME: NodePath.join(root, ".goat", "desktop"),
+          });
+          expect(legacy.received).toHaveLength(2);
+          const error = yield* runCli(["app", "--base-dir", NodePath.join(root, "missing")]).pipe(
+            Effect.flip,
+          );
+          expect(error).toMatchObject({
+            _tag: "DesktopAppUnreachableError",
+            candidateAddresses: [expect.any(String)],
+          });
+          expect(packaged.received).toHaveLength(2);
+        }).pipe(Effect.provideService(HostProcess.HomeDirectory, root), Effect.scoped),
+      ),
+  );
   it.effect("rejects SSH before it tries to reach a desktop app", () =>
     withTempDirectory("goat-app-ssh-test-", (root) =>
       Effect.gen(function* () {

@@ -9,6 +9,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
 import * as Result from "effect/Result";
@@ -1571,6 +1572,42 @@ describe("archive runner script", () => {
   const runRunner = (home: string, runner: string) => runShell(home, [runner, "--version"]);
   const runUpload = (home: string, script: string, bytes: Uint8Array) =>
     runShell(home, ["-c", script], bytes);
+
+  it.effect.skipIf(windowsHost)(
+    "keeps a retained GOAT runner off upstream data despite an ambient T3 home",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-identity-shell-" });
+        const old = path.join(home, ".t3", "userdata");
+        yield* fs.makeDirectory(old, { recursive: true });
+        const sentinel = path.join(old, "settings.json");
+        yield* fs.writeFileString(sentinel, "upstream remains intact");
+        const runtime = path.join(home, ".goat", "runtime", "goat", "versions", archiveVersion);
+        yield* fs.makeDirectory(runtime, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(runtime, "goat"),
+          "#!/bin/sh\nprintf 'goat-ready\\n'\n",
+        );
+        yield* fs.chmod(path.join(runtime, "goat"), 0o700);
+        yield* fs.writeFileString(path.join(runtime, ".install-complete"), archiveVersion);
+        const scripts = yield* nativeScripts({ archiveVersion });
+        const runner = path.join(home, "runner.sh");
+        yield* fs.writeFileString(runner, scripts.runner);
+        const result = yield* runShell(home, [
+          "-c",
+          'export T3CODE_HOME="$HOME/.t3"; exec sh "$1" --version',
+          "identity",
+          runner,
+        ]);
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(result.stdout, "goat-ready\n");
+        assert.equal(yield* fs.readFileString(sentinel), "upstream remains intact");
+        assert.isFalse(yield* fs.exists(path.join(home, ".t3", "runtime")));
+        assert.isFalse(yield* fs.exists(path.join(home, ".t3", "ssh-launch")));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   // A fake "executable" that answers --version, packed the way the release
   // workflow packs the real archive: one top-level directory named after the

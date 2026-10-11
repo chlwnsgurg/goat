@@ -17,6 +17,7 @@ import {
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -59,6 +60,32 @@ const makeDesktopBootstrap = (
 });
 
 it.layer(NodeServices.layer)("cli config resolution", (it) => {
+  it.effect("keeps the standalone server default at T3 home without a desktop bootstrap", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-default-config-" });
+      const old = path.join(home, ".t3", "userdata", "settings.json");
+      yield* fs.makeDirectory(path.dirname(old), { recursive: true });
+      yield* fs.writeFileString(old, "upstream settings sentinel");
+      const config = yield* resolveServerConfig(
+        { ...minimalDesktopFlags(home), baseDir: Option.none(), cwd: Option.some(home) },
+        Option.none(),
+      ).pipe(
+        Effect.provideService(HostProcess.HomeDirectory, home),
+        Effect.provide(
+          Layer.mergeAll(
+            NetService.layer,
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          ),
+        ),
+      );
+      assert.equal(config.baseDir, path.join(home, ".t3"));
+      assert.equal(config.stateDir, path.join(home, ".t3", "userdata"));
+      assert.equal(config.dbPath, path.join(home, ".t3", "userdata", "statev2.sqlite"));
+      assert.equal(yield* fs.readFileString(old), "upstream settings sentinel");
+    }).pipe(Effect.scoped),
+  );
   const defaultObservabilityConfig = {
     traceMinLevel: "Info",
     traceTimingEnabled: true,
@@ -528,6 +555,48 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       assert.equal(resolved.desktopTelemetryFd, 4);
       assert.equal(resolved.desktopTelemetryControlFd, 5);
     }),
+  );
+
+  it.effect(
+    "selects flags then environment then the packaged bootstrap home, including blank env",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-bootstrap-home-" });
+        const desktop = path.join(home, ".goat", "desktop");
+        const custom = path.join(home, "custom");
+        for (const [flag, envHome, expected] of [
+          [undefined, undefined, desktop],
+          [undefined, " ", desktop],
+          [undefined, custom, custom],
+          [custom, path.join(home, "env"), custom],
+        ] as const) {
+          const fd = yield* openBootstrapFd(makeDesktopBootstrap({ t3Home: desktop }));
+          const config = yield* resolveServerConfig(
+            { ...minimalDesktopFlags(home), baseDir: Option.fromUndefinedOr(flag) },
+            Option.none(),
+          ).pipe(
+            Effect.provideService(HostProcess.HomeDirectory, home),
+            Effect.provide(
+              Layer.mergeAll(
+                NetService.layer,
+                ConfigProvider.layer(
+                  ConfigProvider.fromEnv({
+                    env: {
+                      T3CODE_BOOTSTRAP_FD: String(fd),
+                      ...(envHome === undefined ? {} : { T3CODE_HOME: envHome }),
+                    },
+                  }),
+                ),
+              ),
+            ),
+          );
+          assert.equal(config.baseDir, expected);
+          assert.equal(config.stateDir, path.join(expected, "userdata"));
+          assert.equal(config.dbPath, path.join(expected, "userdata", "statev2.sqlite"));
+        }
+      }).pipe(Effect.scoped),
   );
 
   it.effect("carries the desktop's shell environment handoff only when the envelope sets it", () =>

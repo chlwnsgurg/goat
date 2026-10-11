@@ -57,8 +57,10 @@ const layerDesktopClerk = (
     openSystemSettings: () => Effect.succeed(false),
     copyText: () => Effect.void,
   },
+  appVersion = "1.2.3",
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
+    appVersion,
     stateDir: "/tmp/t3-state",
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
@@ -116,7 +118,10 @@ describe("DesktopClerk", () => {
       // The bridge acquires Electron's single-instance lock at creation, and
       // the lock both lives in and creates the userData directory — so the
       // real path must be set before the bridge exists.
-      assert.deepEqual(events, ["setPath:userData:/tmp/app-data/t3code-dev", "createClerkBridge"]);
+      assert.deepEqual(events, [
+        "setPath:userData:/tmp/app-data/goat-desktop-dev",
+        "createClerkBridge",
+      ]);
       storageMock.mockClear();
       createClerkBridgeMock.mockClear();
     });
@@ -124,20 +129,29 @@ describe("DesktopClerk", () => {
 
   it.each([
     {
+      appVersion: "1.2.3",
       name: "packaged Windows",
       isDevelopment: false,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-v2",
+      userData: "/tmp/app-data/goat-desktop",
     },
     {
+      appVersion: "1.2.3",
       name: "development",
       isDevelopment: true,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-dev",
+      userData: "/tmp/app-data/goat-desktop-dev",
+    },
+    {
+      name: "nightly",
+      appVersion: "1.2.3-nightly.20261011.1",
+      isDevelopment: false,
+      platform: "win32" as const,
+      userData: "/tmp/app-data/goat-desktop-nightly",
     },
   ])(
     "creates the bridge before startup can yield to the event loop ($name)",
-    ({ isDevelopment, platform, userData }) => {
+    ({ isDevelopment, platform, userData, appVersion }) => {
       const events: string[] = [];
       storageMock.mockReturnValue(storageAdapter);
       createClerkBridgeMock.mockImplementation(() => {
@@ -150,7 +164,14 @@ describe("DesktopClerk", () => {
       Effect.runSync(
         Effect.scoped(
           Layer.build(
-            layerDesktopClerk(isDevelopment, events, platform, DesktopPreReadyFileSystem.layer),
+            layerDesktopClerk(
+              isDevelopment,
+              events,
+              platform,
+              DesktopPreReadyFileSystem.layer,
+              undefined,
+              appVersion,
+            ),
           ),
         ),
       );

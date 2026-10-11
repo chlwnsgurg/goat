@@ -10,6 +10,23 @@ import {
 describe("DesktopEarlyElectronStartup", () => {
   const joinPath = NodePath.posix.join;
 
+  it("reads production password-store preferences from the GOAT home including a blank override", () => {
+    for (const env of [{}, { T3CODE_HOME: " " }]) {
+      const observed: string[] = [];
+      const preference = resolveEarlyLinuxPasswordStorePreference({
+        env,
+        homeDirectory: "/home/alice",
+        joinPath,
+        readFileString: (path) => {
+          observed.push(path);
+          return JSON.stringify({ linuxPasswordStore: "kwallet6" });
+        },
+      });
+      assert.deepEqual(observed, ["/home/alice/.goat/desktop/userdata/desktop-settings.json"]);
+      assert.equal(preference, "kwallet6");
+    }
+  });
+
   it("reads the persisted linux password-store preference before Electron is ready", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: { T3CODE_HOME: "/home/user/.t3-test" },

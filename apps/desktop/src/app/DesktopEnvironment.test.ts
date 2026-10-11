@@ -39,6 +39,22 @@ const makeEnvironment = (
 ) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it.effect("separates visible stable, nightly and development identities", () =>
+    Effect.gen(function* () {
+      const stable = yield* makeEnvironment({ isPackaged: true, appVersion: "1.2.3" });
+      const nightly = yield* makeEnvironment({
+        isPackaged: true,
+        appVersion: "1.2.3-nightly.20261011.1",
+      });
+      const dev = yield* makeEnvironment({}, { VITE_DEV_SERVER_URL: "http://localhost:5173" });
+      assert.equal(stable.displayName, "GOAT");
+      assert.equal(nightly.displayName, "GOAT (Nightly)");
+      assert.equal(dev.displayName, "GOAT (Dev)");
+      assert.equal(stable.appUserModelId, "si.goat.desktop");
+      assert.equal(nightly.appUserModelId, "si.goat.desktop.nightly");
+      assert.equal(dev.appUserModelId, "si.goat.desktop.dev");
+    }),
+  );
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
@@ -76,7 +92,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.serverRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
+      assert.equal(environment.appUserModelId, "si.goat.desktop.dev");
       assert.equal(environment.linuxWmClass, "t3code-dev");
       assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.Development.desktop");
       assert.deepEqual(
@@ -163,7 +179,8 @@ describe("DesktopEnvironment", () => {
       const production = yield* makeEnvironment();
 
       assert.equal(development.stateDir, "/Users/alice/.t3/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(production.baseDir, "/Users/alice/.goat/desktop");
+      assert.equal(production.stateDir, "/Users/alice/.goat/desktop/userdata");
     }),
   );
 

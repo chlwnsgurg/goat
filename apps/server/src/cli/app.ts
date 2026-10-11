@@ -79,7 +79,7 @@ function isDesktopPlatform(platform: NodeJS.Platform): platform is DesktopAppAct
 
 function sendDesktopAppActivationRequest(input: {
   readonly address: string;
-  readonly fallbackAddress?: string;
+  readonly fallbackAddresses?: ReadonlyArray<string>;
   readonly request: DesktopAppActivationRequest;
   readonly timeoutMs?: number;
 }): Promise<DesktopAppActivationResponse> {
@@ -150,7 +150,7 @@ function sendDesktopAppActivationRequest(input: {
       if (
         !settled &&
         !connected &&
-        input.fallbackAddress !== undefined &&
+        input.fallbackAddresses?.[0] !== undefined &&
         (error.code === "ENOENT" || error.code === "ECONNREFUSED")
       ) {
         settled = true;
@@ -158,7 +158,8 @@ function sendDesktopAppActivationRequest(input: {
         socket.destroy();
         resolve(
           sendDesktopAppActivationRequest({
-            address: input.fallbackAddress,
+            address: input.fallbackAddresses[0],
+            fallbackAddresses: input.fallbackAddresses.slice(1),
             request: input.request,
             ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
           }),
@@ -195,14 +196,14 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
   const path = yield* Path.Path;
   const configuredBaseDir = Option.getOrUndefined(flags.baseDir) ?? environment.t3Home;
   const baseDir = yield* resolveBaseDir(configuredBaseDir);
-  const allowDevFallback = Option.isNone(flags.baseDir) && !environment.t3Home?.trim();
+  const allowDefaultSearch = Option.isNone(flags.baseDir) && !environment.t3Home?.trim();
   const rawWorkspaceRoot =
     Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcess.WorkingDirectory);
   const workspaceRoot = path.resolve(yield* expandHomePath(rawWorkspaceRoot));
   const userId = yield* HostProcess.UserId;
-  const resolveAddress = (stateSubdirectory: "userdata" | "dev") =>
+  const resolveAddress = (stateDir: string) =>
     resolveDesktopAppControlAddress({
-      stateDir: path.join(baseDir, stateSubdirectory),
+      stateDir,
       platform: hostPlatform,
       tempDir: NodeOS.tmpdir(),
       userId,
@@ -217,19 +218,25 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
     workspaceRoot,
     platform: hostPlatform,
   };
-  const address = resolveAddress("userdata");
-  const fallbackAddress = allowDevFallback ? resolveAddress("dev") : undefined;
+  const stateDirectories = allowDefaultSearch
+    ? [
+        path.join(yield* HostProcess.HomeDirectory, ".goat", "desktop", "userdata"),
+        path.join(baseDir, "userdata"),
+        path.join(baseDir, "dev"),
+      ]
+    : [path.join(baseDir, "userdata")];
+  const [address, ...fallbackAddresses] = stateDirectories.map(resolveAddress);
 
   const response = yield* Effect.tryPromise({
     try: () =>
       sendDesktopAppActivationRequest({
-        address,
-        ...(fallbackAddress === undefined ? {} : { fallbackAddress }),
+        address: address!,
+        fallbackAddresses,
         request,
       }),
     catch: (cause) =>
       new DesktopAppUnreachableError({
-        candidateAddresses: fallbackAddress === undefined ? [address] : [address, fallbackAddress],
+        candidateAddresses: [address!, ...fallbackAddresses],
         requestId: request.requestId,
         workspaceRoot,
         cause,
