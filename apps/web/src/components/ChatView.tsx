@@ -8270,13 +8270,6 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
-      if (command === "composer.previousWorktree") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!event.repeat) branchToolbarRef.current?.usePreviousWorktree();
-        return;
-      }
-
       if (command === "thread.steerQueuedMessage") {
         if (routeKind === "draft") return;
         if (!queuedRunsControlRef.current?.steerNext(event.repeat)) return;

@@ -26,16 +26,14 @@ import {
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import { useProject, useThreadShell, useThreadShellsForProjectRefs } from "../state/entities";
+import { useProject, useThreadShell } from "../state/entities";
 import {
   type EnvMode,
   type EnvironmentOption,
   resolveContextStripLabelsCompact,
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
-  resolveLockedWorkspaceLabel,
-  resolvePreviousWorktreeLabel,
-  resolvePreviousWorktreeSeed,
+  resolveWorkspaceChipLabel,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 import {
@@ -44,7 +42,6 @@ import {
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
-import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -73,7 +70,6 @@ import { observeResize } from "~/lib/observeResize";
 
 export interface BranchToolbarHandle {
   openBranchPicker: () => void;
-  usePreviousWorktree: () => void;
 }
 
 interface BranchToolbarProps {
@@ -154,9 +150,6 @@ interface RunContextSelectorProps {
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   onEnvModeChange: (mode: EnvMode) => void;
-  previousWorktreeLabel: string | null;
-  previousWorktreeBranch: string | null;
-  onUsePreviousWorktree: () => void;
 }
 
 const RunContextSelector = memo(function RunContextSelector({
@@ -175,9 +168,6 @@ const RunContextSelector = memo(function RunContextSelector({
   effectiveEnvMode,
   activeWorktreePath,
   onEnvModeChange,
-  previousWorktreeLabel,
-  previousWorktreeBranch,
-  onUsePreviousWorktree,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(
@@ -190,13 +180,12 @@ const RunContextSelector = memo(function RunContextSelector({
       : activeWorktreePath
         ? FolderGitIcon
         : FolderIcon;
-  const workspaceLabel = forceNewWorktree
-    ? resolveEnvModeLabel("worktree")
-    : envModeLocked
-      ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
-      : effectiveEnvMode === "worktree"
-        ? resolveEnvModeLabel("worktree")
-        : resolveCurrentWorkspaceLabel(activeWorktreePath);
+  const workspaceLabel = resolveWorkspaceChipLabel({
+    forceNewWorktree,
+    activeWorktreePath,
+    effectiveEnvMode,
+    activeEnvironment,
+  });
   const isPanel = displayMode === "panel";
   const isLocked = envLocked || (envModeLocked && (!isPanel || !showEnvironmentPicker));
   const workspacePath =
@@ -256,9 +245,8 @@ const RunContextSelector = memo(function RunContextSelector({
   const triggerContent = (
     <>
       {icon}
-      <ComposerContextLabel displayMode={displayMode}>
-        {autoEnvironmentLabel ??
-          (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+      <ComposerContextLabel displayMode={displayMode} collapseWhenCompact={false}>
+        {workspaceLabel}
       </ComposerContextLabel>
     </>
   );
@@ -306,13 +294,7 @@ const RunContextSelector = memo(function RunContextSelector({
       <MenuPopup
         align="start"
         side={isPanel ? "bottom" : "top"}
-        className={
-          isPanel
-            ? "w-(--anchor-width)"
-            : previousWorktreeLabel
-              ? "w-[min(21rem,calc(100vw-2rem))]"
-              : undefined
-        }
+        className={isPanel ? "w-(--anchor-width)" : undefined}
         {...(!isPanel ? composerFloatingLayerProps : {})}
       >
         {showEnvironmentPicker && availableEnvironments && onEnvironmentChange ? (
@@ -367,11 +349,7 @@ const RunContextSelector = memo(function RunContextSelector({
           <MenuRadioGroup
             value={effectiveEnvMode}
             onValueChange={(value) => {
-              if (value === "previous-worktree") {
-                onUsePreviousWorktree();
-                return;
-              }
-              onEnvModeChange(value as EnvMode);
+              if (value === "local" || value === "worktree") onEnvModeChange(value);
             }}
           >
             <MenuRadioItem disabled={envModeLocked || forceNewWorktree} value="local" closeOnClick>
@@ -390,11 +368,6 @@ const RunContextSelector = memo(function RunContextSelector({
                 <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
               </span>
             </MenuRadioItem>
-            {previousWorktreeLabel ? (
-              <MenuRadioItem disabled={envModeLocked} value="previous-worktree" closeOnClick>
-                <PreviousWorktreeItemContent branch={previousWorktreeBranch} />
-              </MenuRadioItem>
-            ) : null}
           </MenuRadioGroup>
         </MenuGroup>
       </MenuPopup>
@@ -626,7 +599,6 @@ export const BranchToolbar = memo(function BranchToolbar({
     draftId ? store.getDraftSession(draftId) : store.getDraftThreadByRef(threadRef),
   );
   const serverThread = useThreadShell(threadRef);
-  const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const activeProjectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
     : draftThread
@@ -640,58 +612,10 @@ export const BranchToolbar = memo(function BranchToolbar({
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (serverThread !== null && activeWorktreePath !== null);
 
-  // "Previous worktree" hops a draft into the most recently active worktree
-  // of this project — the "keep going where I just was" follow-up flow. Only
-  // drafts can hop; started server threads have their workspace pinned.
-  const canUsePreviousWorktree =
-    draftThread !== null && serverThread === null && !envModeLocked && !forceNewWorktree;
-  const projectRefsForWorktreeLookup = useMemo(
-    () => (canUsePreviousWorktree && activeProjectRef ? [activeProjectRef] : []),
-    [canUsePreviousWorktree, activeProjectRef],
-  );
-  const projectThreads = useThreadShellsForProjectRefs(projectRefsForWorktreeLookup);
-  const previousWorktreeSeed = useMemo(
-    () =>
-      canUsePreviousWorktree
-        ? resolvePreviousWorktreeSeed({
-            threads: projectThreads,
-            currentWorktreePath: activeWorktreePath,
-          })
-        : null,
-    [activeWorktreePath, canUsePreviousWorktree, projectThreads],
-  );
-  const previousWorktreeLabel = previousWorktreeSeed
-    ? resolvePreviousWorktreeLabel(previousWorktreeSeed)
-    : null;
-  const onUsePreviousWorktree = useCallback(() => {
-    if (!previousWorktreeSeed || !activeProjectRef) return;
-    // Same shape the branch selector writes when picking a branch that
-    // already lives in a worktree: point the draft at the existing tree.
-    setDraftThreadContext(draftId ?? threadRef, {
-      branch: previousWorktreeSeed.branch,
-      worktreePath: previousWorktreeSeed.worktreePath,
-      envMode: "worktree",
-      projectRef: activeProjectRef,
-    });
-  }, [activeProjectRef, draftId, previousWorktreeSeed, setDraftThreadContext, threadRef]);
-
   useImperativeHandle(
     ref,
-    () => ({
-      openBranchPicker: () => branchSelectorRef.current?.open(),
-      usePreviousWorktree: () => {
-        if (!showGitControls || !canUsePreviousWorktree || !previousWorktreeSeed) return;
-        onUsePreviousWorktree();
-        onComposerFocusRequest?.();
-      },
-    }),
-    [
-      canUsePreviousWorktree,
-      onComposerFocusRequest,
-      onUsePreviousWorktree,
-      previousWorktreeSeed,
-      showGitControls,
-    ],
+    () => ({ openBranchPicker: () => branchSelectorRef.current?.open() }),
+    [],
   );
 
   const showEnvironmentPicker = Boolean(
@@ -728,9 +652,6 @@ export const BranchToolbar = memo(function BranchToolbar({
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             onEnvModeChange={onEnvModeChange}
-            previousWorktreeLabel={previousWorktreeLabel}
-            previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
-            onUsePreviousWorktree={onUsePreviousWorktree}
           />
         ) : null}
         {panelSection !== "workspace" ? (
@@ -782,9 +703,6 @@ export const BranchToolbar = memo(function BranchToolbar({
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             onEnvModeChange={onEnvModeChange}
-            previousWorktreeLabel={previousWorktreeLabel}
-            previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
-            onUsePreviousWorktree={onUsePreviousWorktree}
           />
         </div>
       ) : null}
@@ -821,10 +739,8 @@ export const BranchToolbar = memo(function BranchToolbar({
               envLocked={envModeLocked}
               effectiveEnvMode={effectiveEnvMode}
               activeWorktreePath={activeWorktreePath}
+              activeEnvironment={activeEnvironmentOption}
               onEnvModeChange={onEnvModeChange}
-              previousWorktreeLabel={previousWorktreeLabel}
-              previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
-              onUsePreviousWorktree={onUsePreviousWorktree}
             />
           ) : null}
         </div>

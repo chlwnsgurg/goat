@@ -91,11 +91,11 @@ const WORKSPACE_CHOICES: ReadonlyArray<{
   {
     mode: null,
     label: "Inherit",
-    description: "Use the repository's t3.json, or the current checkout.",
+    description: "Use the repository's t3.json, or Local.",
   },
   {
     mode: "local",
-    label: "Current checkout",
+    label: "Local",
     description: "Start new threads in the existing workspace.",
   },
   {
