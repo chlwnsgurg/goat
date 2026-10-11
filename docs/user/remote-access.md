@@ -188,6 +188,33 @@ running is left alone.
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
+### Start a worktree on a saved SSH host
+
+In the desktop app, save the host in **Settings → Connections**, then open a new
+thread in a project on this device. In the workspace menu, choose **Worktree on SSH**
+and the saved host. Send your message to start the thread there.
+
+GOAT copies the project's commits and current tracked and untracked changes into
+`~/.goat/repos` on that host, then creates a new worktree. Untracked files that Git
+ignores (such as `.env`) stay behind; files already committed travel with the history.
+Provider credentials stay on their machines, and the thread belongs to the
+remote environment. Use SSH keys or an ssh-agent; password prompts are unsupported.
+The new worktree's setup script follows that host's own project script settings; if the
+host has no setup script configured, install dependencies there yourself.
+
+The secret-file check is an early warning for common newly added credential filenames.
+It does not scan tracked files or commit history. Keep secrets out of the project
+before copying it. If a launch response is lost, the thread may already have started;
+check that host's threads before sending again.
+
+To bring committed work home, open the remote thread and choose **Fetch branch to
+this device** in **Git actions**, or search for it in the command palette. The result
+shows a local ref you can inspect in the original repository. See
+[Fetch a branch from an SSH worktree](./source-control.md#fetch-a-branch-from-an-ssh-worktree).
+
+SSH worktree creation and fetch-back are available in the desktop app. The remote
+thread can also be followed through an existing web or mobile connection.
+
 ### Let an agent start work on another machine
 
 An agent can also start a thread on another computer over SSH. Ask it, for
