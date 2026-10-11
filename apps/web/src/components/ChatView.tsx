@@ -11550,6 +11550,10 @@ export default function ChatView(props: ChatViewProps) {
     onEnvironmentChange,
     onEnvModeChange,
     envMode,
+    sshDestination,
+    sshOptions,
+    sshDisabledReason,
+    onSshDestinationChange,
     ...(canOverrideServerThreadEnvMode
       ? {
           activeThreadBranchOverride: activeThreadBranch,
