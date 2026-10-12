@@ -217,6 +217,7 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
       return failure("run_not_found", error.message);
     case "ThreadManagementThreadArchivedError":
     case "ThreadManagementNoSteerableRunError":
+    case "ThreadManagementTargetStoppedError":
       return failure("thread_not_sendable", error.message);
     case "ThreadManagementThreadNotInterruptibleError":
       return failure("thread_not_interruptible", error.message);
@@ -2992,7 +2993,11 @@ const make = Effect.gen(function* () {
         yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
         yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
 
-        const mode = input.mode ?? "auto";
+        const mode = ThreadManagementService.threadSendMode({
+          requested: input.mode,
+          senderThreadId: parent?.thread.id,
+          targetThreadId: input.threadId,
+        });
         const key = yield* requestKey(input.clientRequestId);
         const messageId = stableOperationMessageId({
           scope,
