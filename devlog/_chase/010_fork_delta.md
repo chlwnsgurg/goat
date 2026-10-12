@@ -32,6 +32,12 @@ G13 `goat-copy`, G14 `launch-watch`.
 - 경로: `apps/{web,mobile}`, `apps/desktop/src/{app,window}`, `apps/desktop/resources/dmg`, `assets`, `scripts/export-*-icons.ts`
 - 정책: 보이는 이름, 마크, 아이콘은 GOAT 유지. 같은 컴포넌트의 upstream 로직 변경은 받는다.
 
+### `channels` 채널 원장과 GOAT 봇
+
+- 커밋: #32
+- 경로: `apps/server/src/channels`, `apps/server/src/mcp/toolkits/channel`, `apps/server/src/persistence/Migrations/064_*`, `apps/server/src/orchestration-v2/{Orchestrator,ThreadMessageIntake,runtimeLayer}.ts`, `apps/server/src/textGeneration`, `apps/server/src/{server,ws}.ts`, `packages/contracts/src/{channelGateway,orchestrationV2,rpc,clientRpcPermissions}.ts`, `packages/client-runtime/src/state/channels.ts`, `apps/web/src/state/channels.ts`
+- 정책: GOAT 전용. 마이그레이션 064는 다시 실행해도 안전하게 써서(`IF NOT EXISTS`) upstream이 그 id를 가져가면 옮길 수 있다. upstream의 orchestrator, intake, text generation, RPC 변경은 받고 봇 스레드의 provider run 거부, 봇 입력의 채널 접수, 채널 RPC·MCP 도구, reception 생성을 다시 얹는다.
+
 ### `ci` CI
 
 - 커밋: `bfce4301d` `cc5003979` `095115376`
