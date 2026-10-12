@@ -15,6 +15,7 @@ import {
   type ChannelDispatchTarget,
   type ChannelTask,
   type ChannelTaskId,
+  type ModelSelection,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
 } from "@t3tools/contracts";
@@ -24,6 +25,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 
@@ -43,6 +45,7 @@ import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import { answerForwardIdsFor, questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
+import * as SlackChannelSettings from "./SlackChannelSettings.ts";
 
 export class ChannelDispatcher extends Context.Service<
   ChannelDispatcher,
@@ -93,6 +96,23 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const remoteWorkers = yield* ChannelRemoteWorkers.ChannelRemoteWorkers;
+  const slackSettings = yield* SlackChannelSettings.SlackChannelSettings;
+
+  /**
+   * The Slack connection's default project and model, for work that came in through it. A
+   * settings failure means no defaults; it never picks a different project.
+   */
+  const originDefaults = (task: ChannelLedger.ChannelStoredTask["task"]) =>
+    task.originAddress.kind !== "slack"
+      ? Effect.succeed(undefined)
+      : slackSettings.defaultTarget(task.originAddress.connectionId).pipe(
+          Effect.map(Option.getOrUndefined),
+          Effect.catch((error) =>
+            Effect.logWarning("Slack default target could not be read", {
+              reason: error.reason,
+            }).pipe(Effect.as(undefined)),
+          ),
+        );
 
   const askRequester = (
     stored: ChannelLedger.ChannelStoredTask,
@@ -126,6 +146,18 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** Whether this machine has the provider instance and, when it lists models, that model. */
+  const modelOffered = (selection: ModelSelection) =>
+    Effect.gen(function* () {
+      const instance = yield* providers.getInstance(selection.instanceId);
+      if (instance === undefined) return false;
+      const snapshot = yield* instance.snapshot.getSnapshot;
+      return (
+        snapshot.models.length === 0 ||
+        snapshot.models.some((candidate) => candidate.slug === selection.model)
+      );
+    });
+
   /** The launch settings for a task, or the question to ask when they cannot be chosen. */
   const resolveTarget = (stored: ChannelLedger.ChannelStoredTask) =>
     Effect.gen(function* () {
@@ -135,8 +167,11 @@ const make = Effect.gen(function* () {
       const real = shells.filter((shell) => shell.id !== bot?.bot.projectId);
       const allowed = real.length > 0 ? real : shells;
       const names = allowed.map((shell) => shell.title).join(", ");
-      let chosen = allowed.find((shell) => shell.id === task.projectId);
-      if (task.projectId !== undefined && chosen === undefined) {
+      const defaults = yield* originDefaults(task);
+      // A project named with the work wins over the channel's default project.
+      const projectId = task.projectId ?? defaults?.projectId;
+      let chosen = allowed.find((shell) => shell.id === projectId);
+      if (projectId !== undefined && chosen === undefined) {
         return {
           type: "question" as const,
           text: "I can't start work in that project. Which one should I use? " + names,
@@ -156,12 +191,27 @@ const make = Effect.gen(function* () {
         yield* serverSettings.getSettings.pipe(Effect.orDie),
         chosen.id,
       ).settings;
-      const modelSelection =
+      const projectModel =
         chosen.defaultModelSelection ??
         settings.defaultModelSelection ??
         settings.textGenerationModelSelection;
-      const instance = yield* providers.getInstance(modelSelection.instanceId);
-      if (instance === undefined) {
+      // The Slack connection's model applies only where it is offered. Slack settings have no
+      // control to change it, so an unavailable one falls back to the project's model with a
+      // warning instead of asking a question the requester cannot act on.
+      const preferred =
+        defaults?.modelSelection === undefined
+          ? undefined
+          : (yield* modelOffered(defaults.modelSelection))
+            ? defaults.modelSelection
+            : undefined;
+      if (defaults?.modelSelection !== undefined && preferred === undefined) {
+        yield* Effect.logWarning("Slack default model is not available here; using the project's", {
+          instanceId: defaults.modelSelection.instanceId,
+          model: defaults.modelSelection.model,
+        });
+      }
+      const modelSelection = preferred ?? projectModel;
+      if (!(yield* modelOffered(modelSelection))) {
         return {
           type: "question" as const,
           text:
@@ -262,8 +312,15 @@ const make = Effect.gen(function* () {
   const remoteHints = (stored: ChannelLedger.ChannelStoredTask) =>
     Effect.gen(function* () {
       const task = stored.task;
+      const defaults = yield* originDefaults(task);
       const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
-      const named = shells.find((shell) => shell.id === task.projectId);
+      // The project named with the work, else the Slack connection's default, finds its
+      // counterpart on the other machine.
+      const named = shells.find((shell) => shell.id === (task.projectId ?? defaults?.projectId));
+      // A default project that is gone must not let the other machine's only project stand in
+      // for it: the remote side asks until the requester names one.
+      const defaultProjectGone =
+        task.projectId === undefined && defaults?.projectId !== undefined && named === undefined;
       const identities = yield* Effect.serviceOption(
         RepositoryIdentityResolver.RepositoryIdentityResolver,
       );
@@ -275,7 +332,12 @@ const make = Effect.gen(function* () {
         yield* serverSettings.getSettings.pipe(Effect.orDie),
         named?.id ?? null,
       ).settings;
+      const bot = yield* ledger.getBot(stored.ownerId);
       return {
+        ...(defaultProjectGone ? { requireNamedProject: true } : {}),
+        localProjects: shells
+          .filter((shell) => shell.id !== bot?.bot.projectId)
+          .map((shell) => ({ id: shell.id, title: shell.title })),
         modelSelection:
           named?.defaultModelSelection ??
           settings.defaultModelSelection ??
@@ -284,6 +346,9 @@ const make = Effect.gen(function* () {
           task.requester.runtimeModeCeiling,
           settings.defaultRuntimeMode,
         ),
+        ...(defaults?.modelSelection === undefined
+          ? {}
+          : { preferredModelSelection: defaults.modelSelection }),
         ...(named === undefined ? {} : { title: named.title }),
         ...(identity === null ? {} : { canonicalKey: identity.canonicalKey }),
       };

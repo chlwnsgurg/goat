@@ -283,10 +283,14 @@ export class ChannelLedger extends Context.Service<
     readonly getRemoteWorker: (
       taskId: ChannelTaskId,
     ) => Effect.Effect<string | undefined, ChannelLedgerError>;
-    /** The newest answer recorded on a task, which the dispatcher reads when it asked first. */
-    readonly latestAnswer: (
+    /**
+     * The answers recorded in a task's current generation, newest first, which the dispatcher
+     * reads when it asked. A retry starts over: earlier generations' answers are not returned.
+     */
+    readonly recentAnswers: (
       taskId: ChannelTaskId,
-    ) => Effect.Effect<string | undefined, ChannelLedgerError>;
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<string>, ChannelLedgerError>;
     /** Reads, changes, and writes one remote worker state in one fenced transaction. */
     readonly updateRemoteWorker: (input: {
       readonly owner: string;
@@ -1124,18 +1128,23 @@ const make = Effect.gen(function* () {
         Effect.mapError(toLedgerError("getRemoteWorker")),
       ),
 
-    latestAnswer: (taskId) =>
+    recentAnswers: (taskId, limit) =>
       sql<{ readonly event_json: string }>`
         SELECT event_json FROM channel_task_events
         WHERE task_id = ${taskId} AND type = 'task.question.answered'
-        ORDER BY sequence DESC LIMIT 1
+          AND sequence > COALESCE((
+            SELECT MAX(sequence) FROM channel_task_events
+            WHERE task_id = ${taskId} AND type = 'task.retry.requested'
+          ), 0)
+        ORDER BY sequence DESC LIMIT ${limit}
       `.pipe(
-        Effect.map((rows) => {
-          if (rows[0] === undefined) return undefined;
-          const event = decodeEvent(rows[0].event_json);
-          return event.type === "task.question.answered" ? event.payload.answer : undefined;
-        }),
-        Effect.mapError(toLedgerError("latestAnswer")),
+        Effect.map((rows) =>
+          rows.flatMap((row) => {
+            const event = decodeEvent(row.event_json);
+            return event.type === "task.question.answered" ? [event.payload.answer] : [];
+          }),
+        ),
+        Effect.mapError(toLedgerError("recentAnswers")),
       ),
 
     updateRemoteWorker: (input) =>

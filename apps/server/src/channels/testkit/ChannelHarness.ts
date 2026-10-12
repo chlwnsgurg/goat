@@ -308,7 +308,9 @@ export function makeHarness(
       listShells: () => Effect.succeed(shells as never),
     }),
     Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
-      getInstance: () => Effect.succeed({} as never),
+      // Every instance exists and lists no models, so any model counts as offered.
+      getInstance: () =>
+        Effect.succeed({ snapshot: { getSnapshot: Effect.succeed({ models: [] }) } } as never),
     }),
     Layer.mock(ServerEnvironment.ServerEnvironment)({
       getEnvironmentId: Effect.succeed(environmentId),
@@ -415,7 +417,29 @@ export function makeHarness(
     Layer.provideMerge(layerLaunch),
     Layer.provideMerge(EffectOutbox.layer.pipe(Layer.provide(layerDatabase))),
   );
-  return { layer, world, slackSent, slackFailures, script, launch, providerCalls };
+  /** Removes a project from this machine's catalog, as if it was deleted while work waited. */
+  const removeProject = (id: ProjectId) => {
+    const index = shells.findIndex((shell) => shell.id === id);
+    if (index !== -1) shells.splice(index, 1);
+  };
+
+  /** Renames a project in this machine's catalog. */
+  const renameProject = (id: ProjectId, title: string) => {
+    const index = shells.findIndex((shell) => shell.id === id);
+    if (index !== -1) shells[index] = { ...shells[index]!, title };
+  };
+
+  return {
+    layer,
+    world,
+    slackSent,
+    slackFailures,
+    script,
+    launch,
+    providerCalls,
+    removeProject,
+    renameProject,
+  };
 }
 
 /** A new process owner over the caller's existing ledger and worker services, in its child scope. */

@@ -83,6 +83,14 @@ const INBOX_LIMIT = 200;
 const MAX_PROJECT_PAGES = 5;
 
 /** What the requester reads. Fixed text: remote error text never reaches a channel. */
+/**
+ * How many of a task's answers the remote project choice reads: only the newest of the current
+ * generation. Free text cannot show whether an older answer was overtaken (a later choice may
+ * name a project that has since been renamed or removed), so an older choice is asked for again
+ * rather than revived.
+ */
+const MAX_ANSWERS_READ = 1;
+
 export const REMOTE_COPY = {
   unknownHost: (host: string, hosts: ReadonlyArray<string>) =>
     "I can't send work to " +
@@ -220,6 +228,20 @@ export class ChannelRemoteWorkers extends Context.Service<
       stored: ChannelLedger.ChannelStoredTask,
       local: {
         readonly modelSelection: ModelSelection;
+        /** A model the requester's channel asks for; wins over the remote project's default. */
+        readonly preferredModelSelection?: ModelSelection | undefined;
+        /**
+         * A project was meant (the channel's default) but is gone here, so the remote's only
+         * project must not stand in for it; the requester names one instead.
+         */
+        readonly requireNamedProject?: boolean | undefined;
+        /**
+         * This machine's projects; an answer naming one (as reception matches it, by exact id or
+         * title) chose a project here instead.
+         */
+        readonly localProjects?:
+          | ReadonlyArray<{ readonly id: string; readonly title: string }>
+          | undefined;
         readonly runtimeMode: RuntimeMode;
         /** The local project the task named, to find its counterpart on the other machine. */
         readonly title?: string | undefined;
@@ -240,6 +262,20 @@ export class ChannelRemoteWorkers extends Context.Service<
       owner: string,
       local: {
         readonly modelSelection: ModelSelection;
+        /** A model the requester's channel asks for; wins over the remote project's default. */
+        readonly preferredModelSelection?: ModelSelection | undefined;
+        /**
+         * A project was meant (the channel's default) but is gone here, so the remote's only
+         * project must not stand in for it; the requester names one instead.
+         */
+        readonly requireNamedProject?: boolean | undefined;
+        /**
+         * This machine's projects; an answer naming one (as reception matches it, by exact id or
+         * title) chose a project here instead.
+         */
+        readonly localProjects?:
+          | ReadonlyArray<{ readonly id: string; readonly title: string }>
+          | undefined;
         readonly runtimeMode: RuntimeMode;
         readonly title?: string | undefined;
         readonly canonicalKey?: string | undefined;
@@ -384,17 +420,35 @@ const make = Effect.gen(function* () {
       readonly projectId?: string;
       readonly localTitle?: string;
       readonly canonicalKey?: string;
-      readonly answer?: string;
+      /** The requester's answers in this generation, newest first. */
+      readonly answers?: ReadonlyArray<string>;
+      /** Machines an answer may name; an answer that picks one made a newer choice. */
+      readonly hosts?: ReadonlyArray<string>;
+      /** This machine's projects; an answer that picks one made a newer choice. */
+      readonly localProjects?: ReadonlyArray<{ readonly id: string; readonly title: string }>;
+      readonly requireNamed?: boolean;
     },
   ) => {
     const byId = projects.find((project) => project.id === hint.projectId);
     if (byId !== undefined) return byId;
-    const answer = hint.answer?.toLowerCase();
-    if (answer !== undefined) {
+    // The newest answer naming one of its projects decides. An answer that picked something else
+    // (a machine, or a project on this machine) is the newer choice and names none here.
+    for (const raw of hint.answers ?? []) {
+      const answer = raw.toLowerCase();
       const named = projects.filter((project) => answer.includes(project.title.toLowerCase()));
       if (named.length > 0) {
         return named.toSorted((left, right) => right.title.length - left.title.length)[0];
       }
+      // Same matching as reception, which records a project here from an exact id or a title.
+      const choseOtherwise =
+        meansThisMachine(raw) ||
+        (hint.hosts ?? []).some((host) => answer.includes(host.toLowerCase())) ||
+        (hint.localProjects ?? []).some(
+          (project) =>
+            project.id === raw.trim() ||
+            (project.title !== "" && answer.includes(project.title.toLowerCase())),
+        );
+      if (choseOtherwise) break;
     }
     // The same repository as the local project, by its canonical remote key.
     if (hint.canonicalKey !== undefined) {
@@ -406,7 +460,15 @@ const make = Effect.gen(function* () {
       const same = projects.filter((project) => project.title.toLowerCase() === title);
       if (same.length === 1) return same[0];
     }
-    return projects.length === 1 ? projects[0] : undefined;
+    // The only project stands in only when no project was asked for: a project named here or a
+    // channel default that is gone must match (by id, answer, repository, or title), or the
+    // requester is asked. An answer alone may be about something else, such as the machine.
+    const askedForOne =
+      hint.requireNamed === true ||
+      hint.projectId !== undefined ||
+      hint.localTitle !== undefined ||
+      hint.canonicalKey !== undefined;
+    return projects.length === 1 && !askedForOne ? projects[0] : undefined;
   };
 
   const resolve: ChannelRemoteWorkers["Service"]["resolve"] = (stored, local) =>
@@ -437,12 +499,18 @@ const make = Effect.gen(function* () {
       if (projects.length === 0) {
         return { type: "question", text: REMOTE_COPY.noProject(host) } as const;
       }
-      const answer = yield* ledger.latestAnswer(task.taskId);
+      const answers = yield* ledger.recentAnswers(task.taskId, MAX_ANSWERS_READ);
+      // The project chosen here stays a barrier by id even after it leaves the catalog.
+      const localProjects = [
+        ...(local.localProjects ?? []),
+        ...(task.projectId === undefined ? [] : [{ id: task.projectId, title: "" }]),
+      ];
       const chosen = chooseProject(projects, {
         ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
         ...(local.title === undefined ? {} : { localTitle: local.title }),
         ...(local.canonicalKey === undefined ? {} : { canonicalKey: local.canonicalKey }),
-        ...(answer === undefined ? {} : { answer }),
+        ...(answers.length === 0 ? {} : { answers, hosts, localProjects }),
+        ...(local.requireNamedProject === true ? { requireNamed: true } : {}),
       });
       if (chosen === undefined) {
         return {
@@ -469,7 +537,8 @@ const make = Effect.gen(function* () {
       const target: ChannelDispatchTarget = {
         environmentId: environment.success.environmentId,
         projectId: chosen.id,
-        modelSelection: chosen.defaultModelSelection ?? local.modelSelection,
+        modelSelection:
+          local.preferredModelSelection ?? chosen.defaultModelSelection ?? local.modelSelection,
         runtimeMode: local.runtimeMode,
         interactionMode: "default",
         // A repository gets its own worktree per task, as on this machine.
