@@ -8,6 +8,8 @@
  *
  * @module SlackSdk
  */
+import * as NodeModule from "node:module";
+
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -22,7 +24,13 @@ import {
   type FetchFunction,
   type WebClientOptions,
 } from "@slack/web-api";
-import { fetch as undiciFetch } from "undici";
+
+// undici stays external to the CLI bundle (Cursor's runtime closure needs it on
+// disk), and a Node single-executable can only `import` built-ins, so load it
+// through require the first time Slack makes a request.
+const requireForUndici = NodeModule.createRequire(import.meta.url);
+const undiciFetch: typeof import("undici").fetch = (input, init) =>
+  (requireForUndici("undici") as typeof import("undici")).fetch(input, init);
 
 /** One Socket Mode envelope. `ack` tells Slack the event was received; call it once. */
 export interface SlackSocketEnvelope {
