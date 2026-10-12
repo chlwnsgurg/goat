@@ -7,9 +7,11 @@ import { THREAD_DETAILS_PANEL_LABEL_CLASS } from "./chat/threadDetailsPanelStyle
 export function ComposerContextLabel({
   children,
   displayMode = "toolbar",
+  collapseWhenCompact = true,
 }: {
   children: ReactNode;
   displayMode?: "toolbar" | "panel";
+  collapseWhenCompact?: boolean;
 }) {
   return (
     <span
@@ -18,7 +20,10 @@ export function ComposerContextLabel({
         "min-w-0",
         displayMode === "panel"
           ? "flex-1 overflow-x-clip overflow-y-visible text-left"
-          : "max-w-[240px] group-data-[compact]/composer-context:max-w-0",
+          : cn(
+              "max-w-[240px]",
+              collapseWhenCompact && "group-data-[compact]/composer-context:max-w-0",
+            ),
       )}
     >
       <span
@@ -27,7 +32,10 @@ export function ComposerContextLabel({
           "block w-full min-w-0 truncate",
           displayMode === "panel" && THREAD_DETAILS_PANEL_LABEL_CLASS,
           displayMode === "toolbar" &&
-            "max-w-[240px] transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none",
+            cn(
+              "max-w-[240px] transition-opacity duration-180 ease-drawer motion-reduce:transition-none",
+              collapseWhenCompact && "group-data-[compact]/composer-context:opacity-0",
+            ),
         )}
       >
         {children}

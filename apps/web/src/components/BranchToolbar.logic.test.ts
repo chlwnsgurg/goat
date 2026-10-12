@@ -12,10 +12,8 @@ import {
   resolveBranchTriggerLabel,
   resolveBranchToolbarPrBranch,
   resolveBranchToolbarValue,
-  resolveLockedWorkspaceLabel,
   resolveLocalCheckoutBranchMismatch,
-  resolvePreviousWorktreeLabel,
-  resolvePreviousWorktreeSeed,
+  resolveWorkspaceChipLabel,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
   shouldShowComposerContextStrip,
@@ -24,91 +22,6 @@ import {
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
-
-describe("resolvePreviousWorktreeSeed", () => {
-  it("picks the most recently updated worktree thread", () => {
-    expect(
-      resolvePreviousWorktreeSeed({
-        threads: [
-          {
-            branch: "t3/older",
-            worktreePath: "/repo/.t3/worktrees/older",
-            updatedAt: "2026-07-20T00:00:00.000Z",
-          },
-          {
-            branch: "t3/newer",
-            worktreePath: "/repo/.t3/worktrees/newer",
-            updatedAt: "2026-07-22T00:00:00.000Z",
-          },
-          { branch: "main", worktreePath: null, updatedAt: "2026-07-23T00:00:00.000Z" },
-        ],
-        currentWorktreePath: null,
-      }),
-    ).toEqual({ branch: "t3/newer", worktreePath: "/repo/.t3/worktrees/newer" });
-  });
-
-  it("skips the worktree the composer already points at", () => {
-    expect(
-      resolvePreviousWorktreeSeed({
-        threads: [
-          {
-            branch: "t3/current",
-            worktreePath: "/repo/.t3/worktrees/current",
-            updatedAt: "2026-07-22T00:00:00.000Z",
-          },
-        ],
-        currentWorktreePath: "/repo/.t3/worktrees/current",
-      }),
-    ).toBeNull();
-  });
-
-  it("returns null when no thread has a worktree", () => {
-    expect(
-      resolvePreviousWorktreeSeed({
-        threads: [{ branch: "main", worktreePath: null, updatedAt: "2026-07-22T00:00:00.000Z" }],
-        currentWorktreePath: null,
-      }),
-    ).toBeNull();
-  });
-
-  it("ignores archived threads and threads with unparseable timestamps", () => {
-    expect(
-      resolvePreviousWorktreeSeed({
-        threads: [
-          {
-            branch: "t3/archived",
-            worktreePath: "/repo/.t3/worktrees/archived",
-            updatedAt: "2026-07-23T00:00:00.000Z",
-            archivedAt: "2026-07-23T01:00:00.000Z",
-          },
-          {
-            branch: "t3/garbage-timestamp",
-            worktreePath: "/repo/.t3/worktrees/garbage",
-            updatedAt: "not-a-date",
-          },
-          {
-            branch: "t3/live",
-            worktreePath: "/repo/.t3/worktrees/live",
-            updatedAt: "2026-07-21T00:00:00.000Z",
-            archivedAt: null,
-          },
-        ],
-        currentWorktreePath: null,
-      }),
-    ).toEqual({ branch: "t3/live", worktreePath: "/repo/.t3/worktrees/live" });
-  });
-});
-
-describe("resolvePreviousWorktreeLabel", () => {
-  it("includes the branch when known", () => {
-    expect(resolvePreviousWorktreeLabel({ branch: "t3/fix-thing", worktreePath: "/wt" })).toBe(
-      "Previous worktree (t3/fix-thing)",
-    );
-    expect(resolvePreviousWorktreeLabel({ branch: null, worktreePath: "/wt" })).toBe(
-      "Previous worktree",
-    );
-  });
-});
 
 describe("resolveDraftEnvModeAfterBranchChange", () => {
   it("switches to local mode when returning from an existing worktree to the main worktree", () => {
@@ -536,34 +449,18 @@ describe("resolveEffectiveEnvMode", () => {
 
 describe("resolveEnvModeLabel", () => {
   it("uses explicit workspace labels", () => {
-    expect(resolveEnvModeLabel("local")).toBe("Current checkout");
+    expect(resolveEnvModeLabel("local")).toBe("Local");
     expect(resolveEnvModeLabel("worktree")).toBe("New worktree");
   });
 });
 
 describe("resolveCurrentWorkspaceLabel", () => {
   it("describes the main repo checkout when no worktree path is active", () => {
-    expect(resolveCurrentWorkspaceLabel(null)).toBe("Current checkout");
+    expect(resolveCurrentWorkspaceLabel(null)).toBe("Local");
   });
 
   it("describes the active checkout as a worktree when one is attached", () => {
-    expect(resolveCurrentWorkspaceLabel("/repo/.t3/worktrees/feature-a")).toBe("Current worktree");
-  });
-});
-
-describe("resolveLockedWorkspaceLabel", () => {
-  it("uses a shorter label for the main repo checkout", () => {
-    expect(resolveLockedWorkspaceLabel(null, "local")).toBe("Local checkout");
-  });
-
-  it("uses a shorter label for an attached worktree", () => {
-    expect(resolveLockedWorkspaceLabel("/repo/.t3/worktrees/feature-a", "worktree")).toBe(
-      "Worktree",
-    );
-  });
-
-  it("describes a worktree that is still being created as a new worktree", () => {
-    expect(resolveLockedWorkspaceLabel(null, "worktree")).toBe("New worktree");
+    expect(resolveCurrentWorkspaceLabel("/repo/.t3/worktrees/feature-a")).toBe("Worktree");
   });
 });
 
@@ -881,5 +778,62 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+});
+
+describe("resolveWorkspaceChipLabel", () => {
+  it("labels the main repo checkout as Local", () => {
+    expect(resolveWorkspaceChipLabel({ activeWorktreePath: null, effectiveEnvMode: "local" })).toBe(
+      "Local",
+    );
+  });
+
+  it("labels an attached worktree as Worktree", () => {
+    expect(
+      resolveWorkspaceChipLabel({
+        activeWorktreePath: "/repo/.t3/worktrees/feature-a",
+        effectiveEnvMode: "worktree",
+      }),
+    ).toBe("Worktree");
+  });
+
+  it("describes a worktree that is still being created as a new worktree", () => {
+    expect(
+      resolveWorkspaceChipLabel({ activeWorktreePath: null, effectiveEnvMode: "worktree" }),
+    ).toBe("New worktree");
+  });
+
+  it.each([
+    ["local", null, true, "Local"],
+    ["worktree", null, true, "New worktree"],
+    ["local", "/wt", true, "Worktree"],
+    ["worktree", "/wt", false, "Worktree · Build host"],
+    ["local", null, false, "Local · Build host"],
+    ["worktree", null, false, "New worktree · Build host"],
+  ] as const)(
+    "shows %s at %s on primary=%s",
+    (effectiveEnvMode, activeWorktreePath, isPrimary, label) => {
+      expect(
+        resolveWorkspaceChipLabel({
+          effectiveEnvMode,
+          activeWorktreePath,
+          activeEnvironment: { isPrimary, label: "Build host" },
+        }),
+      ).toBe(label);
+    },
+  );
+  it("force-new-worktree label wins over a stale path", () => {
+    expect(
+      resolveWorkspaceChipLabel({
+        effectiveEnvMode: "local",
+        activeWorktreePath: "/old",
+        forceNewWorktree: true,
+      }),
+    ).toBe("New worktree");
+  });
+  it("keeps plain mode when the owning environment is missing", () => {
+    expect(resolveWorkspaceChipLabel({ effectiveEnvMode: "local", activeWorktreePath: null })).toBe(
+      "Local",
+    );
   });
 });

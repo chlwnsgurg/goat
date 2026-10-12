@@ -2,13 +2,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   filterNewTaskBranches,
+  resolveNewTaskWorkspaceLabel,
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskBranchLabel,
   resolveNewTaskLocalWorkspaceSelection,
 } from "./new-task-context-presentation";
 
 describe("resolveNewTaskLocalWorkspaceSelection", () => {
-  it("waits for refs instead of carrying a worktree base into Current checkout", () => {
+  it("waits for refs instead of carrying a worktree base into Local", () => {
     expect(
       resolveNewTaskLocalWorkspaceSelection({
         branches: [],
@@ -55,7 +56,7 @@ describe("resolveNewTaskLocalWorkspaceSelection", () => {
 });
 
 describe("resolveNewTaskBranchWorktreePath", () => {
-  it("moves Current checkout to the selected existing worktree", () => {
+  it("moves Local to the selected existing worktree", () => {
     expect(
       resolveNewTaskBranchWorktreePath({
         workspaceMode: "local",
@@ -148,5 +149,16 @@ describe("filterNewTaskBranches", () => {
 
   it("matches a typed space against the dash a branch name uses", () => {
     expect(search("  login page ")).toEqual(["Feature/Login-Page"]);
+  });
+});
+
+describe("resolveNewTaskWorkspaceLabel", () => {
+  it.each([
+    ["local", null, "Local"],
+    ["local", "/repo/.t3/worktrees/feature", "Worktree"],
+    ["worktree", null, "New worktree"],
+    ["worktree", "/stale/path", "New worktree"],
+  ] as const)("labels %s at %s as %s", (workspaceMode, worktreePath, label) => {
+    expect(resolveNewTaskWorkspaceLabel({ workspaceMode, worktreePath })).toBe(label);
   });
 });

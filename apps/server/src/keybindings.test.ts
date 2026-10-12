@@ -14,6 +14,8 @@ import * as Keybindings from "./keybindings.ts";
 import { KeybindingsConfigError, MAX_KEYBINDINGS_COUNT } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+const decodeKeybindingCommandExit = Schema.decodeUnknownExit(KeybindingCommand);
+const decodeKeybindingRuleExit = Schema.decodeUnknownExit(KeybindingRule);
 const KeybindingsConfigJson = Schema.fromJsonString(KeybindingsConfig);
 const encodeKeybindingsConfigJson = Schema.encodeEffect(KeybindingsConfigJson);
 const decodeKeybindingsConfigJson = Schema.decodeUnknownEffect(KeybindingsConfigJson);
@@ -58,6 +60,96 @@ const readKeybindingsConfig = (configPath: string) =>
   });
 
 it.layer(NodeServices.layer)("keybindings", (it) => {
+  it.effect("rejects new previous-worktree bindings", () =>
+    Effect.sync(() => {
+      assert.equal(decodeKeybindingCommandExit("composer.previousWorktree")._tag, "Failure");
+      assert.equal(
+        decodeKeybindingRuleExit({
+          key: "mod+l",
+          command: "composer.previousWorktree",
+        })._tag,
+        "Failure",
+      );
+    }),
+  );
+
+  it.effect.each(["load", "startup", "upsert", "remove"] as const)(
+    "silently retires saved previous-worktree entries before %s",
+    (operation) => {
+      const messages: string[] = [];
+      const logger = Logger.make(({ message }) => {
+        messages.push(String(message));
+      });
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
+        yield* fs.makeDirectory(path.dirname(keybindingsConfigPath), { recursive: true });
+        yield* fs.writeFileString(
+          keybindingsConfigPath,
+          JSON.stringify([
+            { key: "not+a+shortcut", command: "composer.previousWorktree", when: "(" },
+            ...(operation === "startup" ? [] : [{ key: "mod+j", command: "terminal.toggle" }]),
+          ]),
+        );
+        const service = yield* Keybindings.Keybindings;
+        if (operation === "startup") yield* service.syncDefaultKeybindingsOnStartup;
+        if (operation === "upsert")
+          yield* service.upsertKeybindingRule({
+            key: "mod+shift+r",
+            command: "script.run-tests.run",
+          });
+        if (operation === "remove")
+          yield* service.removeKeybindingRule({ key: "mod+j", command: "terminal.toggle" });
+        const state = yield* service.loadConfigState;
+        assert.deepEqual(state.issues, []);
+        assert.isFalse(
+          state.keybindings.some((rule) => String(rule.command) === "composer.previousWorktree"),
+        );
+        assert.isTrue(state.keybindings.some((rule) => rule.command === "terminal.toggle"));
+        if (operation !== "load") {
+          const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+          assert.isFalse(
+            persisted.some((rule) => String(rule.command) === "composer.previousWorktree"),
+          );
+          if (operation === "upsert")
+            assert.isTrue(persisted.some((rule) => rule.command === "script.run-tests.run"));
+          if (operation === "remove")
+            assert.isFalse(persisted.some((rule) => rule.command === "terminal.toggle"));
+        }
+        assert.deepEqual(messages, []);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(layerKeybindings(), Logger.layer([logger], { mergeWithExisting: false })),
+        ),
+      );
+    },
+  );
+
+  it.effect("does not renumber genuine invalid entries after retirement", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
+      yield* fs.makeDirectory(path.dirname(keybindingsConfigPath), { recursive: true });
+      yield* fs.writeFileString(
+        keybindingsConfigPath,
+        JSON.stringify([
+          { command: "composer.previousWorktree" },
+          { key: "mod+j", command: "terminal.toggle" },
+          { key: "mod+k", command: "composer.unknown" },
+          null,
+        ]),
+      );
+      const service = yield* Keybindings.Keybindings;
+      const state = yield* service.loadConfigState;
+      assert.deepEqual(
+        state.issues.map((issue) => ("index" in issue ? issue.index : null)),
+        [2, 3],
+      );
+    }).pipe(Effect.provide(layerKeybindings())),
+  );
+
   it.effect("parses shortcuts including plus key", () =>
     Effect.sync(() => {
       assert.deepEqual(Keybindings.parseKeybindingShortcut("mod+j"), {
