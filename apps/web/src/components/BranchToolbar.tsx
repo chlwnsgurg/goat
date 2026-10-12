@@ -1,3 +1,6 @@
+import type { DraftSshDestination } from "../composerDraftStore";
+import { findSavedSshWorktreeOption, type SavedSshWorktreeOption } from "../lib/sshWorktree";
+import { WorkspaceMenuItems } from "./WorkspaceMenuItems";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { readLocalApi } from "../localApi";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -32,8 +35,8 @@ import {
   type EnvironmentOption,
   resolveContextStripLabelsCompact,
   resolveCurrentWorkspaceLabel,
-  resolveEnvModeLabel,
   resolveWorkspaceChipLabel,
+  resolveSshWorkspaceLabel,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 import {
@@ -60,7 +63,6 @@ import {
 } from "./ui/menu";
 import { Separator } from "./ui/separator";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { MiddleTruncate } from "./ui/middle-truncate";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { measureRestingComposerControls } from "./chat/restingComposerControlsMeasurement";
@@ -72,7 +74,14 @@ export interface BranchToolbarHandle {
   openBranchPicker: () => void;
 }
 
+const EMPTY_SSH_OPTIONS: ReadonlyArray<SavedSshWorktreeOption> = [];
+
 interface BranchToolbarProps {
+  sshDestination?: DraftSshDestination | null | undefined;
+  sshOptions?: ReadonlyArray<SavedSshWorktreeOption> | undefined;
+  sshDisabledReason?: string | null | undefined;
+  onSshDestinationChange?: ((destination: DraftSshDestination) => void) | undefined;
+
   layout?: "composer" | "panel";
   panelSection?: "all" | "workspace" | "branch";
   forceNewWorktree?: boolean;
@@ -135,6 +144,11 @@ function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string)
 }
 
 interface RunContextSelectorProps {
+  sshDestination?: DraftSshDestination | null | undefined;
+  sshOptions?: ReadonlyArray<SavedSshWorktreeOption> | undefined;
+  sshDisabledReason?: string | null | undefined;
+  onSshDestinationChange?: ((destination: DraftSshDestination) => void) | undefined;
+
   displayMode?: "toolbar" | "panel";
   workspaceRoot?: string;
   forceNewWorktree: boolean;
@@ -168,6 +182,10 @@ const RunContextSelector = memo(function RunContextSelector({
   effectiveEnvMode,
   activeWorktreePath,
   onEnvModeChange,
+  sshDestination = null,
+  sshOptions = EMPTY_SSH_OPTIONS,
+  sshDisabledReason = null,
+  onSshDestinationChange,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment = useMemo(
@@ -180,11 +198,15 @@ const RunContextSelector = memo(function RunContextSelector({
       : activeWorktreePath
         ? FolderGitIcon
         : FolderIcon;
-  const workspaceLabel = resolveWorkspaceChipLabel({
-    forceNewWorktree,
-    activeWorktreePath,
-    effectiveEnvMode,
-    activeEnvironment,
+  const workspaceLabel = resolveSshWorkspaceLabel({
+    sshSelected: sshDestination !== null,
+    savedLabel: findSavedSshWorktreeOption(sshOptions, sshDestination)?.label ?? null,
+    workspaceLabel: resolveWorkspaceChipLabel({
+      forceNewWorktree,
+      activeWorktreePath,
+      effectiveEnvMode,
+      activeEnvironment,
+    }),
   });
   const isPanel = displayMode === "panel";
   const isLocked = envLocked || (envModeLocked && (!isPanel || !showEnvironmentPicker));
@@ -344,32 +366,17 @@ const RunContextSelector = memo(function RunContextSelector({
             <MenuSeparator />
           </>
         ) : null}
-        <MenuGroup>
-          <MenuGroupLabel>Workspace</MenuGroupLabel>
-          <MenuRadioGroup
-            value={effectiveEnvMode}
-            onValueChange={(value) => {
-              if (value === "local" || value === "worktree") onEnvModeChange(value);
-            }}
-          >
-            <MenuRadioItem disabled={envModeLocked || forceNewWorktree} value="local" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                {activeWorktreePath ? (
-                  <FolderGitIcon className="size-3" />
-                ) : (
-                  <FolderIcon className="size-3" />
-                )}
-                <MiddleTruncate value={resolveCurrentWorkspaceLabel(activeWorktreePath)} />
-              </span>
-            </MenuRadioItem>
-            <MenuRadioItem disabled={envModeLocked} value="worktree" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                <FolderGit2Icon className="size-3" />
-                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
-              </span>
-            </MenuRadioItem>
-          </MenuRadioGroup>
-        </MenuGroup>
+        <WorkspaceMenuItems
+          envMode={effectiveEnvMode}
+          locked={envModeLocked}
+          forceNewWorktree={forceNewWorktree}
+          localLabel={resolveCurrentWorkspaceLabel(activeWorktreePath)}
+          sshDestination={sshDestination}
+          sshOptions={sshOptions}
+          sshDisabledReason={sshDisabledReason}
+          onEnvModeChange={onEnvModeChange}
+          onSshDestinationChange={(destination) => onSshDestinationChange?.(destination)}
+        />
       </MenuPopup>
     </Menu>
   );
@@ -575,6 +582,10 @@ export const BranchToolbar = memo(function BranchToolbar({
   showGitControls,
   draftId,
   onEnvModeChange,
+  sshDestination = null,
+  sshOptions = EMPTY_SSH_OPTIONS,
+  sshDisabledReason = null,
+  onSshDestinationChange,
   envMode,
   activeThreadBranchOverride,
   onActiveThreadBranchOverrideChange,
@@ -651,6 +662,10 @@ export const BranchToolbar = memo(function BranchToolbar({
             onEnvironmentChange={onEnvironmentChange}
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
+            sshDestination={sshDestination}
+            sshOptions={sshOptions}
+            sshDisabledReason={sshDisabledReason}
+            onSshDestinationChange={onSshDestinationChange}
             onEnvModeChange={onEnvModeChange}
           />
         ) : null}
@@ -661,7 +676,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             environmentId={environmentId}
             threadId={threadId}
             {...(draftId ? { draftId } : {})}
-            envLocked={envLocked}
+            envLocked={envLocked || Boolean(sshDestination)}
             effectiveEnvModeOverride={effectiveEnvMode}
             {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
             {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
@@ -702,6 +717,10 @@ export const BranchToolbar = memo(function BranchToolbar({
             onEnvironmentChange={onEnvironmentChange}
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
+            sshDestination={sshDestination}
+            sshOptions={sshOptions}
+            sshDisabledReason={sshDisabledReason}
+            onSshDestinationChange={onSshDestinationChange}
             onEnvModeChange={onEnvModeChange}
           />
         </div>
@@ -740,6 +759,10 @@ export const BranchToolbar = memo(function BranchToolbar({
               effectiveEnvMode={effectiveEnvMode}
               activeWorktreePath={activeWorktreePath}
               activeEnvironment={activeEnvironmentOption}
+              sshDestination={sshDestination}
+              sshOptions={sshOptions}
+              sshDisabledReason={sshDisabledReason}
+              onSshDestinationChange={onSshDestinationChange}
               onEnvModeChange={onEnvModeChange}
             />
           ) : null}
@@ -766,7 +789,7 @@ export const BranchToolbar = memo(function BranchToolbar({
           environmentId={environmentId}
           threadId={threadId}
           {...(draftId ? { draftId } : {})}
-          envLocked={envLocked}
+          envLocked={envLocked || Boolean(sshDestination)}
           effectiveEnvModeOverride={effectiveEnvMode}
           {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
           {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}

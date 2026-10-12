@@ -1,3 +1,4 @@
+import { ComposerContextId } from "@t3tools/contracts";
 import { findRecordedWorktreeSetup, resolveVisibleWorktreeSetup } from "./ChatView.logic";
 import {
   recallCheckoutIsRepo,
@@ -2161,4 +2162,91 @@ describe("waitForRevertedMessage", () => {
     await settled;
     vi.useRealTimers();
   });
+});
+
+import { snapshotDraftContent, isDraftContentUnchanged } from "./ChatView.logic";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+it("compares all composer content fields without retaining mutable references", () => {
+  const id = DraftId.make("content-snapshot");
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(id, " exact text ");
+  const content = store.getComposerDraft(id)!;
+  const snapshot = snapshotDraftContent(content);
+  expect(isDraftContentUnchanged(snapshot, content)).toBe(true);
+  expect(isDraftContentUnchanged(snapshot, null)).toBe(false);
+  expect(isDraftContentUnchanged(snapshot, { ...content, runtimeMode: "full-access" })).toBe(true);
+  for (const field of [
+    "images",
+    "files",
+    "persistedAttachments",
+    "terminalContexts",
+    "previewAnnotations",
+    "reviewComments",
+    "threadContexts",
+  ] as const) {
+    expect(
+      isDraftContentUnchanged(snapshot, { ...content, [field]: [{ id: "new", text: "changed" }] }),
+    ).toBe(false);
+  }
+  expect(
+    isDraftContentUnchanged(snapshot, { ...content, nonPersistedImageIds: ["hydrating"] }),
+  ).toBe(false);
+  content.prompt = "exact text";
+  expect(isDraftContentUnchanged(snapshot, content)).toBe(false);
+  content.prompt = " exact text ";
+  expect(isDraftContentUnchanged(snapshot, content)).toBe(true);
+});
+
+it("detects changed structured context with a stable context ID and ignores attachment bytes", () => {
+  const id = DraftId.make("same-id-context");
+  const store = useComposerDraftStore.getState();
+  store.setPrompt(id, "Text");
+  const content = store.getComposerDraft(id)!;
+  const record = {
+    version: 1 as const,
+    kind: "thread" as const,
+    contextId: ComposerContextId.make("stable"),
+    label: "Original",
+    environmentId: EnvironmentId.make("source"),
+    threadId: ThreadId.make("context"),
+    title: "Original",
+  };
+  const structured = { ...content, threadContexts: [record] };
+  const image = {
+    type: "image" as const,
+    id: "image",
+    name: "original.png",
+    mimeType: "image/png",
+    sizeBytes: 1,
+    previewUrl: "blob:original",
+    file: new File(["x"], "original.png"),
+  };
+  const attachments = { ...structured, images: [image] };
+  const attachmentSnapshot = snapshotDraftContent(attachments);
+  expect(
+    isDraftContentUnchanged(attachmentSnapshot, {
+      ...attachments,
+      images: [
+        {
+          ...image,
+          name: "changed.png",
+          previewUrl: "blob:changed",
+          file: new File(["different bytes"], "changed.png"),
+        },
+      ],
+    }),
+  ).toBe(true);
+  const snapshot = snapshotDraftContent(structured);
+  expect(
+    isDraftContentUnchanged(snapshot, {
+      ...structured,
+      threadContexts: [{ ...record, title: "Changed" }],
+    }),
+  ).toBe(false);
+  expect(
+    isDraftContentUnchanged(snapshot, {
+      ...structured,
+      threadContexts: [{ ...record, environmentId: EnvironmentId.make("other") }],
+    }),
+  ).toBe(false);
 });

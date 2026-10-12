@@ -1,3 +1,19 @@
+import { snapshotDraftContent, isDraftContentUnchanged } from "./ChatView.logic";
+import {
+  savedSshWorktreeOptions,
+  findSavedSshWorktreeOption,
+  sshWorktreeSendBlockReason,
+  sshWorktreeSelectionBlockReason,
+} from "../lib/sshWorktree";
+import {
+  submitSshWorktree,
+  openSshThread,
+  sshWorktreeErrorFeedback,
+  type SshWorktreeSubmissionOutcome,
+  type SshThreadOpenPorts,
+  type SshWorktreeSubmissionPorts,
+} from "../lib/sshWorktreeSubmission";
+import type { DraftSshDestination } from "../composerDraftStore";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -819,6 +835,7 @@ function formatOutgoingPrompt(params: {
   const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
   return applyClaudePromptEffortPrefix(params.text, promptEffort);
 }
+const sshWorkspaceLaunchCommand = vcsEnvironment.sshWorkspaceLaunch;
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 
@@ -1667,6 +1684,7 @@ export default function ChatView(props: ChatViewProps) {
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
+  const launchSshWorkspace = useAtomCommand(sshWorkspaceLaunchCommand, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
@@ -1810,6 +1828,16 @@ export default function ChatView(props: ChatViewProps) {
     const draft = store.getComposerDraft(composerDraftTarget);
     return (draft?.images.length ?? 0) > 0 || (draft?.files.length ?? 0) > 0;
   });
+  const composerHasSshAttachments = useComposerDraftStore((store) => {
+    const draft = store.getComposerDraft(composerDraftTarget);
+    return (
+      draft != null &&
+      (draft.images.length > 0 ||
+        draft.files.length > 0 ||
+        draft.nonPersistedImageIds.length > 0 ||
+        draft.persistedAttachments.length > 0)
+    );
+  });
   // Anything beyond the prompt text: attachments, terminal or element contexts, annotations.
   const composerHasNonPromptContent = useComposerDraftStore((store) => {
     const draft = store.getComposerDraft(composerDraftTarget);
@@ -1831,6 +1859,7 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
   );
+  const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const getDraftSessionByLogicalProjectKey = useComposerDraftStore(
@@ -3083,6 +3112,7 @@ export default function ChatView(props: ChatViewProps) {
     !envLocked &&
     canAutoBalanceEnvironments &&
     loadBalancingSettings.loadBalancingEnabled &&
+    !draftThread?.sshDestination &&
     draftThread?.environmentSelection !== "manual" &&
     (!composerHasAttachments || Boolean(draftThread?.loadBalancedEnvironmentId)) &&
     (!draftThread?.branch || draftThread.environmentSelection === "auto") &&
@@ -4303,6 +4333,37 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  const sshCatalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const sshDestination = draftThread?.sshDestination ?? null;
+  const sshOptions = useMemo(
+    () => savedSshWorktreeOptions(sshCatalog.entries, window.desktopBridge !== undefined),
+    [sshCatalog.entries],
+  );
+  const selectedSshOption = findSavedSshWorktreeOption(sshOptions, sshDestination);
+  const canLaunchSsh = useAtomValue(
+    sshWorkspaceLaunchCommand.permissionAtom(draftThread?.environmentId ?? null),
+  );
+  const sshGuardInput = {
+    selected: true,
+    draftAvailable: isLocalDraftThread,
+    sourceIsPrimary: draftThread?.environmentId === primaryEnvironmentId,
+    sourceProjectAvailable: activeProject !== null,
+    sourceIsGitRepo: isGitRepo,
+    desktopAvailable: window.desktopBridge !== undefined,
+    catalogReady: sshCatalog.isReady,
+    option: selectedSshOption,
+    canLaunch: canLaunchSsh,
+    multipleModels: multipleModelSelections !== null,
+  };
+  const sshSendBlockReason = sshWorktreeSendBlockReason({
+    ...sshGuardInput,
+    selected: sshDestination !== null,
+    hasAttachments: composerHasSshAttachments,
+    hasContextRecords: composerHasNonPromptContent,
+  });
+  // Host selection is available before the user removes text-only transfer blockers.
+  const sshDisabledReason = sshWorktreeSelectionBlockReason(sshGuardInput);
+
   // When context is enabled, keep a hidden, off-flow strip mounted so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
@@ -4465,6 +4526,7 @@ export default function ChatView(props: ChatViewProps) {
     );
     setDraftThreadContext(draftId, {
       environmentSelection: "auto",
+      sshDestination: null,
       loadBalancedEnvironmentId: null,
       branch: null,
       worktreePath: null,
@@ -4527,11 +4589,16 @@ export default function ChatView(props: ChatViewProps) {
             deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings),
             projectRef,
             draftId,
-            { environmentSelection: "manual", loadBalancedEnvironmentId: null },
+            {
+              environmentSelection: "manual",
+              loadBalancedEnvironmentId: null,
+              sshDestination: null,
+            },
           );
         } else {
           setDraftThreadContext(draftId, {
             projectRef,
+            sshDestination: null,
             environmentSelection: "manual",
             loadBalancedEnvironmentId: null,
           });
@@ -8819,6 +8886,104 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
 
+  const makeSshThreadOpenPorts = (
+    savedDestination: DraftSshDestination,
+    automaticRouteKey: string | null,
+  ): SshThreadOpenPorts => ({
+    reconnect: async (savedEnvironmentId) => {
+      const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
+      const option = findSavedSshWorktreeOption(
+        savedSshWorktreeOptions(catalog.entries, window.desktopBridge !== undefined),
+        savedDestination,
+      );
+      if (
+        !catalog.isReady ||
+        !option ||
+        option.disabledReason ||
+        savedEnvironmentId !== savedDestination.environmentId
+      ) {
+        throw new Error("This saved SSH connection is unavailable. Check Settings → Connections.");
+      }
+      const result = await retryEnvironment(savedEnvironmentId);
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    },
+    waitForShell: waitForThreadShell,
+    navigate: async (remoteRef) => {
+      if (automaticRouteKey !== null && currentRouteThreadKeyRef.current !== automaticRouteKey) {
+        throw new Error("The remote thread started. Use Open thread when ready.");
+      }
+      await navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(remoteRef),
+        replace: true,
+      });
+    },
+  });
+  const makeSshSubmissionPorts = (
+    capturedDraftId: DraftId,
+    submittedContentSnapshot: string,
+    savedDestination: DraftSshDestination,
+    capturedRouteThreadKey: string,
+    onDispatchBegan: () => void,
+  ): SshWorktreeSubmissionPorts => {
+    return {
+      ...makeSshThreadOpenPorts(savedDestination, capturedRouteThreadKey),
+      launch: async (target) => {
+        onDispatchBegan();
+        const result = await launchSshWorkspace(target);
+        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+        return result.value;
+      },
+      // Always re-read by captured ID, including after route changes or remounts.
+      isSubmittedDraftContentUnchanged: () =>
+        isDraftContentUnchanged(
+          submittedContentSnapshot,
+          useComposerDraftStore.getState().getComposerDraft(capturedDraftId),
+        ),
+      // Called synchronously after an unchanged-content comparison and successful navigation.
+      deleteSubmittedDraft: () => clearDraftThread(capturedDraftId),
+      // Called when navigation did not happen (timeout, route changed, identity mismatch): the draft
+      // session stays so its route stays mounted. Called only when content still matches the
+      // snapshot; remove it through the existing selector alias, never the displayed target.
+      emptySubmittedDraftContent: () => {
+        clearComposerDraftContent(capturedDraftId); // ChatView.tsx:1833 → composerDraftStore.ts:4186
+        if (currentRouteThreadKeyRef.current === capturedRouteThreadKey) {
+          promptRef.current = "";
+          composerRef.current?.resetCursorState();
+        }
+      },
+    };
+  };
+
+  const showSshStartedNotOpened = (
+    outcome: Extract<SshWorktreeSubmissionOutcome, { kind: "started-not-opened" }>,
+    saved: { destination: DraftSshDestination; hostLabel: string },
+  ) => {
+    // This continuation captures remote identity only; Open cannot resend or consume a draft.
+    const { remoteRef } = outcome;
+    const { destination, hostLabel } = saved;
+    const show = (reason: string) =>
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: `Started on ${hostLabel.slice(0, 120)}, but could not open the thread`,
+          description: `${remoteRef.threadId} · ${reason.slice(0, 500)}`,
+          actionProps: {
+            children: "Open thread",
+            onClick: () => {
+              void openSshThread(
+                { remoteRef, savedEnvironmentId: destination.environmentId },
+                makeSshThreadOpenPorts(destination, null),
+              ).catch((error: unknown) =>
+                show(error instanceof Error ? error.message : "Could not open the remote thread."),
+              );
+            },
+          },
+        }),
+      );
+    show(outcome.reason);
+  };
+
   const onSend = async (
     e?: { preventDefault: () => void },
     dispatchMode: ComposerDispatchMode = "auto",
@@ -8906,6 +9071,136 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
+    const sourceDraft = draftId ? getDraftSession(draftId) : null;
+    if (draftId && sourceDraft?.sshDestination) {
+      if (!sendCtx) return;
+      if (
+        sendCtx.selectedModelSelection.instanceId === NO_PROVIDER_MODEL_SELECTION.instanceId ||
+        !sendCtx.selectedModelSelection.model.trim()
+      ) {
+        setThreadError(sourceDraft.threadId, "Choose a model before sending to SSH.");
+        return;
+      }
+      const capturedDraftId = draftId;
+      const capturedContent = useComposerDraftStore.getState().getComposerDraft(capturedDraftId);
+      if (!capturedContent) return;
+      const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
+      const option = findSavedSshWorktreeOption(
+        savedSshWorktreeOptions(catalog.entries, window.desktopBridge !== undefined),
+        sourceDraft.sshDestination,
+      );
+      const blockReason = sshWorktreeSendBlockReason({
+        selected: true,
+        draftAvailable: true,
+        sourceIsPrimary: sourceDraft.environmentId === primaryEnvironmentId,
+        sourceProjectAvailable: activeProject !== null,
+        sourceIsGitRepo: isGitRepo,
+        desktopAvailable: window.desktopBridge !== undefined,
+        catalogReady: catalog.isReady,
+        option,
+        canLaunch: appAtomRegistry.get(
+          sshWorkspaceLaunchCommand.permissionAtom(sourceDraft.environmentId),
+        ),
+        hasAttachments:
+          capturedContent.images.length > 0 ||
+          capturedContent.files.length > 0 ||
+          capturedContent.nonPersistedImageIds.length > 0 ||
+          capturedContent.persistedAttachments.length > 0 ||
+          directAnnotation?.image != null,
+        hasContextRecords:
+          capturedContent.terminalContexts.length > 0 ||
+          capturedContent.previewAnnotations.length > 0 ||
+          capturedContent.reviewComments.length > 0 ||
+          capturedContent.threadContexts.length > 0 ||
+          directAnnotation !== undefined,
+        multipleModels: sendCtx.multipleModelSelections !== null,
+      });
+      if (blockReason) {
+        setThreadError(sourceDraft.threadId, blockReason);
+        return;
+      }
+      if (!option) return; // type narrowing; prior guard gives the visible reason.
+      const text = capturedContent.prompt.trim(); // same raw prompt used by the content snapshot
+      if (!text) return;
+      // Preserve the existing standalone interaction-mode toggle before launching.
+      const standalone = sendCtx.interactionModeEnabled
+        ? parseStandaloneComposerSlashCommand(text)
+        : null;
+      if (standalone) {
+        handleInteractionModeChange(standalone);
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        return;
+      }
+      const outgoingText = formatOutgoingPrompt({
+        provider: sendCtx.selectedProvider,
+        model: sendCtx.selectedModel,
+        models: sendCtx.selectedProviderModels,
+        effort: sendCtx.selectedPromptEffort,
+        text,
+      });
+      if (composerRef.current?.validateProviderInput(outgoingText) === false) return;
+      const capturedSavedDestination = option.destination;
+      const capturedHostLabel = option.label;
+      const capturedRouteThreadKey = routeThreadKey;
+      // Capture raw current content independently of outgoingText formatting, before any await.
+      const submittedContentSnapshot = snapshotDraftContent(capturedContent);
+      sendInFlightRef.current = true;
+      beginLocalDispatch({ preparingWorktree: false, submissionIntent });
+      let sshLaunchDispatchBegan = false;
+      try {
+        const outcome = await submitSshWorktree(
+          {
+            sourceEnvironmentId: sourceDraft.environmentId,
+            savedEnvironmentId: option.destination.environmentId,
+            launchInput: {
+              sourceProjectId: sourceDraft.projectId,
+              destination: {
+                connectionId: option.destination.connectionId,
+                expectedEnvironmentId: option.destination.environmentId,
+                target: option.profile.target,
+              },
+              title: text.slice(0, 80),
+              modelSelection: sendCtx.selectedModelSelection,
+              runtimeMode,
+              interactionMode: sendCtx.interactionMode,
+              initialMessage: { text: outgoingText },
+            },
+          },
+          makeSshSubmissionPorts(
+            capturedDraftId,
+            submittedContentSnapshot,
+            capturedSavedDestination,
+            capturedRouteThreadKey,
+            () => {
+              sshLaunchDispatchBegan = true;
+            },
+          ),
+        );
+        if (outcome.kind === "started-not-opened") {
+          showSshStartedNotOpened(outcome, {
+            destination: capturedSavedDestination,
+            hostLabel: capturedHostLabel,
+          }); // caller owns the toast and its connect-only Open thread action
+        }
+      } catch (error) {
+        const feedback = sshWorktreeErrorFeedback(error, capturedHostLabel, sshLaunchDispatchBegan);
+        setThreadError(sourceDraft.threadId, feedback.message);
+        toastManager.add(
+          stackedThreadToast({
+            type: feedback.uncertain ? "warning" : "error",
+            title: feedback.message,
+            description: feedback.details,
+          }),
+        );
+      } finally {
+        sendInFlightRef.current = false;
+        resetLocalDispatch();
+      }
+      return; // SSH must never fall through to normal startThreadTurn.
+    }
+
     if (!sendCtx?.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
@@ -10870,6 +11165,61 @@ export default function ChatView(props: ChatViewProps) {
       settings,
     ],
   );
+  const onSshDestinationChange = useCallback(
+    (destination: DraftSshDestination) => {
+      if (
+        !draftId ||
+        envLocked ||
+        sendInFlightRef.current ||
+        !activeProject ||
+        activeProject.environmentId !== primaryEnvironmentId ||
+        !isGitRepo ||
+        multipleModelSelections !== null
+      )
+        return;
+      const current = getDraftSession(draftId);
+      if (
+        !current ||
+        current.environmentId !== primaryEnvironmentId ||
+        current.projectId !== activeProject.id
+      )
+        return;
+      const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
+      const option = findSavedSshWorktreeOption(
+        savedSshWorktreeOptions(catalog.entries, window.desktopBridge !== undefined),
+        destination,
+      );
+      if (
+        !option ||
+        option.disabledReason ||
+        !appAtomRegistry.get(sshWorkspaceLaunchCommand.permissionAtom(current.environmentId))
+      )
+        return;
+      setDraftThreadContext(draftId, {
+        sshDestination: destination,
+        envMode: "worktree",
+        branch: null,
+        worktreePath: null,
+        startFromOrigin: false,
+        environmentSelection: "manual",
+        loadBalancedEnvironmentId: null,
+      });
+      scheduleComposerFocus();
+    },
+    [
+      draftId,
+      envLocked,
+      activeProject,
+      primaryEnvironmentId,
+      isGitRepo,
+      multipleModelSelections,
+      getDraftSession,
+      setDraftThreadContext,
+      scheduleComposerFocus,
+      sendInFlightRef,
+    ],
+  );
+
   const onEnvModeChange = useCallback(
     (mode: DraftThreadEnvMode) => {
       if (multipleModelSelections !== null) return;
@@ -10881,6 +11231,7 @@ export default function ChatView(props: ChatViewProps) {
       if (isLocalDraftThread) {
         setDraftThreadContext(composerDraftTarget, {
           envMode: mode,
+          sshDestination: null,
           startFromOrigin: resolveNewDraftStartFromOrigin({
             envMode: mode,
             newWorktreesStartFromOrigin: activeProjectSettings.settings.newWorktreesStartFromOrigin,
@@ -10954,7 +11305,11 @@ export default function ChatView(props: ChatViewProps) {
     if (sendEnvMode !== "local") {
       // The draft is back; switch it to the project checkout and let the next
       // render resend.
-      setDraftThreadContext(composerDraftTarget, { envMode: "local", startFromOrigin: false });
+      setDraftThreadContext(composerDraftTarget, {
+        envMode: "local",
+        startFromOrigin: false,
+        sshDestination: null,
+      });
       return;
     }
     setWorkLocallyResendDraftId(null);
@@ -10968,6 +11323,7 @@ export default function ChatView(props: ChatViewProps) {
   ]);
 
   const onStartFromOriginChange = (nextStartFromOrigin: boolean) => {
+    if (draftThread?.sshDestination) return;
     if (canOverrideServerThreadEnvMode && activeThread) {
       setPendingServerThreadStartFromOriginByThreadId((current) =>
         current[activeThread.id] === nextStartFromOrigin
@@ -11234,6 +11590,10 @@ export default function ChatView(props: ChatViewProps) {
     onEnvironmentChange,
     onEnvModeChange,
     envMode,
+    sshDestination,
+    sshOptions,
+    sshDisabledReason,
+    onSshDestinationChange,
     ...(canOverrideServerThreadEnvMode
       ? {
           activeThreadBranchOverride: activeThreadBranch,
@@ -11707,8 +12067,10 @@ export default function ChatView(props: ChatViewProps) {
                               isSendBusy={isSendBusy || isSavingQueuedEdit || isResuming}
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
+                              sshWorktreeSelected={sshDestination !== null}
                               sendDisabledReason={
-                                !canOperateThread
+                                sshSendBlockReason ??
+                                (!canOperateThread
                                   ? "This connection cannot change threads."
                                   : isEnvironmentChanging
                                     ? "Preparing machine"
@@ -11720,7 +12082,7 @@ export default function ChatView(props: ChatViewProps) {
                                           ? "Messages loading"
                                           : worktreeSetupBlocksSend
                                             ? "Preparing worktree"
-                                            : projectCloneSendBlockReason
+                                            : projectCloneSendBlockReason)
                               }
                               isPreparingWorktree={isPreparingWorktree}
                               queuedRunsControl={
@@ -11883,6 +12245,10 @@ export default function ChatView(props: ChatViewProps) {
                                 threadId={activeThread.id}
                                 showGitControls={isGitRepo}
                                 {...(routeKind === "draft" && draftId ? { draftId } : {})}
+                                sshDestination={sshDestination}
+                                sshOptions={sshOptions}
+                                sshDisabledReason={sshDisabledReason}
+                                onSshDestinationChange={onSshDestinationChange}
                                 onEnvModeChange={onEnvModeChange}
                                 startFromOrigin={startFromOrigin}
                                 onStartFromOriginChange={onStartFromOriginChange}

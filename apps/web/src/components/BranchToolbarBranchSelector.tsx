@@ -140,6 +140,7 @@ export function BranchToolbarBranchSelector({
   const draftThread = useComposerDraftStore((store) =>
     draftId ? store.getDraftSession(draftId) : store.getDraftThreadByRef(threadRef),
   );
+  const sshSelected = draftThread?.sshDestination != null;
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
 
   const activeProjectRef = serverThread
@@ -161,7 +162,7 @@ export function BranchToolbarBranchSelector({
   const branchCwd = activeWorktreePath ?? activeProjectCwd;
   const hasServerThread = serverThread !== null;
   const canUpdateThreadBranch = !hasServerThread || canOperateThread;
-  const canChangeThreadBranch = canWriteSourceControl && canUpdateThreadBranch;
+  const canChangeThreadBranch = !sshSelected && canWriteSourceControl && canUpdateThreadBranch;
   const effectiveEnvMode =
     effectiveEnvModeOverride ??
     resolveEffectiveEnvMode({
@@ -175,6 +176,7 @@ export function BranchToolbarBranchSelector({
   // ---------------------------------------------------------------------------
   const setThreadBranch = useCallback(
     (branch: string | null, worktreePath: string | null, automatic = false) => {
+      if (sshSelected) return;
       if (
         !activeThreadId ||
         !activeProject ||
@@ -227,6 +229,7 @@ export function BranchToolbarBranchSelector({
       environmentId,
       effectiveEnvMode,
       draftThread?.environmentSelection,
+      sshSelected,
       stopThreadSession,
       updateThreadMetadata,
     ],
@@ -409,6 +412,7 @@ export function BranchToolbarBranchSelector({
   );
 
   const runBranchAction = (action: () => Promise<void>) => {
+    if (sshSelected) return;
     if (
       !readEnvironmentScope(environmentId, AuthSourceControlWriteScope) ||
       (hasServerThread && !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
@@ -431,6 +435,7 @@ export function BranchToolbarBranchSelector({
   };
 
   const selectBranch = (refName: VcsRef) => {
+    if (sshSelected) return;
     if (!canUpdateThreadBranch || !branchCwd || !activeProjectCwd || isBranchActionPending) return;
 
     if (isSelectingWorktreeBase) {
@@ -540,6 +545,7 @@ export function BranchToolbarBranchSelector({
 
   useEffect(() => {
     if (
+      sshSelected ||
       effectiveEnvMode !== "worktree" ||
       activeWorktreePath ||
       activeThreadBranch ||
@@ -554,27 +560,32 @@ export function BranchToolbarBranchSelector({
     effectiveEnvMode,
     setThreadBranch,
     worktreeBaseBranchCandidate,
+    sshSelected,
   ]);
 
   // ---------------------------------------------------------------------------
   // Combobox / list plumbing
   // ---------------------------------------------------------------------------
-  const handleOpenChange = useCallback((open: boolean) => {
-    setIsBranchMenuOpen(open);
-    if (!open) {
-      setBranchQuery("");
-    }
-  }, []);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      if (open && sshSelected) return;
+      setIsBranchMenuOpen(open);
+      if (!open) {
+        setBranchQuery("");
+      }
+    },
+    [sshSelected],
+  );
 
   useImperativeHandle(
     ref,
     () => ({
       open: () => {
-        if (isInitialBranchesLoadPending || isBranchActionPending) return;
+        if (sshSelected || isInitialBranchesLoadPending || isBranchActionPending) return;
         handleOpenChange(true);
       },
     }),
-    [handleOpenChange, isBranchActionPending, isInitialBranchesLoadPending],
+    [handleOpenChange, isBranchActionPending, isInitialBranchesLoadPending, sshSelected],
   );
 
   const triggerLabel = resolveBranchTriggerLabel({
@@ -622,6 +633,7 @@ export function BranchToolbarBranchSelector({
       : `#${prNumber}${displayedPr?.title.trim() ? `: ${displayedPr.title}` : ""}`;
 
   function selectPickerItem(itemValue: string) {
+    if (sshSelected) return;
     if (itemValue === checkoutPullRequestItemValue && prReference && onCheckoutPullRequestRequest) {
       handleOpenChange(false);
       onComposerFocusRequest?.();
