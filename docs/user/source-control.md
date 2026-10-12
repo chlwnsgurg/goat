@@ -260,9 +260,11 @@ watch. Subagents cannot watch pull requests; the thread that delegated to them d
 it yourself, use the row menu in the **Linked pull requests** panel. In the thread details card, a
 watched pull request shows an eye; click it to stop watching.
 
-A watched thread counts as working between wakes, so it stays in the **Working** section and does
-not auto-settle. Agents stop watching when they hand the work back to you, and the thread then
-returns to your inbox.
+A watched thread counts as working between wakes and does not auto-settle. On web and desktop,
+it appears in **Priority** at the top of **Activity**. Priority also holds threads needing an
+approval or answer, unread completions, and returns from snooze. Its **Mark all as read** action
+acknowledges unread completions; it does not stop a watch. On mobile, watched threads stay in
+**Working** when that section is enabled. Agents stop watching when they hand the work back to you.
 
 Cross-repository links use a project on the same host. Azure DevOps reviews require a project checked
 out from the matching organization and repository.

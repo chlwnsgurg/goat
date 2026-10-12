@@ -37,7 +37,9 @@ function layout(
   const rects = items.map((item) => {
     const height =
       item.kind === "thread"
-        ? (item.section === "pinned" || item.section === "active" ? cardHeight : 36) * scale
+        ? (item.section === "pinned" || item.section === "active" || item.section === "priority"
+            ? cardHeight
+            : 36) * scale
         : item.marker === "pinned-header" || item.marker === "pinned-divider"
           ? 0
           : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
@@ -741,26 +743,69 @@ describe("sidebar drag projection", () => {
     expect(result.get(sidebarMarkerId("snoozed-header"))).toEqual({ ...stationary, y: -46 });
   });
 
-  it("previews a time-ordered inbox drop at its time slot, above the Working shelf", () => {
+  it("keeps Priority stationary and out of manual orders during a drop", () => {
     const items = [
+      marker("priority-header"),
+      thread("priority", "priority"),
       pinnedHeader,
       thread("p", "pinned"),
       divider,
       thread("a1", "active"),
       thread("a2", "active"),
-      marker("working-header"),
-      thread("w", "working"),
       settledHeader,
       marker("settled-placeholder"),
     ];
+    const result = preview({ items, settledOrder: [], settledExpanded: false }, "p", "a1");
+    expect(result.get(sidebarMarkerId("priority-header"))).toEqual(stationary);
+    expect(result.get("priority")).toEqual(stationary);
+    expect(result.get("a2")?.y).toBe(0);
+    expect(resolveSidebarDropTarget(items, "p", "a1")).toEqual({
+      section: "active",
+      pinnedOrder: [],
+      activeOrder: ["a1", "p", "a2"],
+    });
+  });
+
+  it("does not project a drop onto a Priority row or header", () => {
+    const items = [
+      marker("priority-header"),
+      thread("priority", "priority"),
+      pinnedHeader,
+      divider,
+      thread("active", "active"),
+      settledHeader,
+    ];
     const input = { items, settledOrder: [], settledExpanded: false };
-    // By pointer, the unpinned row lands between a1 and a2.
-    expect(preview(input, "p", "a1").get("a2")?.y).toBe(0);
-    // By time, it lands below a2, and the shelf does not move.
-    const byTime = preview({ ...input, activeOrder: ["a1", "a2", "p"] }, "p", "a1");
-    expect(byTime.get("a2")?.y).toBe(-83);
-    expect(byTime.get(sidebarMarkerId("working-header"))).toEqual(stationary);
-    expect(byTime.get("w")).toEqual(stationary);
+    for (const over of ["priority", sidebarMarkerId("priority-header")]) {
+      const result = preview(input, "active", over);
+      expect([...result.values()]).toEqual(items.map(() => stationary));
+    }
+  });
+
+  it("preserves draft space beneath Priority while dragging a settled row into cards", () => {
+    const items = [
+      marker("priority-header"),
+      thread("priority", "priority"),
+      pinnedHeader,
+      divider,
+      thread("active", "active"),
+      settledHeader,
+      thread("source", "settled"),
+    ];
+    const args = layout(items, "source", "active");
+    for (const rect of args.rects.slice(2)) {
+      rect.top += 50;
+      rect.bottom += 50;
+    }
+    const strategy = createSidebarSortingStrategy({
+      items,
+      settledOrder: [],
+      settledExpanded: false,
+    });
+    expect(strategy({ ...args, index: 0 })).toEqual(stationary);
+    expect(strategy({ ...args, index: 1 })).toEqual(stationary);
+    expect(strategy({ ...args, index: 4 })).toEqual({ ...stationary, y: 83 });
+    expect(strategy({ ...args, index: 5 })).toEqual({ ...stationary, y: 83 });
   });
 
   it("derives missing card geometry from the measured root scale", () => {

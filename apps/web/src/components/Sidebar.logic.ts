@@ -129,19 +129,21 @@ export const animateSidebarLayoutChanges: AnimateLayoutChanges = (args) =>
 // the lifecycle action; Sidebar.drag previews the resulting layout. Pinned
 // and active threads keep the dragged position; settled threads use time
 // order. Snoozed rows can leave the shelf, but dropping into it is not
-// supported because snoozing requires a wake time. The Working shelf (beta)
-// follows live status, so it is neither a drag source nor a destination.
+// supported because snoozing requires a wake time. Priority follows live
+// attention, so it is neither a drag source nor a destination.
 
-export type SidebarSection = "pinned" | "active" | "working" | "snoozed" | "settled";
+export type SidebarSection = "priority" | "pinned" | "active" | "snoozed" | "settled";
 
-/** Resolve the shelf a visible thread belongs to. Snooze is temporary and
- * wins until its wake boundary; settlement then wins over a stale pin. */
+/** Snooze wins until its wake boundary. Priority overlays lifecycle;
+ * otherwise settlement wins over a stale pin. */
 export function resolveSidebarThreadSection(input: {
   readonly snoozed: boolean;
   readonly settled: boolean;
   readonly pinned: boolean;
+  readonly priority?: boolean;
 }): SidebarSection {
   if (input.snoozed) return "snoozed";
+  if (input.priority) return "priority";
   if (input.settled) return "settled";
   if (input.pinned) return "pinned";
   return "active";
@@ -159,7 +161,7 @@ export type SidebarListMarker =
   | "settled-placeholder"
   /** The boundary between pinned and active rows. */
   | "pinned-divider"
-  | "working-header"
+  | "priority-header"
   | "snoozed-header"
   | "settled-header";
 
@@ -175,17 +177,26 @@ export function sidebarListItemId(item: SidebarListItem): string {
   return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
 }
 
-/** The section a slot belongs to, read off the markers around it: from
-    the top down, everything before the pinned divider is pinned, then the
-    inbox until the first shelf header, each shelf until the next header,
-    then settled. */
+/** A status or lifecycle change must end a drag before it applies a stale action. */
+export function shouldCancelSidebarThreadDrag(
+  items: readonly SidebarListItem[],
+  drag: { readonly activeKey: string; readonly activeSection: SidebarSection },
+): boolean {
+  return !items.some(
+    (item) =>
+      item.kind === "thread" && item.key === drag.activeKey && item.section === drag.activeSection,
+  );
+}
+
+/** Section markers delimit Priority, Pinned, the inbox, and lifecycle shelves. */
 function sectionAtSidebarSlot(items: readonly SidebarListItem[], index: number): SidebarSection {
   let section: SidebarSection = "pinned";
   for (let i = 0; i < index && i < items.length; i += 1) {
     const item = items[i]!;
     if (item.kind !== "marker") continue;
-    if (item.marker === "pinned-divider") section = "active";
-    else if (item.marker === "working-header") section = "working";
+    if (item.marker === "priority-header") section = "priority";
+    else if (item.marker === "pinned-header") section = "pinned";
+    else if (item.marker === "pinned-divider") section = "active";
     else if (item.marker === "snoozed-header") section = "snoozed";
     else if (item.marker === "settled-header") section = "settled";
   }
@@ -193,7 +204,7 @@ function sectionAtSidebarSlot(items: readonly SidebarListItem[], index: number):
 }
 
 /** Resolve the destination section and manual order from an arrayMove across
- * the separators. The working and snoozed shelves are never destinations. */
+ * the separators. Priority and snoozed rows are never destinations. */
 export type SidebarDropTarget = {
   readonly section: "pinned" | "active" | "settled";
   readonly pinnedOrder: readonly string[];
@@ -208,24 +219,32 @@ export function resolveSidebarDropTarget(
   const activeIndex = items.findIndex((item) => sidebarListItemId(item) === activeKey);
   const overIndex = items.findIndex((item) => sidebarListItemId(item) === overId);
   if (activeIndex === -1 || overIndex === -1 || items[activeIndex]?.kind !== "thread") return null;
+  const source = items[activeIndex]!;
+  const over = items[overIndex]!;
+  if (
+    (source.kind === "thread" && source.section === "priority") ||
+    (over.kind === "thread" && over.section === "priority") ||
+    (over.kind === "marker" && over.marker === "priority-header")
+  )
+    return null;
   const moved = items.filter((_, index) => index !== activeIndex);
-  moved.splice(overIndex, 0, items[activeIndex]!);
-  const section = sectionAtSidebarSlot(moved, overIndex);
-  if (section === "working" || section === "snoozed") return null;
+  // Pinned's top boundary belongs to Pinned even when Priority precedes it.
+  const destinationIndex =
+    over.kind === "marker" && over.marker === "pinned-header" ? overIndex + 1 : overIndex;
+  moved.splice(destinationIndex, 0, items[activeIndex]!);
+  const section = sectionAtSidebarSlot(moved, destinationIndex);
+  if (section === "priority" || section === "snoozed") return null;
   const pinnedOrder: string[] = [];
   const activeOrder: string[] = [];
   let currentSection: SidebarSection = "pinned";
   for (const item of moved) {
     if (item.kind === "marker") {
-      if (item.marker === "pinned-divider") currentSection = "active";
-      else if (
-        item.marker === "working-header" ||
-        item.marker === "snoozed-header" ||
-        item.marker === "settled-header"
-      )
-        break;
+      if (item.marker === "priority-header") currentSection = "priority";
+      else if (item.marker === "pinned-header") currentSection = "pinned";
+      else if (item.marker === "pinned-divider") currentSection = "active";
+      else if (item.marker === "snoozed-header" || item.marker === "settled-header") break;
     } else if (currentSection === "pinned") pinnedOrder.push(item.key);
-    else activeOrder.push(item.key);
+    else if (currentSection === "active") activeOrder.push(item.key);
   }
   return { section, pinnedOrder, activeOrder };
 }
@@ -249,8 +268,7 @@ export type SidebarThreadDropPlan =
     }
   | {
       readonly kind: "move-active";
-      /** Null when the inbox is time-ordered: the drop has no placement. */
-      readonly order: readonly string[] | null;
+      readonly order: readonly string[];
       readonly assignments: ReadonlyArray<{ readonly id: string; readonly orderKey: string }>;
       readonly unpin: boolean;
       readonly unsettle: boolean;
@@ -260,14 +278,14 @@ export type SidebarThreadDropPlan =
 
 /** What dropping in `to` does to a thread lifted from `from`, for the badge
     on the lifted row. Null while reordering inside one section and for the
-    working and snoozed shelves, which cannot be drop targets. */
+    Priority and snoozed rows, which cannot be drop targets. */
 export type SidebarDropVerb = "pin" | "unpin" | "settle" | "unsettle" | "wake";
 
 export function resolveSidebarDropVerb(
   from: SidebarSection,
   to: SidebarSection | null,
 ): SidebarDropVerb | null {
-  if (to === null || to === from || to === "working" || to === "snoozed") return null;
+  if (to === null || to === from || to === "priority" || to === "snoozed") return null;
   if (to === "pinned") return "pin";
   if (to === "settled") return "settle";
   if (from === "pinned") return "unpin";
@@ -318,8 +336,6 @@ export function planSidebarThreadDrop(input: {
   readonly activeOrder: readonly string[];
   readonly activeKeysById: ReadonlyMap<string, string | null | undefined>;
   readonly activeReorderableKeys?: ReadonlySet<string>;
-  /** Working beta: the inbox sorts by time, so drops only change lifecycle. */
-  readonly activeTimeOrdered?: boolean;
 }): SidebarThreadDropPlan {
   const {
     activeKey,
@@ -334,6 +350,7 @@ export function planSidebarThreadDrop(input: {
     activeKeysById,
     activeReorderableKeys,
   } = input;
+  if (activeSection === "priority") return { kind: "none" };
   if (input.supportsSettlement === false && (target.section === "settled" || activeSettled)) {
     return { kind: "none" };
   }
@@ -357,20 +374,6 @@ export function planSidebarThreadDrop(input: {
   };
   switch (target.section) {
     case "active": {
-      // Like the settled tail: threads can enter a time-ordered inbox, but
-      // not be arranged inside it.
-      if (input.activeTimeOrdered) {
-        return activeSection === "active"
-          ? { kind: "none" }
-          : {
-              kind: "move-active",
-              order: null,
-              assignments: [],
-              unpin: activePinned,
-              unsettle: activeSettled,
-              unsnooze: activeSection === "snoozed",
-            };
-      }
       const order = target.activeOrder;
       if (
         activeSection === "active" &&
@@ -949,6 +952,86 @@ export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   return completedAt > lastVisitedAt;
 }
 
+/** Only writable unread threads are targets of Priority's bulk visit action. */
+export function selectSidebarMarkReadTargets<
+  T extends ThreadStatusInput & Pick<SidebarThreadSummary, "environmentId" | "id">,
+>(input: {
+  readonly threads: readonly T[];
+  readonly localLastVisitedAtByKey: Readonly<Record<string, string | undefined>>;
+  readonly canOperate: (thread: T) => boolean;
+}): T[] {
+  return input.threads.filter((thread) => {
+    if (!input.canOperate(thread)) return false;
+    const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    return hasUnseenCompletion({
+      ...thread,
+      lastVisitedAt: resolveThreadLastVisitedAt(
+        thread.lastVisitedAt,
+        input.localLastVisitedAtByKey[key],
+      ),
+    });
+  });
+}
+
+/** A visit acknowledges a wake without changing the thread's lifecycle. */
+export function isSidebarThreadWoke(
+  wokeAt: string | null,
+  lastVisitedAt: string | undefined,
+): boolean {
+  if (wokeAt === null || !Number.isFinite(Date.parse(wokeAt))) return false;
+  const visited = lastVisitedAt === undefined ? NaN : Date.parse(lastVisitedAt);
+  return !Number.isFinite(visited) || visited < Date.parse(wokeAt);
+}
+
+/** Priority is a display overlay; its rank never changes pinning or settlement. */
+export function resolveSidebarPriorityRank(input: {
+  readonly thread: ThreadStatusInput;
+  readonly localLastVisitedAt?: string | undefined;
+  readonly wokeAt: string | null;
+  readonly hasChildAttention: boolean;
+}): 0 | 1 | 2 | null {
+  const status = resolveSidebarThreadStatus(input.thread);
+  if (status === "approval" || status === "input" || input.hasChildAttention) return 0;
+  if (status === "working" || status === "waiting") return 1;
+  const lastVisitedAt = resolveThreadLastVisitedAt(
+    input.thread.lastVisitedAt,
+    input.localLastVisitedAt,
+  );
+  return hasUnseenCompletion({ ...input.thread, lastVisitedAt }) ||
+    isSidebarThreadWoke(input.wokeAt, lastVisitedAt)
+    ? 2
+    : null;
+}
+
+/** Cache ranks before sorting; activity ties use the environment-qualified key. */
+export function sortPriorityThreadsForSidebar<
+  T extends Pick<SidebarThreadSummary, "environmentId" | "id" | "updatedAt" | "createdAt">,
+>(threads: readonly T[], ranks: ReadonlyMap<string, number>): T[] {
+  const key = (thread: T) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+  return threads.toSorted(
+    (left, right) =>
+      (ranks.get(key(left)) ?? 2) - (ranks.get(key(right)) ?? 2) ||
+      firstValidTimestampMs(right.updatedAt, right.createdAt) -
+        firstValidTimestampMs(left.updatedAt, left.createdAt) ||
+      key(left).localeCompare(key(right)),
+  );
+}
+
+/** Row controls and child history follow lifecycle even inside Priority. */
+export function resolveSidebarThreadPresentation(input: {
+  readonly snoozed: boolean;
+  readonly settled: boolean;
+}) {
+  return {
+    action: input.snoozed
+      ? ("unsnooze" as const)
+      : input.settled
+        ? ("unsettle" as const)
+        : ("settle" as const),
+    showFinished: !input.snoozed && !input.settled,
+  };
+}
+
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
   if (target === null) return true;
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
@@ -1225,13 +1308,6 @@ export function firstValidTimestampMs(
 }
 
 export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
-// The Working section beta folds and orders the inbox the same way on mobile.
-export {
-  isThreadWorking as isSidebarThreadWorking,
-  sortInboxThreadsByReturn,
-  sortWorkingThreadsBySend,
-} from "@t3tools/client-runtime/state/thread-inbox";
-
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
 export { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
