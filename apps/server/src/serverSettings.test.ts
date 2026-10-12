@@ -1736,6 +1736,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           url,
           secret: "hook-secret",
           allLaunches: false,
+          externalLaunches: false,
         });
         const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
         assert.notInclude(raw, "hook-secret");
@@ -1748,12 +1749,15 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         // Echoing the marker back, or leaving the secret out, keeps it.
         yield* serverSettings.updateSettings({ completionWebhook: forClient });
-        yield* serverSettings.updateSettings({ completionWebhook: { allLaunches: true } });
+        yield* serverSettings.updateSettings({
+          completionWebhook: { allLaunches: true, externalLaunches: true },
+        });
         assert.deepEqual((yield* serverSettings.getSettings).completionWebhook, {
           enabled: true,
           url,
           secret: "hook-secret",
           allLaunches: true,
+          externalLaunches: true,
         });
 
         const cleared = yield* serverSettings.updateSettings({ completionWebhook: { secret: "" } });

@@ -859,6 +859,12 @@ export const CompletionWebhookSettings = Schema.Struct({
   url: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   secret: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   allLaunches: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Also watch launches from outside any GOAT thread (an MCP client without a
+   * thread credential) and post their reports here. Without it such a launch is
+   * watched only when it passes notifyWebhook: true.
+   */
+  externalLaunches: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type CompletionWebhookSettings = typeof CompletionWebhookSettings.Type;
 
@@ -1690,6 +1696,7 @@ export const ServerSettingsPatch = Schema.Struct({
       url: Schema.optionalKey(TrimmedString),
       secret: Schema.optionalKey(TrimmedString),
       allLaunches: Schema.optionalKey(Schema.Boolean),
+      externalLaunches: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual
