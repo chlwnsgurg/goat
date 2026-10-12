@@ -3,12 +3,14 @@ import { excludeGlobalAgentThreads } from "../globalAgentRoute";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import * as DateTime from "effect/DateTime";
-import { deriveActiveWorkStartedAt } from "../session-logic.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import {
+  sidebarFolderName,
+  sidebarShortDeviceName,
+  sidebarHostHueClassName,
   animateSidebarLayoutChanges,
   canPromoteThread,
   buildSidebarDelegatedChildIndex,
@@ -24,7 +26,6 @@ import {
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
   filterSidebarV2VisibleThreads,
-  formatWorkingDurationLabel,
   getFallbackThreadIdAfterDelete,
   getProjectSortTimestamp,
   getSidebarForkParentThreadId,
@@ -52,10 +53,8 @@ import {
   resolveThreadLastVisitedAt,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
-  resolveWorkingStartedAt,
   searchSidebarThreads,
   shouldClearThreadSelectionOnMouseDown,
-  shouldShowSidebarV2Duration,
   shouldRecedeSidebarThread,
   sortLogicalProjectsForSidebar,
   resolveSidebarDropTarget,
@@ -1724,11 +1723,6 @@ describe("resolveSidebarThreadStatus", () => {
       "waiting",
     );
   });
-
-  it("keeps Waiting static while Working shows elapsed duration", () => {
-    expect(shouldShowSidebarV2Duration("waiting")).toBe(false);
-    expect(shouldShowSidebarV2Duration("working")).toBe(true);
-  });
 });
 
 describe("searchSidebarThreads", () => {
@@ -1841,102 +1835,6 @@ describe("reduceSidebarProjectScopeMenuState", () => {
         { type: "query-changed", query: "beta" },
       ),
     ).toEqual({ open: true, query: "beta" });
-  });
-});
-
-describe("resolveWorkingStartedAt", () => {
-  const runtime = {
-    status: "running" as const,
-    providerName: "Codex",
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    activeRunId: RunId.make("turn-1"),
-    lastError: null,
-    updatedAt: "2026-03-09T10:02:00.000Z",
-  };
-
-  it("uses the running run's start time", () => {
-    expect(
-      resolveWorkingStartedAt({
-        latestRun: makeLatestRun({ completedAt: null }),
-        runtime,
-      }),
-    ).toBe("2026-03-09T10:00:00.000Z");
-  });
-
-  it("uses the request time while a run awaits adoption", () => {
-    expect(
-      resolveWorkingStartedAt({
-        latestRun: makeLatestRun({ startedAt: null, completedAt: null }),
-        runtime,
-      }),
-    ).toBe("2026-03-09T10:00:00.000Z");
-  });
-
-  it("does not invent a start from activity updates when the newest run completed", () => {
-    expect(
-      resolveWorkingStartedAt({
-        latestRun: makeLatestRun(),
-        runtime,
-      }),
-    ).toBeNull();
-  });
-
-  it("skips a malformed startedAt instead of returning it", () => {
-    expect(
-      resolveWorkingStartedAt({
-        latestRun: makeLatestRun({ startedAt: "not-a-date", completedAt: null }),
-        runtime,
-      }),
-    ).toBe("2026-03-09T10:00:00.000Z");
-  });
-
-  it.each(["queued", "cancelled"] as const)(
-    "shares the detail timer when a newer run is %s",
-    (status) => {
-      const activityStartedAt = "2026-03-09T10:00:00.000Z";
-      const latestRun = {
-        ...makeLatestRun(),
-        runId: RunId.make("newer-run"),
-        status,
-        startedAt: null,
-        completedAt: status === "queued" ? null : "2026-03-09T10:05:00.000Z",
-      };
-      for (const updatedAt of ["2026-03-09T10:30:00.000Z", "2026-03-09T10:50:00.000Z"]) {
-        const activeRuntime = { ...runtime, updatedAt, activityStartedAt };
-        expect(resolveWorkingStartedAt({ latestRun, runtime: activeRuntime })).toBe(
-          activityStartedAt,
-        );
-        expect(deriveActiveWorkStartedAt(latestRun, activeRuntime, updatedAt)).toBe(
-          activityStartedAt,
-        );
-      }
-      // A server-owned run without a valid start must not borrow a local dispatch clock.
-      expect(
-        deriveActiveWorkStartedAt(
-          latestRun,
-          { ...runtime, activityStartedAt: null },
-          "2026-03-09T10:50:00.000Z",
-        ),
-      ).toBeNull();
-    },
-  );
-
-  it("returns null with neither a running run nor a runtime", () => {
-    expect(resolveWorkingStartedAt({ latestRun: null, runtime: null })).toBeNull();
-  });
-});
-
-describe("formatWorkingDurationLabel", () => {
-  it("formats seconds, minutes, and hours", () => {
-    expect(formatWorkingDurationLabel(0)).toBe("0s");
-    expect(formatWorkingDurationLabel(42_000)).toBe("42s");
-    expect(formatWorkingDurationLabel(5 * 60_000)).toBe("5m");
-    expect(formatWorkingDurationLabel(90 * 60_000)).toBe("1h 30m");
-  });
-
-  it("clamps negative and non-finite elapsed values to zero", () => {
-    expect(formatWorkingDurationLabel(-5_000)).toBe("0s");
-    expect(formatWorkingDurationLabel(Number.NaN)).toBe("0s");
   });
 });
 
@@ -2913,5 +2811,59 @@ describe("Activity sidebar ordering", () => {
       });
       expect(above.kind === "move-active" && above.assignments[0]!.orderKey < "m").toBe(true);
     });
+  });
+});
+
+describe("sidebarFolderName", () => {
+  it.each([
+    ["/Users/jun/projects/goat", "goat"],
+    ["C:\\Users\\jun\\goat", "goat"],
+    ["/projects/goat///", "goat"],
+    ["C:\\projects\\goat\\", "goat"],
+    ["projects\\goat/", "goat"],
+    ["/", null],
+    ["C:\\", null],
+    ["", null],
+    [null, null],
+    [undefined, null],
+  ])("resolves %s to %s", (path, expected) => {
+    expect(sidebarFolderName(path)).toBe(expected);
+  });
+});
+
+describe("sidebarShortDeviceName", () => {
+  it.each([
+    ["juns-MacBook-Pro", "juns"],
+    ["Jun's MacBook Pro", "Juns"],
+    ["Jun’s MacBook Pro", "Juns"],
+    [" host.example.com ", "host"],
+    ["host_workstation", "host"],
+    ["' MacBook", "' MacBook"],
+    ["-host", "-host"],
+    ["   ", null],
+    [null, null],
+    [undefined, null],
+  ])("shortens %s to %s", (label, expected) => {
+    expect(sidebarShortDeviceName(label)).toBe(expected);
+  });
+});
+
+describe("sidebarHostHueClassName", () => {
+  it("assigns a stable hue from the non-blue palette to each environment", () => {
+    const palette = [
+      "text-orange-500",
+      "text-emerald-500",
+      "text-violet-500",
+      "text-pink-500",
+      "text-amber-500",
+      "text-teal-500",
+      "text-lime-600",
+      "text-rose-500",
+    ];
+    for (const environmentId of ["local", "remote-mac", "epyc-01", "", "서울"]) {
+      const hue = sidebarHostHueClassName(environmentId);
+      expect(hue).toBe(sidebarHostHueClassName(environmentId));
+      expect(palette).toContain(hue);
+    }
   });
 });

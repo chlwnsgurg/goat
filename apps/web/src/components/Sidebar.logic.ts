@@ -1,4 +1,3 @@
-import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
@@ -27,6 +26,39 @@ import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+
+export function sidebarFolderName(path: string | null | undefined): string | null {
+  if (!path?.trim()) return null;
+  const segments = path.split(/[\\/]+/).filter(Boolean);
+  const last = segments.at(-1);
+  return last === undefined || (segments.length === 1 && /^[a-z]:$/i.test(last)) ? null : last;
+}
+
+export function sidebarShortDeviceName(label: string | null | undefined): string | null {
+  const trimmed = label?.trim();
+  if (!trimmed) return null;
+  const token = trimmed.split(/[\s.\-_]/, 1)[0]?.replace(/['’]/g, "");
+  return token || trimmed;
+}
+
+const SIDEBAR_HOST_HUE_CLASSES = [
+  "text-orange-500",
+  "text-emerald-500",
+  "text-violet-500",
+  "text-pink-500",
+  "text-amber-500",
+  "text-teal-500",
+  "text-lime-600",
+  "text-rose-500",
+] as const;
+
+export function sidebarHostHueClassName(environmentId: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < environmentId.length; index += 1) {
+    hash = Math.imul(hash ^ environmentId.charCodeAt(index), 0x01000193);
+  }
+  return SIDEBAR_HOST_HUE_CLASSES[(hash >>> 0) % SIDEBAR_HOST_HUE_CLASSES.length]!;
+}
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -1292,10 +1324,6 @@ export function resolveSidebarV2TopStatus(input: {
   return input.isUnread ? "done" : null;
 }
 
-export function shouldShowSidebarV2Duration(status: SidebarThreadStatus): boolean {
-  return status === "working";
-}
-
 /** First VALID timestamp wins: `a ?? b` falls through on null, but a present-
     yet-malformed string must also fall through to the next candidate rather
     than sink the row to the epoch. */
@@ -1389,23 +1417,6 @@ export function reduceSidebarProjectScopeMenuState(
     case "project-settings-opened":
       return { open: false, query: "" };
   }
-}
-
-/** The timestamp a working thread's elapsed label counts from: when its
-    current work started (request time until adoption). Background wakes do
-    not reset it. Malformed timestamps fall through to the next candidate. */
-export function resolveWorkingStartedAt(
-  thread: Pick<SidebarThreadSummary, "latestRun" | "runtime">,
-): string | null {
-  return resolveThreadWorkingStartedAt(thread);
-}
-
-export function formatWorkingDurationLabel(elapsedMs: number): string {
-  const seconds = Number.isFinite(elapsedMs) ? Math.max(0, Math.floor(elapsedMs / 1000)) : 0;
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 export function resolveThreadStatusPill(input: {
