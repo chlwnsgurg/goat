@@ -1,12 +1,19 @@
-import type {
-  DesktopSshEnvironmentTarget,
-  ModelSelection,
-  OrchestrationV2ThreadLaunchWorkspaceStrategy,
-  OrchestrationV2ThreadLauncher,
-  ProviderInteractionMode,
-  RuntimeMode,
+import {
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+  OrchestratorMcpCapabilitiesResult,
+  type ProjectScript,
+  type DesktopSshEnvironmentTarget,
+  type ModelSelection,
+  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  type OrchestrationV2ThreadLauncher,
+  type ProviderInteractionMode,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
+import { targetConnectionKey } from "@t3tools/ssh/command";
+import * as Schema from "effect/Schema";
 import * as SshAuth from "@t3tools/ssh/auth";
 import { discoverSshHosts } from "@t3tools/ssh/config";
 import { SshPasswordPromptError } from "@t3tools/ssh/errors";
@@ -60,6 +67,7 @@ export class SshRemoteDispatchError extends Data.TaggedError("SshRemoteDispatchE
     | "caller_changed";
   readonly message: string;
   readonly remoteCode?: string | undefined;
+  readonly launchMayHaveStarted?: boolean | undefined;
 }> {}
 
 export interface SshDispatchHost {
@@ -102,13 +110,16 @@ export type SshLaunchWorkspace =
  */
 export const LAUNCH_LINEAGE_PROBE_TIMEOUT = "5 seconds";
 
-export interface SshLaunchInput {
-  readonly host: string;
+type SshDispatchDestination =
+  | { readonly host: string; readonly target?: undefined }
+  | { readonly target: DesktopSshEnvironmentTarget; readonly host?: undefined };
+export type SshLaunchInput = SshDispatchDestination & {
   readonly cwd: string;
   readonly workspace: SshLaunchWorkspace;
   readonly title: string;
   readonly message?: string | undefined;
   readonly projectTitle?: string | undefined;
+  readonly scripts?: ReadonlyArray<ProjectScript> | undefined;
   readonly modelSelection?: ModelSelection | undefined;
   readonly runtimeMode: RuntimeMode;
   /**
@@ -124,7 +135,7 @@ export interface SshLaunchInput {
    * whose goat_thread_launch declares launchedBy; older remotes refuse unknown arguments.
    */
   readonly launchedBy?: OrchestrationV2ThreadLauncher | undefined;
-}
+};
 
 export interface SshLaunchResult {
   readonly host: string;
@@ -154,6 +165,19 @@ export interface SshHostToolCall {
 export class SshRemoteDispatch extends Context.Service<
   SshRemoteDispatch,
   {
+    readonly runRemoteScript: (input: {
+      readonly target: DesktopSshEnvironmentTarget;
+      readonly script: string;
+      readonly timeoutMs: number;
+    }) => Effect.Effect<
+      { readonly stdout: string; readonly stderr: string },
+      SshRemoteDispatchError
+    >;
+    readonly preflightTarget: (input: {
+      readonly target: DesktopSshEnvironmentTarget;
+      readonly runtimeMode: RuntimeMode;
+      readonly modelSelection: ModelSelection;
+    }) => Effect.Effect<{ readonly environmentId: EnvironmentId }, SshRemoteDispatchError>;
     readonly listHosts: (input: {
       readonly probe: boolean;
     }) => Effect.Effect<ReadonlyArray<SshDispatchHost>, SshRemoteDispatchError>;
@@ -183,6 +207,16 @@ export class SshRemoteDispatch extends Context.Service<
     readonly connectedHosts: Effect.Effect<ReadonlyArray<string>>;
   }
 >()("t3/sshRemote/SshRemoteDispatch") {}
+
+const decodeRemoteIdentity = Schema.decodeUnknownEffect(
+  Schema.Struct({ environmentId: EnvironmentId }),
+);
+const decodeRemoteCapabilities = Schema.decodeUnknownEffect(OrchestratorMcpCapabilitiesResult);
+
+const decodeRemoteProject = Schema.decodeUnknownEffect(Schema.Struct({ id: ProjectId }));
+const decodeRemoteThread = Schema.decodeUnknownEffect(
+  Schema.Struct({ threadId: ThreadId, runId: Schema.optional(Schema.NullOr(Schema.String)) }),
+);
 
 type RuntimeServices =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -430,7 +464,7 @@ const make = Effect.gen(function* () {
     target: DesktopSshEnvironmentTarget,
     ceiling: RuntimeMode,
   ) {
-    const key = `${target.alias}\u0000${ceiling}`;
+    const key = `${targetConnectionKey(target)}\u0000${ceiling}`;
     const now = yield* Clock.currentTimeMillis;
     const cached = sessions.get(key);
     if (cached !== undefined && cached.expiresAt - SESSION_REFRESH_MARGIN_MS > now) return cached;
@@ -504,16 +538,17 @@ const make = Effect.gen(function* () {
       Effect.mapError((error) => {
         if (describe(error).includes("HTTP 401")) {
           // Revoked or expired on the remote: forget it so the next call issues a fresh one.
-          sessions.delete(`${input.target.alias}\u0000${input.ceiling}`);
+          sessions.delete(`${targetConnectionKey(input.target)}\u0000${input.ceiling}`);
           return failure(
             "remote_refused",
             `${input.target.alias} rejected this machine's GOAT session; call the tool again to sign in anew.`,
           );
         }
-        return failure(
-          "ssh_failed",
-          `Calling ${input.tool} on ${input.target.alias} failed: ${describe(error)}`,
-        );
+        return new SshRemoteDispatchError({
+          reason: "ssh_failed",
+          message: `Calling ${input.tool} on ${input.target.alias} failed: ${describe(error)}`,
+          ...(input.tool === "goat_thread_launch" ? { launchMayHaveStarted: true } : {}),
+        });
       }),
     );
     const result = readRemoteToolResult(input.tool, raw);
@@ -591,11 +626,75 @@ const make = Effect.gen(function* () {
     return yield* browseTarget(target, input);
   });
 
+  const runRemoteScript = Effect.fn("SshRemoteDispatch.runRemoteScript")(function* (input: {
+    readonly target: DesktopSshEnvironmentTarget;
+    readonly script: string;
+    readonly timeoutMs: number;
+  }) {
+    return yield* withRuntime(
+      manager.runRemoteScript(input.target, {
+        script: input.script,
+        timeoutMs: input.timeoutMs,
+      }),
+    ).pipe(sshFailed(input.target.alias));
+  });
+  const preflightTarget = Effect.fn("SshRemoteDispatch.preflightTarget")(function* (input: {
+    readonly target: DesktopSshEnvironmentTarget;
+    readonly runtimeMode: RuntimeMode;
+    readonly modelSelection: ModelSelection;
+  }) {
+    const bootstrap = yield* withRuntime(manager.ensureEnvironment(input.target)).pipe(
+      sshFailed(input.target.alias),
+    );
+    const session = yield* sessionFor(input.target, input.runtimeMode);
+    if (!session.ceilingApplied)
+      return yield* failure("remote_refused", "Update the remote GOAT before sending a workspace.");
+    const identity = yield* callRemote({
+      target: input.target,
+      httpBaseUrl: bootstrap.httpBaseUrl,
+      ceiling: input.runtimeMode,
+      token: session.token,
+      tool: "goat_environment_read",
+      arguments: {},
+    });
+    const environment = yield* decodeRemoteIdentity(identity).pipe(
+      Effect.mapError(() =>
+        failure("remote_refused", "The remote returned no valid environment identity."),
+      ),
+    );
+    const rawCapabilities = yield* callRemote({
+      target: input.target,
+      httpBaseUrl: bootstrap.httpBaseUrl,
+      ceiling: input.runtimeMode,
+      token: session.token,
+      tool: "orchestrator_capabilities",
+      arguments: {},
+    });
+    const capabilities = yield* decodeRemoteCapabilities(rawCapabilities).pipe(
+      Effect.mapError(() =>
+        failure("remote_refused", "The remote cannot report model capabilities."),
+      ),
+    );
+    const provider = capabilities.providers.find(
+      (entry) => entry.providerInstanceId === input.modelSelection.instanceId,
+    );
+    if (
+      provider === undefined ||
+      !provider.models.some((model) => model.id === input.modelSelection.model)
+    )
+      return yield* new SshRemoteDispatchError({
+        reason: "remote_refused",
+        remoteCode: "model_unavailable",
+        message: "The selected provider instance or model is unavailable on the remote GOAT.",
+      });
+    return environment;
+  });
+
   const launchThread = Effect.fn("SshRemoteDispatch.launchThread")(function* <E, R>(
     input: SshLaunchInput,
     beforeLaunch: Effect.Effect<void, E, R>,
   ) {
-    const target = yield* resolveHost(input.host);
+    const target = input.target ?? (yield* resolveHost(input.host!));
     const folder = yield* browseTarget(target, { path: input.cwd, limit: 0 });
     const broad = input.allowBroadWorkspaceRoot === true ? null : broadWorkspaceRoot(folder);
     if (broad !== null) {
@@ -676,7 +775,7 @@ const make = Effect.gen(function* () {
         );
       }
       yield* beforeLaunch;
-      const created = (yield* callRemote({
+      const rawCreated = yield* callRemote({
         ...remote,
         tool: "goat_project_create",
         arguments: {
@@ -685,14 +784,14 @@ const make = Effect.gen(function* () {
             folder.path.split("/").findLast((part) => part.length > 0) ||
             folder.path,
           workspaceRoot: folder.path,
+          ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
         },
-      })) as { readonly id?: string };
-      if (typeof created?.id !== "string") {
-        return yield* failure(
-          "remote_refused",
-          "The remote goat_project_create returned no project id.",
-        );
-      }
+      });
+      const created = yield* decodeRemoteProject(rawCreated).pipe(
+        Effect.mapError(() =>
+          failure("remote_refused", "The remote goat_project_create returned no valid project id."),
+        ),
+      );
       project = { id: created.id, workspaceRoot: folder.path };
       projectCreated = true;
       notes.push(`Registered ${folder.path} as a new project on ${target.alias}.`);
@@ -702,7 +801,7 @@ const make = Effect.gen(function* () {
       input.launchedBy !== undefined && (yield* remoteAcceptsLaunchLineage(remote));
     // The caller's run may have ended, or its modes changed, while SSH ran.
     yield* beforeLaunch;
-    const launched = (yield* callRemote({
+    const rawLaunched = yield* callRemote({
       ...remote,
       tool: "goat_thread_launch",
       arguments: {
@@ -715,13 +814,18 @@ const make = Effect.gen(function* () {
         ...(input.message === undefined ? {} : { message: input.message }),
         ...(forwardLaunchedBy ? { launchedBy: input.launchedBy } : {}),
       },
-    })) as { readonly threadId?: string; readonly runId?: string | null };
-    if (typeof launched?.threadId !== "string") {
-      return yield* failure(
-        "remote_refused",
-        "The remote goat_thread_launch returned no thread id.",
-      );
-    }
+    });
+    const launched = yield* decodeRemoteThread(rawLaunched).pipe(
+      Effect.mapError(
+        () =>
+          new SshRemoteDispatchError({
+            reason: "remote_refused",
+            launchMayHaveStarted: true,
+            message:
+              "The remote launch returned no thread acknowledgement; inspect its threads before retrying.",
+          }),
+      ),
+    );
     notes.push(
       `The thread lives in the GOAT environment on ${target.alias}. Read it with goat_thread_read and send to it with goat_thread_send, passing host "${target.alias}" and this threadId. The user can watch it by connecting to ${target.alias} (Settings → Connections → SSH).`,
     );
@@ -809,7 +913,7 @@ const make = Effect.gen(function* () {
           if (!(error instanceof AcpMcpBridgeError)) return Effect.fail(error);
           if (error.kind === "http" && error.status === 401) {
             // Revoked or expired on the remote: issue a fresh session once.
-            sessions.delete(`${target.alias}\u0000${ceiling}`);
+            sessions.delete(`${targetConnectionKey(target)}\u0000${ceiling}`);
             return retried
               ? Effect.fail(
                   failure(
@@ -837,7 +941,15 @@ const make = Effect.gen(function* () {
 
   const connectedHosts = Effect.sync(() => [...connected].toSorted());
 
-  return SshRemoteDispatch.of({ listHosts, browse, launchThread, callHostTool, connectedHosts });
+  return SshRemoteDispatch.of({
+    listHosts,
+    browse,
+    launchThread,
+    callHostTool,
+    connectedHosts,
+    runRemoteScript,
+    preflightTarget,
+  });
 });
 
 /** Resolve local archive/mirror configuration before building the remote runner. */

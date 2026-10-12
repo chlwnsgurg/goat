@@ -8,9 +8,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
+  type VcsError,
   GitCommandError,
   VcsProcessExitError,
   type VcsSwitchRefInput,
@@ -301,6 +303,20 @@ export interface GitSetBranchUpstreamInput {
 
 export interface GitRemoteStatusOptions {
   readonly refreshUpstream?: boolean;
+}
+
+export class GitWorkspaceSnapshotError extends Schema.TaggedError<GitWorkspaceSnapshotError>()(
+  "GitWorkspaceSnapshotError",
+  { code: Schema.Literals(["unsupported_snapshot", "head_changed"]) },
+) {}
+export interface GitWorkspaceSnapshotInput {
+  readonly cwd: string;
+  readonly snapshotRef: string;
+}
+export interface GitWorkspaceSnapshotResult {
+  readonly snapshotRef: string;
+  readonly commitOid: string;
+  readonly addedUntrackedPaths: ReadonlyArray<string>;
 }
 
 export class GitVcsDriver extends Context.Service<
@@ -807,280 +823,451 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     "core.fsyncMethod=fsync",
   ] as const;
 
-  const checkpoints: VcsDriver.VcsCheckpointOps = {
-    captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
-      const operation = VcsProcess.CHECKPOINT_CAPTURE_OPERATION;
-      const indexConfig = [
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "sparse.expectFilesOutsideOfPatterns=false",
-      ];
-      const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
-      const indexId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-      const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${indexId}`);
-      const commitEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        GIT_INDEX_FILE: tempIndexPath,
-        GIT_AUTHOR_NAME: "T3 Code",
-        GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "T3 Code",
-        GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
-      };
+  const captureTree = Effect.fn("GitVcsDriver.captureTree")(function* (input: {
+    readonly cwd: string;
+    readonly ref: string;
+    readonly strict: boolean;
+  }): Effect.fn.Return<GitWorkspaceSnapshotResult, VcsError | GitWorkspaceSnapshotError> {
+    const operation = VcsProcess.CHECKPOINT_CAPTURE_OPERATION;
+    const readUntracked = Effect.fn("GitVcsDriver.snapshot.readUntracked")(function* () {
+      const paths = yield* execute({
+        operation,
+        cwd: input.cwd,
+        args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+        maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+      });
+      if (paths.stdoutTruncated)
+        return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+      return splitNullSeparatedGitStdoutPaths(paths);
+    });
+    const indexConfig = [
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "sparse.expectFilesOutsideOfPatterns=false",
+    ];
+    const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
+    const indexId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+    const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${indexId}`);
+    const commitEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      GIT_INDEX_FILE: tempIndexPath,
+      GIT_AUTHOR_NAME: "T3 Code",
+      GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "T3 Code",
+      GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
+    };
 
-      // Forced process termination can leave Git's private index lock behind.
-      const cleanupTempIndex = Effect.forEach(
-        [tempIndexPath, `${tempIndexPath}.lock`],
-        (indexFile) => fileSystem.remove(indexFile, { force: true }).pipe(Effect.ignore),
-        { discard: true },
-      );
+    // Forced process termination can leave Git's private index lock behind.
+    const cleanupTempIndex = Effect.forEach(
+      [tempIndexPath, `${tempIndexPath}.lock`],
+      (indexFile) => fileSystem.remove(indexFile, { force: true }).pipe(Effect.ignore),
+      { discard: true },
+    );
 
-      yield* Effect.gen(function* () {
-        const headExists = yield* hasHeadCommit(input.cwd);
-        const sparseConfig = yield* execute({
+    return yield* Effect.gen(function* () {
+      const capturedHead = yield* resolveHeadCommit(input.cwd);
+      const headExists = capturedHead !== null;
+      const untrackedBefore = input.strict ? yield* readUntracked() : [];
+      if (input.strict) {
+        if (!headExists)
+          return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+        const conflicts = yield* execute({
           operation,
           cwd: input.cwd,
-          args: ["config", "--bool", "core.sparseCheckout"],
+          args: ["ls-files", "-u", "-z"],
+        });
+        const entries = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: ["ls-files", "--stage", "-z"],
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        if (
+          conflicts.stdoutTruncated ||
+          conflicts.stdout.length > 0 ||
+          entries.stdoutTruncated ||
+          /(?:^|\0)160000 /u.test(entries.stdout)
+        )
+          return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+        for (const entry of untrackedBefore.filter((name) => name.endsWith("/"))) {
+          const embedded = yield* fileSystem
+            .exists(path.join(input.cwd, entry, ".git"))
+            .pipe(
+              Effect.mapError(
+                () => new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" }),
+              ),
+            );
+          if (embedded)
+            return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+        }
+      }
+      const sparseConfig = yield* execute({
+        operation,
+        cwd: input.cwd,
+        args: ["config", "--bool", "core.sparseCheckout"],
+        allowNonZeroExit: true,
+      });
+      let sparseCheckout = sparseConfig.stdout.trim() === "true";
+      if (sparseCheckout) {
+        const help = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: ["add", "-h"],
           allowNonZeroExit: true,
         });
-        let sparseCheckout = sparseConfig.stdout.trim() === "true";
-        if (sparseCheckout) {
-          const help = yield* execute({
+        sparseCheckout = /--(?:\[no-\])?sparse\b/.test(`${help.stdout}${help.stderr}`);
+      }
+      if (headExists) {
+        const reusedIndex = yield* Effect.gen(function* () {
+          const indexPath = yield* execute({
             operation,
             cwd: input.cwd,
-            args: ["add", "-h"],
-            allowNonZeroExit: true,
+            args: ["rev-parse", "--path-format=absolute", "--git-path", "index"],
           });
-          sparseCheckout = /--(?:\[no-\])?sparse\b/.test(`${help.stdout}${help.stderr}`);
-        }
-        if (headExists) {
-          const reusedIndex = yield* Effect.gen(function* () {
-            const indexPath = yield* execute({
-              operation,
-              cwd: input.cwd,
-              args: ["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            });
-            const { mtime } = yield* fileSystem.stat(indexPath.stdout.trim());
-            if (Option.isNone(mtime)) return false;
-            // Stay below the source timestamp even if Date rounded up, preserving Git's racy check.
-            const indexTime = Math.floor((mtime.value.getTime() - 1) / 1000);
-            if (indexTime <= 0) return false;
-            yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
-            // Retain stat data only where the copied index already matches HEAD.
-            yield* execute({
-              operation,
-              cwd: input.cwd,
-              args: [...indexConfig, "read-tree", "--reset", "HEAD"],
-              env: commitEnv,
-            });
-            // read-tree can rewrite the index, so restore its racy timestamp afterward.
-            yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
-            let specialFlags = false;
-            let recordStart = true;
-            let skipped = false;
-            let skippedRecord: number[] = [];
-            const skippedPaths: string[] = [];
-            yield* vcsProcess.run({
-              operation,
-              command: "git",
-              cwd: input.cwd,
-              args: [...indexConfig, "ls-files", "--full-name", "--sparse", "-v", "-z"],
-              env: commitEnv,
-              maxOutputBytes: 4_096,
-              outputMode: "truncate",
-              // Inspect every tag; retain only skipped file paths for checking sparse rules.
-              onStdoutChunk: (chunk) => {
-                for (const byte of chunk) {
-                  if (recordStart) skipped = byte === 83;
-                  if (skipped && sparseCheckout) {
-                    if (byte !== 0) skippedRecord.push(byte);
-                    else {
-                      if (skippedRecord.at(-1) !== 47) {
-                        const name = Buffer.from(skippedRecord).subarray(2);
-                        if (!NodeBuffer.isUtf8(name)) specialFlags = true;
-                        else skippedPaths.push(name.toString("utf8"));
-                      }
-                      skippedRecord = [];
-                    }
-                  }
-                  if (
-                    recordStart &&
-                    ((byte >= 97 && byte <= 122) || (!sparseCheckout && byte === 83))
-                  ) {
-                    specialFlags = true;
-                  }
-                  recordStart = byte === 0;
-                }
-              },
-            });
-            if (skippedPaths.length > 0 && !specialFlags) {
-              const selected = yield* execute({
-                operation,
-                cwd: input.cwd,
-                args: [...indexConfig, "sparse-checkout", "check-rules", "-z"],
-                stdin: skippedPaths.join("\0") + "\0",
-                env: commitEnv,
-                maxOutputBytes: 1,
-                outputMode: "truncate",
-              });
-              // Any selected skipped file has a manual flag, not a sparse exclusion.
-              specialFlags = selected.stdout.length > 0 || selected.stdoutTruncated;
-            }
-            // Sparse Git clears skip-worktree for present files. Manual flags still need a reset.
-            return !specialFlags;
-          }).pipe(Effect.orElseSucceed(() => false));
-          if (!reusedIndex) {
-            if (sparseCheckout) {
-              const cone = yield* execute({
-                operation,
-                cwd: input.cwd,
-                args: ["config", "--bool", "core.sparseCheckoutCone"],
-                allowNonZeroExit: true,
-              });
-              // Rebuilding a non-cone index loses exclusions; do not publish false deletions.
-              if (cone.stdout.trim() !== "true") {
-                return yield* new VcsProcessExitError({
-                  operation,
-                  command: "git read-tree",
-                  cwd: input.cwd,
-                  exitCode: 1,
-                  detail: "Cannot rebuild a checkpoint index for non-cone sparse checkout.",
-                });
-              }
-            }
-            yield* cleanupTempIndex;
-            yield* execute({
-              operation,
-              cwd: input.cwd,
-              // A fresh sparse index represents excluded directories without marking them deleted.
-              args: sparseCheckout
-                ? [...indexConfig, "-c", "index.sparse=true", "read-tree", "--reset", "HEAD"]
-                : ["read-tree", "HEAD"],
-              env: commitEnv,
-            });
-          }
-        }
-
-        const stageFiles = (exclusions: ReadonlyArray<string>) =>
-          execute({
+          const { mtime } = yield* fileSystem.stat(indexPath.stdout.trim());
+          if (Option.isNone(mtime)) return false;
+          // Stay below the source timestamp even if Date rounded up, preserving Git's racy check.
+          const indexTime = Math.floor((mtime.value.getTime() - 1) / 1000);
+          if (indexTime <= 0) return false;
+          yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
+          // Retain stat data only where the copied index already matches HEAD.
+          yield* execute({
             operation,
             cwd: input.cwd,
-            // Preserve absent skipped entries, but capture present nonignored files outside the cone.
+            args: [...indexConfig, "read-tree", "--reset", capturedHead!],
+            env: commitEnv,
+          });
+          // read-tree can rewrite the index, so restore its racy timestamp afterward.
+          yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
+          let specialFlags = false;
+          let recordStart = true;
+          let skipped = false;
+          let skippedRecord: number[] = [];
+          const skippedPaths: string[] = [];
+          yield* vcsProcess.run({
+            operation,
+            command: "git",
+            cwd: input.cwd,
+            args: [...indexConfig, "ls-files", "--full-name", "--sparse", "-v", "-z"],
+            env: commitEnv,
+            maxOutputBytes: 4_096,
+            outputMode: "truncate",
+            // Inspect every tag; retain only skipped file paths for checking sparse rules.
+            onStdoutChunk: (chunk) => {
+              for (const byte of chunk) {
+                if (recordStart) skipped = byte === 83;
+                if (skipped && sparseCheckout) {
+                  if (byte !== 0) skippedRecord.push(byte);
+                  else {
+                    if (skippedRecord.at(-1) !== 47) {
+                      const name = Buffer.from(skippedRecord).subarray(2);
+                      if (!NodeBuffer.isUtf8(name)) specialFlags = true;
+                      else skippedPaths.push(name.toString("utf8"));
+                    }
+                    skippedRecord = [];
+                  }
+                }
+                if (
+                  recordStart &&
+                  ((byte >= 97 && byte <= 122) || (!sparseCheckout && byte === 83))
+                ) {
+                  specialFlags = true;
+                }
+                recordStart = byte === 0;
+              }
+            },
+          });
+          if (skippedPaths.length > 0 && !specialFlags) {
+            const selected = yield* execute({
+              operation,
+              cwd: input.cwd,
+              args: [...indexConfig, "sparse-checkout", "check-rules", "-z"],
+              stdin: skippedPaths.join("\0") + "\0",
+              env: commitEnv,
+              maxOutputBytes: 1,
+              outputMode: "truncate",
+            });
+            // Any selected skipped file has a manual flag, not a sparse exclusion.
+            specialFlags = selected.stdout.length > 0 || selected.stdoutTruncated;
+          }
+          // Sparse Git clears skip-worktree for present files. Manual flags still need a reset.
+          return !specialFlags;
+        }).pipe(Effect.orElseSucceed(() => false));
+        if (!reusedIndex) {
+          if (sparseCheckout) {
+            const cone = yield* execute({
+              operation,
+              cwd: input.cwd,
+              args: ["config", "--bool", "core.sparseCheckoutCone"],
+              allowNonZeroExit: true,
+            });
+            // Rebuilding a non-cone index loses exclusions; do not publish false deletions.
+            if (cone.stdout.trim() !== "true") {
+              return yield* new VcsProcessExitError({
+                operation,
+                command: "git read-tree",
+                cwd: input.cwd,
+                exitCode: 1,
+                detail: "Cannot rebuild a checkpoint index for non-cone sparse checkout.",
+              });
+            }
+          }
+          yield* cleanupTempIndex;
+          yield* execute({
+            operation,
+            cwd: input.cwd,
+            // A fresh sparse index represents excluded directories without marking them deleted.
+            args: sparseCheckout
+              ? [...indexConfig, "-c", "index.sparse=true", "read-tree", "--reset", capturedHead!]
+              : ["read-tree", capturedHead!],
+            env: commitEnv,
+          });
+        }
+      }
+
+      if (input.strict) {
+        // Newly staged paths belong to the snapshot even when ignore rules match them.
+        // Read the real index, then stage disk content only into the private index.
+        const additions = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: [
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--name-only",
+            "--diff-filter=A",
+            "-z",
+            capturedHead!,
+            "--",
+          ],
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        const deletions = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: ["ls-files", "--deleted", "-z"],
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        if (additions.stdoutTruncated || deletions.stdoutTruncated)
+          return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+        // Git's deletion scan retains dangling symlinks, unlike a filesystem stat.
+        const deletedPaths = new Set(splitNullSeparatedGitStdoutPaths(deletions));
+        const presentPaths = splitNullSeparatedGitStdoutPaths(additions).filter(
+          (name) => !deletedPaths.has(name),
+        );
+        if (presentPaths.length > 0) {
+          yield* execute({
+            operation,
+            cwd: input.cwd,
             args: [
+              "--literal-pathspecs",
               ...indexConfig,
               ...durableWrite,
               "add",
               ...(sparseCheckout ? ["--sparse"] : []),
-              "-A",
-              "--",
-              ".",
-              ...exclusions,
+              "-f",
+              "--pathspec-from-file=-",
+              "--pathspec-file-nul",
             ],
+            stdin: presentPaths.join("\0") + "\0",
             env: commitEnv,
           });
-        yield* stageFiles([]).pipe(
-          Effect.catchTags({
-            VcsProcessExitError: (error) =>
-              Effect.gen(function* () {
-                // Git cannot stage an embedded repository until it has a commit. Discover these
-                // only after staging fails so ordinary checkpoints do not need another file scan.
-                const untracked = yield* execute({
-                  operation,
-                  cwd: input.cwd,
-                  args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
-                  env: commitEnv,
-                  maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
-                });
-                if (untracked.stdoutTruncated) return yield* error;
-                const candidates = splitNullSeparatedGitStdoutPaths(untracked).filter((entry) =>
-                  entry.endsWith("/"),
-                );
-                // Refuse excessive recovery work before probing any nested repositories.
-                if (candidates.length > CHECKPOINT_RECOVERY_MAX_CANDIDATES) return yield* error;
-                // Discover each child's repository instead of inheriting the server's Git bindings.
-                const nestedRepoEnv: NodeJS.ProcessEnv = {
-                  ...process.env,
-                  GIT_DIR: undefined,
-                  GIT_WORK_TREE: undefined,
-                  GIT_COMMON_DIR: undefined,
-                  GIT_INDEX_FILE: undefined,
-                  GIT_OBJECT_DIRECTORY: undefined,
-                  GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
-                };
-                const exclusions: Array<string> = [];
-                for (const entry of candidates) {
-                  const nestedCwd = path.join(input.cwd, entry);
-                  if (
-                    (yield* fileSystem
-                      .exists(path.join(nestedCwd, ".git"))
-                      .pipe(Effect.mapError(() => error))) &&
-                    !(yield* hasHeadCommit(nestedCwd, nestedRepoEnv))
-                  ) {
-                    exclusions.push(`:(exclude,literal)${entry}`);
-                  }
-                }
-                if (exclusions.length === 0) return yield* error;
-                return yield* stageFiles(exclusions);
-              }).pipe(
-                // One budget covers discovery, queued Git admission, probes, and the staging retry.
-                Effect.timeoutOrElse({
-                  duration: CHECKPOINT_RECOVERY_TIMEOUT,
-                  orElse: () => Effect.fail(error),
-                }),
-              ),
-          }),
-        );
-
-        const writeTreeResult = yield* execute({
-          operation,
-          cwd: input.cwd,
-          args: [...indexConfig, ...durableWrite, "write-tree"],
-          env: commitEnv,
-        });
-        const treeOid = writeTreeResult.stdout.trim();
-        if (treeOid.length === 0) {
-          return yield* new VcsProcessExitError({
-            operation,
-            command: "git write-tree",
-            cwd: input.cwd,
-            exitCode: 0,
-            detail: "git write-tree returned an empty tree oid.",
-          });
         }
+      }
 
-        const message = `t3 checkpoint ref=${input.checkpointRef}`;
-        // HEAD is the parent so listAuthoredPaths can see how HEAD moved between checkpoints.
-        const commitTreeResult = yield* execute({
+      const stageFiles = (exclusions: ReadonlyArray<string>) =>
+        execute({
           operation,
           cwd: input.cwd,
+          // Preserve absent skipped entries, but capture present nonignored files outside the cone.
           args: [
+            ...indexConfig,
             ...durableWrite,
-            "commit-tree",
-            treeOid,
-            ...(headExists ? ["-p", "HEAD"] : []),
-            "-m",
-            message,
+            "add",
+            ...(sparseCheckout ? ["--sparse"] : []),
+            "-A",
+            "--",
+            ".",
+            ...exclusions,
           ],
           env: commitEnv,
         });
-        const commitOid = commitTreeResult.stdout.trim();
-        if (commitOid.length === 0) {
+      yield* input.strict
+        ? stageFiles([])
+        : stageFiles([]).pipe(
+            Effect.catchTags({
+              VcsProcessExitError: (error) =>
+                Effect.gen(function* () {
+                  // Git cannot stage an embedded repository until it has a commit. Discover these
+                  // only after staging fails so ordinary checkpoints do not need another file scan.
+                  const untracked = yield* execute({
+                    operation,
+                    cwd: input.cwd,
+                    args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+                    env: commitEnv,
+                    maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+                  });
+                  if (untracked.stdoutTruncated) return yield* error;
+                  const candidates = splitNullSeparatedGitStdoutPaths(untracked).filter((entry) =>
+                    entry.endsWith("/"),
+                  );
+                  // Refuse excessive recovery work before probing any nested repositories.
+                  if (candidates.length > CHECKPOINT_RECOVERY_MAX_CANDIDATES) return yield* error;
+                  // Discover each child's repository instead of inheriting the server's Git bindings.
+                  const nestedRepoEnv: NodeJS.ProcessEnv = {
+                    ...process.env,
+                    GIT_DIR: undefined,
+                    GIT_WORK_TREE: undefined,
+                    GIT_COMMON_DIR: undefined,
+                    GIT_INDEX_FILE: undefined,
+                    GIT_OBJECT_DIRECTORY: undefined,
+                    GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+                  };
+                  const exclusions: Array<string> = [];
+                  for (const entry of candidates) {
+                    const nestedCwd = path.join(input.cwd, entry);
+                    if (
+                      (yield* fileSystem
+                        .exists(path.join(nestedCwd, ".git"))
+                        .pipe(Effect.mapError(() => error))) &&
+                      !(yield* hasHeadCommit(nestedCwd, nestedRepoEnv))
+                    ) {
+                      exclusions.push(`:(exclude,literal)${entry}`);
+                    }
+                  }
+                  if (exclusions.length === 0) return yield* error;
+                  return yield* stageFiles(exclusions);
+                }).pipe(
+                  // One budget covers discovery, queued Git admission, probes, and the staging retry.
+                  Effect.timeoutOrElse({
+                    duration: CHECKPOINT_RECOVERY_TIMEOUT,
+                    orElse: () => Effect.fail(error),
+                  }),
+                ),
+            }),
+          );
+
+      const writeTreeResult = yield* execute({
+        operation,
+        cwd: input.cwd,
+        args: [...indexConfig, ...durableWrite, "write-tree"],
+        env: commitEnv,
+      });
+      const treeOid = writeTreeResult.stdout.trim();
+      if (treeOid.length === 0) {
+        return yield* new VcsProcessExitError({
+          operation,
+          command: "git write-tree",
+          cwd: input.cwd,
+          exitCode: 0,
+          detail: "git write-tree returned an empty tree oid.",
+        });
+      }
+
+      const message = input.strict
+        ? `t3 snapshot ref=${input.ref}`
+        : `t3 checkpoint ref=${input.ref}`;
+      // HEAD is the parent so listAuthoredPaths can see how HEAD moved between checkpoints.
+      const commitTreeResult = yield* execute({
+        operation,
+        cwd: input.cwd,
+        args: [
+          ...durableWrite,
+          "commit-tree",
+          treeOid,
+          ...(capturedHead === null ? [] : ["-p", capturedHead]),
+          "-m",
+          message,
+        ],
+        env: commitEnv,
+      });
+      const commitOid = commitTreeResult.stdout.trim();
+      if (commitOid.length === 0) {
+        return yield* new VcsProcessExitError({
+          operation,
+          command: "git commit-tree",
+          cwd: input.cwd,
+          exitCode: 0,
+          detail: "git commit-tree returned an empty commit oid.",
+        });
+      }
+
+      if (input.strict && (yield* resolveHeadCommit(input.cwd)) !== capturedHead)
+        return yield* new GitWorkspaceSnapshotError({ code: "head_changed" });
+      const untrackedAfter = input.strict ? yield* readUntracked() : [];
+      const treePaths = input.strict
+        ? yield* execute({
+            operation,
+            cwd: input.cwd,
+            args: ["ls-tree", "-r", "--name-only", "-z", treeOid],
+            maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+          })
+        : undefined;
+      if (treePaths?.stdoutTruncated)
+        return yield* new GitWorkspaceSnapshotError({ code: "unsupported_snapshot" });
+      const capturedPaths = new Set(
+        treePaths === undefined ? [] : splitNullSeparatedGitStdoutPaths(treePaths),
+      );
+      const addedUntrackedPaths = [...new Set([...untrackedBefore, ...untrackedAfter])].filter(
+        (name) => capturedPaths.has(name),
+      );
+      if (input.strict) {
+        // Hold HEAD's ref lock through publication so the captured parent stays current.
+        const published = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: [...durableWrite, "update-ref", "--stdin"],
+          stdin: `start\nverify HEAD ${capturedHead}\ncreate ${input.ref} ${commitOid}\nprepare\ncommit\n`,
+          allowNonZeroExit: true,
+        });
+        if (published.exitCode !== 0) {
+          if (
+            /cannot lock ref 'HEAD':.*(?:but expected|unable to resolve reference)/u.test(
+              published.stderr,
+            )
+          )
+            return yield* new GitWorkspaceSnapshotError({ code: "head_changed" });
           return yield* new VcsProcessExitError({
             operation,
-            command: "git commit-tree",
+            command: "git update-ref",
             cwd: input.cwd,
-            exitCode: 0,
-            detail: "git commit-tree returned an empty commit oid.",
+            exitCode: published.exitCode,
+            detail: "Snapshot ref transaction failed.",
           });
         }
-
+      } else {
         yield* execute({
           operation,
           cwd: input.cwd,
-          args: [...durableWrite, "update-ref", input.checkpointRef, commitOid],
+          args: [...durableWrite, "update-ref", input.ref, commitOid],
         });
-      }).pipe(Effect.ensuring(cleanupTempIndex));
-    }),
+      }
+      return { snapshotRef: input.ref, commitOid, addedUntrackedPaths };
+    }).pipe(Effect.ensuring(cleanupTempIndex));
+  });
+
+  const checkpoints: VcsDriver.VcsCheckpointOps = {
+    captureCheckpoint: (input) =>
+      captureTree({
+        cwd: input.cwd,
+        ref: input.checkpointRef,
+        strict: false,
+      }).pipe(
+        Effect.asVoid,
+        Effect.mapError((error) =>
+          error._tag === "GitWorkspaceSnapshotError"
+            ? new VcsProcessExitError({
+                operation: VcsProcess.CHECKPOINT_CAPTURE_OPERATION,
+                command: "git",
+                cwd: input.cwd,
+                exitCode: 1,
+                detail: "Checkpoint snapshot capture was refused.",
+              })
+            : error,
+        ),
+      ),
 
     hasCheckpointRef: (input) =>
       resolveCheckpointCommit(input.cwd, input.checkpointRef).pipe(
@@ -1303,6 +1490,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   return {
     capabilities,
     execute,
+    captureWorkspaceSnapshot: (input: GitWorkspaceSnapshotInput) =>
+      captureTree({
+        cwd: input.cwd,
+        ref: input.snapshotRef,
+        strict: true,
+      }),
     checkpoints,
     detectRepository,
     isInsideWorkTree,

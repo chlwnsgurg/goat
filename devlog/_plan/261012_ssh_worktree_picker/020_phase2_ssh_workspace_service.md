@@ -1,5 +1,28 @@
 # 020 wp2 / PR2: SSH workspace service
 
+## Stale check at wp2 P (origin/dev f2b8eb7e0, merged into PR1 as fa51b5784)
+
+These amendments override the excerpts below where they disagree. Line anchors below are historical
+(written against ba65eae6b); re-locate them by content. Verifier results recorded below are a historical
+baseline, not evidence for the current tree.
+
+1. Keep `SshLaunchInput.allowBroadWorkspaceRoot` (SshRemoteDispatch.ts, after `interactionMode`); the SSH MCP
+   handler passes it (apps/server/src/mcp/toolkits/ssh/handlers.ts). The managed `$HOME/.goat/repos/<name>`
+   passes `broadWorkspaceRoot`, so the workspace launch omits the flag.
+2. When `launchThread` gains full-target resolution, keep the broad-root guard that runs right after the
+   browse of the target folder.
+3. The remote thread launch response now carries `runId?: string | null` and `SshLaunchResult.runId` exists
+   (the SSH MCP handler registers a launch watch from it). Any decoder added for the thread response keeps
+   `runId`; `SshWorkspaceLaunchResult` may expose it as `remoteRunId` but must not drop it from dispatch.
+4. `McpHttpServer.layer` provides LaunchWatchService → SshRemoteDispatch → transport. Move only the
+   dispatcher provision out to the server route composition; keep `Layer.provide(LaunchWatchService.layer)`
+   inside MCP (it consumes the dispatcher), and keep `ConnectionCatalogBroker.layer` in server.ts and the
+   connection-catalog handlers in ws.ts `layerWsRpc`.
+5. MCP rejects undeclared top-level tool arguments; `scripts` is declared in the project-create schema, and
+   `allowBroadWorkspaceRoot` is never sent to the remote.
+6. New RPC literals `connectionCatalog.serve` / `connectionCatalog.respond` exist; `sshWorkspace.launch` /
+   `sshWorkspace.fetchBack` do not collide.
+
 Depends on: [000_plan.md](000_plan.md), [010_phase1_local_default.md](010_phase1_local_default.md).
 Implementation branch: `goat/ws-picker-2-ssh-service`; PR base: `goat/ws-picker-1-local-default`.
 Source anchors were read in the shared coordinator checkout on 2026-10-12; re-anchor after PR1 lands.

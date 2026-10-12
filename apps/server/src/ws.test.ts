@@ -1,3 +1,17 @@
+import * as Schema from "effect/Schema";
+import * as RpcTest from "effect/rpc/RpcTest";
+import {
+  WsRpcGroup,
+  WS_METHODS,
+  SshWorkspaceLaunchInput,
+  SshWorkspaceLaunchResult,
+  SshWorkspaceError,
+  AuthSourceControlWriteScope,
+  AuthOrchestrationOperateScope,
+  type SshWorkspaceFetchBackInput,
+} from "@t3tools/contracts";
+import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
+import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -232,5 +246,110 @@ it.effect("recovers a reveal kind whose real probe outlasts the config timeout",
     if (late?.type === "snapshot") {
       assert.equal(late.config.shellRevealInFileManagerKind, "file-explorer");
     }
+  }).pipe(Effect.scoped),
+);
+
+it.effect("SSH workspace handlers delegate once and preserve typed errors", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          import("effect/rpc/RpcGroup").Rpcs<typeof WsRpcGroup>["_tag"],
+          typeof WS_METHODS.sshWorkspaceLaunch | typeof WS_METHODS.sshWorkspaceFetchBack
+        > => tag !== WS_METHODS.sshWorkspaceLaunch && tag !== WS_METHODS.sshWorkspaceFetchBack,
+      ),
+    );
+    const launchInput = yield* Schema.decodeUnknownEffect(SshWorkspaceLaunchInput)({
+      sourceProjectId: "source",
+      destination: {
+        connectionId: "saved",
+        expectedEnvironmentId: "remote",
+        target: { alias: "box", hostname: "box", username: null, port: null },
+      },
+      title: "Work",
+      modelSelection: { instanceId: "codex", model: "model" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      initialMessage: { text: "Implement" },
+    });
+    const launchOutput = yield* Schema.decodeUnknownEffect(SshWorkspaceLaunchResult)({
+      operationId: "12345678",
+      snapshotRef: "refs/goat/snapshots/12345678",
+      snapshotOid: "a".repeat(40),
+      remoteEnvironmentId: "remote",
+      remoteProjectId: "rp",
+      remoteThreadId: "rt",
+      remoteRepoPath: "/home/test/.goat/repos/repo-12345678",
+      branch: "goat/ssh/12345678",
+    });
+    const fetchInput = {
+      target: launchInput.destination.target,
+      remoteWorkspaceRoot: launchOutput.remoteRepoPath,
+      branch: launchOutput.branch,
+    };
+    const fetchOutput = {
+      sourceProjectId: launchInput.sourceProjectId,
+      localWorkspaceRoot: "/repo",
+      localRef: "refs/remotes/goat-ssh/box/goat/ssh/12345678",
+      commitOid: "a".repeat(40),
+      remoteBranch: fetchInput.branch,
+    };
+    const launches: SshWorkspaceLaunchInput[] = [];
+    const fetches: SshWorkspaceFetchBackInput[] = [];
+    let failure: SshWorkspaceError | undefined;
+    const sync = Layer.succeed(SshWorkspaceSync.SshWorkspaceSync, {
+      launch: (input) =>
+        Effect.suspend(() => {
+          launches.push(input);
+          return failure ? Effect.fail(failure) : Effect.succeed(launchOutput);
+        }),
+      fetchBack: (input) =>
+        Effect.suspend(() => {
+          fetches.push(input);
+          return failure ? Effect.fail(failure) : Effect.succeed(fetchOutput);
+        }),
+    });
+    const handlers = group
+      .toLayer(
+        Effect.gen(function* () {
+          const service = yield* SshWorkspaceSync.SshWorkspaceSync;
+          return {
+            [WS_METHODS.sshWorkspaceLaunch]: (input) => service.launch(input),
+            [WS_METHODS.sshWorkspaceFetchBack]: (input) => service.fetchBack(input),
+          };
+        }),
+      )
+      .pipe(Layer.provide(sync));
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.merge(
+          handlers,
+          RpcAuthorization.layer([AuthSourceControlWriteScope, AuthOrchestrationOperateScope]),
+        ),
+      ),
+    );
+    assert.deepEqual(yield* client[WS_METHODS.sshWorkspaceLaunch](launchInput), launchOutput);
+    assert.deepEqual(yield* client[WS_METHODS.sshWorkspaceFetchBack](fetchInput), fetchOutput);
+    assert.deepEqual(launches, [launchInput]);
+    assert.deepEqual(fetches, [fetchInput]);
+    failure = new SshWorkspaceError({
+      stage: "launch",
+      code: "launch_uncertain",
+      host: "box",
+      operationId: "12345678",
+    });
+    assert.deepEqual(
+      yield* client[WS_METHODS.sshWorkspaceLaunch](launchInput).pipe(Effect.flip),
+      failure,
+    );
+    failure = new SshWorkspaceError({ stage: "fetch", code: "fetch_failed", host: "box" });
+    assert.deepEqual(
+      yield* client[WS_METHODS.sshWorkspaceFetchBack](fetchInput).pipe(Effect.flip),
+      failure,
+    );
+    assert.lengthOf(launches, 2);
+    assert.lengthOf(fetches, 2);
   }).pipe(Effect.scoped),
 );

@@ -4132,3 +4132,97 @@ describe("Windows long path configuration", () => {
     }
   });
 });
+
+it.effect("SSH workspace transport passes BatchMode explicit user alias and port", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const parent = yield* makeTmpDir();
+    const cwd = path.join(parent, "local");
+    const remote = path.join(parent, "remote repo");
+    yield* fs.makeDirectory(cwd);
+    yield* fs.makeDirectory(remote);
+    yield* initRepoWithCommit(cwd);
+    yield* git(remote, ["init"]);
+    const ssh = path.join(parent, "fake-ssh");
+    const log = path.join(parent, "ssh.log");
+    yield* writeTextFile(
+      parent,
+      "fake-ssh",
+      `#!/bin/sh\nprintf '%s\\n' "$@" >> '${log}'\nwhile [ "$#" -gt 0 ]; do case "$1" in -o|-p) shift; shift;; -*) shift;; *) shift; break;; esac; done\ncase "$1" in git-receive-pack*|git-upload-pack*) exec /bin/sh -c "$1";; *) exit 255;; esac\n`,
+    );
+    yield* fs.chmod(ssh, 0o755);
+    const env = {
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_SSH_VARIANT: "ssh",
+      GIT_SSH_COMMAND: `'${ssh}' '-o' 'BatchMode=yes' '-o' 'ConnectTimeout=10' '-p' '2222'`,
+    };
+    const url = `runner@buildbox:${remote}`;
+    const ref = "refs/heads/goat/ssh-base/test";
+    yield* driver.execute({
+      operation: "test",
+      cwd,
+      args: ["push", `--force-with-lease=${ref}:`, url, `HEAD:${ref}`],
+      env,
+    });
+    yield* driver.execute({
+      operation: "test",
+      cwd,
+      args: [
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        url,
+        `+${ref}:refs/remotes/goat-ssh/buildbox/test`,
+      ],
+      env,
+    });
+    const output = yield* fs.readFileString(log);
+    assert.include(output, "BatchMode=yes");
+    assert.include(output, "2222");
+    assert.include(output, "runner@buildbox");
+    assert.include(output, "git-receive-pack");
+    assert.include(output, "git-upload-pack");
+    assert.strictEqual(
+      yield* git(cwd, ["rev-parse", "HEAD"]),
+      yield* git(cwd, ["rev-parse", "refs/remotes/goat-ssh/buildbox/test"]),
+    );
+  }).pipe(Effect.scoped, Effect.provide(layerTest)),
+);
+it.effect("SSH workspace push propagates key-auth refusal", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const parent = yield* makeTmpDir();
+    const cwd = path.join(parent, "local");
+    yield* fs.makeDirectory(cwd);
+    yield* initRepoWithCommit(cwd);
+    const ssh = path.join(parent, "fake-ssh");
+    yield* writeTextFile(
+      parent,
+      "fake-ssh",
+      "#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n",
+    );
+    yield* fs.chmod(ssh, 0o755);
+    const error = yield* driver
+      .execute({
+        operation: "test",
+        cwd,
+        args: [
+          "push",
+          "--force-with-lease=refs/heads/goat/ssh-base/test:",
+          "runner@buildbox:/fixture/remote",
+          "HEAD:refs/heads/goat/ssh-base/test",
+        ],
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_SSH_VARIANT: "ssh",
+          GIT_SSH_COMMAND: `'${ssh}' '-o' 'BatchMode=yes' '-p' '2222'`,
+        },
+      })
+      .pipe(Effect.flip);
+    assert.deepInclude(error, { _tag: "GitCommandError", reason: "authentication_failed" });
+  }).pipe(Effect.scoped, Effect.provide(layerTest)),
+);

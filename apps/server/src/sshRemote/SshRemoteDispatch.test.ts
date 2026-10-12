@@ -1,8 +1,24 @@
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ProjectId,
+  ProjectCreatePayload,
+  OrchestratorMcpFailure,
+  type DesktopSshEnvironmentTarget,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as SshConfig from "@t3tools/ssh/config";
 import { SshCommandError } from "@t3tools/ssh/errors";
-import { EnvironmentId, ThreadId, type RuntimeMode } from "@t3tools/contracts";
+import { RuntimeMode, ThreadId } from "@t3tools/contracts";
 import * as SshTunnel from "@t3tools/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -692,6 +708,482 @@ describe("SshRemoteDispatch.callHostTool", () => {
     }),
   );
 });
+
+// Exercise the real project-create authorization declaration at the fake remote HTTP boundary.
+const RegistrationToolkit = Toolkit.make(
+  Tool.make("goat_project_create", {
+    parameters: ProjectCreatePayload,
+    success: Schema.Struct({ id: ProjectId }),
+    failure: OrchestratorMcpFailure,
+    failureMode: "return",
+    dependencies: [
+      McpInvocationContext.McpInvocationContext,
+      ThreadManagement.ThreadManagementService,
+    ],
+  }),
+);
+const registrationLayer = McpHttpServer.toolkitRegistration(
+  RegistrationToolkit,
+  McpToolAccess.toLayer(RegistrationToolkit, {
+    goat_project_create: McpToolAccess.writesEnvironment(() =>
+      Effect.succeed({ id: ProjectId.make("rp") }),
+    ),
+  }),
+).pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+);
+const mcpClient = McpSchema.McpServerClient.of({
+  clientId: 1,
+  protocolVersion: "2025-06-18",
+  clientCapabilities: {},
+  clientInfo: { name: "test", version: "1" },
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "test", version: "1" },
+  },
+  getClient: Effect.die("unused"),
+});
+const checkRegistration = (args: Record<string, unknown>, ceiling: RuntimeMode) =>
+  Effect.scoped(
+    McpServer.McpServer.pipe(
+      Effect.flatMap((server) => server.callTool({ name: "goat_project_create", arguments: args })),
+      Effect.provide(registrationLayer),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("remote"),
+        requestNamespace: "client:session",
+        thread: undefined,
+        client: { sessionId: "session", label: "GOAT", access: ceiling },
+        capabilities: new Set(["orchestration"] as const),
+        issuedAt: 0,
+      }),
+      Effect.provideService(McpSchema.McpServerClient, mcpClient),
+    ),
+  );
+const capabilityFixture = {
+  parentThreadId: null,
+  inheritedProviderInstanceId: null,
+  inheritedModel: null,
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  providers: [
+    {
+      providerInstanceId: "codex",
+      driverKind: "codex",
+      displayName: null,
+      models: [{ id: "model", label: null }],
+      canRunChildTask: true,
+      canRunCrossProviderChildTask: true,
+      constraints: [],
+    },
+  ],
+  features: {
+    appOwnedSubagents: true,
+    asyncPolling: true,
+    cancellation: true,
+    batchThreadCreation: true,
+    threadManagement: true,
+    incrementalThreadRead: true,
+    scheduledTasks: true,
+    maxBatchThreads: 10,
+  },
+};
+const savedTarget = { alias: "unlisted", hostname: "host.test", username: "runner", port: 2222 };
+const launchInput: SshRemoteDispatch.SshLaunchInput = {
+  target: savedTarget,
+  cwd: "/home/agent/.goat/repos/repo-12345678",
+  workspace: {
+    type: "worktree",
+    baseRef: "refs/heads/goat/ssh-base/12345678",
+    branch: "goat/ssh/12345678",
+  },
+  title: "Work",
+  message: "Implement",
+  runtimeMode: "approval-required",
+  callerRuntimeMode: "full-access",
+  interactionMode: "default",
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+};
+const withLaunchRemote = <A, E>(
+  options: {
+    existing?: boolean;
+    ceilingApplied?: boolean;
+    identity?: unknown;
+    capabilities?: unknown;
+    launchReply?: unknown;
+    transportFailure?: boolean;
+    refusal?: boolean;
+    projectReply?: unknown;
+    broad?: boolean;
+    registrationAccess?: boolean;
+  },
+  body: (record: {
+    tools: { name: string; args: Record<string, unknown>; authorization: string | null }[];
+    targets: DesktopSshEnvironmentTarget[];
+    sessions: { target: DesktopSshEnvironmentTarget; ceiling: RuntimeMode }[];
+  }) => Effect.Effect<A, E, SshRemoteDispatch.SshRemoteDispatch>,
+) =>
+  Effect.gen(function* () {
+    const record = {
+      tools: [] as { name: string; args: Record<string, unknown>; authorization: string | null }[],
+      targets: [] as DesktopSshEnvironmentTarget[],
+      sessions: [] as { target: DesktopSshEnvironmentTarget; ceiling: RuntimeMode }[],
+    };
+    const manager = SshTunnel.SshEnvironmentManager.of({
+      ensureEnvironment: (target) =>
+        Effect.sync(() => {
+          record.targets.push(target);
+          return {
+            target,
+            httpBaseUrl: "http://fixture.invalid/",
+            wsBaseUrl: "ws://fixture.invalid/",
+            pairingToken: null,
+          };
+        }),
+      disconnectEnvironment: () => Effect.void,
+      revalidateTunnels: () => Effect.void,
+      issueMcpClientSession: (target, opts) =>
+        Effect.sync(() => {
+          record.sessions.push({ target, ceiling: opts.runtimeModeCeiling as RuntimeMode });
+          return {
+            token: `token-${record.sessions.length}`,
+            expiresAt: null,
+            runtimeModeCeilingApplied: options.ceilingApplied ?? true,
+          };
+        }),
+      runRemoteScript: (target) =>
+        Effect.sync(() => {
+          record.targets.push(target);
+          const path = options.broad ? "/home/agent" : launchInput.cwd;
+          return {
+            stdout: `T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t${path}\nREAL\t${path}\nGITROOT\t${path}\n`,
+            stderr: "",
+          };
+        }),
+    });
+    const discover = vi.spyOn(SshConfig, "discoverSshHosts").mockReturnValue(Effect.succeed([]));
+    const managerLayer = vi
+      .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+      .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+    const registrationRequests = yield* Queue.unbounded<{
+      args: Record<string, unknown>;
+      ceiling: RuntimeMode;
+      resolve: (value: Effect.Success<ReturnType<typeof checkRegistration>>) => void;
+      reject: (error: Error) => void;
+    }>();
+    yield* Stream.fromQueue(registrationRequests).pipe(
+      Stream.runForEach((request) =>
+        checkRegistration(request.args, request.ceiling).pipe(
+          Effect.matchCause({
+            onFailure: () => request.reject(new Error("Fake registration failed")),
+            onSuccess: request.resolve,
+          }),
+        ),
+      ),
+      Effect.forkChild,
+    );
+    const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
+      const req = JSON.parse(String(init?.body)) as {
+        id?: string;
+        method: string;
+        params?: { name?: string; arguments?: Record<string, unknown> };
+      };
+      if (req.method === "notifications/initialized") return new Response(null, { status: 202 });
+      let result: unknown;
+      if (req.method === "initialize")
+        result = {
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "GOAT", version: "test" },
+        };
+      else if (req.method === "tools/list")
+        result = {
+          tools: [
+            "goat_project_list",
+            "goat_project_create",
+            "goat_thread_launch",
+            "goat_environment_read",
+            "orchestrator_capabilities",
+          ].map((name) => ({ name })),
+        };
+      else {
+        const name = req.params?.name ?? "";
+        const args = req.params?.arguments ?? {};
+        const auth = new Headers(init?.headers).get("authorization");
+        record.tools.push({ name, args, authorization: auth });
+        if (name === "goat_thread_launch" && options.transportFailure)
+          throw new TypeError("lost response");
+        if (name === "goat_project_create" && options.registrationAccess) {
+          const session = record.sessions[Number(auth?.split("-").at(-1)) - 1]!;
+          result = await new Promise<Effect.Success<ReturnType<typeof checkRegistration>>>(
+            (resolve, reject) => {
+              Queue.offerUnsafe(registrationRequests, {
+                args,
+                ceiling: session.ceiling,
+                resolve,
+                reject,
+              });
+            },
+          );
+        } else {
+          const value =
+            name === "goat_project_list"
+              ? {
+                  projects: options.existing
+                    ? [{ id: "existing", workspaceRoot: launchInput.cwd }]
+                    : [],
+                  nextCursor: null,
+                }
+              : name === "goat_project_create"
+                ? (options.projectReply ?? { id: "rp" })
+                : name === "goat_environment_read"
+                  ? (options.identity ?? { environmentId: "remote" })
+                  : name === "orchestrator_capabilities"
+                    ? (options.capabilities ?? capabilityFixture)
+                    : (options.launchReply ?? { threadId: "rt", runId: "run" });
+          result = {
+            content: [{ type: "text", text: JSON.stringify(value) }],
+            structuredContent: value,
+            ...(name === "goat_thread_launch" && options.refusal ? { isError: true } : {}),
+          };
+        }
+      }
+      return Response.json({ jsonrpc: "2.0", id: req.id, result });
+    });
+    vi.stubGlobal("fetch", fetchEndpoint);
+    try {
+      return yield* body(record).pipe(
+        Effect.provide(
+          SshRemoteDispatch.layer.pipe(
+            Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "goat-saved-target-" })),
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      managerLayer.mockRestore();
+      discover.mockRestore();
+    }
+  });
+
+it.effect("launch accepts saved full target without rediscovering its alias", () =>
+  withLaunchRemote({}, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const result = yield* dispatch.launchThread(launchInput, Effect.void);
+      expect(result.threadId).toBe("rt");
+      expect(result.runId).toBe("run");
+      expect(record.targets.every((target) => target === savedTarget)).toBe(true);
+      expect(record.sessions[0]?.ceiling).toBe("full-access");
+    }),
+  ),
+);
+it.effect("alias launch remains compatible", () =>
+  withLaunchRemote({}, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const { target: _target, ...input } = launchInput;
+      const error = yield* dispatch
+        .launchThread({ ...input, host: "unknown" }, Effect.void)
+        .pipe(Effect.flip);
+      expect(error.reason).toBe("host_unknown");
+      expect(record.targets).toHaveLength(0);
+    }),
+  ),
+);
+it.effect("same alias different user or port gets a separate session", () =>
+  withLaunchRemote({}, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      for (const target of [
+        savedTarget,
+        { ...savedTarget, username: "other" },
+        { ...savedTarget, port: 2223 },
+        { ...savedTarget, hostname: "other.test" },
+        savedTarget,
+      ])
+        yield* dispatch.launchThread({ ...launchInput, target }, Effect.void);
+      expect(record.sessions).toHaveLength(4);
+      expect(
+        record.tools
+          .filter((call) => call.name === "goat_thread_launch")
+          .map((call) => call.authorization),
+      ).toEqual([
+        "Bearer token-1",
+        "Bearer token-2",
+        "Bearer token-3",
+        "Bearer token-4",
+        "Bearer token-1",
+      ]);
+    }),
+  ),
+);
+it.effect("scripts reach new remote project creation", () =>
+  withLaunchRemote({}, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const scripts = [
+        {
+          id: "setup",
+          name: "Setup",
+          command: "echo setup",
+          icon: "play" as const,
+          async: true,
+          runOnWorktreeCreate: true,
+        },
+      ];
+      yield* dispatch.launchThread({ ...launchInput, scripts }, Effect.void);
+      const args = record.tools.find((call) => call.name === "goat_project_create")!.args;
+      expect((yield* Schema.decodeUnknownEffect(ProjectCreatePayload)(args)).scripts).toEqual(
+        scripts,
+      );
+      expect(args).not.toHaveProperty("allowBroadWorkspaceRoot");
+    }),
+  ),
+);
+it.effect("existing remote project retains scripts", () =>
+  withLaunchRemote({ existing: true }, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      yield* dispatch.launchThread({ ...launchInput, scripts: [] }, Effect.void);
+      expect(record.tools.map((call) => call.name)).toEqual([
+        "goat_project_list",
+        "goat_thread_launch",
+      ]);
+    }),
+  ),
+);
+it.effect.each(
+  [{ ceilingApplied: false }, { identity: { environmentId: " " } }, { capabilities: {} }].map(
+    (opts) =>
+      [
+        `preflight reads actual environment identity and refuses old remote ${JSON.stringify(opts)}`,
+        opts,
+      ] as const,
+  ),
+)("%s", ([_name, opts]) =>
+  withLaunchRemote(opts, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      const result = yield* dispatch
+        .preflightTarget({
+          target: savedTarget,
+          runtimeMode: "full-access",
+          modelSelection: launchInput.modelSelection!,
+        })
+        .pipe(Effect.flip);
+      expect(result.reason).toBe("remote_refused");
+      expect(record.tools.some((call) => call.name === "goat_thread_launch")).toBe(false);
+    }),
+  ),
+);
+it.effect("preflight reads actual environment identity and selected model", () =>
+  withLaunchRemote({}, () =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      expect(
+        yield* dispatch.preflightTarget({
+          target: savedTarget,
+          runtimeMode: "full-access",
+          modelSelection: launchInput.modelSelection!,
+        }),
+      ).toEqual({ environmentId: "remote" });
+      for (const selection of [
+        { instanceId: ProviderInstanceId.make("missing"), model: "model" },
+        { instanceId: ProviderInstanceId.make("codex"), model: "missing" },
+      ])
+        expect(
+          (yield* dispatch
+            .preflightTarget({
+              target: savedTarget,
+              runtimeMode: "full-access",
+              modelSelection: selection,
+            })
+            .pipe(Effect.flip)).remoteCode,
+        ).toBe("model_unavailable");
+    }),
+  ),
+);
+it.effect.each(
+  [{ transportFailure: true }, { launchReply: {} }, { launchReply: { threadId: " " } }].map(
+    (opts) =>
+      [
+        `launch missing acknowledgement is uncertain and not retried ${JSON.stringify(opts)}`,
+        opts,
+      ] as const,
+  ),
+)("%s", ([_name, opts]) =>
+  withLaunchRemote(opts, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      expect(
+        (yield* dispatch.launchThread(launchInput, Effect.void).pipe(Effect.flip))
+          .launchMayHaveStarted,
+      ).toBe(true);
+      expect(record.tools.filter((call) => call.name === "goat_thread_launch")).toHaveLength(1);
+    }),
+  ),
+);
+it.effect("structured remote refusal is definite", () =>
+  withLaunchRemote(
+    { refusal: true, launchReply: { code: "invalid_request", message: "refused" } },
+    (record) =>
+      Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        const error = yield* dispatch.launchThread(launchInput, Effect.void).pipe(Effect.flip);
+        expect(error.reason).toBe("remote_refused");
+        expect(error.launchMayHaveStarted).toBeUndefined();
+        expect(record.tools.filter((call) => call.name === "goat_thread_launch")).toHaveLength(1);
+      }),
+  ),
+);
+it.effect("first registration permits an approval-required thread under full-access ceiling", () =>
+  withLaunchRemote({ registrationAccess: true }, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      yield* dispatch.launchThread(launchInput, Effect.void);
+      expect(record.sessions[0]?.ceiling).toBe("full-access");
+      expect(
+        record.tools.find((call) => call.name === "goat_thread_launch")?.args.runtimeMode,
+      ).toBe("approval-required");
+      const refused = yield* dispatch
+        .launchThread({ ...launchInput, callerRuntimeMode: "approval-required" }, Effect.void)
+        .pipe(Effect.flip);
+      expect(refused.reason).toBe("remote_refused");
+      expect(record.tools.filter((call) => call.name === "goat_thread_launch")).toHaveLength(1);
+    }),
+  ),
+);
+it.effect("full target keeps broad-root guard and explicit override", () =>
+  withLaunchRemote({ broad: true }, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      expect(
+        (yield* dispatch.launchThread(launchInput, Effect.void).pipe(Effect.flip)).reason,
+      ).toBe("invalid_request");
+      expect(record.tools).toHaveLength(0);
+      yield* dispatch.launchThread({ ...launchInput, allowBroadWorkspaceRoot: true }, Effect.void);
+      expect(
+        record.tools.find((call) => call.name === "goat_project_create")?.args,
+      ).not.toHaveProperty("allowBroadWorkspaceRoot");
+    }),
+  ),
+);
+it.effect("invalid project acknowledgement refuses before launch", () =>
+  withLaunchRemote({ projectReply: { id: " " } }, (record) =>
+    Effect.gen(function* () {
+      const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+      expect(
+        (yield* dispatch.launchThread(launchInput, Effect.void).pipe(Effect.flip))
+          .launchMayHaveStarted,
+      ).toBeUndefined();
+      expect(record.tools.some((call) => call.name === "goat_thread_launch")).toBe(false);
+    }),
+  ),
+);
 
 describe("SSH dispatch launch lineage", () => {
   const launcher = {

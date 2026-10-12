@@ -1,3 +1,5 @@
+import * as SshRemoteDispatch from "./sshRemote/SshRemoteDispatch.ts";
+import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as ConnectionCatalogBroker from "./connections/ConnectionCatalogBroker.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
@@ -696,6 +698,11 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+const layerSshWorkspace = SshWorkspaceSync.layer.pipe(
+  Layer.provide(GitVcsDriver.layer),
+  Layer.provide(RuntimeLayer.layerProjectService),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -727,6 +734,8 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
+  Layer.provide(layerSshWorkspace),
+  Layer.provide(SshRemoteDispatch.layer),
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(layerPullRequestService),
