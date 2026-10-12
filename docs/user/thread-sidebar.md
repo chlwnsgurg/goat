@@ -73,6 +73,7 @@ list to unpin it. Dragging a thread onto the **Settled** header settles it, and 
 thread into the active list un-settles it. A snoozed thread can be dragged out of the snoozed
 shelf, which wakes it, but threads cannot be dragged into the shelf because snoozing needs a wake
 time. Dragging a pinned thread out of the pinned section does not ask for unpin confirmation.
+Threads in **Priority** cannot be dragged or used as drop targets.
 Pinned and active boundary labels appear only while dragging, without moving the rows. The
 other rows slide aside to show where the thread will land. When you cross into another section,
 the dragged thread shows the action the drop performs, with its icon: **Pin**, **Unpin**,
@@ -115,12 +116,23 @@ rename a thread, regenerate its title, or link and unlink a pull request. These 
 appear on web, desktop, and mobile without requiring the originating browser to remain
 open.
 
-### Fold working threads (beta)
+### Follow Priority in Activity
 
-Turn on **Settings → General → Working section (beta)** on web and desktop, or **Settings →
-Thread behavior → Working section** on iOS and Android, to move threads that are working or
-monitoring into a collapsed **Working** section below the active list. A thread returns to the top
-of the active list when it finishes, fails, or needs an approval or answer. The Working section
+On web and desktop, switch to **Activity** to see **Priority** at the top. It holds threads
+with work in progress, pending approvals or answers, unread completions, or an unacknowledged
+return from snooze. A delegated task needing approval or an answer brings its parent here too.
+Pinned and settled threads can appear in Priority; when they no longer need attention, they
+return to their previous section.
+
+Choose **Mark all as read** from Priority's menu to acknowledge unread completions on connections
+you can change. Work in progress and pending requests stay in Priority.
+
+### Fold working threads on mobile
+
+On iOS and Android, turn on **Settings → Thread behavior → Working section** to move threads
+that are working or monitoring into a collapsed **Working** section below the active list.
+A thread returns to the top of the active list when it finishes, fails, or needs an approval
+or answer. The Working section
 lists the thread you last sent work to first. Pinned threads stay in the pinned section. Each
 device keeps its own choice.
 
