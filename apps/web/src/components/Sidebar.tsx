@@ -5623,6 +5623,23 @@ export default function Sidebar() {
                         }
                         switch (item.marker) {
                           case "pinned-header":
+                            // With Priority above, label where the regular roster starts. It sits
+                            // outside the sortable roster, inside the space drag projection keeps
+                            // before the pinned header, like the draft rows below it.
+                            if (priorityThreads.length > 0) {
+                              items.push(
+                                <li
+                                  key="threads-header"
+                                  data-thread-selection-safe
+                                  data-testid="sidebar-threads-header"
+                                  className="mx-0.5 mt-4 flex h-8 list-none items-center px-2"
+                                >
+                                  <span className="text-xs font-medium text-sidebar-foreground">
+                                    Threads
+                                  </span>
+                                </li>,
+                              );
+                            }
                             items.push(draftBlock);
                             items.push(
                               <SidebarDragBoundary

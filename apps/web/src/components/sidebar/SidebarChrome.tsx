@@ -108,7 +108,7 @@ export function SidebarBrandWidthProbe({
       className="pointer-events-none invisible fixed top-0 left-0 flex w-max items-center gap-2 border-r border-transparent pr-3"
       ref={observeWidth}
     >
-      <div className="-mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
+      <div className="ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
         <SidebarBrandMark onBackdrop={false} />
       </div>
       <span className="flex items-center gap-1">
@@ -136,11 +136,12 @@ function SidebarBrand({
       aria-current={active ? "page" : undefined}
       data-active={active}
       className={cn(
-        // Padding holds the selected fill off the letters; the matching negative margins keep
-        // the brand's outer box (and the width probe above) exactly as upstream.
+        // Padding holds the selected fill off the letters. The left margin keeps the letters at
+        // the titlebar inset; the right padding stays in flow (and in the width probe above) so
+        // the header's overflow clip never cuts the selected fill at the minimum sidebar width.
         "relative z-10 h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md px-1.5 outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset",
         placement === "header"
-          ? "-mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden md:flex"
+          ? "ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] hidden md:flex"
           : "pointer-events-auto flex [-webkit-app-region:no-drag]",
         onBackdrop ? "text-white" : "text-foreground",
         active && !onBackdrop ? "bg-sidebar-row-selected" : null,
