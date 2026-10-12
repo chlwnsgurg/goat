@@ -32,9 +32,9 @@ question the thread is waiting on, and a host that stays unreachable each produc
 
 `RemoteDispatchCoordinator` in `apps/server/src/remoteReports/RemoteDispatchCoordinator.ts` inserts
 a row in `remote_dispatches` and then calls `SshRemoteDispatch.launchThread`. Migration
-`apps/server/src/persistence/Migrations/063_RemoteDispatches.ts` creates that table. Reports use
-`apps/server/src/persistence/Migrations/062_RemoteReports.ts` and `RemoteReportService`.
-`apps/server/src/persistence/Migrations/065_RemoteDispatchQuestions.ts` adds
+`apps/server/src/persistence/Migrations/064_RemoteDispatches.ts` creates that table. Reports use
+`apps/server/src/persistence/Migrations/063_RemoteReports.ts` and `RemoteReportService`.
+`apps/server/src/persistence/Migrations/066_RemoteDispatchQuestions.ts` adds
 `pending_request_ids`, a JSON array of the launched run's open question ids. The coordinator
 writes that column from the host's observed `pendingRequestIds` before it announces questions.
 When delivery is `wake` and the remote thread id is set, it dispatches one notice per question

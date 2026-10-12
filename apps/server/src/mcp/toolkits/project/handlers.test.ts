@@ -493,7 +493,13 @@ const clientLaunchHarness = (input: {
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
 }) => {
   const projectId = ProjectId.make("project:client-target");
-  const modelSelection = { instanceId: ProviderInstanceId.make("claude"), model: "claude-opus" };
+  // "claudeAgent" is the real default instance id for the Claude driver
+  // (see `defaultInstanceIdForDriver`), so it resolves as enabled by default
+  // under the project-scoped provider instance gate the launch path now runs.
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus",
+  };
   const layerDependencies = Layer.mergeAll(
     ServerSettings.layerTest(),
     NodeCrypto.layer,

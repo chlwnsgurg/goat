@@ -246,6 +246,13 @@ that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
 
+A provider runs a runtime mode it does not offer as `approval-required`, so a
+child would ask for approval on every command. `orchestrator_capabilities`
+lists `runtimeModes` only for a provider that offers some of the modes, and
+omits it for a provider that offers all of them. When the target lists
+`runtimeModes`, an explicit `runtimeMode` outside that list is refused, and an
+inherited mode steps down to the broadest mode the target offers.
+
 A local async child outlives an interrupt or Stop of the parent's turn and still wakes
 the parent when it finishes. A local `mode: "wait"` child stops with the turn whose
 blocking call it answers, unless that wait already timed out. `task_cancel` stops
