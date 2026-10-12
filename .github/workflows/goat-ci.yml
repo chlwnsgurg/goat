@@ -161,6 +161,8 @@ jobs:
       - name: Upload build output
         # Only on push to dev/main: PR runs filled the private-repo artifact quota.
         if: matrix.task == 'build' && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+        # Nothing downloads this artifact, so a full storage quota must not fail the build.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: goat-desktop-build
