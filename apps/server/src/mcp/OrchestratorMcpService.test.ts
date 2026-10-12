@@ -994,6 +994,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                 return "cancel_requested" as const;
               }),
             ),
+          get: () => Effect.succeed(null),
         }),
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({}),
         providerRegistryLayer([]),
