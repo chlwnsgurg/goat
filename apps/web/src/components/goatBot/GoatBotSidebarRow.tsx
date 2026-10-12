@@ -15,19 +15,21 @@ import {
 import { GoatBotAvatar } from "./GoatBotAvatar";
 import { useGoatBotPreferred } from "./GoatBotModeButton";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
+import { useGoatBotHome } from "./useGoatBotHome";
 import { useGoatBotWaitingCount } from "./useGoatBotWaitingCount";
 import { Badge } from "../ui/badge";
 
 /** GOAT Bot's pinned place at the top of the thread list, hidden in thread mode. */
 export function GoatBotSidebarRow() {
+  useGoatBotHome();
   const port = useContext(GoatBotChannelContext);
   const enabled = useGoatBotPreferred();
   return enabled ? <GoatBotSidebarObserver key={port ? "port" : "none"} /> : null;
 }
 
 /**
- * Reads only. The bot is created or adopted (including a stopped global agent) when the user
- * first opens it, so a client that never opens GOAT Bot never makes a bot thread.
+ * Observes the bot without creating a bot thread. The parent row claims and syncs the cluster
+ * home; creation or adoption of a stopped global agent still waits until the bot is opened.
  */
 function GoatBotSidebarObserver() {
   const count = useGoatBotWaitingCount();

@@ -693,6 +693,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["xcode android studio sdk avd runtime"],
   },
   {
+    id: "goat-bot-home",
+    title: "Runs on",
+    to: "/settings/integrations",
+    targetId: "goat-bot",
+    searchTerms: ["goat bot home computer environment cluster"],
+  },
+  {
     id: "slack-connection",
     title: "Slack connection",
     to: "/settings/integrations",

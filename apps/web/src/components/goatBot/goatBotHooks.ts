@@ -1,6 +1,8 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useMemo } from "react";
 
+import { resolveEnvironmentOptionLabel } from "~/components/BranchToolbar.logic";
+
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { type GlobalAgentLegacyRoute, legacyGlobalAgentRoute } from "~/globalAgentRoute";
 import { useGlobalAgentStore } from "~/globalAgentStore";
@@ -25,6 +27,23 @@ export function useGoatBotEnvironments(): ReadonlyArray<GoatBotEnvironmentInput>
           entry.serverConfig?.environment.capabilities,
         ),
         primary: entry.environmentId === primaryEnvironmentId,
+        label: resolveEnvironmentOptionLabel({
+          isPrimary: entry.environmentId === primaryEnvironmentId,
+          environmentId: entry.environmentId,
+          runtimeLabel: entry.serverConfig?.environment.label ?? null,
+          savedLabel: entry.label,
+        }),
+        settingsSnapshot: entry.serverConfig?.settings ?? null,
+        homeTarget: {
+          environmentId: entry.environmentId,
+          connected: entry.connection.phase === "connected",
+          supportsHome: entry.serverConfig?.environment.capabilities.goatBotHome === true,
+          supportsBot: environmentSupportsChannelLedger(
+            entry.serverConfig?.environment.capabilities,
+          ),
+          settingsLoaded: entry.serverConfig?.settings != null,
+          home: entry.serverConfig?.settings?.goatBotHome ?? null,
+        },
       })),
     [environments, primaryEnvironmentId],
   );

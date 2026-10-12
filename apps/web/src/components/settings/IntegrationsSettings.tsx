@@ -3,6 +3,7 @@ import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { DeviceHostsSettings } from "./DeviceHostsSettings";
+import { GoatBotSettings } from "./GoatBotSettings";
 import { SlackChannelSettings } from "./SlackChannelSettings";
 /**
  * Integrations settings - preferences for surfaces T3 Code embeds rather than
@@ -1548,6 +1549,7 @@ export function IntegrationsSettingsPanel() {
         )}
       </SettingsSection>
       <DeviceIntegrationSettings />
+      <GoatBotSettings />
       <SlackChannelSettings />
     </SettingsPageContainer>
   );

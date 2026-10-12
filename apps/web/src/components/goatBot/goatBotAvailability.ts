@@ -1,4 +1,9 @@
 import type { EnvironmentId, ExecutionEnvironmentCapabilities, ThreadId } from "@t3tools/contracts";
+import {
+  pickGoatBotHomeCandidate,
+  resolveGoatBotHome,
+  type GoatBotHomeTarget,
+} from "@t3tools/client-runtime/goatBot/home";
 
 /** One machine as GOAT Bot sees it. */
 export interface GoatBotEnvironmentInput {
@@ -6,6 +11,9 @@ export interface GoatBotEnvironmentInput {
   readonly connected: boolean;
   readonly supportsChannelLedger: boolean;
   readonly primary: boolean;
+  readonly label?: string;
+  readonly homeTarget?: GoatBotHomeTarget;
+  readonly settingsSnapshot?: object | null;
 }
 
 export interface GoatBotRef {
@@ -24,10 +32,27 @@ export type GoatBotEnsureState =
 export type GoatBotAvailability =
   | { readonly kind: "unsupported" }
   | { readonly kind: "offline"; readonly environmentId: EnvironmentId }
+  | { readonly kind: "home_offline"; readonly environmentId: EnvironmentId; readonly label: string }
   | { readonly kind: "connecting"; readonly environmentId: EnvironmentId }
   | { readonly kind: "legacy_active"; readonly environmentId: EnvironmentId }
   | { readonly kind: "error"; readonly environmentId: EnvironmentId; readonly message: string }
   | { readonly kind: "ready"; readonly bot: GoatBotRef };
+
+/** Resolve home before selecting an environment; absent capabilities preserve old-server behavior. */
+export function resolveGoatBotHomeSelection(
+  environments: ReadonlyArray<GoatBotEnvironmentInput>,
+  botRef: GoatBotRef | null,
+) {
+  const targets = environments.flatMap((entry) => (entry.homeTarget ? [entry.homeTarget] : []));
+  const supported = targets.some((target) => target.supportsHome);
+  const resolution = resolveGoatBotHome({ targets });
+  const candidateId = pickGoatBotHomeCandidate({
+    targets,
+    knownBotEnvironmentId: botRef?.environmentId ?? null,
+    primaryEnvironmentId: environments.find((entry) => entry.primary)?.environmentId ?? null,
+  });
+  return { targets, supported, resolution, candidateId };
+}
 
 /**
  * The machine GOAT Bot lives on: the one a known bot belongs to, else the
@@ -37,6 +62,12 @@ export function pickGoatBotEnvironment(
   environments: ReadonlyArray<GoatBotEnvironmentInput>,
   botRef: GoatBotRef | null,
 ): GoatBotEnvironmentInput | null {
+  const { supported, resolution, candidateId } = resolveGoatBotHomeSelection(environments, botRef);
+  if (supported) {
+    const environmentId =
+      resolution.state === "claimed" ? resolution.claim.environmentId : candidateId;
+    return environments.find((entry) => entry.environmentId === environmentId) ?? null;
+  }
   if (botRef !== null) {
     const known = environments.find((entry) => entry.environmentId === botRef.environmentId);
     if (known) return known;
@@ -58,6 +89,30 @@ export function resolveGoatBotAvailability(input: {
   readonly botRef: GoatBotRef | null;
   readonly ensure: GoatBotEnsureState;
 }): GoatBotAvailability {
+  const { supported, resolution, candidateId } = resolveGoatBotHomeSelection(
+    input.environments,
+    input.botRef,
+  );
+  if (supported) {
+    if (resolution.state === "claimed" && !resolution.homeConnected) {
+      const environmentId = resolution.claim.environmentId;
+      return {
+        kind: "home_offline",
+        environmentId,
+        label:
+          input.environments.find((entry) => entry.environmentId === environmentId)?.label ??
+          environmentId,
+      };
+    }
+    if (resolution.state !== "claimed") {
+      const environmentId =
+        candidateId ??
+        input.environments.find((entry) => entry.homeTarget?.supportsHome)?.environmentId;
+      return environmentId === undefined
+        ? { kind: "unsupported" }
+        : { kind: "connecting", environmentId };
+    }
+  }
   const environment = pickGoatBotEnvironment(input.environments, input.botRef);
   if (environment === null || !environment.supportsChannelLedger) return { kind: "unsupported" };
   const { environmentId } = environment;

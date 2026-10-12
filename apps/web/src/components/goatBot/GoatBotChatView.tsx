@@ -83,19 +83,24 @@ export function GoatBotChatView({
           <GoatBotModeButton to="thread" />
         </div>
       </WorkspacePageHeader>
-      {availability.kind === "offline" || availability.kind === "connecting" ? (
+      {availability.kind === "offline" ||
+      availability.kind === "home_offline" ||
+      availability.kind === "connecting" ? (
         <div
           role="status"
           className="border-b border-border px-4 py-2 text-sm text-muted-foreground"
         >
-          {availability.kind === "offline"
-            ? "GOAT Bot's computer is offline. You can send messages again once it reconnects."
-            : "Connecting to GOAT Bot…"}
+          {availability.kind === "home_offline"
+            ? `GOAT Bot runs on ${availability.label}, which isn't connected`
+            : availability.kind === "offline"
+              ? "GOAT Bot's computer is offline. You can send messages again once it reconnects."
+              : "Connecting to GOAT Bot…"}
         </div>
       ) : null}
       {rows.length > 0 &&
       availability.kind !== "ready" &&
       availability.kind !== "offline" &&
+      availability.kind !== "home_offline" &&
       availability.kind !== "connecting" ? (
         <div role="status">
           <GoatBotNotice
@@ -236,6 +241,7 @@ function statusLine(availability: GoatBotAvailability): string {
     case "connecting":
       return "Connecting…";
     case "offline":
+    case "home_offline":
       return "Offline";
     case "legacy_active":
       return "Waiting for the global agent";
@@ -329,6 +335,12 @@ function noticeCopy(availability: GoatBotAvailability): {
       return {
         title: "Connecting to GOAT Bot…",
         description: "This takes a moment.",
+        retryLabel: null,
+      };
+    case "home_offline":
+      return {
+        title: "Waiting for GOAT Bot's computer",
+        description: `GOAT Bot runs on ${availability.label}, which isn't connected`,
         retryLabel: null,
       };
     case "offline":

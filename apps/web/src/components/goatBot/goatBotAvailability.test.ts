@@ -164,3 +164,120 @@ describe("resolveGoatBotRemoval", () => {
     expect(resolveGoatBotRemoval({ ...missing, shellSeen: false })).toBe(null);
   });
 });
+
+const homeEnv = (
+  environmentId: EnvironmentId,
+  home: { environmentId: EnvironmentId; claimedAt: number; claimId: string } | null,
+  overrides: Partial<GoatBotEnvironmentInput> = {},
+): GoatBotEnvironmentInput =>
+  env(environmentId, {
+    label: environmentId === remote ? "Remote Mac" : "This device",
+    homeTarget: {
+      environmentId,
+      connected: true,
+      supportsHome: true,
+      supportsBot: true,
+      settingsLoaded: true,
+      home,
+    },
+    ...overrides,
+  });
+
+describe("cluster home availability", () => {
+  const claim = { environmentId: remote, claimedAt: 100, claimId: "winner" };
+  const remembered = { environmentId: primary, threadId: botThread };
+  it("follows the claim instead of the remembered bot or primary", () => {
+    const environments = [homeEnv(primary, claim), homeEnv(remote, claim)];
+    expect(pickGoatBotEnvironment(environments, remembered)?.environmentId).toBe(remote);
+    expect(
+      resolveGoatBotAvailability({
+        environments,
+        botRef: remembered,
+        ensure: { state: "confirmed", bot: { environmentId: remote, threadId: botThread } },
+      }),
+    ).toEqual({ kind: "ready", bot: { environmentId: remote, threadId: botThread } });
+    expect(
+      resolveGoatBotAvailability({
+        environments,
+        botRef: remembered,
+        ensure: { state: "confirmed", bot: remembered },
+      }),
+    ).toEqual({ kind: "connecting", environmentId: remote });
+  });
+  it("keeps an absent home offline instead of ensuring on the primary", () => {
+    expect(
+      resolveGoatBotAvailability({
+        environments: [homeEnv(primary, claim)],
+        botRef: remembered,
+        ensure: { state: "confirmed", bot: remembered },
+      }),
+    ).toEqual({ kind: "home_offline", environmentId: remote, label: remote });
+  });
+  it("names a disconnected home and blocks sending", () => {
+    const offline = homeEnv(remote, claim, {
+      connected: false,
+      homeTarget: {
+        environmentId: remote,
+        connected: false,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: claim,
+      },
+    });
+    const availability = resolveGoatBotAvailability({
+      environments: [homeEnv(primary, claim), offline],
+      botRef: remembered,
+      ensure: { state: "idle" },
+    });
+    expect(availability).toEqual({
+      kind: "home_offline",
+      environmentId: remote,
+      label: "Remote Mac",
+    });
+    expect(canSendToGoatBot(availability, true)).toBe(false);
+  });
+  it("waits for an unloaded supporting snapshot even if another has a claim", () => {
+    const unloaded = homeEnv(primary, null, {
+      homeTarget: {
+        environmentId: primary,
+        connected: true,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: false,
+        home: null,
+      },
+    });
+    expect(
+      resolveGoatBotAvailability({
+        environments: [unloaded, homeEnv(remote, claim)],
+        botRef: remembered,
+        ensure: { state: "confirmed", bot: remembered },
+      }),
+    ).toEqual({ kind: "connecting", environmentId: primary });
+  });
+  it("selects a candidate but stays connecting until an unclaimed home reads back", () => {
+    const environments = [homeEnv(primary, null), homeEnv(remote, null)];
+    expect(
+      pickGoatBotEnvironment(environments, { environmentId: remote, threadId: botThread })
+        ?.environmentId,
+    ).toBe(remote);
+    expect(
+      resolveGoatBotAvailability({
+        environments,
+        botRef: remembered,
+        ensure: { state: "confirmed", bot: remembered },
+      }),
+    ).toEqual({ kind: "connecting", environmentId: primary });
+  });
+  it("keeps the old picker when every server lacks the home capability", () => {
+    const environments = [env(primary), env(remote)];
+    expect(
+      resolveGoatBotAvailability({
+        environments,
+        botRef: remembered,
+        ensure: { state: "confirmed", bot: remembered },
+      }),
+    ).toEqual({ kind: "ready", bot: remembered });
+  });
+});

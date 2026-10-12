@@ -27,6 +27,9 @@ const state = vi.hoisted(() => ({
     connected: boolean;
     supportsChannelLedger: boolean;
     primary: boolean;
+    label?: string;
+    homeTarget?: import("@t3tools/client-runtime/goatBot/home").GoatBotHomeTarget;
+    settingsSnapshot?: object | null;
   }>,
   running: null as RunId | null,
   bootstrapped: true,
@@ -68,6 +71,7 @@ function bumpTick() {
   tickVersion += 1;
   for (const listener of tickListeners) listener();
 }
+vi.mock("./useGoatBotHome", () => ({ useGoatBotHome: () => undefined }));
 vi.mock("./goatBotHooks", () => ({
   useGoatBotEnvironments: () => {
     useTick();
@@ -1170,4 +1174,133 @@ it("remounts the thread permission hook when the port is installed and removed",
   provided = null;
   await render(false, false, true);
   expect(textarea().disabled).toBe(true);
+});
+
+it("waits for claim readback before ensure, then ensures on the chosen home", async () => {
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: {
+        environmentId,
+        connected: true,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: null,
+      },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Connecting");
+  const claim = { environmentId, claimedAt: 100, claimId: "claim" };
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: { ...state.environments[0]!.homeTarget!, home: claim },
+      settingsSnapshot: { goatBotHome: claim },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+});
+
+it("does not retry not_home on unchanged snapshots, permission changes or reconnect", async () => {
+  const claim = { environmentId, claimedAt: 100, claimId: "claim" };
+  const target = {
+    environmentId,
+    connected: true,
+    supportsHome: true,
+    supportsBot: true,
+    settingsLoaded: true,
+    home: claim,
+  };
+  const settings = { goatBotHome: claim };
+  state.environments = [
+    { ...state.environments[0]!, homeTarget: target, settingsSnapshot: settings },
+  ];
+  vi.mocked(port.ensureBot).mockRejectedValueOnce(
+    new ChannelGatewayError({ reason: "not_home", homeEnvironmentId: EnvironmentId.make("other") }),
+  );
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain("Connecting");
+  await render();
+  permission = false;
+  await render();
+  permission = true;
+  await render();
+  state.environments = [
+    { ...state.environments[0]!, connected: false, homeTarget: { ...target, connected: false } },
+  ];
+  await render();
+  state.environments = [{ ...state.environments[0]!, connected: true, homeTarget: target }];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+  state.environments = [{ ...state.environments[0]!, settingsSnapshot: { ...settings } }];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(2);
+});
+
+it("shows a calm named offline home without ensuring on another environment", async () => {
+  const offlineId = EnvironmentId.make("offline-home");
+  const claim = { environmentId: offlineId, claimedAt: 100, claimId: "offline" };
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: {
+        environmentId,
+        connected: true,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: claim,
+      },
+    },
+    {
+      environmentId: offlineId,
+      connected: false,
+      supportsChannelLedger: true,
+      primary: false,
+      label: "Office Mac",
+      homeTarget: {
+        environmentId: offlineId,
+        connected: false,
+        supportsHome: true,
+        supportsBot: true,
+        settingsLoaded: true,
+        home: claim,
+      },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("GOAT Bot runs on Office Mac, which isn't connected");
+});
+
+it("retries not_home when the winner changes even without a new settings object", async () => {
+  const claim = { environmentId, claimedAt: 100, claimId: "first" };
+  const settings = { goatBotHome: claim };
+  const target = {
+    environmentId,
+    connected: true,
+    supportsHome: true,
+    supportsBot: true,
+    settingsLoaded: true,
+    home: claim,
+  };
+  state.environments = [
+    { ...state.environments[0]!, homeTarget: target, settingsSnapshot: settings },
+  ];
+  vi.mocked(port.ensureBot).mockRejectedValueOnce(new ChannelGatewayError({ reason: "not_home" }));
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(1);
+  state.environments = [
+    {
+      ...state.environments[0]!,
+      homeTarget: { ...target, home: { ...claim, claimId: "second", claimedAt: 101 } },
+    },
+  ];
+  await render();
+  expect(port.ensureBot).toHaveBeenCalledTimes(2);
 });

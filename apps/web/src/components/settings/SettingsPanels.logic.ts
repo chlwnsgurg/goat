@@ -260,7 +260,8 @@ export function buildProviderInstanceUpdatePatch(input: {
   readonly textGenerationModelSelection?:
     | ServerSettings["textGenerationModelSelection"]
     | undefined;
-}): Partial<UnifiedSettings> {
+  // goatBotHome has no null patch, so it stays out of provider patches.
+}): Partial<Omit<UnifiedSettings, "goatBotHome">> {
   return {
     providerInstances: {
       ...input.settings.providerInstances,

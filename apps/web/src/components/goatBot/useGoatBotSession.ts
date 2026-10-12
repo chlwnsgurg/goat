@@ -13,6 +13,7 @@ import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entiti
 import {
   pickGoatBotEnvironment,
   resolveGoatBotAvailability,
+  resolveGoatBotHomeSelection,
   type GoatBotEnvironmentInput,
 } from "./goatBotAvailability";
 import { GoatBotChannelContext, type GoatBotChannelPort } from "./goatBotChannelPort";
@@ -30,6 +31,8 @@ import { buildGoatBotTimeline, goatBotReplyingSince } from "./goatBotRows";
 import { createGoatBotSendQueue, type GoatBotSendQueue } from "./goatBotSendQueue";
 
 interface Session {
+  readonly homeKey: string;
+  readonly notHome: { readonly homeKey: string; readonly settingsSnapshot: object | null } | null;
   readonly connected: boolean;
   readonly capability: boolean;
   readonly generation: number;
@@ -93,6 +96,12 @@ function newQueue(environmentId: EnvironmentId) {
 /** Sidebar observers also track reconnects while the bot screen is closed. */
 function useObservedEnvironments() {
   const environments = useGoatBotEnvironments();
+  const { supported, resolution } = resolveGoatBotHomeSelection(environments, null);
+  const homeKey = !supported
+    ? "legacy"
+    : resolution.state === "claimed"
+      ? `${resolution.claim.environmentId}:${resolution.claim.claimedAt}:${resolution.claim.claimId}`
+      : resolution.state;
   useEffect(() => {
     const observed = new Map(environments.map((entry) => [entry.environmentId, entry]));
     for (const [environmentId, session] of useSessions.getState().sessions) {
@@ -108,16 +117,19 @@ function useObservedEnvironments() {
       const previous = useSessions.getState().sessions.get(environment.environmentId);
       if (
         previous?.connected === environment.connected &&
-        previous.capability === environment.supportsChannelLedger
+        previous.capability === environment.supportsChannelLedger &&
+        previous.homeKey === homeKey
       )
         continue;
       const generation =
         (previous?.generation ?? 0) + (environment.connected && !previous?.connected ? 1 : 0);
       const key =
         environment.connected && environment.supportsChannelLedger
-          ? `${environment.environmentId}:${generation}:channel`
+          ? `${environment.environmentId}:${generation}:channel:${homeKey}`
           : null;
       update(environment.environmentId, {
+        homeKey,
+        notHome: previous?.notHome ?? null,
         connected: environment.connected,
         capability: environment.supportsChannelLedger,
         generation,
@@ -128,7 +140,7 @@ function useObservedEnvironments() {
         queue: previous?.queue ?? newQueue(environment.environmentId),
       });
     }
-  }, [environments]);
+  }, [environments, homeKey]);
   return environments;
 }
 
@@ -143,12 +155,22 @@ export function useGoatBotEnabled() {
   const port = useContext(GoatBotChannelContext);
   const environments = useObservedEnvironments();
   const botRef = useGlobalAgentStore((state) => state.botRef);
+  const home = useMemo(
+    () => resolveGoatBotHomeSelection(environments, botRef),
+    [environments, botRef],
+  );
   const environment = pickGoatBotEnvironment(environments, botRef);
   const session = useSessions((state) =>
     environment === null ? undefined : state.sessions.get(environment.environmentId),
   );
   return {
-    enabled: goatBotEnabled(port, environment),
+    enabled: home.supported
+      ? port !== null &&
+        (home.resolution.state === "claimed" ||
+          environments.some((entry) => entry.supportsChannelLedger))
+      : goatBotEnabled(port, environment),
+    environments,
+    home,
     environment,
     generation:
       session?.connected === environment?.connected &&
@@ -163,7 +185,7 @@ const useCannotSend = (_environmentId: EnvironmentId | null) => false;
 
 /** One ensure and send queue per environment, shared by the entry route and thread view. */
 export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
-  const { enabled, environment, port } = useGoatBotEnabled();
+  const { enabled, environment, environments, home, port } = useGoatBotEnabled();
   const environmentId = environment?.environmentId ?? null;
   const bootstrapped = useEnvironmentShellsBootstrapped(environmentId);
   const session = useSessions((state) =>
@@ -185,10 +207,27 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
   // oxlint-disable-next-line react/hooks -- Invoke the injected hook unconditionally.
   const canOperate = useCanSend(environmentId);
 
+  const homeKey = !home.supported
+    ? "legacy"
+    : home.resolution.state === "claimed"
+      ? `${home.resolution.claim.environmentId}:${home.resolution.claim.claimedAt}:${home.resolution.claim.claimId}`
+      : home.resolution.state;
+  const settingsSnapshot = environment?.settingsSnapshot ?? null;
+  const homeReady = !home.supported || home.resolution.state === "claimed";
   useEffect(() => {
     if (environmentId === null || session === undefined) return;
     let current = useSessions.getState().sessions.get(environmentId);
     if (!current) return;
+    // A not_home refusal waits for observed evidence, including across manual retry and reconnect.
+    if (current.notHome !== null) {
+      if (
+        current.notHome.homeKey === homeKey &&
+        current.notHome.settingsSnapshot === settingsSnapshot
+      )
+        return;
+      current = { ...current, notHome: null, machine: retryGoatBotEnsure(current.machine) };
+      update(environmentId, current);
+    }
     let machine = current.machine;
     let legacyAutoRetried = current.port === port ? current.legacyAutoRetried : false;
     if (current.port !== port) machine = retryGoatBotEnsure(machine);
@@ -205,7 +244,14 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
       current = { ...current, port, canOperate, legacyAutoRetried, machine };
       update(environmentId, current);
     }
-    if (!enabled || !bootstrapped || !current.connected || !port || machine.ensure.state !== "idle")
+    if (
+      !homeReady ||
+      !enabled ||
+      !bootstrapped ||
+      !current.connected ||
+      !port ||
+      machine.ensure.state !== "idle"
+    )
       return;
     const request = startGoatBotEnsure(machine);
     update(environmentId, { ...current, machine: request.machine });
@@ -232,6 +278,17 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
         settle({ kind: "confirmed", bot }, bot);
       } catch (error) {
         const gatewayError = error as ChannelGatewayError | null;
+        if (gatewayError?.reason === "not_home") {
+          const latest = useSessions.getState().sessions.get(environmentId);
+          if (latest?.machine.pending === request.token) {
+            update(environmentId, {
+              ...latest,
+              machine: retryGoatBotEnsure(latest.machine),
+              notHome: { homeKey, settingsSnapshot },
+            });
+          }
+          return;
+        }
         settle(
           gatewayError?.reason === "legacy_active"
             ? { kind: "legacy_active" }
@@ -244,6 +301,9 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
     })();
   }, [
     environmentId,
+    homeReady,
+    homeKey,
+    settingsSnapshot,
     enabled,
     bootstrapped,
     port,
@@ -257,12 +317,13 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
   const availability = !enabled
     ? { kind: "unsupported" as const }
     : resolveGoatBotAvailability({
-        environments: environment === null ? [] : [environment],
+        environments,
         botRef,
         ensure:
           session?.connected === environment?.connected &&
           session?.capability === environment?.supportsChannelLedger &&
-          session?.port === port
+          session?.port === port &&
+          session.homeKey === homeKey
             ? session.machine.ensure
             : { state: "idle" },
       });
@@ -298,7 +359,7 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
     onRetryAvailability: () => {
       if (environmentId === null) return;
       const current = useSessions.getState().sessions.get(environmentId);
-      if (current)
+      if (current && current.notHome === null)
         update(environmentId, { ...current, machine: retryGoatBotEnsure(current.machine) });
     },
   };
