@@ -34,7 +34,8 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'dev' &&
       github.event.workflow_run.head_repository.full_name == 'goat-si/goat'))
-    runs-on: [self-hosted, linux, x64, goat, epyc]
+    # Hosted: the resolve step needs gh, which the EPYC runners do not carry.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       skip: ${{ steps.resolve.outputs.skip }}
