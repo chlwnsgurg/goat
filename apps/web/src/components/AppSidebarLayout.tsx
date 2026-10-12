@@ -85,7 +85,7 @@ function readInitialThreadSidebarWidth(): number {
   }
 }
 
-function SidebarControl({
+export function SidebarControl({
   onCollapsedBrandWidthChange,
 }: {
   onCollapsedBrandWidthChange: (width: number) => void;
@@ -135,6 +135,7 @@ function SidebarControl({
     // A focused desktop browser page forwards the chord as a menu action.
     const unsubscribe = window.desktopBridge?.onMenuAction((action) => {
       if (action === "sidebar.toggle") toggleSidebar();
+      else if (action === "sidebar.toggleActivity") void toggleActivity();
     });
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);

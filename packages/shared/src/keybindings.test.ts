@@ -12,6 +12,7 @@ describe("sidebar activity keybinding", () => {
   it.each([
     { platform: "MacIntel", metaKey: true, ctrlKey: false, key: "¨" },
     { platform: "Win32", metaKey: false, ctrlKey: true, key: "u" },
+    { platform: "Linux", metaKey: false, ctrlKey: true, key: "u" },
   ])("resolves mod+alt+u on $platform", ({ platform, metaKey, ctrlKey, key }) => {
     const bindings = compileResolvedKeybindingsConfig(DEFAULT_KEYBINDINGS);
     const matching = bindings.filter((binding) =>
