@@ -952,6 +952,27 @@ export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   return completedAt > lastVisitedAt;
 }
 
+/** Only writable unread threads are targets of Priority's bulk visit action. */
+export function selectSidebarMarkReadTargets<
+  T extends ThreadStatusInput & Pick<SidebarThreadSummary, "environmentId" | "id">,
+>(input: {
+  readonly threads: readonly T[];
+  readonly localLastVisitedAtByKey: Readonly<Record<string, string | undefined>>;
+  readonly canOperate: (thread: T) => boolean;
+}): T[] {
+  return input.threads.filter((thread) => {
+    if (!input.canOperate(thread)) return false;
+    const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    return hasUnseenCompletion({
+      ...thread,
+      lastVisitedAt: resolveThreadLastVisitedAt(
+        thread.lastVisitedAt,
+        input.localLastVisitedAtByKey[key],
+      ),
+    });
+  });
+}
+
 /** A visit acknowledges a wake without changing the thread's lifecycle. */
 export function isSidebarThreadWoke(
   wokeAt: string | null,

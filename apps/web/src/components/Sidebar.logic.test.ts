@@ -30,6 +30,7 @@ import {
   getSidebarForkParentThreadId,
   getSidebarThreadIdsToPrewarm,
   hasUnseenCompletion,
+  selectSidebarMarkReadTargets,
   isContextMenuPointerDown,
   isSidebarSubagentThread,
   isTrailingDoubleClick,
@@ -655,6 +656,50 @@ describe("Activity Priority", () => {
         thread: { ...thread, lastVisitedAt: undefined },
       }),
     ).toBe(2);
+  });
+
+  it("marks only unread threads in operable environments from a mixed-permission list", () => {
+    const readOnlyEnvironment = EnvironmentId.make("read-only");
+    const legacyEnvironment = EnvironmentId.make("legacy");
+    const writableUnread = makeThread({ latestRun: makeLatestRun(), lastVisitedAt: before });
+    const readOnlyUnread = makeThread({
+      environmentId: readOnlyEnvironment,
+      latestRun: makeLatestRun(),
+      lastVisitedAt: before,
+    });
+    const writableRead = makeThread({
+      id: ThreadId.make("already-read"),
+      latestRun: makeLatestRun(),
+      lastVisitedAt: after,
+    });
+    const legacyUnread = {
+      ...makeThread({ environmentId: legacyEnvironment, latestRun: makeLatestRun() }),
+      lastVisitedAt: undefined,
+    };
+    const threads = [readOnlyUnread, writableUnread, writableRead, legacyUnread];
+    const localLastVisitedAtByKey = {
+      [delegatedChildKey(writableUnread)]: after,
+      [scopedThreadKey(scopeThreadRef(legacyUnread.environmentId, legacyUnread.id))]: before,
+    };
+    const permitted = new Set([localEnvironmentId, legacyEnvironment]);
+    const targets = () =>
+      selectSidebarMarkReadTargets({
+        threads,
+        localLastVisitedAtByKey,
+        canOperate: (thread) => permitted.has(thread.environmentId),
+      });
+    expect(targets()).toEqual([writableUnread, legacyUnread]);
+    permitted.clear();
+    expect(targets()).toEqual([]);
+    permitted.add(readOnlyEnvironment);
+    expect(targets()).toEqual([readOnlyUnread]);
+    expect(
+      selectSidebarMarkReadTargets({
+        threads: [writableRead],
+        localLastVisitedAtByKey,
+        canOperate: () => true,
+      }),
+    ).toEqual([]);
   });
 
   it("includes unacknowledged wakes, including settled rows, but not malformed wakes", () => {

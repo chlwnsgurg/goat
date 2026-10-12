@@ -154,6 +154,7 @@ import {
 } from "../state/environments";
 import {
   readThreadShell,
+  readEnvironmentSupportsVisitedTracking,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
   useThreadShells,
@@ -172,7 +173,11 @@ import {
 } from "./sidebar/SidebarDelegatedChildren";
 import { useSidebarDelegatedChildIndex } from "./sidebar/delegatedChildIndex";
 import { usePromoteThread } from "./promoteThread";
-import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
+import {
+  readEnvironmentScope,
+  useEnvironmentScope,
+  useEnvironmentsWithScope,
+} from "../state/session";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -209,6 +214,7 @@ import {
   formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
+  selectSidebarMarkReadTargets,
   isSidebarNestedLinkClick,
   isSidebarThreadWoke,
   resolveSidebarPriorityRank,
@@ -2964,26 +2970,55 @@ export default function Sidebar() {
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => subscribeSidebarSearchFocus(() => threadSearchInputRef.current?.focus()), []);
-  const unreadPriorityThreads = useMemo(
-    () =>
-      priorityThreads.filter((thread) => {
-        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        return hasUnseenCompletion({
-          ...thread,
-          lastVisitedAt: resolveThreadLastVisitedAt(
-            thread.lastVisitedAt,
-            localLastVisitedAtByKey[key],
-          ),
-        });
-      }),
-    [priorityThreads, localLastVisitedAtByKey],
+  const operablePriorityEnvironments = useEnvironmentsWithScope(
+    priorityThreads,
+    AuthOrchestrationOperateScope,
   );
+  const priorityReadTargets = useMemo(
+    () =>
+      selectSidebarMarkReadTargets({
+        threads: priorityThreads,
+        localLastVisitedAtByKey,
+        canOperate: (thread) => operablePriorityEnvironments.has(thread.environmentId),
+      }),
+    [priorityThreads, localLastVisitedAtByKey, operablePriorityEnvironments],
+  );
+  const visitPriorityThread = useOrchestrationCommand(threadEnvironment.visit, {
+    reportFailure: false,
+  });
+  const markThreadVisited = useUiStateStore((state) => state.markThreadVisited);
   const markPriorityRead = useCallback(() => {
+    const targets = selectSidebarMarkReadTargets({
+      threads: priorityThreads,
+      localLastVisitedAtByKey,
+      canOperate: (thread) => canOperateThreads([thread]),
+    });
     const visitedAt = new Date().toISOString();
-    for (const thread of unreadPriorityThreads) {
-      acknowledgeWoke(scopeThreadRef(thread.environmentId, thread.id), visitedAt);
-    }
-  }, [acknowledgeWoke, unreadPriorityThreads]);
+    void (async () => {
+      for (const thread of targets) {
+        if (!canOperateThreads([thread])) continue;
+        const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+        if (!readEnvironmentSupportsVisitedTracking(thread.environmentId)) {
+          markThreadVisited(scopedThreadKey(threadRef), visitedAt);
+          continue;
+        }
+        const result = await visitPriorityThread({
+          environmentId: thread.environmentId,
+          input: { threadId: thread.id, visitedAt },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to mark thread as read",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      }
+    })();
+  }, [priorityThreads, localLastVisitedAtByKey, markThreadVisited, visitPriorityThread]);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
@@ -5653,7 +5688,7 @@ export default function Sidebar() {
                                   </MenuTrigger>
                                   <MenuPopup side="bottom" align="end">
                                     <MenuItem
-                                      disabled={unreadPriorityThreads.length === 0}
+                                      disabled={priorityReadTargets.length === 0}
                                       onClick={markPriorityRead}
                                     >
                                       Mark all as read
