@@ -41,6 +41,7 @@ import {
   SidebarCollapsedBrand,
 } from "./sidebar/SidebarChrome";
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
+import { useSidebarActivityToggle } from "./sidebar/SidebarViewToggles";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { useProjects } from "../state/entities";
 import {
@@ -92,6 +93,7 @@ function SidebarControl({
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar } = useSidebar();
+  const { toggleActivity } = useSidebarActivityToggle();
   const isSidebarVisible = useSidebarVisibility();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const stageBackdropVariant = useSidebarStageBackdropVariant(
@@ -119,15 +121,13 @@ function SidebarControl({
         // available everywhere else, including the plain-text composer.
         return;
       }
-      if (
-        resolveShortcutCommand(event, keybindings, { context: { usagePageOpen } }) !==
-        "sidebar.toggle"
-      )
-        return;
+      const command = resolveShortcutCommand(event, keybindings, { context: { usagePageOpen } });
+      if (command !== "sidebar.toggle" && command !== "sidebar.toggleActivity") return;
 
       event.preventDefault();
       event.stopPropagation();
-      toggleSidebar();
+      if (command === "sidebar.toggleActivity") void toggleActivity();
+      else toggleSidebar();
     };
 
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
@@ -140,7 +140,7 @@ function SidebarControl({
       window.removeEventListener("keydown", onKeyDown, true);
       unsubscribe?.();
     };
-  }, [keybindings, toggleSidebar, usagePageOpen]);
+  }, [keybindings, toggleActivity, toggleSidebar, usagePageOpen]);
 
   return (
     // The right-side layout controls carry mr-px (border compensation inside

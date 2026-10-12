@@ -33,12 +33,17 @@ import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
+import { SidebarViewToggles } from "./SidebarViewToggles";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
 }: {
   isElectron: boolean;
 }) {
+  const isOnSettings = useLocation({
+    select: (location) =>
+      location.pathname === "/settings" || location.pathname.startsWith("/settings/"),
+  });
   const stageLabel = useEnvironmentStageLabel();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const backdropVariant = resolveSidebarStageBackdropVariant(
@@ -76,6 +81,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           </div>
         ) : null}
       </div>
+      {!isOnSettings ? <SidebarViewToggles onBackdrop={backdropVariant !== null} /> : null}
     </div>
   );
 });
@@ -99,12 +105,16 @@ export function SidebarBrandWidthProbe({
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none invisible fixed top-0 left-0 flex w-max border-r border-transparent pr-3"
+      className="pointer-events-none invisible fixed top-0 left-0 flex w-max items-center gap-2 border-r border-transparent pr-3"
       ref={observeWidth}
     >
       <div className="-mr-1.5 ml-[calc(var(--workspace-titlebar-content-left)-0.375rem)] flex px-1.5">
         <SidebarBrandMark onBackdrop={false} />
       </div>
+      <span className="flex items-center gap-1">
+        <span className="size-8 sm:size-7" />
+        <span className="size-8 sm:size-7" />
+      </span>
     </div>
   );
 }
