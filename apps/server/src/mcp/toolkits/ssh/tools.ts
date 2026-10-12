@@ -129,7 +129,7 @@ const SshThreadLaunchTool = Tool.make("goat_ssh_thread_launch", {
     notifyOnCompletion: Schema.optional(
       Schema.Boolean.annotate({
         description:
-          "Default true for a calling GOAT thread: the launch watch follows the remote thread over SSH and wakes the caller when its run ends, waits on a question, or its host stays unreachable. Pass false to follow run ends yourself. Agent reports still arrive per reportDelivery; wake (default) wakes only for needs_input questions, while completed and failed reports wait for the next origin turn.",
+          'Default true for a calling GOAT thread: the launch watch follows the remote thread over SSH and wakes the caller when its run ends, waits on a question, or its host stays unreachable. Pass notifyOnCompletion:false or use goat_thread_unwatch to stop run-end and host-outage reports. None of this remote thread\'s questions arrive through the launch watch after opting out. SSH-host questions then need goat_thread_wait({host}) or goat_pending_request_list({scope:"launched", hosts}). Approvals are no longer reported; check goat_thread_read or tell the user the thread may be waiting. Agent reports still arrive per reportDelivery; wake (default) wakes only for needs_input questions, while completed and failed reports wait for the next origin turn.',
       }),
     ),
   }),

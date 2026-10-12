@@ -2223,6 +2223,7 @@ export default function ChatView(props: ChatViewProps) {
     () =>
       launcherRelationshipToParent !== "subagent" &&
       launchedBy !== undefined &&
+      launchedBy.via !== "delegate_task" &&
       launcherOwnEnvironmentId !== undefined
         ? resolveLauncherRef(launchedBy, launcherOwnEnvironmentId)
         : null,

@@ -75,6 +75,7 @@ export const layer = McpToolAccess.toLayer(SshToolkit, {
                 environmentId: descriptor.environmentId,
                 environmentLabel: descriptor.label,
                 threadTitle: launcher.title,
+                via: "ssh_thread_launch" as const,
               })),
             );
       const attachments = yield* dispatch

@@ -1098,25 +1098,49 @@ const make = Effect.gen(function* () {
       );
       // Authority may have changed while the last upload completed.
       yield* beforeLaunch;
-      const rawLaunched = yield* callRemote({
-        ...remote,
-        tool: "goat_thread_launch",
-        beforeToolCall: beforeLaunch,
-        arguments: {
-          projectId,
-          title: input.title,
-          workspaceStrategy,
-          runtimeMode: input.runtimeMode,
-          ...(input.interactionMode === undefined
-            ? {}
-            : { interactionMode: input.interactionMode }),
-          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-          ...(message === undefined ? {} : { message }),
-          ...(forwardLaunchedBy ? { launchedBy: input.launchedBy } : {}),
-          ...(attachments.length === 0 ? {} : { attachments }),
-          ...(forwardReport ? { report: input.report } : {}),
-        },
-      });
+      const launch = (withLaunchedBy: boolean) =>
+        callRemote({
+          ...remote,
+          tool: "goat_thread_launch",
+          beforeToolCall: beforeLaunch,
+          arguments: {
+            projectId,
+            title: input.title,
+            workspaceStrategy,
+            runtimeMode: input.runtimeMode,
+            ...(input.interactionMode === undefined
+              ? {}
+              : { interactionMode: input.interactionMode }),
+            ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+            ...(message === undefined ? {} : { message }),
+            ...(withLaunchedBy
+              ? {
+                  launchedBy: {
+                    ...input.launchedBy,
+                    via: input.launchedBy?.via ?? "ssh_thread_launch",
+                  },
+                }
+              : {}),
+            ...(attachments.length === 0 ? {} : { attachments }),
+            ...(forwardReport ? { report: input.report } : {}),
+          },
+        });
+      const rawLaunched = yield* launch(forwardLaunchedBy).pipe(
+        Effect.catch((error) =>
+          error instanceof SshRemoteDispatchError &&
+          forwardLaunchedBy &&
+          (error.reason === "remote_refused" || error.reason === "ssh_failed") &&
+          error.message.includes("goat_thread_launch does not take launchedBy, so nothing ran")
+            ? Effect.gen(function* () {
+                const result = yield* launch(false);
+                notes.push(
+                  'This remote does not record its launcher, so scope:"launched" cannot find its questions; use host and threadId.',
+                );
+                return result;
+              })
+            : Effect.fail(error),
+        ),
+      );
       const launched = yield* decodeRemoteThread(rawLaunched).pipe(
         Effect.mapError(
           () =>

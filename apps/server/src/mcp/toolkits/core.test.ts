@@ -1,3 +1,4 @@
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as RemoteDispatchCoordinator from "../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -8,6 +9,10 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ChatImageAttachment,
   CommandId,
+  RuntimeRequestId,
+  NodeId,
+  TurnItemId,
+  type OrchestrationV2ServerCommand,
   EnvironmentId,
   ProviderInstanceId,
   RunId,
@@ -15,6 +20,8 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -24,6 +31,7 @@ import { FetchHttpClient } from "effect/http";
 
 import {
   OrchestratorCommandRejectedError,
+  OrchestratorQuestionAlreadyAnsweredError,
   OrchestratorDispatchError,
   OrchestratorProjectionError,
 } from "../../orchestration-v2/Orchestrator.ts";
@@ -41,8 +49,10 @@ import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService
 import * as McpHttpServer from "../McpHttpServer.ts";
 import * as SshRemoteDispatch from "../../sshRemote/SshRemoteDispatch.ts";
 import * as LaunchWatchService from "../LaunchWatchService.ts";
+import { newLaunchWatch } from "../launchWatch.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
+import { DispatchModeLimit } from "../../orchestration-v2/DispatchModeLimit.ts";
 import { dispatchFailure } from "../threadAccess.ts";
 import { OrchestratorToolkit } from "./orchestrator/tools.ts";
 import { PreviewToolkit } from "./preview/tools.ts";
@@ -54,6 +64,9 @@ import { RemoteReportToolkit } from "./remoteReport/tools.ts";
 import { AttachmentToolkit } from "./attachment/tools.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
+import * as SshHandlers from "./ssh/handlers.ts";
+import * as McpToolAccess from "../McpToolAccess.ts";
+import * as Stream from "effect/Stream";
 import { SshToolkit } from "./ssh/tools.ts";
 import { ConnectionToolkit } from "./connection/tools.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
@@ -78,8 +91,17 @@ const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 
 // Registration asks for every service the thread tools declare; these cases call none that use them.
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+  Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+  Layer.provide(
+    Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({ connectedHosts: Effect.succeed([]) }),
+  ),
+  Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+  Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+  Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
 );
 
 it("publishes unique tool names with reference-free object-root inputs", () => {
@@ -178,6 +200,32 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
   expect([...names].some((name) => name.startsWith("t3_"))).toBe(false);
   expect(names.has("goat_thread_launch")).toBe(true);
   expect(names.has("t3_thread_start")).toBe(false);
+  expect(ProjectToolkit.tools.goat_thread_launch.description).toContain(
+    'notifyOnCompletion:false or goat_thread_unwatch stops run-end and host-outage reports. Only local user-input questions still arrive. SSH-host questions then need goat_thread_wait({host}) or goat_pending_request_list({scope:"launched", hosts}). Approvals are no longer reported; check goat_thread_read or tell the user the thread may be waiting.',
+  );
+  for (const [tool, questionDelivery] of [
+    [ProjectToolkit.tools.goat_thread_launch, "Only local user-input questions still arrive."],
+    [
+      SshToolkit.tools.goat_ssh_thread_launch,
+      "None of this remote thread's questions arrive through the launch watch after opting out.",
+    ],
+  ] as const) {
+    const schema = Tool.getJsonSchema(tool);
+    expect(schema).toMatchObject({
+      properties: {
+        notifyOnCompletion: {
+          anyOf: expect.arrayContaining([
+            {
+              type: "boolean",
+              description: expect.stringContaining(
+                `${questionDelivery} SSH-host questions then need goat_thread_wait({host}) or goat_pending_request_list({scope:"launched", hosts}). Approvals are no longer reported; check goat_thread_read or tell the user the thread may be waiting.`,
+              ),
+            },
+          ]),
+        },
+      },
+    });
+  }
 });
 
 const threadId = ThreadId.make("mcp-core-thread");
@@ -877,4 +925,560 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
       ),
     ),
   ),
+);
+
+it.effect(
+  "validates reason, records authenticated responders, and reads resolved questions through registration",
+  () =>
+    Effect.gen(function* () {
+      const requestId = RuntimeRequestId.make("question-request");
+      const targetId = ThreadId.make("asking");
+      const now = DateTime.makeUnsafe("2026-10-12T00:00:00.000Z");
+      const captured: OrchestrationV2ServerCommand[] = [];
+      const shell = McpToolAccessTestkit.liveThreadShell(targetId);
+      const projection = McpToolAccessTestkit.idleThreadProjection(shell);
+      let request = {
+        id: requestId,
+        nodeId: NodeId.make("question-node"),
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input",
+        status: "pending",
+        responseCapability: { type: "message" },
+        createdAt: now,
+        resolvedAt: null,
+      } as import("@t3tools/contracts").OrchestrationV2RuntimeRequest;
+      const item: import("@t3tools/contracts").OrchestrationV2TurnItem = {
+        id: TurnItemId.make("question-item"),
+        type: "user_input_request",
+        threadId: targetId,
+        runId: null,
+        nodeId: request.nodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "waiting",
+        title: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        requestId,
+        questions: [{ id: "q", header: "Choice", question: "Continue?", options: [] }],
+      };
+      let rejection: OrchestratorQuestionAlreadyAnsweredError | undefined;
+      const dependencies = layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: () =>
+              Effect.succeed({ ...projection, runtimeRequests: [request], turnItems: [item] }),
+            dispatch: (command) => {
+              captured.push(command);
+              return rejection === undefined
+                ? Effect.succeed({ sequence: 7, storedEvents: [] })
+                : Effect.fail(rejection);
+            },
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const call = (name: string, args: Record<string, unknown>, invocation = scope) =>
+          server
+            .callTool({ name, arguments: args })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+              Effect.provideService(McpSchema.McpServerClient, client),
+            );
+        const args = { threadId: targetId, requestId, answers: { q: "  Exact option  " } };
+        for (const reason of [undefined, "", "   ", "R".repeat(2001)]) {
+          const failure = yield* call("goat_pending_request_respond", {
+            ...args,
+            ...(reason === undefined ? {} : { reason }),
+          }).pipe(Effect.flip);
+          expect(failure._tag).toBe("InvalidParams");
+        }
+        expect(captured).toHaveLength(0);
+        for (const reason of ["R", "R".repeat(2000)]) {
+          const result = yield* call("goat_pending_request_respond", { ...args, reason });
+          expect(result.structuredContent).toEqual({ sequence: 7 });
+          expect(captured.at(-1)).toMatchObject({
+            threadId: targetId,
+            answers: args.answers,
+            respondedBy: {
+              type: "agent",
+              threadId: scope.thread!.threadId,
+              environmentId: null,
+              title: scope.thread!.threadId,
+              reason,
+            },
+          });
+        }
+        yield* call(
+          "goat_pending_request_respond",
+          { ...args, reason: "Outside reason" },
+          clientScope("full-access"),
+        );
+        expect(captured.at(-1)).toMatchObject({
+          respondedBy: { type: "client", reason: "Outside reason" },
+        });
+        const schema = Tool.getJsonSchema(ThreadToolkit.tools.goat_pending_request_respond);
+        expect(schema.required).toContain("reason");
+        expect(JSON.stringify(schema)).toContain('"maxLength":2000');
+        for (const key of ["scope", "launchedBy"])
+          expect(schema.properties).not.toHaveProperty(key);
+        for (const key of ["host", "respondedBy"]) expect(schema.properties).toHaveProperty(key);
+        const respondedBy = { type: "client" as const, reason: "Winner private reason" };
+        const pendingRequest = request;
+        for (const status of ["pending", "resolved", "expired", "cancelled"] as const) {
+          request = {
+            ...pendingRequest,
+            status,
+            resolvedAt: status === "pending" ? null : now,
+            ...(status === "resolved" ? { respondedBy } : {}),
+          };
+          const result = yield* call("goat_pending_request_read", {
+            threadId: targetId,
+            requestId,
+          });
+          expect(result.isError).toBe(false);
+          expect(result.structuredContent).toMatchObject({
+            requestId,
+            questions: item.questions,
+            status,
+            resolvedAt: status === "pending" ? null : DateTime.formatIso(now),
+          });
+        }
+        request = {
+          ...request,
+          status: "resolved",
+          respondedBy: { type: "user" },
+          decision: "cancel",
+        };
+        const dismissal = yield* call("goat_pending_request_read", {
+          threadId: targetId,
+          requestId,
+        });
+        expect(dismissal.structuredContent).toMatchObject({
+          status: "resolved",
+          decision: "cancel",
+          respondedBy: { type: "user" },
+        });
+        request = { ...request, status: "resolved", respondedBy };
+        rejection = new OrchestratorQuestionAlreadyAnsweredError({
+          commandId: CommandId.make("loser"),
+          requestId,
+          respondedBy,
+          resolvedAt: now,
+          status: "resolved",
+        });
+        for (const status of ["resolved", "pending"] as const) {
+          request = { ...request, status };
+          const result = yield* call("goat_pending_request_respond", { ...args, reason: "Loser" });
+          expect(declaredFailure(result)).toMatchObject({
+            code: "invalid_request",
+            message: rejection.message,
+          });
+          expect(rejection.message).not.toContain(respondedBy.reason);
+        }
+        const before = captured.length;
+        for (const kind of [
+          "command",
+          "file-read",
+          "file-change",
+          "mcp-elicitation",
+          "permission",
+        ] as const) {
+          request = { ...request, kind, status: "pending" };
+          const result = yield* call("goat_pending_request_respond", {
+            ...args,
+            reason: "No approval authority",
+          });
+          expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+        }
+        expect(captured).toHaveLength(before);
+      }).pipe(Effect.provide(dependencies));
+    }),
+);
+
+it.effect("keeps ceiling codes and forwards questions to the user before and under the lock", () =>
+  Effect.gen(function* () {
+    const targetId = ThreadId.make("target");
+    const now = DateTime.makeUnsafe("2026-10-12T00:00:00Z");
+    let preflight = true;
+    let mode: "runtime" | "interaction" = "runtime";
+    const shell = () =>
+      McpToolAccessTestkit.liveThreadShell(targetId, {
+        runtimeMode: preflight && mode === "runtime" ? "full-access" : "auto",
+        interactionMode: "default",
+      });
+    const projection = () => ({
+      ...McpToolAccessTestkit.idleThreadProjection(shell()),
+      runtimeRequests: [
+        {
+          id: RuntimeRequestId.make("request"),
+          nodeId: NodeId.make("node"),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "user_input" as const,
+          status: "pending" as const,
+          responseCapability: { type: "message" as const },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      ],
+      turnItems: [{ type: "user_input_request", requestId: "request", questions: [] }],
+    });
+    const dependencies = layerThreadToolkit.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provide(NodeCrypto.layer),
+      Layer.provide(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (id) =>
+            Effect.succeed(
+              id === ThreadId.make("plan-caller")
+                ? McpToolAccessTestkit.liveThreadShell(id, {
+                    runtimeMode: "auto",
+                    interactionMode: "plan",
+                  })
+                : shell(),
+            ),
+          getProjectThreadRecords: () => Effect.succeed(projection() as never),
+          dispatch: () =>
+            Effect.gen(function* () {
+              const limit = yield* DispatchModeLimit;
+              if (limit?.refused === undefined) return yield* Effect.die("Missing dispatch guard");
+              yield* Ref.set(limit.refused, {
+                mode,
+                threadId: targetId,
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+              });
+              return yield* new OrchestratorDispatchError({
+                commandId: CommandId.make("raised"),
+                commandType: "runtime-request.respond",
+              });
+            }),
+        }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (invocation: McpInvocationContext.McpInvocationScope) =>
+        server
+          .callTool({
+            name: "goat_pending_request_respond",
+            arguments: {
+              threadId: targetId,
+              requestId: "request",
+              answers: { q: "Yes" },
+              reason: "R",
+            },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      for (const stage of ["preflight", "locked"] as const) {
+        preflight = stage === "preflight";
+        for (const selectedMode of ["runtime", "interaction"] as const) {
+          mode = selectedMode;
+          const invocation =
+            mode === "runtime"
+              ? clientScope("auto")
+              : { ...scope, thread: { ...scope.thread!, threadId: ThreadId.make("plan-caller") } };
+          // The thread caller's plan ceiling needs a different shell from its target.
+          const result = yield* call(invocation);
+          expect(declaredFailure(result)).toMatchObject({
+            code:
+              mode === "runtime"
+                ? "runtime_mode_escalation_denied"
+                : "interaction_mode_escalation_denied",
+            message: expect.stringContaining("forward it to the user"),
+          });
+        }
+      }
+    }).pipe(Effect.provide(dependencies));
+  }),
+);
+
+it("declares every pending and launcher host-transport argument on strict schemas", () => {
+  for (const [tool, keys] of [
+    [
+      ThreadToolkit.tools.goat_pending_request_list,
+      ["host", "scope", "hosts", "launcherThreadId", "launcherEnvironmentId", "threadId"],
+    ],
+    [ThreadToolkit.tools.goat_pending_request_read, ["host", "threadId", "requestId"]],
+    [
+      ThreadToolkit.tools.goat_pending_request_respond,
+      ["host", "threadId", "requestId", "reason", "respondedBy"],
+    ],
+    [ProjectToolkit.tools.goat_thread_launch, ["launchedBy"]],
+    [OrchestratorToolkit.tools.goat_thread_wait, ["ignoreRequestIds"]],
+  ] as const) {
+    const schema = Tool.getJsonSchema(tool);
+    // Production registration closes top-level schemas; raw Tool schemas remain open.
+    for (const key of keys) expect(schema.properties).toHaveProperty(key);
+  }
+});
+
+it.effect.each([false, true])(
+  "SSH launch derives origin identity from invocation scope, thread=%s",
+  (hasThread) =>
+    Effect.gen(function* () {
+      const captured: Array<SshRemoteDispatch.SshLaunchInput> = [];
+      const watches: Array<Parameters<LaunchWatchService.LaunchWatchServiceShape["register"]>[0]> =
+        [];
+      const invocation = hasThread ? scope : clientScope("full-access");
+      const remoteResult = {
+        host: "box",
+        cwd: "/repo",
+        projectId: "project",
+        projectCreated: false,
+        threadId: "remote",
+        runId: null,
+        reportsSupported: true,
+        workspaceStrategy: { type: "root" as const },
+        runtimeMode: "full-access" as const,
+        remoteServerKind: "managed" as const,
+        notes: [],
+      };
+      const dependencies = Layer.mergeAll(
+        NodeCrypto.layer,
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getDescriptor: Effect.succeed({
+            environmentId: invocation.environmentId,
+            label: "test",
+          } as never),
+        }),
+        Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({
+          launch: (input, check) =>
+            check.pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  captured.push(input.launch);
+                  return { correlationId: "fixture", launch: remoteResult, reportsSupported: true };
+                }),
+              ),
+            ),
+        }),
+        Layer.succeed(McpInvocationContext.McpInvocationContext, invocation),
+        McpToolAccessTestkit.liveThreadsLayer,
+        Layer.mock(LaunchWatchService.LaunchWatchService)({
+          register: (input) =>
+            Effect.sync(() => {
+              watches.push(input);
+              return newLaunchWatch({
+                ...input,
+                host: input.host ?? null,
+                incarnation: "test",
+                now: 0,
+              });
+            }),
+        }),
+        Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+          validateLaunchAttachments: (attachments) => Effect.succeed(attachments),
+          launchThread: (input, check) =>
+            check.pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  captured.push(input);
+                  return remoteResult;
+                }),
+              ),
+            ),
+        }),
+      );
+      const toolkit = yield* SshToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(SshHandlers.layer).pipe(Layer.provide(dependencies)),
+        ),
+      );
+      const result = yield* toolkit
+        .handle("goat_ssh_thread_launch", { host: "box", cwd: "/repo", title: "Remote" })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect(result.at(-1)?.result).toMatchObject({ threadId: "remote" });
+      expect(watches).toEqual(
+        hasThread
+          ? [
+              {
+                launcherThreadId: threadId,
+                host: "box",
+                threadId: "remote",
+                projectId: null,
+                title: "Remote",
+                runId: null,
+              },
+            ]
+          : [],
+      );
+      expect(captured[0]?.launchedBy).toEqual(
+        hasThread
+          ? {
+              kind: "launch",
+              threadId: scope.thread!.threadId,
+              environmentId: scope.environmentId,
+              environmentLabel: "test",
+              threadTitle: McpToolAccessTestkit.liveThreadShell(threadId).title,
+              via: "ssh_thread_launch",
+            }
+          : undefined,
+      );
+    }),
+);
+
+it.effect("pending toolkit host routing preserves target authority", () =>
+  Effect.gen(function* () {
+    const sent: Array<SshRemoteDispatch.SshHostToolCall> = [];
+    const localTargets: Array<ThreadId> = [];
+    const remoteId = ThreadId.make("remote-thread");
+    const dependencies = McpHttpServer.layerThreadToolkit.pipe(
+      Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+      Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provide(NodeCrypto.layer),
+      Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+      Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+      Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+      Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+      Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+      Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+      Layer.provide(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (id) => {
+            localTargets.push(id);
+            return Effect.succeed(McpToolAccessTestkit.liveThreadShell(id));
+          },
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+          connectedHosts: Effect.succeed([]),
+          callHostTool: (call, authorize) =>
+            authorize.pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  sent.push(call);
+                  return null;
+                }),
+              ),
+              Effect.andThen(
+                Effect.fail(
+                  new SshRemoteDispatch.SshRemoteDispatchError({
+                    reason: "remote_refused",
+                    remoteCode: "runtime_mode_escalation_denied",
+                    message: "Destination ceiling",
+                  }),
+                ),
+              ),
+            ),
+        }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (
+        name: string,
+        args: Record<string, unknown>,
+        invocation: McpInvocationContext.McpInvocationScope,
+      ) =>
+        server
+          .callTool({ name, arguments: args })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      for (const name of ["goat_pending_request_list", "goat_pending_request_read"]) {
+        const result = yield* call(
+          name,
+          { host: "box", threadId: remoteId, ...(name.endsWith("read") ? { requestId: "q" } : {}) },
+          clientScope("read-only"),
+        );
+        expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+      }
+      const launchedReadOnly = yield* call(
+        "goat_pending_request_list",
+        { scope: "launched" },
+        clientScope("read-only"),
+      );
+      expect(declaredFailure(launchedReadOnly)).toMatchObject({ code: "capability_denied" });
+      expect(sent).toEqual([]);
+      const result = yield* call(
+        "goat_pending_request_respond",
+        {
+          host: "box",
+          threadId: remoteId,
+          requestId: "q",
+          answers: { q: "yes" },
+          reason: "The API supports it",
+        },
+        scope,
+      );
+      expect(declaredFailure(result)).toMatchObject({
+        code: "runtime_mode_escalation_denied",
+        message: expect.stringContaining("forward it to the user"),
+      });
+      expect(localTargets).not.toContain(remoteId);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.arguments).not.toHaveProperty("host");
+      for (const reason of [" ", "\n\t"]) {
+        const failure = yield* call(
+          "goat_pending_request_respond",
+          {
+            threadId: remoteId,
+            requestId: "q",
+            answers: {},
+            reason: "Valid",
+            respondedBy: {
+              type: "agent",
+              threadId: "foreign",
+              environmentId: "foreign-env",
+              title: null,
+              reason,
+            },
+          },
+          clientScope("full-access"),
+        ).pipe(Effect.flip);
+        expect(failure._tag).toBe("InvalidParams");
+      }
+      expect(sent).toHaveLength(1);
+    }).pipe(Effect.provide(dependencies));
+  }),
+);
+
+it.effect(
+  "publishes strict pending transport schemas and rejects unknown keys before dispatch",
+  () =>
+    Effect.gen(function* () {
+      const dependencies = layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+      );
+      yield* Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        for (const name of [
+          "goat_pending_request_list",
+          "goat_pending_request_read",
+          "goat_pending_request_respond",
+        ]) {
+          const definition = server.tools.find(({ tool }) => tool.name === name);
+          expect(definition?.tool.inputSchema.additionalProperties).toBe(false);
+          const result = yield* server
+            .callTool({ name, arguments: { misspelledHost: "box" } })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+              Effect.provideService(McpSchema.McpServerClient, client),
+            );
+          expect(declaredFailure(result)).toMatchObject({
+            code: "invalid_request",
+            message: expect.stringContaining("so nothing ran"),
+          });
+        }
+      }).pipe(Effect.provide(dependencies));
+    }),
 );

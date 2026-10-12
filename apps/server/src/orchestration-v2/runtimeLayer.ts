@@ -2,6 +2,8 @@ import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
+import * as Effect from "effect/Effect";
+import * as QuestionEscalationService from "./QuestionEscalationService.ts";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
@@ -346,6 +348,17 @@ export const layer = Layer.mergeAll(
 export const layerProduction = Layer.mergeAll(
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* QuestionEscalationService.QuestionEscalationService;
+      yield* service.start();
+    }),
+  ).pipe(
+    Layer.provide(QuestionEscalationService.layer),
+    Layer.provide(
+      Layer.mergeAll(layerOrchestratorProvided, layerEventSinkProvided, ProjectionStore.layer),
+    ),
+  ),
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,
   layerThreadLifecycleProvided,

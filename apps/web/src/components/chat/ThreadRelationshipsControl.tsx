@@ -324,7 +324,8 @@ export function ThreadRelationshipsPanel(props: {
     return deriveThreadRelationshipGraph({ threads: shells, projection });
   }, [archivedShells, projection, props.environmentId, threadShells]);
   const currentThread = projection?.thread ?? graph.nodes.get(props.threadId)?.thread;
-  const launchedBy = currentThread?.launchedBy;
+  const launchedBy =
+    currentThread?.launchedBy?.via === "delegate_task" ? undefined : currentThread?.launchedBy;
   const launcherRef = useMemo(
     () => (launchedBy === undefined ? null : resolveLauncherRef(launchedBy, props.environmentId)),
     [launchedBy, props.environmentId],

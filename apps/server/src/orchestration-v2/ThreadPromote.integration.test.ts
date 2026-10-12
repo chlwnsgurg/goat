@@ -175,7 +175,14 @@ it.effect("promoting a running delegated task detaches its thread and ends the t
     // The child's own delegate is still its child.
     const grandchild = (yield* orchestrator.getThreadProjection(grandchildThreadId)).thread;
     assert.equal(grandchild.lineage.parentThreadId, childThreadId);
-    assert.equal(grandchild.launchedBy, undefined);
+    assert.deepEqual(grandchild.launchedBy, {
+      kind: "launch",
+      threadId: childThreadId,
+      environmentId: null,
+      environmentLabel: null,
+      threadTitle: child.title,
+      via: "delegate_task",
+    });
   }).pipe(Effect.provide(layerTest)),
 );
 

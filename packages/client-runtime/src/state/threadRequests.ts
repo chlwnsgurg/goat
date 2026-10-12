@@ -152,6 +152,9 @@ export function createQuestionHistoryProjector() {
                   ...item,
                   questionAnswer: {
                     requestId: request.id,
+                    ...(request.respondedBy === undefined
+                      ? {}
+                      : { respondedBy: request.respondedBy }),
                     answers: request.answers,
                     attachmentsByQuestionId: {},
                     questionTextById: Object.fromEntries(

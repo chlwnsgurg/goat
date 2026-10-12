@@ -5,7 +5,7 @@ import {
 } from "./chatAttachment.ts";
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
@@ -75,7 +75,54 @@ export const UserInputAttachments = Schema.Record(
 );
 export type UserInputAttachments = typeof UserInputAttachments.Type;
 
+export const UserInputResponseReason = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(2000),
+  Schema.isPattern(/\S/),
+);
+export type UserInputResponseReason = typeof UserInputResponseReason.Type;
+
+export const UserInputRespondedBy = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("user") }),
+  Schema.Struct({
+    type: Schema.Literal("agent"),
+    threadId: ThreadId,
+    environmentId: Schema.NullOr(EnvironmentId),
+    title: Schema.NullOr(Schema.String),
+    reason: UserInputResponseReason,
+  }),
+  Schema.Struct({ type: Schema.Literal("client"), reason: UserInputResponseReason }),
+]);
+export type UserInputRespondedBy = typeof UserInputRespondedBy.Type;
+
+/** Describes the recorded responder or terminal outcome without exposing the answer or reason. */
+export function describeUserInputResponder(input: {
+  respondedBy?: UserInputRespondedBy | undefined;
+  decision?: ProviderApprovalDecision | undefined;
+  status?: "pending" | "resolved" | "expired" | "cancelled" | undefined;
+}): string {
+  if (input.status === "expired") return "expired";
+  if (input.status === "cancelled") return "cancelled";
+  if (input.decision === "cancel") {
+    return input.respondedBy?.type === "user"
+      ? "dismissed by the user"
+      : "closed when its thread stopped or settled";
+  }
+  const responder = input.respondedBy;
+  switch (responder?.type) {
+    case "user":
+      return "the user";
+    case "agent":
+      return `orchestrator "${responder.title ?? responder.threadId}"${responder.environmentId === null ? "" : " on another machine"}`;
+    case "client":
+      return "an MCP client";
+    default:
+      return "another responder";
+  }
+}
+
 export const UserInputAttachmentAnswerPayload = Schema.Struct({
+  respondedBy: Schema.optional(UserInputRespondedBy),
   requestId: TrimmedNonEmptyString,
   questionTextById: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   answers: ProviderUserInputAnswers,

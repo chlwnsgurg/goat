@@ -44,6 +44,7 @@ import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
+import * as PendingQuestionsMcpService from "./PendingQuestionsMcpService.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
@@ -911,7 +912,11 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   Layer.provide(ThreadMetadataMcpService.layer),
 );
 
-export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
+export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer).pipe(
+  Layer.provide(PendingQuestionsMcpService.layer),
+  Layer.provide(HostThreadsMcpService.layer),
+  Layer.provide(OrchestratorMcpService.layer),
+);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,

@@ -165,6 +165,15 @@ export interface HostThreadsMcpServiceShape {
   readonly listWatches: (
     scope: McpInvocationScope,
   ) => Effect.Effect<OrchestratorMcpThreadWatchListResult, OrchestratorMcpFailure>;
+  readonly writeOnHost: <A extends object, E>(
+    scope: McpInvocationScope,
+    input: {
+      readonly host: string;
+      readonly tool: string;
+      readonly arguments: Readonly<Record<string, unknown>>;
+    },
+    decode: (value: unknown) => Effect.Effect<A, E>,
+  ) => Effect.Effect<A & { readonly host: string }, OrchestratorMcpFailure>;
 }
 
 export class HostThreadsMcpService extends Context.Service<
@@ -450,12 +459,17 @@ const make = Effect.gen(function* () {
     waitForThread: (scope, input) => {
       if (input.host === undefined) return local.waitForThread(scope, input);
       const timeoutMs = Math.min(MAX_WAIT_MS, Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_MS));
+      const { ignoreRequestIds, ...args } = withoutHost(input);
       return onHost(
         scope,
         {
           host: input.host,
           tool: "goat_thread_wait",
-          arguments: { ...withoutHost(input), timeoutMs },
+          arguments: {
+            ...args,
+            timeoutMs,
+            ...(ignoreRequestIds === undefined ? {} : { ignoreRequestIds }),
+          },
           writes: false,
           // A remote that times out answers timedOut:true; only silence past that is unavailability.
           timeoutMs: timeoutMs + WAIT_ANSWER_MARGIN_MS,
@@ -524,6 +538,7 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError(storeFailure));
         return { watches: watches.map(watchView) } satisfies OrchestratorMcpThreadWatchListResult;
       }),
+    writeOnHost: (scope, input, decode) => onHost(scope, { ...input, writes: true }, decode),
   });
 });
 

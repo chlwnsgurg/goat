@@ -2614,3 +2614,26 @@ describe("MCP apps", () => {
     expect(feed("running").some((candidate) => candidate.type === "mcp-app")).toBe(false);
   });
 });
+
+it("renders question notification summaries with the existing message icon", () => {
+  const item = {
+    ...base("question-notification", "2026-06-20T00:00:01.000Z", 0),
+    type: "notification" as const,
+    source: {
+      kind: "question" as const,
+      threadId: ThreadId.make("asking"),
+      requestId: RuntimeRequestId.make("question"),
+      humanRequired: true,
+    },
+    outcome: "updated" as const,
+    summary: "A question needs an answer",
+    detail: "Which option?",
+  };
+  const feed = buildThreadFeed([projected(item, 0)]);
+  expect(feed[0]?.type).toBe("activity-group");
+  if (feed[0]?.type !== "activity-group") throw new Error("Missing question activity");
+  const activity = feed[0].activities[0]!;
+  expect(activity.summary).toBe(item.summary);
+  expect(activity.icon).toBe("message");
+  expect(activity.getFullDetail()).toContain(item.detail);
+});

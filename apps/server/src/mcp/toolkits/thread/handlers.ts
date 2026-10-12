@@ -1,6 +1,5 @@
 import {
   type CommandId,
-  type RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type RunId,
@@ -10,6 +9,8 @@ import {
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
+import * as PendingQuestionsMcpService from "../../PendingQuestionsMcpService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   dispatchFailure,
@@ -49,27 +50,6 @@ const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
   return { sequence: result.sequence };
 });
 
-const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
-  threadId?: ThreadId | undefined;
-  requestId: RuntimeRequestId;
-}) {
-  const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"]);
-  const request = context.projection.runtimeRequests.find(
-    (request) =>
-      request.id === input.requestId &&
-      request.kind === "user_input" &&
-      request.status === "pending",
-  );
-  const item = context.projection.turnItems.find(
-    (item) => item.type === "user_input_request" && item.requestId === input.requestId,
-  );
-  if (request === undefined || item?.type !== "user_input_request")
-    return yield* new OrchestratorMcpFailure({
-      code: "invalid_request",
-      message: "The pending user-input request was not found.",
-    });
-  return { ...context, request, item };
-});
 /** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
@@ -200,36 +180,40 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return { sequence: result.sequence };
     }),
   ),
-  goat_pending_request_list: McpToolAccess.reads((input) =>
-    Effect.gen(function* () {
-      const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
-      return {
-        requestIds: projection.runtimeRequests
-          .filter((request) => request.kind === "user_input" && request.status === "pending")
-          .map((request) => request.id),
-      };
-    }),
+  goat_pending_request_list: McpToolAccess.readsOrReachesHost(
+    (input) =>
+      input.host !== undefined ||
+      (input.scope === "launched" &&
+        input.launcherThreadId === undefined &&
+        input.launcherEnvironmentId === undefined),
+    (input) =>
+      Effect.gen(function* () {
+        const service = yield* PendingQuestionsMcpService.PendingQuestionsMcpService;
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        return yield* service.list(scope, input);
+      }),
   ),
-  goat_pending_request_read: McpToolAccess.reads((input) =>
-    Effect.gen(function* () {
-      const { item } = yield* readQuestion(input);
-      return { requestId: input.requestId, questions: item.questions };
-    }),
+  goat_pending_request_read: McpToolAccess.readsOrReachesHost(
+    (input) => input.host !== undefined,
+    (input) =>
+      Effect.gen(function* () {
+        const service = yield* PendingQuestionsMcpService.PendingQuestionsMcpService;
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        return yield* service.read(scope, input);
+      }),
   ),
-  goat_pending_request_respond: writesThread((input) =>
-    Effect.gen(function* () {
-      const { threads, projection } = yield* readQuestion(input);
-      const result = yield* threads
-        .dispatch({
-          type: "runtime-request.respond",
-          threadId: projection.thread.id,
-          commandId: yield* newCommandId(),
-          requestId: input.requestId,
-          answers: input.answers,
-        })
-        .pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
-    }),
+  goat_pending_request_respond: McpToolAccess.writesThreads(
+    (input) => (input.host === undefined ? [input.threadId] : []),
+    (input) =>
+      Effect.gen(function* () {
+        const service = yield* PendingQuestionsMcpService.PendingQuestionsMcpService;
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        return yield* service.respond(scope, input);
+      }),
+    {
+      refusalSuffix:
+        " This question needs a person: forward it to the user in your own thread, or let them answer it in the asking thread.",
+    },
   ),
   goat_queue_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {

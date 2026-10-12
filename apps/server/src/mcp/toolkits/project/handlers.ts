@@ -89,6 +89,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller } = context;
+        if (
+          input.launchedBy !== undefined &&
+          (caller !== undefined ||
+            input.launchedBy.environmentId === null ||
+            input.launchedBy.environmentId === context.scope.environmentId)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              "launchedBy is accepted only from an outside caller naming a foreign environment.",
+          });
         const commandId = yield* newCommandId();
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
@@ -206,11 +217,21 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                   environmentId: null,
                   environmentLabel: null,
                   threadTitle: caller.title,
+                  via: "thread_launch" as const,
                 },
               }
             : input.launchedBy === undefined
               ? {}
-              : { launchedBy: input.launchedBy }),
+              : {
+                  launchedBy: {
+                    ...input.launchedBy,
+                    kind: "launch" as const,
+                    via:
+                      input.launchedBy.via === "delegate_task"
+                        ? ("delegate_task" as const)
+                        : ("ssh_thread_launch" as const),
+                  },
+                }),
         }).pipe(
           Effect.mapError((error) =>
             error._tag === "AttachmentClaimError"

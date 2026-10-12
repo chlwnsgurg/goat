@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   ProjectId,
   RunId,
   ThreadId,
@@ -12,6 +13,8 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -46,12 +49,16 @@ interface World {
   /** Answers to local waits, taken one per wait. */
   readonly waits: Queue.Queue<WaitAnswer>;
   readonly waitCalls: Array<ThreadManagementService.ThreadManagementWaitInput>;
+  waitHandler?: (input: ThreadManagementService.ThreadManagementWaitInput) => WaitAnswer;
   /** One entry per wait that started. */
   readonly waitStarted: Queue.Queue<RunId | undefined>;
   /** One entry per read of the launcher's shell. */
   readonly launcherReads: Queue.Queue<void>;
+  readonly escalationMessages: Set<string>;
+  readonly escalationReads: Array<ReadonlyArray<string>>;
   readonly assistantMessages: Array<{ runId: RunId; text: string }>;
   requests: Array<{ id: string; status: string; kind: string }>;
+  subagents: Array<{ origin: string; childThreadId: ThreadId }>;
   /** Failures for the next dispatches, used up in order. */
   readonly dispatchFailures: Array<"transient" | "refused">;
   /**
@@ -86,6 +93,8 @@ const makeWorld = Effect.gen(function* () {
           worktreePath: "/work/fix",
           archivedAt: null,
           deletedAt: null,
+          creationSource: "mcp",
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: target },
         },
       ],
     ]),
@@ -93,8 +102,11 @@ const makeWorld = Effect.gen(function* () {
     waitCalls: [],
     waitStarted: yield* Queue.unbounded<RunId | undefined>(),
     launcherReads: yield* Queue.unbounded<void>(),
+    escalationMessages: new Set(),
+    escalationReads: [],
     assistantMessages: [],
     requests: [],
+    subagents: [],
     dispatchFailures: [],
     rejected: new Set(),
     attempts: [],
@@ -153,21 +165,30 @@ const layerFor = (world: World, baseDir: string) =>
             Effect.suspend(() => {
               world.waitCalls.push(input);
               return Queue.offer(world.waitStarted, input.runId).pipe(
-                Effect.andThen(Queue.take(world.waits)),
-                Effect.flatten,
+                Effect.andThen(
+                  world.waitHandler?.(input) ?? Queue.take(world.waits).pipe(Effect.flatten),
+                ),
               );
             }),
           getThreadRecords: (_threadId, _fields, filter) =>
-            Effect.sync(
-              () =>
-                ({
-                  thread: {},
-                  messages: world.assistantMessages
-                    .filter((message) => filter?.messageRunIds?.includes(message.runId) ?? true)
-                    .map((message) => ({ ...message, role: "assistant" })),
-                  runtimeRequests: world.requests,
-                }) as never,
-            ),
+            Effect.sync(() => {
+              if (filter?.messageIds !== undefined) {
+                world.escalationReads.push(filter.messageIds);
+                return {
+                  messages: filter.messageIds
+                    .filter((id) => world.escalationMessages.has(id))
+                    .map((id) => ({ id })),
+                } as never;
+              }
+              return {
+                thread: {},
+                messages: world.assistantMessages
+                  .filter((message) => filter?.messageRunIds?.includes(message.runId) ?? true)
+                  .map((message) => ({ ...message, role: "assistant" })),
+                runtimeRequests: world.requests,
+                subagents: world.subagents,
+              } as never;
+            }),
           dispatch: (command) => dispatchIn(world, command),
         }),
         Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
@@ -375,6 +396,526 @@ describe("LaunchWatchService", () => {
         }),
       );
       expect(world.deliveredLog).toHaveLength(3);
+    }),
+  );
+
+  it.effect.each(["local", "remote"] as const)(
+    "a reported unanswered question waits for the tick, while a new question releases immediately ($0)",
+    (mode) =>
+      Effect.gen(function* () {
+        const world = yield* makeWorld;
+        const baseDir = yield* tempDir;
+        const started = yield* Queue.unbounded<void>();
+        const changes = yield* Queue.unbounded<void>();
+        const firstLongWait = yield* Deferred.make<void>();
+        let calls = 0;
+        const inputs: Array<{ ignoreRequestIds?: ReadonlyArray<string>; timeoutMs: number }> = [];
+        world.requests = [{ id: "question-1", status: "pending", kind: "user_input" }];
+        const wait = (input: { ignoreRequestIds?: ReadonlyArray<string>; timeoutMs: number }) =>
+          Effect.gen(function* () {
+            calls++;
+            inputs.push(input);
+            yield* Queue.offer(started, undefined);
+            const novel = world.requests.filter((q) => !input.ignoreRequestIds?.includes(q.id));
+            let timedOut = false;
+            // Bound a broken follower too: only the first wait can return without a gate.
+            if (novel.length === 0 || calls > 1) {
+              yield* Deferred.succeed(firstLongWait, undefined);
+              timedOut = yield* Queue.take(changes).pipe(
+                Effect.as(false),
+                Effect.timeoutOrElse({
+                  duration: input.timeoutMs,
+                  orElse: () => Effect.succeed(true),
+                }),
+              );
+            }
+            return {
+              threadId: target,
+              run: { id: run1, status: "waiting" } as never,
+              timedOut,
+            };
+          });
+        if (mode === "local") world.waitHandler = wait;
+        else
+          world.hostCall = (call) =>
+            call.tool === "goat_thread_wait"
+              ? wait(call.arguments as { timeoutMs: number }).pipe(
+                  Effect.map((result) => ({
+                    threadId: target,
+                    runId: run1,
+                    status: "waiting",
+                    timedOut: result.timedOut,
+                  })),
+                )
+              : Effect.succeed({ requestIds: world.requests.map((q) => q.id) });
+        yield* withService(world, baseDir, (service) =>
+          Effect.gen(function* () {
+            yield* mode === "local" ? watchLocal(service, run1) : watchRemote(service, run1);
+            yield* Queue.take(started);
+            expect((yield* Queue.take(world.delivered)).text).toContain("question-1");
+            yield* Queue.take(started);
+            yield* Deferred.await(firstLongWait);
+            expect(inputs[1]?.ignoreRequestIds).toEqual(["question-1"]);
+            const tick = mode === "local" ? 30_000 : 120_000;
+            yield* TestClock.adjust(tick - 1);
+            expect(calls).toBe(2);
+            const before = yield* Clock.currentTimeMillis;
+            world.requests.push({ id: "question-2", status: "pending", kind: "user_input" });
+            yield* Queue.offer(changes, undefined);
+            expect((yield* Queue.take(world.delivered)).text).toContain("question-2");
+            yield* Queue.take(started);
+            expect(yield* Clock.currentTimeMillis).toBe(before);
+            expect(inputs[2]?.ignoreRequestIds).toEqual(["question-1", "question-2"]);
+            yield* TestClock.adjust(tick - 1);
+            expect(calls).toBe(3);
+            yield* TestClock.adjust(1);
+            yield* Queue.take(started);
+            expect(calls).toBe(4);
+            expect(world.deliveredLog).toHaveLength(2);
+          }),
+        );
+      }),
+  );
+
+  it.effect("a strict legacy wait refusal retries once and stays incapable for this follower", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      const baseDir = yield* tempDir;
+      const starts = yield* Queue.unbounded<void>();
+      const nextTick = yield* Deferred.make<void>();
+      let waits = 0;
+      world.hostCall = (call) =>
+        call.tool !== "goat_thread_wait"
+          ? Effect.succeed({ requestIds: ["question-1"] })
+          : Effect.gen(function* () {
+              waits++;
+              yield* Queue.offer(starts, undefined);
+              if (call.arguments.ignoreRequestIds !== undefined)
+                return yield* new SshRemoteDispatch.SshRemoteDispatchError({
+                  reason: "remote_refused",
+                  remoteCode: "invalid_request",
+                  message: "goat_thread_wait does not take ignoreRequestIds, so nothing ran",
+                });
+              if (waits === 3) yield* Deferred.await(nextTick);
+              if (waits > 3) return yield* Effect.never;
+              return { threadId: target, runId: run1, status: "waiting", timedOut: true };
+            });
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* watchRemote(service, run1);
+          yield* Queue.take(starts);
+          yield* Queue.take(world.delivered);
+          yield* Queue.take(starts);
+          yield* Queue.take(starts);
+          yield* Deferred.succeed(nextTick, undefined);
+          yield* Queue.take(starts);
+          expect(
+            world.hostCalls
+              .filter(({ call }) => call.tool === "goat_thread_wait")
+              .map(({ call }) => call.arguments.ignoreRequestIds),
+          ).toEqual([undefined, ["question-1"], undefined, undefined]);
+          expect(world.deliveredLog).toHaveLength(1);
+        }),
+      );
+    }),
+  );
+
+  it.effect.each(["failure", "empty", "reported"] as const)(
+    "backs off after an early remote release with no new listed question ($0)",
+    (listing) =>
+      Effect.gen(function* () {
+        const world = yield* makeWorld;
+        const baseDir = yield* tempDir;
+        const paused = yield* Deferred.make<void>();
+        const restarted = yield* Deferred.make<void>();
+        const clock = yield* Clock.Clock;
+        let waits = 0;
+        world.hostCall = (call) => {
+          if (call.tool === "goat_thread_wait")
+            return Effect.gen(function* () {
+              waits++;
+              if (waits > (listing === "reported" ? 2 : 1)) {
+                yield* Deferred.succeed(restarted, undefined);
+                return yield* Effect.never;
+              }
+              return { threadId: target, runId: run1, status: "waiting", timedOut: false };
+            });
+          return listing === "failure"
+            ? Effect.fail(
+                new SshRemoteDispatch.SshRemoteDispatchError({
+                  reason: "ssh_failed",
+                  message: "list failed",
+                }),
+              )
+            : Effect.succeed({ requestIds: listing === "reported" ? ["question-1"] : [] });
+        };
+        yield* withService(world, baseDir, (service) =>
+          Effect.gen(function* () {
+            yield* watchRemote(service, run1);
+            if (listing === "reported") yield* Queue.take(world.delivered);
+            const milestone = yield* Effect.raceFirst(
+              Deferred.await(paused).pipe(Effect.as("paused")),
+              Deferred.await(restarted).pipe(Effect.as("restarted")),
+            );
+            expect(milestone).toBe("paused");
+            expect(waits).toBe(listing === "reported" ? 2 : 1);
+            yield* TestClock.adjust(30_000);
+            yield* Deferred.await(restarted);
+          }),
+        ).pipe(
+          Effect.provideService(Clock.Clock, {
+            ...clock,
+            sleep: (duration) =>
+              (Duration.toMillis(duration) === 30_000
+                ? Deferred.succeed(paused, undefined)
+                : Effect.void
+              ).pipe(Effect.andThen(clock.sleep(duration))),
+          }),
+        );
+      }),
+  );
+
+  it.effect.each(["failure", "empty", "other"] as const)(
+    "merges early remote wait question ids with the list ($0)",
+    (listing) =>
+      Effect.gen(function* () {
+        const world = yield* makeWorld;
+        const baseDir = yield* tempDir;
+        const restarted = yield* Deferred.make<void>();
+        let waits = 0;
+        world.hostCall = (call) => {
+          if (call.tool === "goat_thread_wait")
+            return Effect.gen(function* () {
+              if (++waits > 1) {
+                yield* Deferred.succeed(restarted, undefined);
+                return yield* Effect.never;
+              }
+              return {
+                threadId: target,
+                runId: run1,
+                status: "waiting",
+                timedOut: false,
+                pendingRequestIds: ["question-1"],
+              };
+            });
+          return listing === "failure"
+            ? Effect.fail(
+                new SshRemoteDispatch.SshRemoteDispatchError({
+                  reason: "ssh_failed",
+                  message: "list failed",
+                }),
+              )
+            : Effect.succeed({ requestIds: listing === "other" ? ["question-2"] : [] });
+        };
+        yield* withService(world, baseDir, (service) =>
+          Effect.gen(function* () {
+            yield* watchRemote(service, run1);
+            yield* Deferred.await(restarted);
+            const [watch] = yield* service.list(launcher);
+            expect(watch?.reportedQuestions.toSorted()).toEqual(
+              listing === "other" ? ["run-1/question-1", "run-1/question-2"] : ["run-1/question-1"],
+            );
+            expect(world.deliveredLog).toHaveLength(listing === "other" ? 2 : 1);
+            expect(
+              world.hostCalls.filter(({ call }) => call.tool === "goat_thread_wait")[1]?.call
+                .arguments.ignoreRequestIds,
+            ).toEqual(listing === "other" ? ["question-2", "question-1"] : ["question-1"]);
+          }),
+        );
+      }),
+  );
+
+  it.effect.each([
+    {
+      reason: "remote_refused" as const,
+      message: "goat_thread_wait does not take ignoreRequestIds",
+    },
+    {
+      reason: "remote_refused" as const,
+      message: "goat_thread_wait does not take otherField, so nothing ran",
+    },
+    {
+      reason: "ssh_failed" as const,
+      message: "goat_thread_wait does not take ignoreRequestIds, so nothing ran",
+    },
+  ])("only the strict wait refusal disables exclusions: $reason $message", ({ reason, message }) =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      const baseDir = yield* tempDir;
+      const paused = yield* Deferred.make<void>();
+      const restarted = yield* Deferred.make<void>();
+      const clock = yield* Clock.Clock;
+      let waits = 0;
+      world.hostCall = (call) =>
+        call.tool === "goat_thread_wait"
+          ? Effect.gen(function* () {
+              waits++;
+              if (waits === 2)
+                return yield* new SshRemoteDispatch.SshRemoteDispatchError({
+                  reason,
+                  remoteCode: "invalid_request",
+                  message,
+                });
+              if (waits > 2) {
+                yield* Deferred.succeed(restarted, undefined);
+                return yield* Effect.never;
+              }
+              return { threadId: target, runId: run1, status: "waiting", timedOut: false };
+            })
+          : Effect.succeed({ requestIds: ["question-1"] });
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* watchRemote(service, run1);
+          yield* Queue.take(world.delivered);
+          yield* Deferred.await(paused);
+          expect(waits).toBe(2);
+          yield* TestClock.adjust(30_000);
+          yield* Deferred.await(restarted);
+          expect(
+            world.hostCalls
+              .filter(({ call }) => call.tool === "goat_thread_wait")
+              .map(({ call }) => call.arguments.ignoreRequestIds),
+          ).toEqual([undefined, ["question-1"], ["question-1"]]);
+        }),
+      ).pipe(
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          sleep: (duration) =>
+            (Duration.toMillis(duration) === 30_000
+              ? Deferred.succeed(paused, undefined)
+              : Effect.void
+            ).pipe(Effect.andThen(clock.sleep(duration))),
+        }),
+      );
+    }),
+  );
+
+  it.effect.each(
+    (["launcher", "legacy", "provider-native", "foreign", "other-launcher"] as const).flatMap(
+      (ownership) => [true, false].map((escalationExists) => ({ ownership, escalationExists })),
+    ),
+  )(
+    "local watch gives owned escalations time to arrive ($ownership, stored=$escalationExists)",
+    ({ ownership, escalationExists }) =>
+      Effect.gen(function* () {
+        const world = yield* makeWorld;
+        const baseDir = yield* tempDir;
+        const paused = yield* Deferred.make<void>();
+        const clock = yield* Clock.Clock;
+        const shell = world.shells.get(target)!;
+        if (escalationExists) world.escalationMessages.add("question-escalation:target:question-1");
+        if (ownership === "legacy" || ownership === "provider-native") {
+          world.shells.set(target, {
+            ...shell,
+            lineage: {
+              parentThreadId: launcher,
+              relationshipToParent: "subagent",
+              rootThreadId: launcher,
+            },
+            creationSource: ownership === "legacy" ? "mcp" : "provider",
+          });
+          world.subagents.push({ origin: "app_owned", childThreadId: target });
+        } else
+          world.shells.set(target, {
+            ...shell,
+            launchedBy: {
+              kind: "launch" as const,
+              environmentLabel: null,
+              threadTitle: null,
+              threadId: ownership === "other-launcher" ? ThreadId.make("other") : launcher,
+              environmentId: ownership === "foreign" ? EnvironmentId.make("foreign") : null,
+              via: "thread_launch",
+            },
+          });
+        world.requests = [
+          { id: "question-1", status: "pending", kind: "user_input" },
+          { id: "approval-1", status: "pending", kind: "command" },
+        ];
+        yield* withService(world, baseDir, (service) =>
+          Effect.gen(function* () {
+            yield* watchLocal(service, run1);
+            yield* Queue.take(world.waitStarted);
+            yield* Queue.offer(world.waits, stillRunning(run1));
+            const owned = ownership === "launcher" || ownership === "legacy";
+            if (owned && !escalationExists) {
+              const milestone = yield* Effect.raceFirst(
+                Deferred.await(paused).pipe(Effect.as("paused")),
+                Queue.take(world.waitStarted).pipe(Effect.as("continued")),
+              );
+              expect(milestone).toBe("paused");
+              const [before] = yield* service.list(launcher);
+              expect(before?.reportedQuestions).toEqual(["run-1/approval-1"]);
+              expect(world.deliveredLog).toHaveLength(1);
+              expect(world.deliveredLog[0]?.text).toContain("approval-1");
+              yield* TestClock.adjust(29_999);
+              expect(world.deliveredLog).toHaveLength(1);
+              expect(world.waitCalls).toHaveLength(1);
+              yield* TestClock.adjust(1);
+              yield* Queue.take(world.waitStarted);
+              yield* Queue.offer(world.waits, stillRunning(run1));
+            }
+            // The next wait starts only after wakes and reported keys have been saved.
+            yield* Queue.take(world.waitStarted);
+            const [watch] = yield* service.list(launcher);
+            expect(watch?.reportedQuestions.toSorted()).toEqual([
+              "run-1/approval-1",
+              "run-1/question-1",
+            ]);
+            expect(world.deliveredLog).toHaveLength(owned && escalationExists ? 1 : 2);
+            expect(world.escalationReads).toEqual(
+              owned
+                ? Array.from({ length: escalationExists ? 1 : 2 }, () => [
+                    "question-escalation:target:question-1",
+                  ])
+                : [],
+            );
+            expect(world.deliveredLog.some((message) => message.text.includes("approval-1"))).toBe(
+              true,
+            );
+            yield* service.rearm({ ...local, runId: run2 });
+            world.requests = [];
+            yield* Queue.offer(world.waits, finished(run1));
+            yield* Queue.take(world.waitStarted);
+            expect(world.waitCalls.at(-1)?.ignoreRequestIds).toEqual([]);
+          }),
+        ).pipe(
+          Effect.provideService(Clock.Clock, {
+            ...clock,
+            sleep: (duration) =>
+              (Duration.toMillis(duration) === 30_000
+                ? Deferred.succeed(paused, undefined)
+                : Effect.void
+              ).pipe(Effect.andThen(clock.sleep(duration))),
+          }),
+        );
+      }),
+  );
+
+  it.effect.each([true, false])(
+    "keeps a question unreported until an escalation or watch notice exists (escalated=$0)",
+    (escalated) =>
+      Effect.gen(function* () {
+        const world = yield* makeWorld;
+        const baseDir = yield* tempDir;
+        const pauses = yield* Queue.unbounded<void>();
+        const clock = yield* Clock.Clock;
+        world.shells.set(target, {
+          ...world.shells.get(target),
+          launchedBy: {
+            kind: "launch" as const,
+            environmentLabel: null,
+            threadTitle: null,
+            threadId: launcher,
+            environmentId: null,
+            via: "thread_launch",
+          },
+        });
+        world.requests = [{ id: "question-1", status: "pending", kind: "user_input" }];
+        world.dispatchFailures.push("transient");
+        yield* withService(world, baseDir, (service) =>
+          Effect.gen(function* () {
+            yield* watchLocal(service, run1);
+            yield* Queue.take(world.waitStarted);
+            yield* Queue.offer(world.waits, stillRunning(run1));
+            yield* Queue.take(pauses);
+            const [before] = yield* service.list(launcher);
+            expect(before?.reportedQuestions).toEqual([]);
+            expect(world.deliveredLog).toEqual([]);
+            expect(world.attempts).toEqual([]);
+            yield* TestClock.adjust(29_999);
+            expect(world.attempts).toEqual([]);
+            if (escalated) world.escalationMessages.add("question-escalation:target:question-1");
+            yield* TestClock.adjust(1);
+            yield* Queue.take(world.waitStarted);
+            yield* Queue.offer(world.waits, stillRunning(run1));
+            if (!escalated) {
+              yield* Queue.take(pauses);
+              const [retrying] = yield* service.list(launcher);
+              expect(retrying?.reportedQuestions).toEqual([]);
+              expect(world.deliveredLog).toEqual([]);
+              expect(world.attempts).toHaveLength(1);
+              yield* TestClock.adjust(30_000);
+              yield* Queue.take(world.waitStarted);
+              yield* Queue.offer(world.waits, stillRunning(run1));
+            }
+            yield* Queue.take(world.waitStarted);
+            const [after] = yield* service.list(launcher);
+            expect(after?.reportedQuestions).toEqual(["run-1/question-1"]);
+            expect(world.deliveredLog).toHaveLength(escalated ? 0 : 1);
+            expect(world.attempts).toHaveLength(escalated ? 0 : 2);
+          }),
+        ).pipe(
+          Effect.provideService(Clock.Clock, {
+            ...clock,
+            sleep: (duration) =>
+              (Duration.toMillis(duration) === 30_000
+                ? Queue.offer(pauses, undefined)
+                : Effect.void
+              ).pipe(Effect.andThen(clock.sleep(duration))),
+          }),
+        );
+      }),
+  );
+
+  it.effect("starts a new escalation grace period when a question disappears and returns", () =>
+    Effect.gen(function* () {
+      const world = yield* makeWorld;
+      const baseDir = yield* tempDir;
+      const pauses = yield* Queue.unbounded<void>();
+      const clock = yield* Clock.Clock;
+      world.shells.set(target, {
+        ...world.shells.get(target),
+        launchedBy: {
+          kind: "launch" as const,
+          environmentLabel: null,
+          threadTitle: null,
+          threadId: launcher,
+          environmentId: null,
+          via: "thread_launch",
+        },
+      });
+      const question = { id: "question-1", status: "pending", kind: "user_input" };
+      world.requests = [question];
+      yield* withService(world, baseDir, (service) =>
+        Effect.gen(function* () {
+          yield* watchLocal(service, run1);
+          yield* Queue.take(world.waitStarted);
+          yield* Queue.offer(world.waits, stillRunning(run1));
+          yield* Queue.take(pauses);
+          yield* TestClock.adjust(30_000);
+          yield* Queue.take(world.waitStarted);
+          world.requests = [];
+          yield* Queue.offer(world.waits, stillRunning(run1));
+          yield* Queue.take(world.waitStarted);
+          world.requests = [question];
+          yield* Queue.offer(world.waits, stillRunning(run1));
+          const milestone = yield* Effect.raceFirst(
+            Queue.take(pauses).pipe(Effect.as("paused")),
+            Queue.take(world.waitStarted).pipe(Effect.as("continued")),
+          );
+          expect(milestone).toBe("paused");
+          expect(world.attempts).toEqual([]);
+          const [before] = yield* service.list(launcher);
+          expect(before?.reportedQuestions).toEqual([]);
+          world.escalationMessages.add("question-escalation:target:question-1");
+          yield* TestClock.adjust(30_000);
+          yield* Queue.take(world.waitStarted);
+          yield* Queue.offer(world.waits, stillRunning(run1));
+          yield* Queue.take(world.waitStarted);
+          const [after] = yield* service.list(launcher);
+          expect(after?.reportedQuestions).toEqual(["run-1/question-1"]);
+          expect(world.deliveredLog).toEqual([]);
+        }),
+      ).pipe(
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          sleep: (duration) =>
+            (Duration.toMillis(duration) === 30_000
+              ? Queue.offer(pauses, undefined)
+              : Effect.void
+            ).pipe(Effect.andThen(clock.sleep(duration))),
+        }),
+      );
     }),
   );
 

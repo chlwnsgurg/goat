@@ -337,11 +337,15 @@ export function questionWake(input: {
   const request =
     input.kind === null ? "a request" : `a ${input.kind.replaceAll("_", " ")} request`;
   const answer =
-    watch.host !== null
-      ? `It can be answered in that thread from a client connected to ${watch.host}.`
-      : input.kind === "user_input"
-        ? `Read it with goat_pending_request_read {threadId: "${watch.threadId}", requestId: "${input.requestId}"} and answer with goat_pending_request_respond if you can decide, or leave it to the user.`
-        : "An approval can only be given in that thread from a GOAT client, so tell the user.";
+    input.kind === "user_input"
+      ? watch.host !== null
+        ? `Read it with goat_pending_request_read {host: "${watch.host}", threadId: "${watch.threadId}", requestId: "${input.requestId}"} and answer with goat_pending_request_respond using the same host, threadId, and requestId (reason required) if you can decide, or forward it to the user.`
+        : `Read it with goat_pending_request_read {threadId: "${watch.threadId}", requestId: "${input.requestId}"} and answer with goat_pending_request_respond if you can decide, or leave it to the user.`
+      : watch.host !== null
+        ? `It can be answered in that thread from a client connected to ${watch.host}.`
+        : input.kind === null
+          ? "Read the request in that thread from a GOAT client and tell the user."
+          : "An approval can only be given in that thread from a GOAT client, so tell the user.";
   return {
     ...wakeIds(watch, `question:${questionKey(input.runId, input.requestId)}`),
     text: `${name} (${identity(watch)}) is waiting on ${request} (${input.requestId}) in run ${input.runId} and cannot continue until it is answered. ${answer} ${STOP_HINT}`,

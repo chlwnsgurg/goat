@@ -11,6 +11,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import {
   getQuestionAnswerPreview,
   getQuestionAnswerText,
+  getQuestionAnswerAttribution,
   getQuestionTextPreview,
   hasQuestionAnswer,
 } from "@t3tools/client-runtime/work-log/user-input";
@@ -5281,6 +5282,8 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
         return "terminal";
       case "monitor":
         return "eye";
+      case "question":
+        return "message-circle";
       case "background_task":
         return "zap";
       case "system":
@@ -5799,8 +5802,14 @@ function QuestionAnswerHistory({
     [attachments],
   );
   const urls = useAssetUrls(activeThreadEnvironmentId, resources);
+  const attribution = getQuestionAnswerAttribution(answer);
   return (
     <div className="ms-7 mt-2 space-y-2" onClick={stopRowToggle}>
+      {attribution === null ? null : (
+        <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+          {attribution}
+        </p>
+      )}
       {[
         ...new Set([
           ...Object.keys(answer.questionTextById ?? {}),

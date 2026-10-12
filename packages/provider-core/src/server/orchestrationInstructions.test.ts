@@ -96,3 +96,23 @@ describe("T3 orchestration provider instructions", () => {
     assert.notInclude(withoutMcp, "GOAT orchestration");
   });
 });
+
+it("explains question decisions and question-aware waits", () => {
+  for (const text of [
+    "goat_pending_request_respond",
+    "reason",
+    "human-only",
+    "never sleep-poll",
+    "end the turn",
+    "pendingRequestIds",
+    'scope:"launched"',
+    "also with `host`",
+    "here or on hosts arrive as notifications",
+    "`host` for remote threads",
+    "Only local user-input questions still arrive.",
+    'SSH-host questions then need `goat_thread_wait({host})` or `goat_pending_request_list({scope:"launched", hosts})`. Approvals are no longer reported; check `goat_thread_read` or tell the user the thread may be waiting.',
+    "Forward to the user any decision your own user has not authorized, such as pushing, deploying, sending outside, or starting new work beyond the request.",
+  ]) {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, text);
+  }
+});

@@ -6,6 +6,7 @@ import {
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadListResult,
   ProviderInstanceId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -350,4 +351,35 @@ it.effect("refuses a launch watch for a remote delegated task", () =>
         }
       }),
   ),
+);
+
+it.effect.each([true, false])("decodes remote wait with question IDs present=%s", (present) =>
+  Effect.gen(function* () {
+    const { result, calls } = yield* runService(
+      {
+        interactionMode: "default",
+        hostCall: () =>
+          Effect.succeed({
+            threadId: "remote-1",
+            runId: "run-1",
+            status: "completed",
+            timedOut: false,
+            ...(present ? { pendingRequestIds: ["q-1"] } : {}),
+          }),
+      },
+      (service) =>
+        service.waitForThread(scope, {
+          host: "box",
+          threadId: ThreadId.make("remote-1"),
+          ...(present ? { ignoreRequestIds: [RuntimeRequestId.make("forwarded")] } : {}),
+        }),
+    );
+    expect(result).toMatchObject({ success: { host: "box", timedOut: false } });
+    if (result._tag === "Success")
+      expect(result.success.pendingRequestIds).toEqual(present ? ["q-1"] : undefined);
+    expect(calls[0]?.arguments).not.toHaveProperty("host");
+    if (present) expect(calls[0]?.arguments.ignoreRequestIds).toEqual(["forwarded"]);
+    else expect(calls[0]?.arguments).not.toHaveProperty("ignoreRequestIds");
+    expect(calls[0]?.writes).toBe(false);
+  }),
 );

@@ -10,6 +10,9 @@ import {
   IsoDateTime,
   isProviderNativeSubagentThread,
   MessageId,
+  NodeId,
+  RuntimeRequestId,
+  type ProviderUserInputAnswers,
   type ModelSelection,
   type OrchestrationV2DelegatedCompletionDelivery,
   type OrchestrationV2ProviderCapabilities,
@@ -55,6 +58,7 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
 import { threadShellFromProjection } from "../orchestration-v2/ProjectionStore.ts";
+import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -189,6 +193,14 @@ function makeDeterministicAdapter(input: {
   readonly terminalGate?: (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
   ) => Deferred.Deferred<void> | undefined;
+  readonly detachedCompletion?: boolean;
+  readonly startEvents?: (
+    turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+    providerTurnId: ProviderTurnId,
+  ) => Effect.Effect<ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>>;
+  readonly onRespond?: (
+    response: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput,
+  ) => Effect.Effect<void>;
   readonly response: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) => string;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
@@ -198,6 +210,7 @@ function makeDeterministicAdapter(input: {
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (sessionInput) =>
       Effect.gen(function* () {
+        const sessionScope = yield* Effect.scope;
         const events = yield* PubSub.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
@@ -290,72 +303,79 @@ function makeDeterministicAdapter(input: {
                   },
                 },
               ]);
-              const terminalGate = input.terminalGate?.(turnInput);
-              if (terminalGate !== undefined) {
-                yield* Deferred.await(terminalGate);
-              } else if (!input.shouldComplete(turnInput)) {
-                return;
-              }
-              const response = input.response(turnInput);
-              yield* publish([
-                {
-                  type: "provider_turn.updated",
-                  driver: input.driver,
-                  providerTurn: {
-                    id: providerTurnId,
-                    providerThreadId: turnInput.providerThread.id,
-                    nodeId: turnInput.rootNodeId,
-                    runAttemptId: turnInput.attemptId,
-                    nativeTurnRef: {
-                      driver: input.driver,
-                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
-                      strength: "strong",
+              if (input.startEvents !== undefined)
+                yield* publish(yield* input.startEvents(turnInput, providerTurnId));
+              const complete = Effect.gen(function* () {
+                const terminalGate = input.terminalGate?.(turnInput);
+                if (terminalGate !== undefined) {
+                  yield* Deferred.await(terminalGate);
+                } else if (!input.shouldComplete(turnInput)) {
+                  return;
+                }
+                const response = input.response(turnInput);
+                yield* publish([
+                  {
+                    type: "provider_turn.updated",
+                    driver: input.driver,
+                    providerTurn: {
+                      id: providerTurnId,
+                      providerThreadId: turnInput.providerThread.id,
+                      nodeId: turnInput.rootNodeId,
+                      runAttemptId: turnInput.attemptId,
+                      nativeTurnRef: {
+                        driver: input.driver,
+                        nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                        strength: "strong",
+                      },
+                      ordinal: turnInput.providerTurnOrdinal,
+                      status: "completed",
+                      startedAt: eventTime,
+                      completedAt: eventTime,
                     },
-                    ordinal: turnInput.providerTurnOrdinal,
-                    status: "completed",
-                    startedAt: eventTime,
-                    completedAt: eventTime,
                   },
-                },
-                {
-                  type: "turn_item.updated",
-                  driver: input.driver,
-                  turnItem: {
-                    id: TurnItemId.make(
-                      `turn-item:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
-                    ),
-                    threadId: turnInput.threadId,
-                    runId: turnInput.runId,
-                    nodeId: turnInput.rootNodeId,
+                  {
+                    type: "turn_item.updated",
+                    driver: input.driver,
+                    turnItem: {
+                      id: TurnItemId.make(
+                        `turn-item:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
+                      ),
+                      threadId: turnInput.threadId,
+                      runId: turnInput.runId,
+                      nodeId: turnInput.rootNodeId,
+                      providerThreadId: turnInput.providerThread.id,
+                      providerTurnId,
+                      nativeItemRef: null,
+                      parentItemId: null,
+                      ordinal: turnInput.runOrdinal * 100 + 1,
+                      status: "completed",
+                      title: null,
+                      startedAt: eventTime,
+                      completedAt: eventTime,
+                      updatedAt: eventTime,
+                      type: "assistant_message",
+                      messageId: MessageId.make(
+                        `message:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
+                      ),
+                      text: response,
+                      streaming: false,
+                    },
+                  },
+                  {
+                    type: "turn.terminal",
+                    driver: input.driver,
                     providerThreadId: turnInput.providerThread.id,
                     providerTurnId,
-                    nativeItemRef: null,
-                    parentItemId: null,
-                    ordinal: turnInput.runOrdinal * 100 + 1,
+                    runOrdinal: turnInput.runOrdinal,
                     status: "completed",
-                    title: null,
-                    startedAt: eventTime,
-                    completedAt: eventTime,
-                    updatedAt: eventTime,
-                    type: "assistant_message",
-                    messageId: MessageId.make(
-                      `message:${input.instanceId}:${turnInput.threadId}:${turnInput.runOrdinal}:assistant`,
-                    ),
-                    text: response,
-                    streaming: false,
+                    failure: null,
+                    threadDisposition: "reusable",
                   },
-                },
-                {
-                  type: "turn.terminal",
-                  driver: input.driver,
-                  providerThreadId: turnInput.providerThread.id,
-                  providerTurnId,
-                  runOrdinal: turnInput.runOrdinal,
-                  status: "completed",
-                  failure: null,
-                  threadDisposition: "reusable",
-                },
-              ]);
+                ]);
+              });
+              if (input.detachedCompletion === true)
+                yield* complete.pipe(Effect.forkIn(sessionScope));
+              else yield* complete;
             }),
           steerTurn: () => Effect.void,
           interruptTurn: ({ providerThread, providerTurnId }) =>
@@ -398,7 +418,7 @@ function makeDeterministicAdapter(input: {
                 },
               ]);
             }),
-          respondToRuntimeRequest: () => Effect.void,
+          respondToRuntimeRequest: (response) => input.onRespond?.(response) ?? Effect.void,
           readThreadSnapshot: () =>
             unsupported(input.driver, "readThreadSnapshot is unused in this test"),
           rollbackThread: () => unsupported(input.driver, "rollbackThread is unused in this test"),
@@ -679,7 +699,11 @@ describe("orchestrator MCP toolkit", () => {
             McpHttpServer.layerOrchestratorToolkit,
             McpHttpServer.layerThreadToolkit,
           ).pipe(
-            Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
+            Layer.provide(
+              Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+                connectedHosts: Effect.succeed([]),
+              }),
+            ),
             Layer.provide(
               Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
             ),
@@ -4219,3 +4243,392 @@ describe("orchestrator MCP toolkit", () => {
     ),
   );
 });
+
+it.live("delegate_task wait returns before a child question is answered", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace("question-wait");
+
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      const answered = yield* Deferred.make<void>();
+      const offered = yield* Deferred.make<void>();
+      const offers = yield* Ref.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const continuationProbe = Layer.succeed(
+        ProviderContinuationRequests.ProviderContinuationRequests,
+        {
+          offer: (request) =>
+            Ref.update(offers, (all) => [...all, request]).pipe(
+              Effect.andThen(Deferred.succeed(offered, undefined)),
+              Effect.asVoid,
+            ),
+          take: Effect.never,
+        },
+      );
+      const requestId = RuntimeRequestId.make("live-child-question");
+      const answerValues: Array<ProviderUserInputAnswers | undefined> = [];
+      const driver = ProviderDriverKind.make("codex");
+      const adapter = makeDeterministicAdapter({
+        instanceId: codexInstanceId,
+        driver,
+        capabilities: CodexProviderCapabilitiesV2,
+        capturedTurns,
+        shouldComplete: () => false,
+        detachedCompletion: true,
+        terminalGate: (turn) =>
+          turn.message.text === "Ask before deciding." ? answered : undefined,
+        response: () => "Answered and completed.",
+        onRespond: (response) =>
+          Effect.gen(function* () {
+            answerValues.push(response.answers);
+            yield* Deferred.succeed(answered, undefined);
+          }),
+        startEvents: (turn, providerTurnId) =>
+          Effect.gen(function* () {
+            if (turn.message.text !== "Ask before deciding.") return [];
+            const now = yield* DateTime.now;
+            const nodeId = NodeId.make("live-child-question-node");
+            const providerSessionId = turn.providerThread.providerSessionId;
+            if (providerSessionId === null) return yield* Effect.die("Missing provider session");
+            const events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event> = [
+              {
+                type: "node.updated",
+                driver,
+                node: {
+                  id: nodeId,
+                  threadId: turn.threadId,
+                  runId: turn.runId,
+                  parentNodeId: turn.rootNodeId,
+                  rootNodeId: turn.rootNodeId,
+                  kind: "user_input_request",
+                  status: "waiting",
+                  countsForRun: true,
+                  providerThreadId: turn.providerThread.id,
+                  providerTurnId,
+                  nativeItemRef: null,
+                  runtimeRequestId: requestId,
+                  checkpointScopeId: null,
+                  startedAt: now,
+                  completedAt: null,
+                },
+              },
+              {
+                type: "runtime_request.updated",
+                driver,
+                threadId: turn.threadId,
+                runtimeRequest: {
+                  id: requestId,
+                  nodeId,
+                  providerTurnId,
+                  nativeRequestRef: { driver, nativeId: "question-native", strength: "strong" },
+                  kind: "user_input",
+                  status: "pending",
+                  responseCapability: { type: "live", providerSessionId },
+                  createdAt: now,
+                  resolvedAt: null,
+                },
+              },
+              {
+                type: "turn_item.updated",
+                driver,
+                turnItem: {
+                  id: TurnItemId.make("live-child-question-item"),
+                  type: "user_input_request",
+                  threadId: turn.threadId,
+                  runId: turn.runId,
+                  nodeId,
+                  providerThreadId: turn.providerThread.id,
+                  providerTurnId,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 2,
+                  status: "waiting",
+                  title: null,
+                  startedAt: now,
+                  completedAt: null,
+                  updatedAt: now,
+                  requestId,
+                  questions: [
+                    {
+                      id: "q",
+                      header: "Choice",
+                      question: "Choose a branch?",
+                      options: [
+                        { label: "dev", description: "Development" },
+                        { label: "main", description: "Stable" },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ];
+            return events;
+          }),
+      });
+      const registry = ProviderAdapterRegistry.layerFromAdapters([adapter]);
+      const runtime = ProviderReplayHarness.layerWithRegistry(
+        { name: "question-wait", runtimePolicyOverride: { cwd } },
+        registry,
+      ).pipe(Layer.provide(continuationProbe));
+      const orchestration = Layer.merge(
+        runtime,
+        ThreadManagementService.layer.pipe(Layer.provide(runtime)),
+      );
+      const layer = Layer.merge(
+        McpHttpServer.layerOrchestratorToolkit,
+        McpHttpServer.layerThreadToolkit,
+      ).pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(orchestration),
+        Layer.provide(registry),
+        Layer.provide(
+          ProviderRegistryMock.layer([
+            makeProviderSnapshot({ instanceId: codexInstanceId, driver, model: codexModel }),
+          ]),
+        ),
+        Layer.provide(layerUnusedScheduledTaskStub),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatchService.LaunchWatchService)({ rearm: () => Effect.void }),
+        ),
+        Layer.provide(
+          Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({ connectedHosts: Effect.succeed([]) }),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const server = yield* McpServer.McpServer;
+        const parentId = ThreadId.make("question-wait-parent");
+
+        const created = yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("question-wait-create"),
+          threadId: parentId,
+          projectId,
+          title: "Parent",
+          modelSelection: codexSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("question-wait-start"),
+          threadId: parentId,
+          messageId: MessageId.make("question-wait-start"),
+          text: parentPrompt,
+          attachments: [],
+          modelSelection: codexSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+        yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentId,
+            afterSequence: created.sequence,
+            eventType: "provider-turn.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "provider-turn.updated" &&
+                stored.event.payload.status === "running",
+            ),
+            Stream.runHead,
+          );
+
+        const invocation: McpInvocationContext.McpInvocationScope = {
+          environmentId: EnvironmentId.make("question-wait-env"),
+          requestNamespace: "question-wait",
+          thread: {
+            threadId: parentId,
+            providerInstanceId: codexInstanceId,
+            providerSessionId: "question-wait",
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 0,
+        };
+        const invoke = (name: string, args: Record<string, unknown>) =>
+          server
+            .callTool({ name, arguments: args })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+              Effect.provideService(McpSchema.McpServerClient, client),
+            );
+
+        const call = yield* invoke("delegate_task", {
+          task: "Ask before deciding.",
+          mode: "wait",
+          timeoutMs: 10_000,
+          clientRequestId: "question-wait",
+        });
+        expect(call.isError).not.toBe(true);
+
+        const delegated = yield* decodeDelegateTaskResult(call.structuredContent);
+        expect(delegated).toMatchObject({
+          status: "running",
+          waitTimedOut: false,
+          pendingRequestIds: [requestId],
+        });
+        const parent = yield* orchestrator.getThreadRecords(parentId, ["subagents"]);
+        expect(parent.subagents.find((task) => task.id === delegated.taskId)?.completionWake).toBe(
+          "always",
+        );
+        const wait = yield* invoke("goat_thread_wait", { threadId: delegated.childThreadId });
+        expect(wait.structuredContent).toMatchObject({
+          timedOut: false,
+          pendingRequestIds: [requestId],
+        });
+        const read = yield* invoke("goat_pending_request_read", {
+          threadId: delegated.childThreadId,
+          requestId,
+        });
+        expect(read.structuredContent).toMatchObject({ status: "pending", requestId });
+
+        if (delegated.childThreadId === null) throw new Error("Expected a local child thread");
+        const beforeAnswer = yield* orchestrator.getThreadEventSequence(delegated.childThreadId);
+
+        const response = yield* invoke("goat_pending_request_respond", {
+          threadId: delegated.childThreadId,
+          requestId,
+          answers: { q: "dev" },
+          reason: "The feature targets development.",
+        });
+        expect(response.isError).not.toBe(true);
+        yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: delegated.childThreadId,
+            afterSequence: beforeAnswer,
+            eventType: "run.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "run.updated" && stored.event.payload.status === "completed",
+            ),
+            Stream.runHead,
+          );
+
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* worker.drain();
+
+        expect(answerValues).toEqual([{ q: "dev" }]);
+        const child = yield* orchestrator.getThreadRecords(delegated.childThreadId, [
+          "runtimeRequests",
+        ]);
+        expect(child.runtimeRequests.find((request) => request.id === requestId)).toMatchObject({
+          status: "resolved",
+          respondedBy: {
+            type: "agent",
+            threadId: parentId,
+            environmentId: null,
+            reason: "The feature targets development.",
+          },
+        });
+        yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentId,
+            afterSequence: beforeAnswer,
+            eventType: "subagent.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.id === delegated.taskId &&
+                (stored.event.payload.completionDelivery?.state === "claimed" ||
+                  stored.event.payload.completionDelivery?.state === "delivered"),
+            ),
+            Stream.runHead,
+          );
+        yield* Deferred.await(offered);
+        const finished = yield* orchestrator.getThreadRecords(parentId, ["subagents", "runs"]);
+        expect(
+          finished.subagents.find((task) => task.id === delegated.taskId)?.completionWake,
+        ).toBe("always");
+        const completions = yield* Ref.get(offers);
+        expect(completions).toHaveLength(1);
+        const delivery = finished.runs.flatMap((run) =>
+          run.delegatedCompletion?.delivery === null ||
+          run.delegatedCompletion?.delivery === undefined
+            ? []
+            : [run.delegatedCompletion.delivery],
+        );
+        expect(delivery).toHaveLength(1);
+        expect(delivery[0]?.taskIds).toEqual([delegated.taskId]);
+        expect(completions[0]?.delegatedCompletion?.messageId).toBe(delivery[0]?.messageId);
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
+);
+
+it.effect("goat_thread_wait host result retains pendingRequestIds through MCP registration", () =>
+  Effect.gen(function* () {
+    const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
+    const layer = McpHttpServer.layerOrchestratorToolkit.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
+      Layer.provide(NodeServices.layer),
+      Layer.provide(Layer.mock(ThreadManagementService.ThreadManagementService)({})),
+      Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+      Layer.provide(ProviderRegistryMock.layer([])),
+      Layer.provide(layerUnusedScheduledTaskStub),
+      Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+      Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+      Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
+      Layer.provide(
+        Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+          callHostTool: (call, authorize) =>
+            authorize.pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  calls.push(call);
+                  return {
+                    threadId: "remote",
+                    runId: "remote-run",
+                    status: "completed",
+                    timedOut: false,
+                    pendingRequestIds: ["remote-question"],
+                  };
+                }),
+              ),
+            ),
+        }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const invocation: McpInvocationContext.McpInvocationScope = {
+        environmentId: EnvironmentId.make("host-wait"),
+        requestNamespace: "client",
+        thread: undefined,
+        client: { sessionId: "client", label: "Outside", access: "full-access" },
+        issuedAt: 0,
+        capabilities: new Set(["orchestration"]),
+      };
+      const result = yield* server
+        .callTool({ name: "goat_thread_wait", arguments: { host: "box", threadId: "remote" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(yield* decodeThreadWaitResult(result.structuredContent)).toMatchObject({
+        host: "box",
+        timedOut: false,
+        pendingRequestIds: ["remote-question"],
+      });
+      expect(calls[0]?.arguments).not.toHaveProperty("host");
+      expect(calls[0]?.writes).toBe(false);
+    }).pipe(Effect.provide(layer));
+  }),
+);

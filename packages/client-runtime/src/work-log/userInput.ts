@@ -1,4 +1,17 @@
-import { type UserInputAttachmentAnswerPayload } from "@t3tools/contracts";
+import {
+  describeUserInputResponder,
+  type UserInputAttachmentAnswerPayload,
+} from "@t3tools/contracts";
+
+/** Additional history detail for recorded agent and client answers. */
+export function getQuestionAnswerAttribution(
+  answer: UserInputAttachmentAnswerPayload,
+): string | null {
+  const responder = answer.respondedBy;
+  return responder === undefined || responder.type === "user"
+    ? null
+    : `Answered by ${describeUserInputResponder({ respondedBy: responder })}: ${responder.reason}`;
+}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)

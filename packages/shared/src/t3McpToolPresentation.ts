@@ -293,10 +293,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["List", "Listing", "Listed", "pending questions"],
     "question-list",
   ),
-  goat_pending_request_read: tool(
-    ["Read", "Reading", "Read", "pending questions"],
-    "question-read",
-  ),
+  goat_pending_request_read: tool(["Read", "Reading", "Read", "questions"], "question-read"),
   goat_pending_request_respond: tool(
     ["Answer", "Answering", "Answered", "pending questions"],
     "question-respond",

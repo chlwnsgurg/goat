@@ -1375,7 +1375,7 @@ describe("SSH dispatch launch lineage", () => {
       const { result, launches } = yield* launchAgainst({ declaresLaunchedBy: true });
       expect(result.threadId).toBe("new-thread");
       expect(launches).toHaveLength(1);
-      expect(launches[0]?.launchedBy).toEqual(launcher);
+      expect(launches[0]?.launchedBy).toEqual({ ...launcher, via: "ssh_thread_launch" });
     }),
   );
 
@@ -2583,5 +2583,207 @@ describe("SshRemoteDispatch SSH attachments", () => {
         f.assertTrace(["project_list", "prepare:1", "blocked:1", "discard:1"]);
       }),
     ),
+  );
+});
+
+describe("SSH launcher transport", () => {
+  it.effect.each([
+    { name: "current", refusal: null, launchedBy: true, expectedCalls: 1, success: true },
+    { name: "threadless", refusal: null, launchedBy: false, expectedCalls: 1, success: true },
+    {
+      name: "strict-old",
+      refusal: "goat_thread_launch does not take launchedBy, so nothing ran",
+      launchedBy: true,
+      expectedCalls: 2,
+      success: true,
+    },
+    {
+      name: "handler-refusal",
+      refusal: "goat_thread_launch cannot run this model",
+      launchedBy: true,
+      expectedCalls: 1,
+      success: false,
+    },
+    {
+      name: "ambiguous",
+      refusal: "connection closed after creating thread",
+      launchedBy: true,
+      expectedCalls: 1,
+      success: false,
+    },
+    {
+      name: "retry-refused",
+      refusal: "goat_thread_launch does not take launchedBy, so nothing ran",
+      launchedBy: true,
+      expectedCalls: 2,
+      success: false,
+    },
+  ])("passes launcher and retries only a strict pre-handler refusal: $name", (scenario) =>
+    Effect.gen(function* () {
+      const target = { alias: "box", hostname: "box", username: null, port: null };
+      const calls: Array<Record<string, unknown>> = [];
+      let creates = 0;
+      let authorizations = 0;
+      const authAtCalls: number[] = [];
+      const launcher = {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        via: "ssh_thread_launch" as const,
+        threadId: ThreadId.make("origin-thread"),
+        environmentId: EnvironmentId.make("origin-env"),
+      };
+      const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+      const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body)) as {
+          id: string;
+          method: string;
+          params?: { name: string; arguments: Record<string, unknown> };
+        };
+        if (request.method === "initialize")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              protocolVersion: "2025-06-18",
+              capabilities: { tools: {} },
+              serverInfo: { name: "GOAT", version: "test" },
+            },
+          });
+        if (request.method === "notifications/initialized")
+          return new Response(null, { status: 202 });
+        if (request.method === "tools/list")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              tools: [
+                {
+                  name: "goat_thread_launch",
+                  inputSchema: { type: "object", properties: { launchedBy: { type: "object" } } },
+                },
+              ],
+            },
+          });
+        if (request.method === "tools/call") {
+          if (request.params?.name === "goat_project_list")
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              result: {
+                structuredContent: {
+                  projects: [{ id: "project-1", workspaceRoot: "/home/agent/repo" }],
+                  nextCursor: null,
+                },
+              },
+            });
+          if (request.params?.name !== "goat_thread_launch") throw new Error("Unexpected tool");
+          calls.push(request.params.arguments);
+          authAtCalls.push(authorizations);
+          if (
+            (calls.length === 1 && scenario.refusal !== null) ||
+            scenario.name === "retry-refused"
+          ) {
+            if (scenario.name === "ambiguous") creates += 1;
+            return Response.json({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: { code: -32602, message: scenario.refusal },
+            });
+          }
+          creates += 1;
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            result: { structuredContent: { threadId: "remote-thread" } },
+          });
+        }
+        throw new Error(`Unexpected method ${request.method}`);
+      });
+      const manager = SshTunnel.SshEnvironmentManager.of({
+        ensureEnvironment: () =>
+          Effect.succeed({
+            target,
+            httpBaseUrl: "http://box:3773/",
+            wsBaseUrl: "ws://box:3773/",
+            pairingToken: null,
+          }),
+        disconnectEnvironment: () => Effect.die("Unexpected disconnect"),
+        revalidateTunnels: () => Effect.void,
+        issueMcpClientSession: () =>
+          Effect.succeed({ token: "fixture", expiresAt: null, runtimeModeCeilingApplied: true }),
+        runRemoteScript: () =>
+          Effect.succeed({
+            stdout:
+              "T3B\t1\nHOME\t/home/agent\nOS\tLinux\nPATH\t/home/agent/repo\nREAL\t/home/agent/repo\n",
+            stderr: "",
+          }),
+      });
+      const discover = vi
+        .spyOn(SshConfig, "discoverSshHosts")
+        .mockReturnValue(Effect.succeed([{ ...target, source: "ssh-config" }]));
+      const managerLayer = vi
+        .spyOn(SshTunnel.SshEnvironmentManager, "layer")
+        .mockReturnValue(Layer.succeed(SshTunnel.SshEnvironmentManager, manager));
+      vi.stubGlobal("fetch", fetchEndpoint);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          vi.unstubAllGlobals();
+          managerLayer.mockRestore();
+          discover.mockRestore();
+        }),
+      );
+      const result = yield* Effect.gen(function* () {
+        const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
+        return yield* dispatch
+          .launchThread(
+            {
+              host: "box",
+              cwd: "/home/agent/repo",
+              workspace: { type: "cwd" },
+              title: "Work",
+              message: "Implement",
+              modelSelection,
+              runtimeMode: "auto",
+              callerRuntimeMode: "full-access",
+              interactionMode: "default",
+              ...(scenario.launchedBy ? { launchedBy: launcher } : {}),
+            },
+            Effect.sync(() => {
+              authorizations += 1;
+            }),
+          )
+          .pipe(Effect.result);
+      }).pipe(
+        Effect.provide(
+          SshRemoteDispatch.layer.pipe(
+            Layer.provide(ServerConfig.layerTest("/fixture", { prefix: "goat-launcher-test-" })),
+            Layer.provide(FetchHttpClient.layer),
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      );
+      expect(calls).toHaveLength(scenario.expectedCalls);
+      expect(result._tag).toBe(scenario.success ? "Success" : "Failure");
+      expect(calls[0]).toEqual({
+        projectId: "project-1",
+        title: "Work",
+        workspaceStrategy: { type: "root" },
+        runtimeMode: "auto",
+        interactionMode: "default",
+        modelSelection,
+        message: "Implement",
+        ...(scenario.launchedBy ? { launchedBy: launcher } : {}),
+      });
+      if (scenario.expectedCalls === 2) {
+        expect(calls[1]).not.toHaveProperty("launchedBy");
+        expect(authAtCalls[1]).toBe(authAtCalls[0]! + 1);
+        if (result._tag === "Success")
+          expect(result.success.notes.join(" ")).toContain(
+            'scope:"launched" cannot find its questions',
+          );
+      }
+      expect(creates).toBe(scenario.success || scenario.name === "ambiguous" ? 1 : 0);
+    }),
   );
 });

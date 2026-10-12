@@ -4,6 +4,8 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   ContextTransferId,
+  EnvironmentId,
+  RuntimeRequestId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -22,11 +24,20 @@ import {
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
 } from "./scheduledTask.ts";
-import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
+import {
+  ProviderInteractionMode,
+  RuntimeMode,
+  ProviderUserInputAnswers,
+  UserInputRespondedBy,
+  UserInputResponseReason,
+  ProviderApprovalDecision,
+} from "./providerPolicy.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2Actor,
+  OrchestrationV2RuntimeRequest,
+  OrchestrationV2UserInputQuestion,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
@@ -244,6 +255,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   model: Schema.NullOr(Schema.String),
   summary: Schema.NullOr(Schema.String),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
+  pendingRequestIds: Schema.optional(Schema.Array(RuntimeRequestId)),
   waitTimedOut: Schema.Boolean.annotate({
     description:
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
@@ -328,6 +340,81 @@ const OrchestratorMcpProjectTarget = Schema.optional(
 
 /** Set on results that came from another machine; absent for this environment. */
 const OrchestratorMcpResultHost = Schema.optional(Schema.String);
+
+export const OrchestratorMcpPendingRequestListInput = Schema.Struct({
+  threadId: Schema.optional(ThreadId),
+  host: Schema.optional(OrchestratorMcpHost),
+  scope: Schema.optional(Schema.Literals(["thread", "launched"])),
+  hosts: Schema.optional(Schema.Array(OrchestratorMcpHost).check(Schema.isMaxLength(16))),
+  launcherThreadId: Schema.optional(ThreadId),
+  launcherEnvironmentId: Schema.optional(EnvironmentId),
+});
+export type OrchestratorMcpPendingRequestListInput =
+  typeof OrchestratorMcpPendingRequestListInput.Type;
+export const OrchestratorMcpLaunchedQuestion = Schema.Struct({
+  host: Schema.NullOr(OrchestratorMcpHost),
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  title: Schema.String,
+  requestId: RuntimeRequestId,
+  questions: Schema.Array(OrchestrationV2UserInputQuestion),
+  humanRequired: Schema.Boolean,
+});
+export type OrchestratorMcpLaunchedQuestion = typeof OrchestratorMcpLaunchedQuestion.Type;
+export const OrchestratorMcpLaunchedQuestionsResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
+  questions: Schema.Array(OrchestratorMcpLaunchedQuestion),
+  truncated: Schema.Boolean,
+  unavailableHosts: Schema.Array(
+    Schema.Struct({ host: OrchestratorMcpHost, code: Schema.String, message: Schema.String }),
+  ),
+});
+export type OrchestratorMcpLaunchedQuestionsResult =
+  typeof OrchestratorMcpLaunchedQuestionsResult.Type;
+export const OrchestratorMcpThreadPendingRequestsResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
+  requestIds: Schema.Array(RuntimeRequestId),
+});
+export const OrchestratorMcpPendingRequestListResult = Schema.Union([
+  OrchestratorMcpThreadPendingRequestsResult,
+  OrchestratorMcpLaunchedQuestionsResult,
+]);
+export type OrchestratorMcpPendingRequestListResult =
+  typeof OrchestratorMcpPendingRequestListResult.Type;
+export const OrchestratorMcpPendingRequestReadInput = Schema.Struct({
+  threadId: Schema.optional(ThreadId),
+  host: Schema.optional(OrchestratorMcpHost),
+  requestId: RuntimeRequestId,
+});
+export type OrchestratorMcpPendingRequestReadInput =
+  typeof OrchestratorMcpPendingRequestReadInput.Type;
+export const OrchestratorMcpPendingRequestReadResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
+  requestId: RuntimeRequestId,
+  questions: Schema.Array(OrchestrationV2UserInputQuestion),
+  status: Schema.optional(OrchestrationV2RuntimeRequest.fields.status),
+  decision: Schema.optional(ProviderApprovalDecision),
+  respondedBy: Schema.optional(UserInputRespondedBy),
+  resolvedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+});
+export type OrchestratorMcpPendingRequestReadResult =
+  typeof OrchestratorMcpPendingRequestReadResult.Type;
+export const OrchestratorMcpPendingRequestRespondInput = Schema.Struct({
+  threadId: Schema.optional(ThreadId),
+  host: Schema.optional(OrchestratorMcpHost),
+  requestId: RuntimeRequestId,
+  answers: ProviderUserInputAnswers,
+  reason: UserInputResponseReason,
+  respondedBy: Schema.optional(UserInputRespondedBy),
+});
+export type OrchestratorMcpPendingRequestRespondInput =
+  typeof OrchestratorMcpPendingRequestRespondInput.Type;
+export const OrchestratorMcpPendingRequestRespondResult = Schema.Struct({
+  host: OrchestratorMcpResultHost,
+  sequence: NonNegativeInt,
+});
+export type OrchestratorMcpPendingRequestRespondResult =
+  typeof OrchestratorMcpPendingRequestRespondResult.Type;
 
 export const OrchestratorMcpThreadListInput = Schema.Struct({
   projectId: OrchestratorMcpProjectTarget,
@@ -512,6 +599,7 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   host: Schema.optional(OrchestratorMcpHost),
   runId: Schema.optional(RunId),
   timeoutMs: Schema.optional(Schema.Number),
+  ignoreRequestIds: Schema.optional(Schema.Array(RuntimeRequestId).check(Schema.isMaxLength(50))),
 });
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
@@ -521,6 +609,7 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
   timedOut: Schema.Boolean,
+  pendingRequestIds: Schema.optional(Schema.Array(RuntimeRequestId)),
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 

@@ -112,6 +112,8 @@ const TASK_WAKE_EVENTS = [
   { thread: "child", eventType: "run.updated" },
   { thread: "child", eventType: "subagent.updated" },
   { thread: "child", eventType: "provider-thread.updated" },
+  { thread: "child", eventType: "runtime-request.updated" },
+  { thread: "child", eventType: "turn-item.updated" },
 ] as const;
 /** A person answers the card, so a slower poll is plenty. */
 const SECRET_REQUEST_POLL_INTERVAL_MS = 500;
@@ -1536,6 +1538,42 @@ const make = Effect.gen(function* () {
             : taskStatusForRun(taskResultRun ?? childRun) === "queued"
               ? "queued"
               : "running";
+      const latestRun = ThreadManagementService.latestRun(childControls);
+      const questionRunIds = childControls.runs
+        .filter(
+          (run) =>
+            run.id === latestRun?.id || !ThreadManagementService.isTerminalRunStatus(run.status),
+        )
+        .map((run) => run.id);
+      const questionItems = yield* threadManagement
+        .getThreadRecords(task.childThreadId, ["turnItems"], {
+          turnItemTypes: ["user_input_request"],
+          turnItemRunIds: questionRunIds,
+        })
+        .pipe(Effect.mapError(threadManagementFailure));
+      const questionIds = questionItems.turnItems.flatMap((item) =>
+        item.type === "user_input_request" &&
+        item.runId !== null &&
+        questionRunIds.includes(item.runId)
+          ? [item.requestId]
+          : [],
+      );
+      const questionRequests =
+        questionIds.length === 0
+          ? { runtimeRequests: [] }
+          : yield* threadManagement
+              .getThreadRecords(task.childThreadId, ["runtimeRequests"], {
+                runtimeRequestIds: questionIds,
+              })
+              .pipe(Effect.mapError(threadManagementFailure));
+      const questionRecords = { ...questionItems, ...questionRequests };
+      const pendingRequestIds = [
+        ...new Set(
+          questionRunIds.flatMap((runId) =>
+            ThreadManagementService.pendingUserInputRequestIdsForRun(questionRecords, runId),
+          ),
+        ),
+      ].toSorted();
       const derivedResult =
         task.result !== null
           ? task.result
@@ -1580,6 +1618,7 @@ const make = Effect.gen(function* () {
           : null,
         latestTerminalResultContextTransferId: resultTransferForRun(terminalRun)?.id ?? null,
         waitTimedOut,
+        ...(pendingRequestIds.length === 0 ? {} : { pendingRequestIds }),
       } satisfies OrchestratorMcpDelegateTaskResult;
       if (acknowledgeTerminal)
         yield* acknowledgeTaskResult(
@@ -1607,8 +1646,9 @@ const make = Effect.gen(function* () {
         .getThreadEventSequence(scope.thread.threadId)
         .pipe(Effect.mapError(streamError));
       const initial = yield* readTask(scope, taskId, false, true);
-      if (isTerminalTaskStatus(initial.status)) return Option.some(initial);
-      // One stream per event type, so transcript events never fill a buffer.
+      if (isTerminalTaskStatus(initial.status) || (initial.pendingRequestIds?.length ?? 0) > 0)
+        return Option.some(initial);
+      // Keep event types narrow, then skip non-question transcript items.
       return yield* Stream.mergeAll(
         TASK_WAKE_EVENTS.flatMap(({ thread, eventType }) => {
           if (thread === "child" && (initial.host !== undefined || initial.childThreadId === null))
@@ -1621,8 +1661,17 @@ const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ).pipe(
         Stream.mapError(streamError),
+        // The item can commit after its request; other transcript items need no read.
+        Stream.filter(
+          (stored) =>
+            stored.event.type !== "turn-item.updated" ||
+            stored.event.payload.type === "user_input_request",
+        ),
         Stream.mapEffect(() => readTask(scope, taskId, false, true)),
-        Stream.filter((result) => isTerminalTaskStatus(result.status)),
+        Stream.filter(
+          (result) =>
+            isTerminalTaskStatus(result.status) || (result.pendingRequestIds?.length ?? 0) > 0,
+        ),
         Stream.runHead,
       );
     }).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten));
@@ -1682,10 +1731,14 @@ const make = Effect.gen(function* () {
         Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
       );
       const waited = yield* waitForTask(scope, taskId, timeoutMs);
-      if (Option.isSome(waited)) {
+      if (
+        Option.isSome(waited) &&
+        (isTerminalTaskStatus(waited.value.status) ||
+          (waited.value.pendingRequestIds?.length ?? 0) === 0)
+      ) {
         return waited.value;
       }
-      // The blocking wait timed out, so it no longer owns delivery: upgrade
+      // A timeout or pending question released the blocking wait, so it no longer owns delivery: upgrade
       // the task so a later terminal wakes the parent even mid-turn. Best
       // effort; on failure the settled_only policy still wakes a settled
       // parent.
@@ -1724,7 +1777,13 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
-      return yield* readTask(scope, taskId, true, true);
+      if (Option.isSome(waited)) return waited.value;
+      const final = yield* readTask(scope, taskId, false, true);
+      return {
+        ...final,
+        waitTimedOut:
+          !isTerminalTaskStatus(final.status) && (final.pendingRequestIds?.length ?? 0) === 0,
+      };
     });
 
   /**
@@ -2239,6 +2298,7 @@ const make = Effect.gen(function* () {
                     environmentId: scope.environmentId,
                     environmentLabel: null,
                     threadTitle: parent.thread.title,
+                    via: "delegate_task",
                   },
                 },
               },
@@ -2662,6 +2722,7 @@ const make = Effect.gen(function* () {
                     environmentId: null,
                     environmentLabel: null,
                     threadTitle: parent.thread.title,
+                    via: "create_threads",
                   },
                   commandId: stableCommandId({
                     scope,
@@ -2973,6 +3034,9 @@ const make = Effect.gen(function* () {
             projectId: target.thread.projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
+            ...(input.ignoreRequestIds === undefined
+              ? {}
+              : { ignoreRequestIds: input.ignoreRequestIds }),
             timeoutMs: Math.min(
               MAX_WAIT_TIMEOUT_MS,
               Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
@@ -2984,6 +3048,9 @@ const make = Effect.gen(function* () {
           runId: result.run?.id ?? null,
           status: result.run?.status ?? "idle",
           timedOut: result.timedOut,
+          ...(result.pendingRequestIds === undefined
+            ? {}
+            : { pendingRequestIds: result.pendingRequestIds }),
         } satisfies OrchestratorMcpThreadWaitResult;
       }),
     interruptThread: (scope, input) =>

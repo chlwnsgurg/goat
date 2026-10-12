@@ -211,6 +211,9 @@ it.effect(
         ProjectionStore.ProjectionStoreV2,
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
+          getLaunchedPendingQuestions: () => Effect.die("Unused launched question query"),
+          getQuestionEscalationCandidates: () =>
+            Effect.die("unused getQuestionEscalationCandidates"),
           getServerActivity: () => Effect.die("unused getServerActivity"),
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),

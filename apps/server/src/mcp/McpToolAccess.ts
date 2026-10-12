@@ -182,6 +182,7 @@ export const writes = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>
 export const writesThreads = <P, A, E, R>(
   threads: (params: P) => ReadonlyArray<ThreadId | undefined>,
   handle: (params: P) => Effect.Effect<A, E, R>,
+  options: { readonly refusalSuffix?: string } = {},
 ) =>
   declare((params: P) =>
     Effect.gen(function* () {
@@ -192,7 +193,16 @@ export const writesThreads = <P, A, E, R>(
           .getThreadShell(threadId)
           .pipe(Effect.mapError(unavailable));
         if (target !== null && target.deletedAt === null) {
-          yield* assertTargetWithinLimits(caller.limits, target);
+          yield* assertTargetWithinLimits(caller.limits, target).pipe(
+            Effect.mapError((error) =>
+              options.refusalSuffix === undefined
+                ? error
+                : new OrchestratorMcpFailure({
+                    code: error.code,
+                    message: error.message + options.refusalSuffix,
+                  }),
+            ),
+          );
         }
       }
       // The target's user can raise its modes after the check above; the
@@ -204,7 +214,7 @@ export const writesThreads = <P, A, E, R>(
         Effect.catch((error) =>
           Effect.flatMap(Ref.get(refused), (refusal) =>
             Effect.fail<E | OrchestratorMcpFailure>(
-              refusal === undefined ? error : escalationDenied(refusal),
+              refusal === undefined ? error : escalationDenied(refusal, options.refusalSuffix),
             ),
           ),
         ),
@@ -213,13 +223,13 @@ export const writesThreads = <P, A, E, R>(
   );
 
 /** How an agent hears that a thread it targets was raised above its modes mid-call. */
-const escalationDenied = (refusal: DispatchModeRefusal) =>
+const escalationDenied = (refusal: DispatchModeRefusal, refusalSuffix = "") =>
   new OrchestratorMcpFailure({
     code:
       refusal.mode === "runtime"
         ? "runtime_mode_escalation_denied"
         : "interaction_mode_escalation_denied",
-    message: `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this caller's. Its user changed it while this call ran.`,
+    message: `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this caller's. Its user changed it while this call ran.${refusalSuffix}`,
   });
 
 /** The modes a started thread runs with: those requested, else the caller's own. */

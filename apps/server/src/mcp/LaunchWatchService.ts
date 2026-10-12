@@ -1,9 +1,11 @@
 import {
+  MessageId,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadWaitResult,
   type ProjectId,
   type RunId,
   type RuntimeMode,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
@@ -23,6 +25,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { localQuestionLauncher } from "../orchestration-v2/QuestionEscalationService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import {
@@ -124,6 +127,8 @@ type StepResult =
   | {
       readonly _tag: "Running";
       readonly questions: ReadonlyArray<{ readonly id: string; readonly kind: string | null }>;
+      readonly escalatesUserInput?: boolean;
+      readonly retryIfNoNewQuestions?: boolean;
     }
   | { readonly _tag: "RunMissing" }
   | { readonly _tag: "Gone"; readonly reason: string }
@@ -190,6 +195,8 @@ export const make = Effect.gen(function* () {
   const statePath = path.join(config.stateDir, LAUNCH_WATCH_FILE);
 
   let watches = new Map<string, LaunchWatch>();
+  /** First sightings of local questions whose escalation message has not landed yet. */
+  const missingEscalations = new Map<string, Map<string, number>>();
   /** One follower per watch with runs to report; only touched while holding the lock. */
   const followers = new Map<
     string,
@@ -215,6 +222,9 @@ export const make = Effect.gen(function* () {
       Effect.tap(() =>
         Effect.sync(() => {
           watches = next;
+          for (const watchId of missingEscalations.keys()) {
+            if (!next.has(watchId)) missingEscalations.delete(watchId);
+          }
         }),
       ),
     );
@@ -290,6 +300,7 @@ export const make = Effect.gen(function* () {
           threadId: watch.threadId,
           runId,
           timeoutMs: LOCAL_TICK_MS,
+          ignoreRequestIds: reportedRequestIds(watch, runId),
         })
         .pipe(
           Effect.map((result) => ({ _tag: "Waited", result }) as const),
@@ -311,7 +322,17 @@ export const make = Effect.gen(function* () {
       const questions = records.runtimeRequests
         .filter((request) => request.status === "pending" && request.kind !== "dynamic_tool_call")
         .map((request) => ({ id: request.id as string, kind: request.kind as string }));
-      return { _tag: "Running", questions } satisfies StepResult;
+      const subagents =
+        shell.launchedBy === undefined &&
+        shell.lineage.parentThreadId === watch.launcherThreadId &&
+        shell.lineage.relationshipToParent === "subagent"
+          ? (yield* threads.getThreadRecords(watch.launcherThreadId, ["subagents"])).subagents
+          : [];
+      return {
+        _tag: "Running",
+        questions,
+        escalatesUserInput: localQuestionLauncher(shell, subagents) === watch.launcherThreadId,
+      } satisfies StepResult;
     }).pipe(
       Effect.catchTags({
         LauncherGone: () => Effect.succeed({ _tag: "LauncherGone" } satisfies StepResult),
@@ -335,20 +356,56 @@ export const make = Effect.gen(function* () {
     return { _tag: "Unreachable", error: describe(error) };
   };
 
-  const remoteStep = (watch: LaunchWatch, host: string, runId: RunId) =>
+  const reportedRequestIds = (watch: LaunchWatch, runId: RunId) => {
+    const prefix = `${runId}/`;
+    return watch.reportedQuestions
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => RuntimeRequestId.make(key.slice(prefix.length)));
+  };
+
+  const remoteStep = (
+    watch: LaunchWatch,
+    host: string,
+    runId: RunId,
+    capability: { ignoresQuestions: boolean },
+  ) =>
     Effect.gen(function* () {
-      const waited = yield* callHost(
-        watch,
-        host,
-        "goat_thread_wait",
-        { threadId: watch.threadId, runId, timeoutMs: REMOTE_TICK_MS },
-        REMOTE_TICK_MS + REMOTE_ANSWER_MARGIN_MS,
-      ).pipe(Effect.flatMap(decodeWait));
+      const ignoreRequestIds = reportedRequestIds(watch, runId);
+      const wait = (ignore: boolean) =>
+        callHost(
+          watch,
+          host,
+          "goat_thread_wait",
+          {
+            threadId: watch.threadId,
+            runId,
+            timeoutMs: REMOTE_TICK_MS,
+            ...(ignore && ignoreRequestIds.length > 0 ? { ignoreRequestIds } : {}),
+          },
+          REMOTE_TICK_MS + REMOTE_ANSWER_MARGIN_MS,
+        );
+      const waited = yield* wait(capability.ignoresQuestions).pipe(
+        Effect.catchTags({
+          SshRemoteDispatchError: (error) =>
+            capability.ignoresQuestions &&
+            ignoreRequestIds.length > 0 &&
+            error.reason === "remote_refused" &&
+            error.message.includes(
+              "goat_thread_wait does not take ignoreRequestIds, so nothing ran",
+            )
+              ? Effect.gen(function* () {
+                  capability.ignoresQuestions = false;
+                  return yield* wait(false);
+                })
+              : Effect.fail(error),
+        }),
+        Effect.flatMap(decodeWait),
+      );
       if (!waited.timedOut && isTerminalStatus(waited.status)) {
         return { _tag: "Terminal", status: waited.status } satisfies StepResult;
       }
       // Only user questions are listed remotely; approvals show up when the run ends.
-      const questions = yield* callHost(
+      const listedQuestions = yield* callHost(
         watch,
         host,
         "goat_pending_request_list",
@@ -366,7 +423,19 @@ export const make = Effect.gen(function* () {
               }).pipe(Effect.as([])),
         ),
       );
-      return { _tag: "Running", questions } satisfies StepResult;
+      const questions = [...listedQuestions];
+      if (!waited.timedOut) {
+        for (const id of waited.pendingRequestIds ?? []) {
+          if (!questions.some((question) => question.id === id)) {
+            questions.push({ id, kind: "user_input" });
+          }
+        }
+      }
+      return {
+        _tag: "Running",
+        questions,
+        retryIfNoNewQuestions: !waited.timedOut,
+      } satisfies StepResult;
     }).pipe(
       Effect.timeoutOption(REMOTE_STEP_LIMIT_MS),
       Effect.map((result) =>
@@ -493,7 +562,10 @@ export const make = Effect.gen(function* () {
     );
 
   const releaseSlot = (watchId: string, incarnation: string) => {
-    if (followers.get(watchId)?.incarnation === incarnation) followers.delete(watchId);
+    if (followers.get(watchId)?.incarnation === incarnation) {
+      followers.delete(watchId);
+      missingEscalations.delete(watchId);
+    }
   };
 
   /** Starts a follower when a watch has runs to report and none is running. Call with the lock held. */
@@ -551,6 +623,7 @@ export const make = Effect.gen(function* () {
           }
           switch (result._tag) {
             case "Terminal": {
+              missingEscalations.delete(watchId);
               const sent = yield* deliver(
                 watch,
                 finishedWake({ watch, runId, status: result.status, ...details }),
@@ -565,10 +638,56 @@ export const make = Effect.gen(function* () {
             }
             case "Running": {
               let next = recordContact(watch, now);
-              let pause = 0;
+              const missing = missingEscalations.get(watchId) ?? new Map<string, number>();
+              const pending = new Set(
+                result.questions.map((question) => questionKey(runId, question.id)),
+              );
+              for (const key of missing.keys()) {
+                if (!pending.has(key)) missing.delete(key);
+              }
+              let pause =
+                result.retryIfNoNewQuestions &&
+                result.questions.every((question) =>
+                  next.reportedQuestions.includes(questionKey(runId, question.id)),
+                )
+                  ? RETRY_MS
+                  : 0;
               for (const question of result.questions) {
                 const key = questionKey(runId, question.id);
-                if (next.reportedQuestions.includes(key)) continue;
+                if (next.reportedQuestions.includes(key)) {
+                  missing.delete(key);
+                  continue;
+                }
+                if (result.escalatesUserInput && question.kind === "user_input") {
+                  const messageId = MessageId.make(
+                    `question-escalation:${watch.threadId}:${question.id}`,
+                  );
+                  const escalated = yield* threads
+                    .getThreadRecords(watch.launcherThreadId, ["messages"], {
+                      messageIds: [messageId],
+                    })
+                    .pipe(
+                      Effect.map((records) =>
+                        records.messages.some((message) => message.id === messageId),
+                      ),
+                      Effect.catch((error) =>
+                        Effect.logDebug("launch watch: escalation message unreadable", {
+                          cause: error,
+                        }).pipe(Effect.as(false)),
+                      ),
+                    );
+                  if (escalated) {
+                    next = recordQuestion(next, key, now);
+                    missing.delete(key);
+                    continue;
+                  }
+                  const firstSeen = missing.get(key) ?? now;
+                  missing.set(key, firstSeen);
+                  if (now - firstSeen < RETRY_MS) {
+                    pause = RETRY_MS;
+                    continue;
+                  }
+                }
                 const sent = yield* deliver(
                   next,
                   questionWake({
@@ -580,12 +699,16 @@ export const make = Effect.gen(function* () {
                   }),
                 );
                 next = sent.delivered ? recordQuestion(sent.watch, key, now) : sent.watch;
+                if (sent.delivered) missing.delete(key);
                 if (!sent.delivered) pause = RETRY_MS;
               }
+              if (missing.size > 0) missingEscalations.set(watchId, missing);
+              else missingEscalations.delete(watchId);
               if (next !== watch) yield* keep(next);
               return pause;
             }
             case "RunMissing":
+              missingEscalations.delete(watchId);
               yield* Effect.logWarning("launch watch: followed run no longer exists", {
                 watchId,
                 runId,
@@ -649,6 +772,7 @@ export const make = Effect.gen(function* () {
   /** Follows one watch's pending runs until none is left or the watch goes away. */
   const follow = (watchId: string, incarnation: string): Effect.Effect<void> =>
     Effect.gen(function* () {
+      const capability = { ignoresQuestions: true };
       while (true) {
         const next = yield* plan(watchId, incarnation);
         if (next._tag === "Exit") return;
@@ -660,7 +784,7 @@ export const make = Effect.gen(function* () {
         const result =
           watch.host === null
             ? yield* localStep(watch, runId)
-            : yield* remoteStep(watch, watch.host, runId);
+            : yield* remoteStep(watch, watch.host, runId, capability);
         const details = result._tag === "Terminal" ? yield* detailsFor(watch, runId) : noDetails;
         const pause = yield* apply(watchId, incarnation, runId, result, details).pipe(
           Effect.catch((error) =>

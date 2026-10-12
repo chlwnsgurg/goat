@@ -187,3 +187,21 @@ describe("resolveT3McpToolPresentation", () => {
     expect(resolveT3McpToolPresentation("t3-code.not_a_real_tool")).toBeNull();
   });
 });
+
+it("keeps answer lifecycle labels and permits resolved question reads", () => {
+  for (const tool of ["goat_pending_request_respond", "t3_pending_request_respond"]) {
+    expect(resolveT3McpToolDefinition(tool)?.labels).toEqual([
+      "Answer",
+      "Answering",
+      "Answered",
+      "pending questions",
+    ]);
+    expect(resolveT3McpToolDefinition(tool)?.summaryAction).toBe("question-respond");
+  }
+  expect(resolveT3McpToolDefinition("goat_pending_request_read")?.labels).toEqual([
+    "Read",
+    "Reading",
+    "Read",
+    "questions",
+  ]);
+});

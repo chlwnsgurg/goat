@@ -184,3 +184,62 @@ it("restores old text answers without mutating history or replacing unchanged ro
   expect(project(answered)).toBe(result);
   expect(project({ ...answered, visibleTurnItems: [...rows] })[0]).toBe(result[0]);
 });
+
+it("restores provenance without mutating or overwriting saved history", () => {
+  const project = createQuestionHistoryProjector();
+  const item = projection.turnItems[0]!;
+  const row = {
+    item,
+    position: 0,
+    sourceItemId: item.id,
+    sourceThreadId: item.threadId,
+    visibility: "local" as const,
+  };
+  const rows = [row];
+  const pending = { visibleTurnItems: rows, runtimeRequests: projection.runtimeRequests };
+  expect(project(pending)).toBe(rows);
+  const answered = {
+    ...pending,
+    runtimeRequests: [
+      {
+        ...projection.runtimeRequests[0]!,
+        status: "resolved" as const,
+        answers: { next: "Continue" },
+        respondedBy: { type: "client" as const, reason: "Original reason" },
+      },
+    ],
+  };
+  const result = project(answered);
+  expect(result[0]?.item).toMatchObject({
+    questionAnswer: {
+      answers: { next: "Continue" },
+      respondedBy: answered.runtimeRequests[0]!.respondedBy,
+      attachmentsByQuestionId: {},
+      questionTextById: { next: "What should happen next?" },
+    },
+  });
+  expect(row.item).not.toHaveProperty("questionAnswer");
+  expect(project(answered)).toBe(result);
+  expect(project({ ...answered, visibleTurnItems: [...rows] })[0]).toBe(result[0]);
+  const revised = {
+    ...answered,
+    runtimeRequests: answered.runtimeRequests.map((request) => ({
+      ...request,
+      respondedBy: { type: "client" as const, reason: "Revised reason" },
+    })),
+  };
+  expect(project(revised)[0]).not.toBe(result[0]);
+  const saved = {
+    ...row,
+    item: {
+      ...row.item,
+      questionAnswer: {
+        requestId: "saved",
+        answers: { next: "Saved answer" },
+        attachmentsByQuestionId: {},
+        respondedBy: { type: "user" as const },
+      },
+    },
+  };
+  expect(project({ ...revised, visibleTurnItems: [saved] })).toEqual([saved]);
+});

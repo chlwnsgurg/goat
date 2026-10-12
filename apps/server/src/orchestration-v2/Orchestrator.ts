@@ -20,6 +20,11 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  RuntimeRequestId,
+  UserInputRespondedBy,
+  ProviderApprovalDecision,
+  OrchestrationV2RuntimeRequest,
+  describeUserInputResponder,
   isProviderNativeSubagentThread,
   MessageId,
   type NodeId,
@@ -253,7 +258,30 @@ export function canReplayCommandReceipt(
   return receiptThreadId === commandThreadId;
 }
 
+export class OrchestratorQuestionAlreadyAnsweredError extends Schema.TaggedError<OrchestratorQuestionAlreadyAnsweredError>()(
+  "OrchestratorQuestionAlreadyAnsweredError",
+  {
+    commandId: CommandId,
+    requestId: RuntimeRequestId,
+    respondedBy: Schema.optional(UserInputRespondedBy),
+    resolvedAt: Schema.NullOr(Schema.DateTimeUtc),
+    decision: Schema.optional(ProviderApprovalDecision),
+    status: Schema.optional(OrchestrationV2RuntimeRequest.fields.status),
+  },
+) {
+  override get message(): string {
+    const description = describeUserInputResponder(this);
+    const outcome =
+      this.decision === "cancel" || this.status === "expired" || this.status === "cancelled"
+        ? description
+        : `answered by ${description}`;
+    const time = this.resolvedAt === null ? "an unknown time" : DateTime.formatIso(this.resolvedAt);
+    return `This question was already ${outcome} at ${time}.`;
+  }
+}
+
 export const OrchestratorV2Error = Schema.Union([
+  OrchestratorQuestionAlreadyAnsweredError,
   OrchestratorDispatchError,
   OrchestratorCommandRejectedError,
   OrchestratorProjectionError,
@@ -348,6 +376,12 @@ export interface OrchestratorV2Shape {
     options?: ShellSnapshotOptions,
   ) => Effect.Effect<
     Effect.Effect<OrchestrationV2ThreadShellSnapshot, OrchestratorV2Error>,
+    OrchestratorV2Error
+  >;
+  readonly getLaunchedPendingQuestions: (
+    input: Parameters<ProjectionStoreV2["Service"]["getLaunchedPendingQuestions"]>[0],
+  ) => Effect.Effect<
+    Effect.Success<ReturnType<ProjectionStoreV2["Service"]["getLaunchedPendingQuestions"]>>,
     OrchestratorV2Error
   >;
   readonly getThreadShell: (
@@ -6913,6 +6947,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        launchedBy: {
+          kind: "launch",
+          environmentLabel: null,
+          threadTitle: parentProjection.thread.title,
+          threadId: parentProjection.thread.id,
+          environmentId: null,
+          via: "delegate_task",
+        },
       };
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,
@@ -7583,12 +7625,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (runtimeRequest.status !== "pending") {
+        if (runtimeRequest.kind === "user_input")
+          return yield* new OrchestratorQuestionAlreadyAnsweredError({
+            commandId: command.commandId,
+            requestId: command.requestId,
+            ...(runtimeRequest.respondedBy === undefined
+              ? {}
+              : { respondedBy: runtimeRequest.respondedBy }),
+            ...(runtimeRequest.decision === undefined ? {} : { decision: runtimeRequest.decision }),
+            status: runtimeRequest.status,
+            resolvedAt: runtimeRequest.resolvedAt,
+          });
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Runtime request ${command.requestId} is ${runtimeRequest.status}.`,
         });
       }
+      if (
+        command.respondedBy !== undefined &&
+        command.respondedBy.type !== "user" &&
+        runtimeRequest.kind !== "user_input"
+      )
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Only the user can answer approval requests.",
+        });
       if (runtimeRequest.responseCapability.type === "not_resumable") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -7614,6 +7677,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...runtimeRequest,
         status: "resolved" as const,
         resolvedAt: now,
+        ...(command.respondedBy === undefined ? {} : { respondedBy: command.respondedBy }),
         ...(command.decision === undefined ? {} : { decision: command.decision }),
         ...(command.answers === undefined ? {} : { answers: command.answers }),
       };
@@ -7678,6 +7742,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {
                   questionAnswer: {
                     requestId: command.requestId,
+                    ...(command.respondedBy === undefined
+                      ? {}
+                      : { respondedBy: command.respondedBy }),
                     answers: command.answers ?? {},
                     attachmentsByQuestionId: command.attachmentsByQuestionId ?? {},
                     questionTextById: Object.fromEntries(
@@ -7758,15 +7825,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         }
         // The resolution and normal message dispatch share one event transaction.
+        const responder = command.respondedBy?.type === "user" ? undefined : command.respondedBy;
+        const localAgent =
+          responder?.type === "agent" && responder.environmentId === null ? responder : undefined;
+        const answerText = replies.join("\n\n");
         return yield* dispatchMessage(
           {
             type: "message.dispatch",
             commandId: command.commandId,
             threadId: command.threadId,
             messageId: MessageId.make(`async-answer:${command.requestId}`),
-            text: replies.join("\n\n"),
+            text:
+              responder === undefined
+                ? answerText
+                : `Answered by ${describeUserInputResponder({ respondedBy: responder })}${localAgent === undefined ? "" : ` (${localAgent.threadId})`}: ${responder.reason}\n\n${answerText}`,
             attachments: [],
-            createdBy: "user",
+            createdBy: responder === undefined ? "user" : "agent",
+            ...(localAgent === undefined ? {} : { senderThreadId: localAgent.threadId }),
             creationSource: "server",
             dispatchMode,
           },
@@ -7803,6 +7878,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .pipe(
           Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
         );
+      if (request !== undefined && request.kind === "user_input" && request.status !== "pending") {
+        return yield* new OrchestratorQuestionAlreadyAnsweredError({
+          commandId: command.commandId,
+          requestId: command.requestId,
+          ...(request.respondedBy === undefined ? {} : { respondedBy: request.respondedBy }),
+          ...(request.decision === undefined ? {} : { decision: request.decision }),
+          status: request.status,
+          resolvedAt: request.resolvedAt,
+        });
+      }
       if (request === undefined || request.status !== "pending") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -7824,6 +7909,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: command.threadId,
           requestId: command.requestId,
           decision: "cancel",
+          ...(command.respondedBy === undefined ? {} : { respondedBy: command.respondedBy }),
         },
         events,
         effects,
@@ -11740,6 +11826,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           Effect.mapError(shellProjectionError),
           Effect.map(Effect.mapError(shellProjectionError)),
         ),
+    getLaunchedPendingQuestions: (input) =>
+      projectionStore
+        .getLaunchedPendingQuestions(input)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: input.launcherThreadId, cause }),
+          ),
+        ),
     getThreadShell: (threadId) =>
       projectionStore
         .getThreadShell(threadId)
@@ -11877,6 +11971,13 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
       Effect.fail(
         new OrchestratorProjectionError({
           threadId: ThreadId.make("thread:shell"),
+          cause: "Orchestration V2 live runtime is not configured.",
+        }),
+      ),
+    getLaunchedPendingQuestions: (input) =>
+      Effect.fail(
+        new OrchestratorProjectionError({
+          threadId: input.launcherThreadId,
           cause: "Orchestration V2 live runtime is not configured.",
         }),
       ),

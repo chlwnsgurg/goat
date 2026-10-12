@@ -377,6 +377,7 @@ it.effect(
           environmentId: scope.environmentId,
           environmentLabel: null,
           threadTitle: f.projection.thread.title,
+          via: "delegate_task",
         });
         const call = yield* Queue.take(f.calls);
         assert.equal(call.input.arguments.watchRunId, remoteRunId);

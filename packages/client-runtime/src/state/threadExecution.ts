@@ -442,6 +442,7 @@ export function notificationChildThreadId(
     case "delegated_task":
       return source.childThreadId;
     case "command":
+    case "question":
     case "monitor":
     case "background_task":
     case "system":

@@ -553,6 +553,14 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
       threadId: parentThreadId,
       projectId,
       title: "Parent with a linked PR",
+      launchedBy: {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        threadId: ThreadId.make("grandparent"),
+        environmentId: null,
+        via: "thread_launch",
+      },
       modelSelection,
       runtimeMode: "full-access",
       interactionMode: "default",
@@ -596,6 +604,32 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
     const updatedParent = yield* projections.getThreadProjection(parentThreadId);
     const childThreadId = updatedParent.subagents[0]!.childThreadId!;
     const child = yield* projections.getThreadProjection(childThreadId);
+    assert.deepEqual(child.thread.launchedBy, {
+      kind: "launch" as const,
+      environmentLabel: null,
+      threadTitle: "Parent with a linked PR",
+      threadId: parentThreadId,
+      environmentId: null,
+      via: "delegate_task",
+    });
+    const replay = yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      commandId: CommandId.make("delegate-parent-pr"),
+      parentThreadId,
+      parentRunId: parentRun.id,
+      parentNodeId: parentRun.rootNodeId!,
+      task: "Review the changes",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    assert.equal(
+      replay.storedEvents.find((event) => event.event.type === "thread.created")?.event.threadId,
+      childThreadId,
+    );
+    assert.lengthOf((yield* projections.getThreadProjection(parentThreadId)).subagents, 1);
     assert.isNull(child.thread.linkedPullRequest);
     assert.deepEqual(child.thread.pullRequests, []);
     assert.equal(child.thread.branch, parent.thread.branch);

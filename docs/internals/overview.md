@@ -95,6 +95,29 @@ blocked work. It records the activity timestamp for stable
 sorting and detaches idle provider sessions. Clients render the persisted result; they do not
 derive settlement from their own clocks or PR caches.
 
+## Questions from launched threads
+
+A thread an agent starts with `goat_thread_launch`, `create_threads`, or `delegate_task`
+records its `launchedBy`. Launcher identity is separate from lineage: lineage is ancestry and
+subagent ownership, while the launcher is who should hear about the thread's questions. Provider
+native subagents and forks never inherit it. The
+[question escalation service](../../apps/server/src/orchestration-v2/QuestionEscalationService.ts)
+reacts to committed request and question-item events and queues one notification on a launcher
+in the same environment, with deterministic ids so replays and the startup sweep do not
+duplicate it. When the question resolves, a still-queued notification run is cancelled; a
+notification already delivered is followed by one short resolution notice unless the launcher
+answered itself. The
+[launch watch](../../apps/server/src/mcp/LaunchWatchService.ts) leaves those questions to it and
+reports the rest: approvals, and questions of threads on SSH hosts, which it reads over the
+host's MCP session. Waits that follow a thread pass the questions they already reported as
+`ignoreRequestIds`, because a wait releases on any other pending user-input question.
+
+Answers record `respondedBy`. The WebSocket boundary always stamps the user; MCP stamps the
+authenticated caller. An answer an agent carries to another machine arrives there as an outside
+MCP client, so its foreign `agent` provenance and an SSH launch's `launcher` are claims made by
+that authenticated client session, not proof of the origin thread. Agent answers never carry
+approval authority: approvals stay human-only and the target's mode ceiling still applies.
+
 ## Waiting for asynchronous work
 
 Tests use [drainable workers](../../packages/shared/src/DrainableWorker.ts) to wait until both the

@@ -2021,6 +2021,14 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     yield* fs.writeFile(pendingPath, new Uint8Array([1, 2, 3, 4]));
     const input = {
       ...launchInput({ command: "intake-launch", thread: "intake-thread" }),
+      launchedBy: {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        threadId: ThreadId.make("intake-caller"),
+        environmentId: null,
+        via: "thread_launch" as const,
+      },
       initialMessage: {
         messageId: MessageId.make("intake-first"),
         text: "First [file](t3-context://v1/file/intake-file)",
@@ -2086,6 +2094,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     assert.deepEqual(yield* fs.readFile(pendingPath), new Uint8Array([1, 2, 3, 4]));
 
     const replayed = yield* ThreadMessageIntake.launchThread(input);
+    assert.deepEqual(replayed.projection.thread.launchedBy, input.launchedBy);
     assert.equal(replayed.projection.messages[0]?.id, stored.id);
     assert.deepEqual(replayed.projection.messages[0]?.attachments, stored.attachments);
     const claimedFiles = Effect.map(fs.readDirectory(config.attachmentsDir), (files) =>
@@ -2403,3 +2412,75 @@ it.effect.each([
     }).pipe(Effect.provide(harness.layer));
   }),
 );
+
+it.effect("records launcher before preparation and preserves it on receipt replay", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      runSetup: () =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launcher = {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        threadId: ThreadId.make("caller"),
+        environmentId: null,
+        via: "thread_launch" as const,
+      };
+      const input = {
+        ...launchInput({
+          command: "foundation-launch",
+          thread: "foundation-thread",
+          message: "Initial prompt",
+          workspace: { type: "worktree", baseRef: "main" },
+        }),
+        launchedBy: launcher,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+      };
+      const result = yield* ThreadMessageIntake.launchThread(input);
+      yield* Deferred.await(entered);
+      assert.deepEqual(result.projection.thread.launchedBy, launcher);
+      assert.deepEqual((yield* threads.getThreadShell(result.threadId))?.launchedBy, launcher);
+      const replay = yield* ThreadMessageIntake.launchThread(input);
+      assert.equal(replay.threadId, result.threadId);
+      assert.deepEqual(replay.projection.thread.launchedBy, launcher);
+      assert.lengthOf(yield* threads.listProjectThreads({ projectId, includeSubagents: false }), 1);
+      yield* Deferred.succeed(release, undefined);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          harness.layer,
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-foundation-intake-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      ),
+    );
+  }),
+);
+it.effect.each([
+  { type: "root" },
+  { type: "existing_worktree", worktreePath: "/repo-existing", branch: "existing" },
+  { type: "worktree", baseRef: "main" },
+] as const)("keeps ordinary $type launches without a launcher", (workspace) => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const result = yield* launches.launch(
+      launchInput({
+        command: `plain-${workspace.type}`,
+        thread: `plain-${workspace.type}`,
+        workspace,
+      }),
+    );
+    assert.isUndefined(result.projection.thread.launchedBy);
+  }).pipe(Effect.provide(harness.layer));
+});

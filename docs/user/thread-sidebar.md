@@ -226,6 +226,11 @@ Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
 
+A thread an agent launched sends its questions to the thread that launched it.
+That agent may answer itself or ask you; its answer shows which thread answered
+and why. You can still answer in the asking thread, and the first answer counts.
+Approvals always wait for you.
+
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
 finishes; the call's own result shows its status.

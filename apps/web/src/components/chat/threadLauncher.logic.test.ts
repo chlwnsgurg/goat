@@ -43,6 +43,15 @@ describe("isLaunchedFromThread", () => {
     );
   });
 
+  it("does not count delegated children as launched top-level threads", () => {
+    expect(
+      isLaunchedFromThread(
+        { environmentId: localEnvironmentId, launchedBy: { ...launchedBy, via: "delegate_task" } },
+        launcher,
+      ),
+    ).toBe(false);
+  });
+
   it("does not count promotions as launches", () => {
     expect(
       isLaunchedFromThread(

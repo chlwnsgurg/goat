@@ -12,6 +12,7 @@ export function isLaunchedFromThread(
 ): boolean {
   return (
     shell.launchedBy?.kind === "launch" &&
+    shell.launchedBy.via !== "delegate_task" &&
     shell.launchedBy.threadId === launcher.threadId &&
     (shell.launchedBy.environmentId ?? shell.environmentId) === launcher.environmentId
   );

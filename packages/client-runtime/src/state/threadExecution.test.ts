@@ -1,5 +1,6 @@
 import {
   TurnItemId,
+  RuntimeRequestId,
   NodeId,
   MessageId,
   ProviderInstanceId,
@@ -18,6 +19,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
   presentPendingBackgroundWork,
+  notificationChildThreadId,
   presentProviderGoal,
   deriveReportedModelSelection,
   deriveLatestThreadRun,
@@ -717,4 +719,20 @@ describe("presentProviderGoal", () => {
       presentProviderGoal({ objective: "All tests pass", status: "active" }, false).title,
     ).toBe("Goal set");
   });
+});
+
+it("question notifications do not masquerade as child-thread navigation", () => {
+  const childThreadId = ThreadId.make("child");
+  expect(
+    notificationChildThreadId({
+      kind: "question",
+      threadId: childThreadId,
+      requestId: RuntimeRequestId.make("question"),
+      humanRequired: false,
+    }),
+  ).toBeUndefined();
+  expect(notificationChildThreadId({ kind: "subagent", childThreadId })).toBe(childThreadId);
+  expect(notificationChildThreadId({ kind: "delegated_task", taskIds: [], childThreadId })).toBe(
+    childThreadId,
+  );
 });

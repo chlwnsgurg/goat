@@ -171,6 +171,7 @@ it.effect("forwards the calling thread and this machine as the remote thread's l
         environmentId: "launcher-environment",
         environmentLabel: "studio",
         threadTitle: "Orchestrator",
+        via: "ssh_thread_launch",
       },
     ]);
   }),

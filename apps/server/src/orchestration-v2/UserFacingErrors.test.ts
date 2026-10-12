@@ -1,5 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 
+import { CommandId, RuntimeRequestId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import { OrchestratorQuestionAlreadyAnsweredError } from "./Orchestrator.ts";
 import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
 
 describe("userFacingDispatchErrorMessage", () => {
@@ -65,4 +68,20 @@ describe("userFacingDispatchErrorMessage", () => {
       "Claude provider thread provider-thread-1 has no live query.",
     );
   });
+});
+
+it("shows recorded responder and time through WS wrappers", () => {
+  const error = new OrchestratorQuestionAlreadyAnsweredError({
+    commandId: CommandId.make("loser"),
+    requestId: RuntimeRequestId.make("question"),
+    respondedBy: { type: "client", reason: "Private reason" },
+    resolvedAt: DateTime.makeUnsafe("2026-10-12T00:00:00Z"),
+  });
+  assert.equal(
+    userFacingDispatchErrorMessage({
+      message: "Failed to dispatch orchestration command runtime-request.respond (loser).",
+      cause: error,
+    }),
+    "This question was already answered by an MCP client at 2026-10-12T00:00:00.000Z.",
+  );
 });

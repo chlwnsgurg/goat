@@ -22,6 +22,7 @@ import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentS
 import * as ServerConfig from "../config.ts";
 import {
   OrchestratorCommandPreviouslyRejectedError,
+  OrchestratorQuestionAlreadyAnsweredError,
   OrchestratorDispatchError,
 } from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
@@ -364,6 +365,61 @@ it.effect("releases claimed copies when the command was already rejected", () =>
       Effect.result,
     );
     expect(result._tag).toBe("Failure");
+    expect(
+      NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
+        entry.startsWith("thread-rejected-"),
+      ),
+    ).toEqual([]);
+    expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`))).toBe(true);
+  }).pipe(Effect.provide(layerIntakeTest)),
+);
+
+it.effect("releases loser uploads when an already-answered question rejects the response", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const pendingId = ChatAttachmentId.make(createPendingAttachmentId()!);
+    NodeFS.writeFileSync(
+      NodePath.join(config.attachmentsDir, `${pendingId}.png`),
+      new Uint8Array([1, 2, 3]),
+    );
+    // The winner's stored attachment survives the loser's rejected claims.
+    const winnerPath = NodePath.join(config.attachmentsDir, "winner.png");
+    NodeFS.writeFileSync(winnerPath, new Uint8Array([9]));
+    const result = yield* dispatchCommand({
+      type: "runtime-request.respond",
+      commandId: CommandId.make("answer-rejected"),
+      threadId: ThreadId.make("thread-rejected"),
+      requestId: RuntimeRequestId.make("request-rejected"),
+      answers: { q: ["one"] },
+      attachmentsByQuestionId: {
+        q: [
+          {
+            type: "image",
+            id: pendingId,
+            name: "screen.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+          },
+        ],
+      },
+    }).pipe(
+      Effect.provide(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          dispatch: (command) =>
+            Effect.fail(
+              new OrchestratorQuestionAlreadyAnsweredError({
+                commandId: command.commandId,
+                requestId: RuntimeRequestId.make("request-rejected"),
+                respondedBy: { type: "client", reason: "Winner" },
+                resolvedAt: NOW,
+              }),
+            ),
+        }),
+      ),
+      Effect.result,
+    );
+    expect(result._tag).toBe("Failure");
+    expect(NodeFS.readFileSync(winnerPath)).toEqual(Buffer.from([9]));
     expect(
       NodeFS.readdirSync(config.attachmentsDir).filter((entry) =>
         entry.startsWith("thread-rejected-"),

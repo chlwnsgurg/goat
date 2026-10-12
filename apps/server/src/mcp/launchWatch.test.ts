@@ -144,7 +144,7 @@ it.effect(
     }),
 );
 
-it.effect("question messages give local request arguments or the connected host client route", () =>
+it.effect("question messages give concrete local and remote pending-tool arguments", () =>
   Effect.sync(() => {
     const question = (host: string | null) =>
       questionWake({
@@ -157,7 +157,27 @@ it.effect("question messages give local request arguments or the connected host 
     expect(question(null).text).toContain(
       'goat_pending_request_read {threadId: "target-thread", requestId: "request-1"}',
     );
-    expect(question("box").text).toContain("from a client connected to box");
+    expect(question("box").text).toContain(
+      'goat_pending_request_read {host: "box", threadId: "target-thread", requestId: "request-1"}',
+    );
+    expect(question("box").text).toContain(
+      "goat_pending_request_respond using the same host, threadId, and requestId (reason required)",
+    );
+    expect(question("box").text).toContain("forward it to the user");
+    for (const host of [null, "box"]) {
+      for (const kind of [null, "command"]) {
+        const wake = questionWake({
+          watch: makeWatch(host),
+          runId: RunId.make("run-1"),
+          requestId: "request-1",
+          kind,
+          title: null,
+        });
+        expect(wake.text).not.toContain("goat_pending_request_respond");
+        expect(wake.text).toContain(kind === null ? "a request" : "a command request");
+        if (host !== null) expect(wake.text).toContain("from a client connected to box");
+      }
+    }
   }),
 );
 

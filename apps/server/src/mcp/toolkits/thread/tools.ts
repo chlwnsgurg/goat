@@ -9,10 +9,14 @@ import {
   ModelSelection,
   RuntimeMode,
   ProviderInteractionMode,
-  RuntimeRequestId,
-  ProviderUserInputAnswers,
   IsoDateTime,
   OrchestratorMcpFailure,
+  OrchestratorMcpPendingRequestListInput,
+  OrchestratorMcpPendingRequestListResult,
+  OrchestratorMcpPendingRequestReadInput,
+  OrchestratorMcpPendingRequestReadResult,
+  OrchestratorMcpPendingRequestRespondInput,
+  OrchestratorMcpPendingRequestRespondResult,
   OrchestrationV2DispatchCommandResult,
   ThreadId,
   RunId,
@@ -26,6 +30,7 @@ import { Tool, Toolkit } from "effect/ai";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as PendingQuestionsMcpService from "../../PendingQuestionsMcpService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("goat_thread_organize", {
@@ -127,50 +132,40 @@ const QueuePromoteTool = Tool.make("goat_queue_promote_to_steer", {
   parameters: Schema.Struct({ ...queueTarget, targetRunId: RunId }),
 }).annotate(Tool.Destructive, true);
 
-const requestTarget = { threadId: Schema.optional(ThreadId), requestId: RuntimeRequestId };
-const question = Schema.Struct({
-  id: Schema.String,
-  header: Schema.String,
-  question: Schema.String,
-  options: Schema.Array(
-    Schema.Struct({
-      label: Schema.String,
-      description: Schema.String,
-      value: Schema.optional(Schema.String),
-    }),
-  ),
-  multiSelect: Schema.optional(Schema.Boolean),
-  allowCustomAnswer: Schema.optional(Schema.Boolean),
-  initialAnswer: Schema.optional(Schema.String),
-  required: Schema.optional(Schema.Boolean),
-});
-const pendingRequest = Schema.Struct({
-  requestId: RuntimeRequestId,
-  questions: Schema.Array(question),
-});
+const pendingTool = {
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    PendingQuestionsMcpService.PendingQuestionsMcpService,
+    Crypto.Crypto,
+  ],
+};
 const PendingRequestListTool = Tool.make("goat_pending_request_list", {
-  ...commandTool,
+  ...pendingTool,
   description:
-    "List pending user questions in a thread. Omit threadId for this thread. Approval requests are not included.",
-  parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
-  success: Schema.Struct({ requestIds: Schema.Array(RuntimeRequestId) }),
+    "List pending user-input questions; approvals are human-only and excluded. Omit threadId for this thread, or pass host and threadId for another machine. scope='launched' shows your launched threads' questions locally and on connected hosts plus hosts[]. Host fan-out caps at 16; unavailableHosts reports skipped aliases and hosts that could not be queried. Results cap at 100; when truncated, answer questions or narrow with host and threadId. Launcher filters are reserved for outside host transport.",
+  parameters: OrchestratorMcpPendingRequestListInput,
+  success: OrchestratorMcpPendingRequestListResult,
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const PendingRequestReadTool = Tool.make("goat_pending_request_read", {
-  ...commandTool,
+  ...pendingTool,
   description:
-    "Read a pending user question. Answer with goat_pending_request_respond; existing live or message response handling is used.",
-  parameters: Schema.Struct(requestTarget),
-  success: pendingRequest,
+    "Read a pending or resolved user question, including status, responder and resolution time when available. Pass host and threadId for another machine. Answer with goat_pending_request_respond or forward to the user; old remotes may omit status and provenance.",
+  parameters: OrchestratorMcpPendingRequestReadInput,
+  success: OrchestratorMcpPendingRequestReadResult,
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const PendingRequestRespondTool = Tool.make("goat_pending_request_respond", {
-  ...commandTool,
+  ...pendingTool,
   description:
-    "Answer a pending user-input request using the existing runtime response command. This cannot approve a permission request.",
-  parameters: Schema.Struct({ ...requestTarget, answers: ProviderUserInputAnswers }),
+    "Answer a pending user-input question with answers and a required reason (1–2000 characters, including non-whitespace text). Pass host and threadId for another machine; remote writes need default interaction mode. Approvals are human-only; forward humanRequired questions to the user. respondedBy is reserved for outside host transport; thread callers must omit it.",
+  parameters: OrchestratorMcpPendingRequestRespondInput,
+  success: OrchestratorMcpPendingRequestRespondResult,
 })
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);

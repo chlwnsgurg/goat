@@ -12,9 +12,9 @@ import {
   CommandId,
   ContextHandoffId,
   ContextTransferId,
-  EnvironmentId,
   EventId,
   ForwardCompatibleOptional,
+  EnvironmentId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -65,6 +65,7 @@ import {
   ProviderUserInputAnswers,
   UserInputAttachments,
   UserInputAttachmentAnswerPayload,
+  UserInputRespondedBy,
   RuntimeMode,
 } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
@@ -117,8 +118,8 @@ export const OrchestrationV2AppThreadLineage = Schema.Struct({
 export type OrchestrationV2AppThreadLineage = typeof OrchestrationV2AppThreadLineage.Type;
 
 /**
- * Who started a top-level thread: an agent thread through goat_thread_launch,
- * goat_ssh_thread_launch or create_threads ("launch"), or the user promoting a
+ * Who started a thread: an agent thread through goat_thread_launch,
+ * goat_ssh_thread_launch, create_threads or delegate_task ("launch"), or the user promoting a
  * delegated task ("promotion"). Descriptive only: thread.create is a client
  * command and SSH forwards it unauthenticated, so never authorize with it.
  */
@@ -131,8 +132,32 @@ export const OrchestrationV2ThreadLauncher = Schema.Struct({
   environmentLabel: Schema.NullOr(Schema.String),
   /** Launcher thread title at launch time, shown when the thread cannot be resolved. */
   threadTitle: Schema.NullOr(Schema.String),
+  via: Schema.optional(
+    Schema.Literals(["thread_launch", "create_threads", "ssh_thread_launch", "delegate_task"]),
+  ),
 });
 export type OrchestrationV2ThreadLauncher = typeof OrchestrationV2ThreadLauncher.Type;
+/** Model-facing question delivery seam, also usable by a remote reverse channel. */
+export const OrchestrationV2QuestionEscalation = Schema.Struct({
+  environmentId: Schema.NullOr(EnvironmentId),
+  threadId: ThreadId,
+  title: Schema.String,
+  requestId: RuntimeRequestId,
+  questions: Schema.Array(Schema.suspend(() => OrchestrationV2UserInputQuestion)),
+  deadline: Schema.Null,
+  humanRequired: Schema.Boolean,
+  answerWith: Schema.Literal("goat_pending_request_respond"),
+});
+export type OrchestrationV2QuestionEscalation = typeof OrchestrationV2QuestionEscalation.Type;
+
+export const OrchestrationV2QuestionResolution = Schema.Struct({
+  environmentId: Schema.NullOr(EnvironmentId),
+  threadId: ThreadId,
+  requestId: RuntimeRequestId,
+  respondedBy: Schema.optional(UserInputRespondedBy),
+  resolvedAt: IsoDateTime,
+});
+export type OrchestrationV2QuestionResolution = typeof OrchestrationV2QuestionResolution.Type;
 
 export const OrchestrationV2ContextTransferType = Schema.Literals([
   "fork",
@@ -403,7 +428,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   lineage: OrchestrationV2AppThreadLineage,
-  /** Who started this top-level thread; absent for user-created threads and older servers. */
+  /** Who started this thread; absent for user-created threads and older servers. */
   launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -1082,6 +1107,7 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   resolvedAt: Schema.NullOr(Schema.DateTimeUtc),
   decision: Schema.optional(ProviderApprovalDecision),
   answers: Schema.optional(ProviderUserInputAnswers),
+  respondedBy: Schema.optional(UserInputRespondedBy),
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
 
@@ -1133,6 +1159,12 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
     SubagentNotificationSource,
     CommandNotificationSource,
     Schema.Struct({ kind: Schema.Literal("monitor") }),
+    Schema.Struct({
+      kind: Schema.Literal("question"),
+      threadId: ThreadId,
+      requestId: RuntimeRequestId,
+      humanRequired: Schema.Boolean,
+    }),
     Schema.Struct({ kind: Schema.Literal("background_task") }),
     /** T3 Code itself, such as a restart continuing an interrupted turn. */
     Schema.Struct({ kind: Schema.Literal("system") }),
@@ -1903,7 +1935,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   lineage: OrchestrationV2AppThreadLineage,
-  /** Who started this top-level thread; absent for user-created threads and older servers. */
+  /** Who started this thread; absent for user-created threads and older servers. */
   launchedBy: Schema.optional(OrchestrationV2ThreadLauncher),
   forkedFrom: Schema.NullOr(OrchestrationV2AppThread.fields.forkedFrom),
   activeProviderThreadId: Schema.NullOr(ProviderThreadId),
@@ -3035,12 +3067,14 @@ export const OrchestrationV2Command = Schema.Union([
     decision: Schema.optional(ProviderApprovalDecision),
     answers: Schema.optional(ProviderUserInputAnswers),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
+    respondedBy: Schema.optional(UserInputRespondedBy),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.user-input.dismiss"),
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
+    respondedBy: Schema.optional(UserInputRespondedBy),
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),

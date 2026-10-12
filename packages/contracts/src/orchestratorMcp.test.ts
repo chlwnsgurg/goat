@@ -3,6 +3,12 @@ import * as Schema from "effect/Schema";
 
 import {
   OrchestratorMcpCreateThreadsInput,
+  OrchestratorMcpPendingRequestRespondInput,
+  OrchestratorMcpPendingRequestRespondResult,
+  OrchestratorMcpPendingRequestReadResult,
+  OrchestratorMcpPendingRequestListInput,
+  OrchestratorMcpLaunchedQuestionsResult,
+  OrchestratorMcpThreadWaitResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpThreadInterruptInput,
@@ -12,6 +18,22 @@ import {
   OrchestratorMcpThreadWaitInput,
 } from "./orchestratorMcp.ts";
 
+const decodePendingRequestRespondInput = Schema.decodeUnknownSync(
+  OrchestratorMcpPendingRequestRespondInput,
+);
+const decodePendingRequestRespondResult = Schema.decodeUnknownSync(
+  OrchestratorMcpPendingRequestRespondResult,
+);
+const decodePendingRequestReadResult = Schema.decodeUnknownSync(
+  OrchestratorMcpPendingRequestReadResult,
+);
+const decodePendingRequestListInput = Schema.decodeUnknownSync(
+  OrchestratorMcpPendingRequestListInput,
+);
+const decodeLaunchedQuestionsResult = Schema.decodeUnknownSync(
+  OrchestratorMcpLaunchedQuestionsResult,
+);
+const decodeThreadWaitResult = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitResult);
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeStrictCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput, {
   onExcessProperty: "error",
@@ -23,6 +45,26 @@ const decodeThreadListInput = Schema.decodeUnknownSync(OrchestratorMcpThreadList
 const decodeThreadReadInput = Schema.decodeUnknownSync(OrchestratorMcpThreadReadInput);
 const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSendInput);
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
+
+it("bounds explicit question hosts and ignored wait request IDs", () => {
+  const hosts = Array.from({ length: 16 }, (_, i) => `host-${i}`);
+  expect(decodePendingRequestListInput({ scope: "launched", hosts }).hosts).toEqual(hosts);
+  expect(() =>
+    decodePendingRequestListInput({ scope: "launched", hosts: [...hosts, "extra"] }),
+  ).toThrow();
+  const ignoreRequestIds = Array.from({ length: 50 }, (_, i) => `question-${i}`);
+  expect(decodeThreadWaitInput({ threadId: "thread", ignoreRequestIds }).ignoreRequestIds).toEqual(
+    ignoreRequestIds,
+  );
+  expect(() =>
+    decodeThreadWaitInput({ threadId: "thread", ignoreRequestIds: [...ignoreRequestIds, "extra"] }),
+  ).toThrow();
+  expect(() => decodeThreadWaitInput({ threadId: "thread", ignoreRequestIds: [""] })).toThrow();
+  expect(
+    decodeThreadWaitInput({ threadId: "thread", ignoreRequestIds: [] }).ignoreRequestIds,
+  ).toEqual([]);
+  expect(decodeThreadWaitInput({ threadId: "thread" })).not.toHaveProperty("ignoreRequestIds");
+});
 
 describe("orchestrator MCP contracts", () => {
   it("decodes cross-provider delegated task requests and durable results", () => {
@@ -60,6 +102,15 @@ describe("orchestrator MCP contracts", () => {
     expect(request.target?.providerInstanceId).toBe("claudeAgent");
     expect(result.status).toBe("completed");
     expect(result.summary).toBe("Workspace inspected.");
+    expect(result.pendingRequestIds).toBeUndefined();
+    const waiting = decodeDelegateTaskResult({
+      ...result,
+      status: "running",
+      pendingRequestIds: ["q"],
+      waitTimedOut: false,
+    });
+    expect(waiting.status).toBe("running");
+    expect(waiting.pendingRequestIds).toEqual(["q"]);
   });
 
   it("decodes target model options in canonical and shorthand shapes", () => {
@@ -227,4 +278,91 @@ it("advertises host only for delegation targets, not create_threads", () => {
       threads: [{ target: { host: "build-box" } }],
     }),
   ).toThrow();
+});
+
+it("decodes pending tools and optional legacy result fields", () => {
+  const args = {
+    threadId: "thread",
+    host: "box",
+    requestId: "q",
+    answers: { q: " exact\n" },
+    reason: "Chosen for compatibility",
+    respondedBy: {
+      type: "agent",
+      threadId: "launcher",
+      environmentId: "foreign",
+      title: null,
+      reason: "Chosen for compatibility",
+    },
+  };
+  expect(decodePendingRequestRespondInput(args)).toEqual(args);
+  for (const reason of ["", " \n\t", "x".repeat(2001)]) {
+    expect(() =>
+      decodePendingRequestRespondInput({
+        ...args,
+        reason,
+      }),
+    ).toThrow();
+    expect(() =>
+      decodePendingRequestRespondInput({
+        ...args,
+        respondedBy: { ...args.respondedBy, reason },
+      }),
+    ).toThrow();
+  }
+  expect(decodePendingRequestRespondResult({ sequence: 1 })).toEqual({ sequence: 1 });
+  const read = decodePendingRequestReadResult({
+    requestId: "q",
+    questions: [],
+  });
+  expect(read.status).toBeUndefined();
+  expect(read.respondedBy).toBeUndefined();
+  expect(
+    decodePendingRequestListInput({
+      scope: "launched",
+      launcherThreadId: "launcher",
+      launcherEnvironmentId: "origin",
+    }),
+  ).toMatchObject({ scope: "launched" });
+});
+it("keeps launched results distinct and requires environment identity", () => {
+  const decode = decodeLaunchedQuestionsResult;
+  expect(() => decode({ requestIds: [] })).toThrow();
+  const question = {
+    host: null,
+    environmentId: "here",
+    threadId: "thread",
+    title: "Question",
+    requestId: "q",
+    questions: [],
+    humanRequired: false,
+  };
+  expect(
+    decode({ questions: [question], truncated: true, unavailableHosts: [] }).questions,
+  ).toEqual([question]);
+  expect(() =>
+    decode({
+      questions: [{ ...question, environmentId: null }],
+      truncated: false,
+      unavailableHosts: [],
+    }),
+  ).toThrow();
+});
+it("decodes optional question wait IDs without changing run status", () => {
+  const decode = decodeThreadWaitResult;
+  for (const status of ["running", "completed"]) {
+    expect(
+      decode({
+        threadId: "thread",
+        runId: "run",
+        status,
+        timedOut: false,
+        pendingRequestIds: ["q"],
+      }),
+    ).toMatchObject({ status, pendingRequestIds: ["q"] });
+  }
+  expect(
+    decode({ threadId: "thread", runId: "run", status: "completed", timedOut: false })
+      .pendingRequestIds,
+  ).toBeUndefined();
 });

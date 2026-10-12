@@ -9,6 +9,8 @@ import {
   CheckpointId,
   CheckpointRef,
   CommandId,
+  EnvironmentId,
+  describeUserInputResponder,
   ContextTransferId,
   EventId,
   MessageId,
@@ -24,6 +26,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderSessionId,
   ProviderTurnId,
   RunId,
   ThreadId,
@@ -480,6 +483,109 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerPlatformTest),
 );
+
+const seedFoundationQuestion = Effect.fn("runtimeTest.seedFoundationQuestion")(function* (
+  name: string,
+  requestOverrides: Partial<import("@t3tools/contracts").OrchestrationV2RuntimeRequest> = {},
+) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const eventSink = yield* EventSink.EventSinkV2;
+  const now = yield* DateTime.now;
+  const threadId = ThreadId.make(`${name}`);
+  const requestId = RuntimeRequestId.make(`${name}-request`);
+  const nodeId = NodeId.make(`${name}-node`);
+  const itemId = TurnItemId.make(`${name}-item`);
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make(`${name}-create`),
+    createdBy: "user",
+    creationSource: "web",
+    threadId,
+    projectId: ProjectId.make(`${name}-project`),
+    title: "Async question",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: process.cwd(),
+  });
+  yield* eventSink.write({
+    commandId: CommandId.make(`${name}-seed`),
+    events: [
+      {
+        id: EventId.make(`${name}-node-event`),
+        type: "node.updated",
+        threadId,
+        nodeId,
+        occurredAt: now,
+        payload: {
+          id: nodeId,
+          threadId,
+          runId: null,
+          parentNodeId: null,
+          rootNodeId: nodeId,
+          kind: "user_input_request",
+          status: "waiting",
+          countsForRun: false,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: requestId,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: null,
+        },
+      },
+      {
+        id: EventId.make(`${name}-request-event`),
+        type: "runtime-request.updated",
+        threadId,
+        nodeId,
+        occurredAt: now,
+        payload: {
+          id: requestId,
+          nodeId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "message" },
+          createdAt: now,
+          resolvedAt: null,
+          ...requestOverrides,
+        },
+      },
+      {
+        id: EventId.make(`${name}-item-event`),
+        type: "turn-item.updated",
+        threadId,
+        nodeId,
+        occurredAt: now,
+        payload: {
+          id: itemId,
+          type: "user_input_request",
+          threadId,
+          runId: null,
+          nodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "waiting",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          requestId,
+          responseMode: "message",
+          questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+        },
+      },
+    ],
+  });
+  return { threadId, requestId, nodeId, itemId, now };
+});
 
 it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
   it.effect("emits model updates separately from provider switches", () =>
@@ -1167,6 +1273,414 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
+  it.effect.each([
+    {
+      type: "agent",
+      threadId: ThreadId.make("caller"),
+      environmentId: null,
+      title: "Coordinator",
+      reason: "Matches the brief",
+    },
+    {
+      type: "agent",
+      threadId: ThreadId.make("caller"),
+      environmentId: EnvironmentId.make("foreign"),
+      title: null,
+      reason: "Foreign answer",
+    },
+    { type: "client", reason: "Client answer" },
+    { type: "user" },
+  ] as const)("persists $type provenance with first-answer-wins arbitration", (respondedBy) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const prefix = `provenance-${respondedBy.type}-${"environmentId" in respondedBy ? (respondedBy.environmentId ?? "local") : "local"}`;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make(`${prefix}`);
+      const requestId = RuntimeRequestId.make(`${prefix}-request`);
+      const nodeId = NodeId.make(`${prefix}-node`);
+      const itemId = TurnItemId.make(`${prefix}-item`);
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${prefix}-create`),
+        createdBy: "user",
+        creationSource: "web",
+        threadId,
+        projectId: ProjectId.make(`${prefix}-project`),
+        title: "Async question",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      yield* eventSink.write({
+        commandId: CommandId.make(`${prefix}-seed`),
+        events: [
+          {
+            id: EventId.make(`${prefix}-node-event`),
+            type: "node.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: nodeId,
+              threadId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: nodeId,
+              kind: "user_input_request",
+              status: "waiting",
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: requestId,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make(`${prefix}-request-event`),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: requestId,
+              nodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "user_input",
+              status: "pending",
+              responseCapability: { type: "message" },
+              createdAt: now,
+              resolvedAt: null,
+            },
+          },
+          {
+            id: EventId.make(`${prefix}-item-event`),
+            type: "turn-item.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: itemId,
+              type: "user_input_request",
+              threadId,
+              runId: null,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              requestId,
+              responseMode: "message",
+              questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+            },
+          },
+        ],
+      });
+      const invalid = yield* orchestrator
+        .dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make(`${prefix}-blank`),
+          threadId,
+          requestId,
+          answers: { color: " " },
+          respondedBy,
+        })
+        .pipe(Effect.result);
+      assert.equal(invalid._tag, "Failure");
+      const unanswered = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(unanswered.runtimeRequests[0]?.status, "pending");
+      assert.deepEqual(unanswered.messages, []);
+      assert.isUndefined(unanswered.runtimeRequests[0]?.respondedBy);
+
+      const command = {
+        type: "runtime-request.respond" as const,
+        commandId: CommandId.make(`${prefix}-answer`),
+        threadId,
+        requestId,
+        answers: { color: "  Blue  " },
+        respondedBy,
+      };
+      const trustedCommand =
+        respondedBy.type === "user"
+          ? ThreadManagementService.withCreationProvenance(
+              { ...command, respondedBy: { type: "client", reason: "Forged client identity" } },
+              { createdBy: "user", creationSource: "web" },
+            )
+          : command;
+      const accepted = yield* orchestrator.dispatch(trustedCommand);
+      const repeated = yield* orchestrator.dispatch(trustedCommand);
+      assert.equal(repeated.sequence, accepted.sequence);
+      const answered = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(answered.runtimeRequests[0]?.status, "resolved");
+      assert.deepEqual(answered.runtimeRequests[0]?.answers, command.answers);
+      assert.deepEqual(answered.runtimeRequests[0]?.respondedBy, respondedBy);
+      assert.equal(answered.nodes.find((node) => node.id === nodeId)?.status, "completed");
+      assert.equal(answered.turnItems.find((item) => item.id === itemId)?.status, "completed");
+      const answeredItem = answered.turnItems.find((item) => item.id === itemId);
+      assert.equal(answeredItem?.type, "user_input_request");
+      if (answeredItem?.type === "user_input_request") {
+        assert.deepEqual(answeredItem.questionAnswer, {
+          requestId,
+          respondedBy,
+          answers: command.answers,
+          attachmentsByQuestionId: {},
+          questionTextById: { color: "Which color?" },
+        });
+      }
+      assert.equal(answered.messages.length, 1);
+      const localAgent =
+        respondedBy.type === "agent" && respondedBy.environmentId === null
+          ? respondedBy
+          : undefined;
+      const expectedPrefix =
+        respondedBy.type === "user"
+          ? ""
+          : `Answered by ${describeUserInputResponder({ respondedBy })}${localAgent === undefined ? "" : ` (${localAgent.threadId})`}: ${respondedBy.reason}\n\n`;
+      assert.equal(answered.messages[0]?.text, `${expectedPrefix}Which color?\nBlue`);
+      assert.equal(answered.messages[0]?.createdBy, respondedBy.type === "user" ? "user" : "agent");
+      assert.equal(answered.messages[0]?.senderThreadId, localAgent?.threadId);
+      assert.equal(answered.messages[0]?.role, "user");
+      assert.equal(answered.runs.length, 1);
+
+      const duplicate = yield* orchestrator
+        .dispatch({
+          ...command,
+          commandId: CommandId.make(`${prefix}-duplicate`),
+          answers: { color: "Green" },
+          respondedBy:
+            respondedBy.type === "user"
+              ? { type: "client", reason: "Losing client" }
+              : { type: "user" },
+        })
+        .pipe(Effect.result);
+      assert.equal(duplicate._tag, "Failure");
+      if (duplicate._tag === "Failure") {
+        assert.equal(duplicate.failure._tag, "OrchestratorQuestionAlreadyAnsweredError");
+        assert.equal(
+          duplicate.failure.message,
+          `This question was already answered by ${describeUserInputResponder({ respondedBy })} at ${DateTime.formatIso(answered.runtimeRequests[0]!.resolvedAt!)}.`,
+        );
+      }
+      const retained = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(retained.messages.length, 1);
+      assert.deepEqual(retained.runtimeRequests[0]?.respondedBy, respondedBy);
+      assert.deepEqual(retained.runtimeRequests[0]?.answers, command.answers);
+    }),
+  );
+
+  it.effect("arbitrates concurrent answers against the persisted winner", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const question = yield* seedFoundationQuestion("concurrent-question");
+      const gate = yield* Deferred.make<void>();
+      const first = {
+        type: "runtime-request.respond" as const,
+        commandId: CommandId.make("concurrent-agent"),
+        threadId: question.threadId,
+        requestId: question.requestId,
+        answers: { color: "Blue" },
+        respondedBy: { type: "client" as const, reason: "Client winner" },
+      };
+      const second = ThreadManagementService.withCreationProvenance(
+        { ...first, commandId: CommandId.make("concurrent-user"), answers: { color: "Green" } },
+        { createdBy: "user", creationSource: "web" },
+      );
+      const left = yield* Deferred.await(gate).pipe(
+        Effect.andThen(orchestrator.dispatch(first)),
+        Effect.result,
+        Effect.forkChild,
+      );
+      const right = yield* Deferred.await(gate).pipe(
+        Effect.andThen(orchestrator.dispatch(second)),
+        Effect.result,
+        Effect.forkChild,
+      );
+      yield* Deferred.succeed(gate, undefined);
+      const results = [yield* Fiber.join(left), yield* Fiber.join(right)];
+      assert.equal(results.filter((result) => result._tag === "Success").length, 1);
+      const loser = results.find((result) => result._tag === "Failure");
+      assert.isDefined(loser);
+      const projection = yield* orchestrator.getThreadProjection(question.threadId);
+      const winner = projection.runtimeRequests[0]!;
+      assert.lengthOf(projection.messages, 1);
+      assert.deepEqual(
+        winner.answers,
+        winner.respondedBy?.type === "user" ? { color: "Green" } : { color: "Blue" },
+      );
+      if (loser?._tag === "Failure") {
+        assert.equal(loser.failure._tag, "OrchestratorQuestionAlreadyAnsweredError");
+        assert.equal(
+          loser.failure.message,
+          `This question was already answered by ${describeUserInputResponder(winner)} at ${DateTime.formatIso(winner.resolvedAt!)}.`,
+        );
+      }
+    }),
+  );
+  it.effect("reports legacy terminal outcomes without inventing provenance", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      for (const status of ["resolved", "expired", "cancelled"] as const) {
+        const question = yield* seedFoundationQuestion(`legacy-${status}`, { status });
+        const result = yield* orchestrator
+          .dispatch({
+            type: "runtime-request.respond",
+            commandId: CommandId.make(`legacy-answer-${status}`),
+            threadId: question.threadId,
+            requestId: question.requestId,
+            answers: { color: "Blue" },
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure")
+          assert.equal(
+            result.failure.message,
+            `This question was already ${status === "resolved" ? "answered by another responder" : status} at an unknown time.`,
+          );
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(question.threadId)).runtimeRequests[0]?.status,
+          status,
+        );
+      }
+    }),
+  );
+  it.effect("rejects every non-user approval responder without committing", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      for (const kind of [
+        "command",
+        "file-read",
+        "file-change",
+        "mcp-elicitation",
+        "permission",
+      ] as const) {
+        const question = yield* seedFoundationQuestion(`approval-${kind}`, { kind });
+        for (const respondedBy of [
+          { type: "client" as const, reason: "R" },
+          {
+            type: "agent" as const,
+            threadId: ThreadId.make("caller"),
+            environmentId: null,
+            title: null,
+            reason: "R",
+          },
+        ]) {
+          const commandId = CommandId.make(`approval-${kind}-${respondedBy.type}`);
+          const result = yield* orchestrator
+            .dispatch({
+              type: "runtime-request.respond",
+              commandId,
+              threadId: question.threadId,
+              requestId: question.requestId,
+              decision: "accept",
+              respondedBy,
+            })
+            .pipe(Effect.result);
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.equal(result.failure._tag, "OrchestratorDispatchError");
+            if (result.failure._tag === "OrchestratorDispatchError")
+              assert.equal(result.failure.cause, "Only the user can answer approval requests.");
+          }
+          assert.isEmpty(yield* outbox.listByCommandId(commandId));
+          const request = (yield* orchestrator.getThreadProjection(question.threadId))
+            .runtimeRequests[0]!;
+          assert.equal(request.status, "pending");
+          assert.isUndefined(request.respondedBy);
+        }
+      }
+    }),
+  );
+  it.effect("records live agent provenance while delivering exact answer labels", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const providerSessionId = ProviderSessionId.make("foundation-live-session");
+      const question = yield* seedFoundationQuestion("foundation-live", {
+        responseCapability: { type: "live", providerSessionId },
+      });
+      const providerSession = {
+        id: providerSessionId,
+        driver,
+        providerInstanceId: modelSelection.instanceId,
+        status: "running" as const,
+        cwd: process.cwd(),
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: question.now,
+        updatedAt: question.now,
+        lastError: null,
+      };
+      yield* eventSink.write({
+        commandId: CommandId.make("foundation-live-session"),
+        events: [
+          {
+            id: EventId.make("foundation-live-session-event"),
+            type: "provider-session.attached",
+            threadId: question.threadId,
+            occurredAt: question.now,
+            payload: providerSession,
+          },
+        ],
+      });
+      const captured =
+        yield* Deferred.make<import("@t3tools/contracts").ProviderUserInputAnswers>();
+      const command = {
+        type: "runtime-request.respond" as const,
+        commandId: CommandId.make("foundation-live-answer"),
+        threadId: question.threadId,
+        requestId: question.requestId,
+        answers: { color: "  파랑 / Blue  ", choices: ["Exact option"] },
+        respondedBy: {
+          type: "agent" as const,
+          threadId: ThreadId.make("caller"),
+          environmentId: null,
+          title: "Coordinator",
+          reason: "Matches the brief",
+        },
+      };
+      const spy = vi.spyOn(sessions, "get").mockReturnValue(
+        Effect.succeed(
+          Option.some({
+            providerSession,
+            respondToRuntimeRequest: (
+              input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput,
+            ) =>
+              Effect.gen(function* () {
+                const saved = yield* orchestrator.getThreadProjection(question.threadId);
+                assert.deepEqual(saved.runtimeRequests[0]?.respondedBy, command.respondedBy);
+                const item = saved.turnItems.find((item) => item.type === "user_input_request");
+                if (item?.type === "user_input_request")
+                  assert.deepEqual(item.questionAnswer?.respondedBy, command.respondedBy);
+                assert.deepEqual(input, {
+                  requestId: question.requestId,
+                  answers: command.answers,
+                });
+                yield* Deferred.succeed(captured, input.answers!);
+              }),
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+        ),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+      yield* orchestrator.dispatch(command);
+      yield* worker.drain();
+      assert.deepEqual(yield* Deferred.await(captured), command.answers);
+    }),
+  );
   it.effect("dismisses message-capable questions directly and while settling", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1275,10 +1789,23 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         commandId: CommandId.make("runtime-dismiss-question-command"),
         threadId: dismissed.threadId,
         requestId: dismissed.requestId,
+        respondedBy: { type: "user" },
       });
       const dismissedProjection = yield* orchestrator.getThreadProjection(dismissed.threadId);
       assert.equal(dismissedProjection.runtimeRequests[0]?.status, "resolved");
       assert.equal(dismissedProjection.runtimeRequests[0]?.decision, "cancel");
+      assert.deepEqual(dismissedProjection.runtimeRequests[0]?.respondedBy, { type: "user" });
+      const dismissedAgain = yield* orchestrator
+        .dispatch({
+          type: "thread.user-input.dismiss",
+          commandId: CommandId.make("dismiss-again"),
+          threadId: dismissed.threadId,
+          requestId: dismissed.requestId,
+        })
+        .pipe(Effect.result);
+      assert.equal(dismissedAgain._tag, "Failure");
+      if (dismissedAgain._tag === "Failure")
+        assert.include(dismissedAgain.failure.message, "already dismissed by the user");
       assert.equal(
         dismissedProjection.nodes.find((node) => node.id === dismissed.nodeId)?.status,
         "cancelled",
@@ -1298,6 +1825,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       const settledProjection = yield* orchestrator.getThreadProjection(settled.threadId);
       assert.equal(settledProjection.thread.settledOverride, "settled");
       assert.equal(settledProjection.runtimeRequests[0]?.status, "resolved");
+      assert.isUndefined(settledProjection.runtimeRequests[0]?.respondedBy);
       assert.equal(settledProjection.runtimeRequests[0]?.decision, "cancel");
       assert.equal(
         settledProjection.nodes.find((node) => node.id === settled.nodeId)?.status,

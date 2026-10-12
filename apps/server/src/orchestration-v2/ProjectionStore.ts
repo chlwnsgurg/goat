@@ -14,6 +14,7 @@ import {
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
 import type {
+  EnvironmentId,
   OrchestrationV2AppThread,
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
@@ -127,12 +128,14 @@ export class ProjectionStoreThreadNotFoundError extends Schema.TaggedError<Proje
 export class ProjectionStoreReadError extends Schema.TaggedError<ProjectionStoreReadError>()(
   "ProjectionStoreReadError",
   {
-    threadId: ThreadId,
+    threadId: Schema.optional(ThreadId),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
-    return `Failed to read orchestration projection for thread ${this.threadId}.`;
+    return this.threadId === undefined
+      ? "Failed to read orchestration projections."
+      : `Failed to read orchestration projection for thread ${this.threadId}.`;
   }
 }
 
@@ -308,6 +311,7 @@ export interface ProjectionRecordFilter {
   readonly messageRunIds?: ReadonlyArray<RunId>;
   readonly turnItemRunIds?: ReadonlyArray<RunId | null>;
   readonly runIds?: ReadonlyArray<RunId>;
+  readonly runtimeRequestIds?: ReadonlyArray<RuntimeRequestId>;
   readonly turnItemTypes?: ReadonlyArray<OrchestrationV2TurnItem["type"]>;
   readonly turnItemStatuses?: ReadonlyArray<OrchestrationV2TurnItem["status"]>;
 }
@@ -418,6 +422,25 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
+  /** At most 500 pending local-launcher questions, ordered by request id. */
+  readonly getQuestionEscalationCandidates: (input: { readonly limit: number }) => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly requestId: RuntimeRequestId;
+    }>,
+    ProjectionStoreV2Error
+  >;
+  readonly getLaunchedPendingQuestions: (input: {
+    readonly launcherThreadId: ThreadId;
+    readonly launcherEnvironmentId: EnvironmentId | null;
+    readonly limit: number;
+  }) => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly requestId: RuntimeRequestId;
+    }>,
+    ProjectionStoreV2Error
+  >;
   readonly getTurnStartContext: (
     threadId: ThreadId,
     runId: RunId,
@@ -3115,6 +3138,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT payload_json
             FROM orchestration_v2_projection_runtime_requests
             WHERE thread_id = ${threadId}
+              ${filter?.runtimeRequestIds === undefined ? sql`` : sql`AND runtime_request_id IN (SELECT value FROM json_each(${encodeIdList(filter.runtimeRequestIds)}))`}
             ORDER BY created_at ASC, runtime_request_id ASC
           `
               : sql<PayloadRow>`
@@ -4752,6 +4776,84 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
       );
 
+    const getQuestionEscalationCandidates: ProjectionStoreV2Shape["getQuestionEscalationCandidates"] =
+      (input) =>
+        sql<{ thread_id: string; request_id: string }>`
+        SELECT r.thread_id, r.runtime_request_id AS request_id
+        FROM orchestration_v2_projection_runtime_requests AS r
+        JOIN orchestration_v2_projection_threads AS t ON t.thread_id = r.thread_id
+        WHERE r.status = 'pending' AND r.kind = 'user_input'
+          AND t.deleted_at IS NULL AND t.archived_at IS NULL
+          AND NOT (COALESCE(json_extract(t.payload_json, '$.lineage.relationshipToParent'), '') = 'subagent'
+            AND COALESCE(json_extract(t.payload_json, '$.creationSource'), '') = 'provider')
+          AND (
+            (json_type(t.payload_json, '$.launchedBy') = 'object'
+              AND json_extract(t.payload_json, '$.launchedBy.environmentId') IS NULL)
+            OR (json_type(t.payload_json, '$.launchedBy') IS NULL
+              AND json_extract(t.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+              AND EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents AS task
+                WHERE task.child_thread_id = t.thread_id AND task.origin = 'app_owned'
+                  AND task.thread_id = json_extract(t.payload_json, '$.lineage.parentThreadId')
+              ))
+          )
+        ORDER BY r.runtime_request_id ASC
+        LIMIT ${Math.max(1, Math.min(500, Math.trunc(input.limit)))}`.pipe(
+          Effect.map((rows) =>
+            rows.map((row) => ({
+              threadId: ThreadId.make(row.thread_id),
+              requestId: RuntimeRequestId.make(row.request_id),
+            })),
+          ),
+          Effect.mapError(
+            (cause) =>
+              new ProjectionStoreReadError({
+                cause,
+              }),
+          ),
+        );
+
+    const getLaunchedPendingQuestions: ProjectionStoreV2Shape["getLaunchedPendingQuestions"] = (
+      input,
+    ) =>
+      sql<{ thread_id: string; request_id: string }>`
+        SELECT r.thread_id, r.runtime_request_id AS request_id
+        FROM orchestration_v2_projection_runtime_requests AS r
+        JOIN orchestration_v2_projection_threads AS t ON t.thread_id = r.thread_id
+        WHERE r.status = 'pending' AND r.kind = 'user_input'
+          AND t.deleted_at IS NULL AND t.archived_at IS NULL
+          AND NOT (COALESCE(json_extract(t.payload_json, '$.lineage.relationshipToParent'), '') = 'subagent'
+            AND COALESCE(json_extract(t.payload_json, '$.creationSource'), '') = 'provider')
+          AND (
+            (json_type(t.payload_json, '$.launchedBy') = 'object'
+              AND json_extract(t.payload_json, '$.launchedBy.threadId') = ${input.launcherThreadId}
+              AND json_extract(t.payload_json, '$.launchedBy.environmentId') IS ${input.launcherEnvironmentId})
+            OR (${input.launcherEnvironmentId} IS NULL
+              AND json_type(t.payload_json, '$.launchedBy') IS NULL
+              AND json_extract(t.payload_json, '$.lineage.parentThreadId') = ${input.launcherThreadId}
+              AND json_extract(t.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+              AND EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_subagents AS task
+                WHERE task.child_thread_id = t.thread_id AND task.origin = 'app_owned'
+                  AND task.thread_id = json_extract(t.payload_json, '$.lineage.parentThreadId')
+              ))
+          )
+        ORDER BY r.runtime_request_id ASC, r.thread_id ASC
+        LIMIT ${Math.max(1, Math.min(500, Math.trunc(input.limit)))}`.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            threadId: ThreadId.make(row.thread_id),
+            requestId: RuntimeRequestId.make(row.request_id),
+          })),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new ProjectionStoreReadError({
+              cause,
+            }),
+        ),
+      );
+
     const getThreadRecords: ProjectionStoreV2Shape["getThreadRecords"] = (
       threadId,
       fields,
@@ -5941,6 +6043,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread,
       getSettlementCandidates,
       getThreadsWithPullRequests,
+      getQuestionEscalationCandidates,
+      getLaunchedPendingQuestions,
       getThreadProjection,
       getTurnStartContext,
       getTurnStartHistory,
@@ -6161,6 +6265,85 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               })),
           ),
         ),
+      getQuestionEscalationCandidates: (input) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .flatMap(({ thread, runtimeRequests }) => {
+                if (
+                  thread.deletedAt !== null ||
+                  thread.archivedAt !== null ||
+                  (thread.lineage.relationshipToParent === "subagent" &&
+                    thread.creationSource === "provider")
+                )
+                  return [];
+                const eligible =
+                  thread.launchedBy !== undefined
+                    ? thread.launchedBy.environmentId === null
+                    : thread.lineage.relationshipToParent === "subagent" &&
+                      thread.lineage.parentThreadId !== null &&
+                      state.projections
+                        .get(thread.lineage.parentThreadId)
+                        ?.subagents.some(
+                          (task) => task.origin === "app_owned" && task.childThreadId === thread.id,
+                        ) === true;
+                return eligible
+                  ? runtimeRequests
+                      .filter((r) => r.kind === "user_input" && r.status === "pending")
+                      .map((r) => ({ threadId: thread.id, requestId: r.id }))
+                  : [];
+              })
+              .toSorted((a, b) =>
+                a.requestId < b.requestId ? -1 : a.requestId > b.requestId ? 1 : 0,
+              )
+              .slice(0, Math.max(1, Math.min(500, Math.trunc(input.limit)))),
+          ),
+        ),
+      getLaunchedPendingQuestions: (input) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .flatMap(({ thread, runtimeRequests }) => {
+                if (
+                  thread.deletedAt !== null ||
+                  thread.archivedAt !== null ||
+                  (thread.lineage.relationshipToParent === "subagent" &&
+                    thread.creationSource === "provider")
+                )
+                  return [];
+                const eligible =
+                  thread.launchedBy !== undefined
+                    ? thread.launchedBy.threadId === input.launcherThreadId &&
+                      thread.launchedBy.environmentId === input.launcherEnvironmentId
+                    : input.launcherEnvironmentId === null &&
+                      thread.lineage.parentThreadId === input.launcherThreadId &&
+                      thread.lineage.relationshipToParent === "subagent" &&
+                      thread.lineage.parentThreadId !== null &&
+                      state.projections
+                        .get(thread.lineage.parentThreadId)
+                        ?.subagents.some(
+                          (task) => task.origin === "app_owned" && task.childThreadId === thread.id,
+                        ) === true;
+                return eligible
+                  ? runtimeRequests
+                      .filter((r) => r.kind === "user_input" && r.status === "pending")
+                      .map((r) => ({ threadId: thread.id, requestId: r.id }))
+                  : [];
+              })
+              .toSorted((a, b) =>
+                a.requestId < b.requestId
+                  ? -1
+                  : a.requestId > b.requestId
+                    ? 1
+                    : a.threadId < b.threadId
+                      ? -1
+                      : a.threadId > b.threadId
+                        ? 1
+                        : 0,
+              )
+              .slice(0, Math.max(1, Math.min(500, Math.trunc(input.limit)))),
+          ),
+        ),
       getLimitRecoveryCandidates: (options) =>
         Ref.get(replayState).pipe(
           Effect.map((state) =>
@@ -6379,6 +6562,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
           const selected = {
             ...projection,
+            runtimeRequests: projection.runtimeRequests.filter(
+              (row) =>
+                filter?.runtimeRequestIds === undefined ||
+                filter.runtimeRequestIds.includes(row.id),
+            ),
             messages: projection.messages.filter(
               (row) =>
                 (filter?.messageRunIds === undefined ||

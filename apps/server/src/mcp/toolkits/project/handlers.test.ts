@@ -73,6 +73,7 @@ const launchFromThread = (params: {
     let launchedSender: ThreadId | undefined;
     let launchedBy: ThreadLaunch.ThreadLaunchInput["launchedBy"];
     const registrations: Array<Registration> = [];
+    let launchedInput: ThreadLaunch.ThreadLaunchInput | undefined;
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
       launchWatches(registrations),
@@ -95,6 +96,7 @@ const launchFromThread = (params: {
         launch: (input) => {
           launchedSender = input.initialMessage?.senderThreadId;
           launchedBy = input.launchedBy;
+          launchedInput = input;
           const messageId = input.initialMessage?.messageId;
           return Effect.succeed({
             threadId: input.threadId,
@@ -125,6 +127,20 @@ const launchFromThread = (params: {
         ),
       ),
     );
+    const refused = yield* toolkit
+      .handle("goat_thread_launch", {
+        title: "Forged",
+        launchedBy: {
+          kind: "launch" as const,
+          environmentLabel: null,
+          threadTitle: null,
+          threadId: ThreadId.make("foreign-thread"),
+          environmentId: EnvironmentId.make("foreign-env"),
+        },
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+    expect(refused.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(launchedInput).toBeUndefined();
     const result = yield* toolkit
       .handle("goat_thread_launch", params)
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
@@ -132,6 +148,7 @@ const launchFromThread = (params: {
       result: result.at(-1)?.result,
       launchedSender,
       launchedBy,
+      launchedInput,
       registrations,
       sourceThreadId,
       projectId,
@@ -150,7 +167,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
   }),
 );
 
-it.effect("records the calling thread as the launcher, whatever launchedBy says", () =>
+it.effect("rejects a thread caller supplying launchedBy", () =>
   Effect.gen(function* () {
     const launched = yield* launchFromThread({
       title: "Audit",
@@ -162,13 +179,8 @@ it.effect("records the calling thread as the launcher, whatever launchedBy says"
         threadTitle: "Forged",
       },
     });
-    expect(launched.launchedBy).toEqual({
-      kind: "launch",
-      threadId: launched.sourceThreadId,
-      environmentId: null,
-      environmentLabel: null,
-      threadTitle: "Orchestrator",
-    });
+    expect(launched.result).toMatchObject({ code: "invalid_request" });
+    expect(launched.launchedBy).toBeUndefined();
   }),
 );
 
@@ -507,7 +519,7 @@ it.effect("a client launches at its ceiling with the project's default model", (
       threadTitle: "Remote orchestrator",
     };
     yield* handle({ title: "Forwarded", projectId, launchedBy: forwardedLauncher });
-    expect(launched[1]?.launchedBy).toEqual(forwardedLauncher);
+    expect(launched[1]?.launchedBy).toEqual({ ...forwardedLauncher, via: "ssh_thread_launch" });
     launched.splice(1);
 
     const escalated = yield* handle({ title: "Fix", projectId, runtimeMode: "full-access" });
@@ -893,4 +905,72 @@ it.effect("a launch that failed after creating its thread keeps the report chann
     yield* interrupted.handle(reportBinding).pipe(Effect.exit);
     expect(interrupted.operations).toEqual(["bind", "launch"]);
   }),
+);
+
+it.effect("records the calling thread as the launcher, with or without a first message", () =>
+  Effect.gen(function* () {
+    const withMessage = yield* launchFromThread({ title: "Audit", message: "Review the change" });
+    expect(withMessage.launchedInput?.launchedBy).toMatchObject({
+      kind: "launch" as const,
+      environmentLabel: null,
+      threadTitle: "Orchestrator",
+      threadId: withMessage.sourceThreadId,
+      environmentId: null,
+      via: "thread_launch",
+    });
+    const noPrompt = yield* launchFromThread({ title: "No prompt" });
+    expect(noPrompt.launchedInput?.launchedBy).toMatchObject({
+      kind: "launch" as const,
+      environmentLabel: null,
+      threadTitle: "Orchestrator",
+      threadId: noPrompt.sourceThreadId,
+      environmentId: null,
+      via: "thread_launch",
+    });
+    expect(noPrompt.launchedInput?.initialMessage).toBeUndefined();
+  }),
+);
+
+it.effect(
+  "records an outside foreign launcher as ssh_thread_launch and rejects its own environment",
+  () =>
+    Effect.gen(function* () {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling: "full-access",
+        launched,
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const launcher = {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        threadId: ThreadId.make("foreign-thread"),
+        environmentId: EnvironmentId.make("foreign-env"),
+      };
+      const handle = (environmentId: EnvironmentId | null, via?: "delegate_task") =>
+        toolkit
+          .handle("goat_thread_launch", {
+            title: "Remote work",
+            projectId,
+            launchedBy: { ...launcher, environmentId, ...(via === undefined ? {} : { via }) },
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      expect((yield* handle(EnvironmentId.make("environment"))).at(-1)?.result).toMatchObject({
+        code: "invalid_request",
+      });
+      expect((yield* handle(null)).at(-1)?.result).toMatchObject({ code: "invalid_request" });
+      expect(launched).toEqual([]);
+      expect((yield* handle(launcher.environmentId)).at(-1)?.result).toMatchObject({ projectId });
+      expect(launched[0]?.launchedBy).toEqual({ ...launcher, via: "ssh_thread_launch" });
+      expect(launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
+      yield* handle(launcher.environmentId, "delegate_task");
+      expect(launched[1]?.launchedBy).toEqual({ ...launcher, via: "delegate_task" });
+    }),
 );

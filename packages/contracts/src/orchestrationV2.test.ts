@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import * as SchemaAST from "effect/SchemaAST";
+import * as SchemaGetter from "effect/SchemaGetter";
 
 import {
   CheckpointId,
@@ -8,6 +10,12 @@ import {
   CheckpointScopeId,
   ContextTransferId,
   CommandId,
+  EnvironmentId,
+  RuntimeRequestId,
+  UserInputRespondedBy,
+  UserInputResponseReason,
+  UserInputAttachmentAnswerPayload,
+  describeUserInputResponder,
   EventId,
   MessageId,
   NodeId,
@@ -24,6 +32,13 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2QuestionEscalation,
+  OrchestrationV2QuestionResolution,
+  OrchestrationV2AppThread,
+  OrchestrationV2AppThreadJson,
+  OrchestrationV2NotificationSource,
+  OrchestrationV2ThreadShellJson,
+  OrchestrationV2RuntimeRequestJson,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -1678,5 +1693,462 @@ it("roundtrips remote subagent addressing without exposing internal task command
         summary: "forged",
       }),
     ).toThrow();
+  }
+});
+
+describe("question foundations", () => {
+  it("round-trips launcher on thread payloads and accepts legacy absence", () => {
+    const input = emptyThreadProjection().thread;
+    const decode = Schema.decodeUnknownSync(OrchestrationV2AppThread);
+    const encodeJson = Schema.encodeSync(OrchestrationV2AppThreadJson);
+    const decodeJson = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson);
+    for (const via of [
+      "thread_launch",
+      "create_threads",
+      "ssh_thread_launch",
+      "delegate_task",
+    ] as const) {
+      const launcher = {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        threadId: ThreadId.make("caller"),
+        environmentId: null,
+        via,
+      };
+      const thread = decode({ ...input, launchedBy: launcher });
+      expect(decodeJson(encodeJson(thread)).launchedBy).toEqual(launcher);
+    }
+    expect(decodeJson(encodeJson(decode(input))).launchedBy).toBeUndefined();
+  });
+
+  it("requires every agent responder member and bounds reason", () => {
+    const decode = Schema.decodeUnknownSync(UserInputRespondedBy);
+    const reason = Schema.decodeUnknownSync(UserInputResponseReason);
+    const agent = {
+      type: "agent" as const,
+      threadId: ThreadId.make("caller"),
+      environmentId: null,
+      title: null,
+      reason: "R",
+    };
+    expect(decode({ type: "user" })).toEqual({ type: "user" });
+    expect(decode(agent)).toEqual(agent);
+    expect(reason("R".repeat(2000))).toHaveLength(2000);
+    expect(() => reason("")).toThrow();
+    expect(() => reason("   ")).toThrow();
+    expect(reason("  R  ")).toBe("  R  ");
+    expect(decode({ type: "client", reason: "R" })).toEqual({ type: "client", reason: "R" });
+    expect(() => reason("R".repeat(2001))).toThrow();
+    for (const key of ["threadId", "environmentId", "title", "reason"] as const) {
+      const incomplete: Record<string, unknown> = { ...agent };
+      delete incomplete[key];
+      expect(() => decode(incomplete)).toThrow();
+    }
+    const outsideEnvironment = EnvironmentId.make("origin");
+    expect(decode({ ...agent, environmentId: outsideEnvironment })).toEqual({
+      ...agent,
+      environmentId: outsideEnvironment,
+    });
+  });
+
+  it("accepts unknown answer provenance and preserves recorded agent metadata", () => {
+    const decode = Schema.decodeUnknownSync(UserInputAttachmentAnswerPayload);
+    const old = {
+      requestId: "request",
+      answers: { q: "  Exact option  " },
+      attachmentsByQuestionId: {},
+    };
+    expect(decode(old).respondedBy).toBeUndefined();
+    const respondedBy = {
+      type: "agent" as const,
+      threadId: ThreadId.make("caller"),
+      environmentId: null,
+      title: "Coordinator",
+      reason: "Matches the brief",
+    };
+    expect(decode({ ...old, respondedBy })).toEqual({ ...old, respondedBy });
+  });
+
+  it("round-trips question source and rejects malformed known questions", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2NotificationSource);
+    const encode = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2NotificationSource));
+    const source = {
+      kind: "question" as const,
+      threadId: ThreadId.make("asking"),
+      requestId: RuntimeRequestId.make("request"),
+      humanRequired: true,
+    };
+    expect(decode(encode(source))).toEqual(source);
+    for (const key of ["threadId", "requestId", "humanRequired"] as const) {
+      const incomplete: Record<string, unknown> = { ...source };
+      delete incomplete[key];
+      expect(() => decode(incomplete)).toThrow();
+    }
+    expect(decode({ kind: "future-question-kind" })).toEqual({ kind: "background_task" });
+  });
+});
+
+const encodeShellJson = Schema.encodeSync(OrchestrationV2ThreadShellJson);
+const decodeShellJson = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson);
+const decodeRuntimeRequestJson = Schema.decodeUnknownSync(OrchestrationV2RuntimeRequestJson);
+const encodeRuntimeRequestJson = Schema.encodeSync(OrchestrationV2RuntimeRequestJson);
+
+it("carries launcher through create commands and shell JSON", () => {
+  for (const via of [
+    "thread_launch",
+    "create_threads",
+    "ssh_thread_launch",
+    "delegate_task",
+  ] as const) {
+    for (const environmentId of [null, EnvironmentId.make("origin")]) {
+      const launcher = {
+        kind: "launch" as const,
+        environmentLabel: null,
+        threadTitle: null,
+        threadId: ThreadId.make("caller"),
+        environmentId,
+        via,
+      };
+      const command = {
+        type: "thread.create",
+        commandId: "create",
+        createdBy: "agent",
+        creationSource: "mcp",
+        threadId: "child",
+        projectId: "project",
+        title: "Child",
+        modelSelection: { instanceId: "codex", model: "model" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        launchedBy: launcher,
+      };
+      expect(decodeOrchestrationV2Command(command)).toMatchObject({ launchedBy: launcher });
+      for (const key of [
+        "kind",
+        "threadId",
+        "environmentId",
+        "environmentLabel",
+        "threadTitle",
+      ] as const) {
+        const incomplete = { ...launcher };
+        delete (incomplete as Record<string, unknown>)[key];
+        expect(() =>
+          decodeOrchestrationV2Command({ ...command, launchedBy: incomplete }),
+        ).toThrow();
+      }
+      const shell = decodeOrchestrationV2ThreadShell({
+        launchedBy: launcher,
+        createdBy: "user",
+        creationSource: "web",
+        id: "thread-1",
+        projectId: "project-1",
+        title: "Thread",
+        providerInstanceId: "claudeAgent",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        lineage: {
+          parentThreadId: null,
+          relationshipToParent: null,
+          rootThreadId: "thread-1",
+        },
+        forkedFrom: null,
+        activeProviderThreadId: "provider-thread-1",
+        latestRunId: "run-1",
+        activeRunId: null,
+        status: "completed",
+        pendingRuntimeRequest: null,
+        latestVisibleMessage: null,
+        latestUserMessageAt: null,
+        hasActionableProposedPlan: false,
+        itemCount: 0,
+        visibleItemCount: 0,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        deletedAt: null,
+      });
+      const encoded = encodeShellJson(shell);
+      expect(decodeShellJson(encoded).launchedBy).toEqual(launcher);
+    }
+  }
+});
+it("round-trips responder metadata in resolved requests, commands and history", () => {
+  for (const respondedBy of [
+    undefined,
+    { type: "user" as const },
+    { type: "client" as const, reason: "R" },
+    {
+      type: "agent" as const,
+      threadId: ThreadId.make("caller"),
+      environmentId: null,
+      title: null,
+      reason: "  R  ",
+    },
+  ]) {
+    const metadata = respondedBy === undefined ? {} : { respondedBy };
+    const request = decodeRuntimeRequestJson({
+      id: "request",
+      nodeId: "node",
+      providerTurnId: null,
+      nativeRequestRef: null,
+      kind: "user_input",
+      status: "resolved",
+      responseCapability: { type: "message" },
+      createdAt: DateTime.formatIso(now),
+      resolvedAt: DateTime.formatIso(now),
+      answers: { q: "  Exact  " },
+      ...metadata,
+    });
+    expect(decodeRuntimeRequestJson(encodeRuntimeRequestJson(request))).toEqual(request);
+    expect(
+      decodeOrchestrationV2Command({
+        type: "runtime-request.respond",
+        commandId: "answer",
+        threadId: "thread",
+        requestId: "request",
+        answers: request.answers,
+        ...metadata,
+      }),
+    ).toMatchObject(metadata);
+    const item = decodeOrchestrationV2TurnItem({
+      id: "item",
+      type: "user_input_request",
+      threadId: "thread",
+      runId: null,
+      nodeId: "node",
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      requestId: "request",
+      questions: [],
+      questionAnswer: {
+        requestId: "request",
+        answers: request.answers,
+        attachmentsByQuestionId: {},
+        ...metadata,
+      },
+    });
+    expect(decodeOrchestrationV2TurnItemJson(encodeOrchestrationV2TurnItemJson(item))).toEqual(
+      item,
+    );
+  }
+});
+it("describes responders and terminal outcomes truthfully", () => {
+  expect(describeUserInputResponder({})).toBe("another responder");
+  expect(
+    describeUserInputResponder({
+      respondedBy: { type: "user" },
+      decision: "cancel",
+      status: "resolved",
+    }),
+  ).toBe("dismissed by the user");
+  expect(describeUserInputResponder({ decision: "cancel", status: "resolved" })).toBe(
+    "closed when its thread stopped or settled",
+  );
+  expect(describeUserInputResponder({ status: "expired" })).toBe("expired");
+  expect(describeUserInputResponder({ status: "cancelled" })).toBe("cancelled");
+});
+
+function encodedKind(member: Schema.Top): string {
+  const encoded = SchemaAST.toEncoded(member.ast);
+  const kind = SchemaAST.isObjects(encoded)
+    ? encoded.propertySignatures.find((property) => property.name === "kind")?.type
+    : undefined;
+  if (kind !== undefined && SchemaAST.isLiteral(kind) && typeof kind.literal === "string") {
+    return kind.literal;
+  }
+  throw new Error("Each member of a kind union needs a literal string `kind`.");
+}
+
+/**
+ * A union tagged by `kind` that tolerates kinds this build does not know.
+ * After the known members comes a decode-only arm: an object with an unknown
+ * `kind`, or none, decodes through `fallback` to a known member instead of
+ * failing, so a newer server can add kinds without breaking older clients and
+ * rows written before a kind existed still load. `unknown` builds that arm's
+ * input around the given `kind` field. A known kind whose fields do not decode
+ * still fails. Kinds are the encoded ones, which a member may rename on decode.
+ * The arm never encodes; values always match a known member first.
+ */
+function kindUnionWithFallback<
+  const Members extends ReadonlyArray<Schema.Top & { readonly Encoded: { readonly kind: string } }>,
+  Unknown extends Schema.Top,
+>(
+  members: Members,
+  unknown: (kind: Schema.optional<Schema.String>) => Unknown,
+  fallback: (value: Unknown["Type"]) => Schema.Union<Members>["Encoded"],
+) {
+  const knownKinds: ReadonlySet<string> = new Set(members.map(encodedKind));
+  const unknownKind = unknown(
+    Schema.optional(
+      Schema.String.check(
+        Schema.makeFilter(
+          (kind: string) => !knownKinds.has(kind) || "A known kind must decode in full.",
+        ),
+      ),
+    ),
+  ).pipe(
+    Schema.decodeTo(Schema.Union(members), {
+      decode: SchemaGetter.transform(fallback),
+      encode: SchemaGetter.forbidden(() => "Unknown kinds are decode-only."),
+    }),
+  );
+  // Members are tried in order, so the fallback must come last.
+  return Schema.Union([...members, unknownKind]);
+}
+
+const SubagentNotificationSource = Schema.Struct({
+  kind: Schema.Literal("subagent"),
+  /** The subagent's own thread, when the notification reports one subagent. */
+  childThreadId: Schema.optional(ThreadId),
+});
+const CommandNotificationSource = Schema.Struct({ kind: Schema.Literal("command") });
+
+/**
+ * What a notification reports on. Several pieces of work of one kind share
+ * that kind; mixed or unnamed work is `background_task`.
+ *
+ * Sources are stored and sent in the shape clients before `subagent` and
+ * `command` existed decode, since they reject a kind they do not know: a
+ * command is `background_command`, and a subagent is `background_task` with
+ * `work: "subagent"`, a field those clients ignore. Encoding picks the first
+ * member that fits, so those come first. The plain `subagent` and `command`
+ * members after them decode values that were already decoded once.
+ */
+const PreQuestionNotificationSource = kindUnionWithFallback(
+  [
+    Schema.Struct({
+      kind: Schema.Literal("delegated_task"),
+      taskIds: Schema.Array(NodeId),
+      /** The task's own thread, when the notification reports one task. */
+      childThreadId: Schema.optional(ThreadId),
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("background_task"),
+      work: Schema.Literal("subagent"),
+      childThreadId: Schema.optional(ThreadId),
+    }).pipe(
+      Schema.decodeTo(Schema.toType(SubagentNotificationSource), {
+        decode: SchemaGetter.transform(({ childThreadId }) =>
+          childThreadId === undefined
+            ? { kind: "subagent" as const }
+            : { kind: "subagent" as const, childThreadId },
+        ),
+        encode: SchemaGetter.transform(({ childThreadId }) => ({
+          kind: "background_task" as const,
+          work: "subagent" as const,
+          ...(childThreadId === undefined ? {} : { childThreadId }),
+        })),
+      }),
+    ),
+    Schema.Struct({ kind: Schema.Literal("background_command").transform("command") }),
+    SubagentNotificationSource,
+    CommandNotificationSource,
+    Schema.Struct({ kind: Schema.Literal("monitor") }),
+    Schema.Struct({ kind: Schema.Literal("background_task") }),
+    /** T3 Code itself, such as a restart continuing an interrupted turn. */
+    Schema.Struct({ kind: Schema.Literal("system") }),
+  ],
+  (kind) => Schema.Struct({ kind }),
+  () => ({ kind: "background_task" }),
+);
+
+const encodeNotificationSourceJson = Schema.encodeSync(
+  Schema.toCodecJson(OrchestrationV2NotificationSource),
+);
+const decodePreQuestionSource = Schema.decodeUnknownSync(PreQuestionNotificationSource);
+const decodeNotificationSource = Schema.decodeUnknownSync(OrchestrationV2NotificationSource);
+
+it("lets pre-question clients fall back without losing new-client identity", () => {
+  const source = {
+    kind: "question" as const,
+    threadId: ThreadId.make("asking"),
+    requestId: RuntimeRequestId.make("request"),
+    humanRequired: false,
+  };
+  const wire = encodeNotificationSourceJson(source);
+  expect(decodePreQuestionSource(wire)).toEqual({
+    kind: "background_task",
+  });
+  expect(decodeNotificationSource(wire)).toEqual(source);
+});
+
+it("round-trips the local and remote question escalation seam", () => {
+  const decode = Schema.decodeUnknownSync(OrchestrationV2QuestionEscalation);
+  const encode = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2QuestionEscalation));
+  const decodeJson = Schema.decodeUnknownSync(
+    Schema.fromJsonString(OrchestrationV2QuestionEscalation),
+  );
+  for (const environmentId of [null, EnvironmentId.make("origin")]) {
+    const payload = {
+      environmentId,
+      threadId: ThreadId.make("asking"),
+      title: "Question source",
+      requestId: RuntimeRequestId.make("request:color"),
+      questions: [
+        {
+          id: "color",
+          header: "Color",
+          question: "Which color?",
+          options: [{ label: "Blue", description: "Use blue" }],
+          multiSelect: false,
+        },
+      ],
+      deadline: null,
+      humanRequired: environmentId !== null,
+      answerWith: "goat_pending_request_respond",
+    };
+    const question = decode(payload);
+    expect(decodeJson(encode(question))).toEqual(payload);
+    expect(() => decode({ ...payload, deadline: "tomorrow" })).toThrow();
+    expect(() => decode({ ...payload, answerWith: "other_tool" })).toThrow();
+    const { environmentId: _environmentId, ...missingEnvironment } = payload;
+    expect(() => decode(missingEnvironment)).toThrow();
+  }
+});
+it("round-trips resolution provenance through the question resolution seam", () => {
+  const decode = Schema.decodeUnknownSync(OrchestrationV2QuestionResolution);
+  const encode = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2QuestionResolution));
+  const decodeJson = Schema.decodeUnknownSync(
+    Schema.fromJsonString(OrchestrationV2QuestionResolution),
+  );
+  for (const respondedBy of [
+    undefined,
+    { type: "user" },
+    { type: "client", reason: "Client answer" },
+    {
+      type: "agent",
+      threadId: ThreadId.make("launcher"),
+      environmentId: EnvironmentId.make("remote"),
+      title: "Launcher",
+      reason: "Decision",
+    },
+  ]) {
+    const payload = {
+      environmentId: null,
+      threadId: ThreadId.make("asking"),
+      requestId: RuntimeRequestId.make("request"),
+      resolvedAt: "2026-10-12T00:00:00.000Z",
+      ...(respondedBy === undefined ? {} : { respondedBy }),
+    };
+    expect(decodeJson(encode(decode(payload)))).toEqual(payload);
   }
 });

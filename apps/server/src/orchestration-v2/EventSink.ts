@@ -175,6 +175,8 @@ export interface EventSinkV2Shape {
     readonly eventType?: OrchestrationV2DomainEvent["type"];
     /** Bound RPC subscribers; internal workers must not drop their subscription under load. */
     readonly bounded?: boolean;
+    /** Worker-only: runs after subscription and high-water acquisition, before replay. */
+    readonly onSubscribed?: Effect.Effect<void>;
   }) => Stream.Stream<OrchestrationV2StoredEvent, EventSinkV2Error>;
   readonly latestSequence: (input?: {
     readonly threadId?: ThreadId;
@@ -750,6 +752,7 @@ const layerBase: Layer.Layer<
           }
           const subscription = yield* PubSub.subscribe(pubsub);
           const highWater = yield* eventStore.latestSequence();
+          if (input?.onSubscribed !== undefined) yield* input.onSubscribed;
           const live = Stream.fromSubscription(subscription).pipe(
             Stream.filter((stored) => stored.sequence > Math.max(highWater, afterSequence)),
             Stream.filter(matches),

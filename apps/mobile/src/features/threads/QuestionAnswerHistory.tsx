@@ -4,7 +4,10 @@ import type {
   UserInputAttachments,
 } from "@t3tools/contracts";
 import { Image, Linking, Pressable, View } from "react-native";
-import { getQuestionAnswerText } from "@t3tools/client-runtime/work-log/user-input";
+import {
+  getQuestionAnswerText,
+  getQuestionAnswerAttribution,
+} from "@t3tools/client-runtime/work-log/user-input";
 import { AppText as Text } from "../../components/AppText";
 import { useAssetUrl } from "../../state/assets";
 
@@ -38,8 +41,12 @@ export function QuestionAnswerHistory(props: {
   environmentId: EnvironmentId;
   answer: UserInputAttachmentAnswerPayload;
 }) {
+  const attribution = getQuestionAnswerAttribution(props.answer);
   return (
     <View className="gap-2">
+      {attribution === null ? null : (
+        <Text className="text-sm text-foreground-muted">{attribution}</Text>
+      )}
       {[
         ...new Set([
           ...Object.keys(props.answer.questionTextById ?? {}),

@@ -26,6 +26,7 @@ import {
   ProjectId,
   RunId,
   type ScheduledTaskId,
+  type RuntimeRequestId,
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
@@ -54,7 +55,16 @@ export function withCreationProvenance(
   provenance: ThreadManagementProvenance,
 ): OrchestrationV2Command {
   switch (command.type) {
-    case "thread.create":
+    case "runtime-request.respond":
+    case "thread.user-input.dismiss":
+      return provenance.createdBy === "user"
+        ? { ...command, respondedBy: { type: "user" } }
+        : command;
+    case "thread.create": {
+      if (provenance.createdBy !== "user") return { ...command, ...provenance };
+      const { launchedBy: _launcher, ...userCommand } = command;
+      return { ...userCommand, ...provenance };
+    }
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
@@ -139,12 +149,16 @@ export interface ThreadManagementWaitInput {
   readonly threadId: ThreadId;
   readonly runId?: RunId;
   readonly timeoutMs: number;
+  readonly ignoreRequestIds?: ReadonlyArray<RuntimeRequestId>;
+  /** Internal settling still waits for the run to finish. */
+  readonly releaseOnPendingQuestion?: boolean;
 }
 
 export interface ThreadManagementWaitResult {
   readonly threadId: ThreadId;
   readonly run: OrchestrationV2Run | null;
   readonly timedOut: boolean;
+  readonly pendingRequestIds?: ReadonlyArray<RuntimeRequestId>;
 }
 
 export interface ThreadManagementInterruptInput {
@@ -304,6 +318,7 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
+  readonly getLaunchedPendingQuestions: Orchestrator.OrchestratorV2Shape["getLaunchedPendingQuestions"];
   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
   readonly getThreadProjection: (
     threadId: ThreadId,
@@ -407,6 +422,25 @@ export function isActiveRun(run: OrchestrationV2Run): boolean {
     run.status === "running" ||
     run.status === "waiting"
   );
+}
+
+/** Joins question items to their runs without loading execution nodes or transcripts. */
+export function pendingUserInputRequestIdsForRun(
+  records: Pick<OrchestrationV2ThreadProjection, "turnItems" | "runtimeRequests">,
+  runId: RunId,
+): ReadonlyArray<RuntimeRequestId> {
+  const requests = new Set(
+    records.turnItems.flatMap((item) =>
+      item.type === "user_input_request" && item.runId === runId ? [item.requestId] : [],
+    ),
+  );
+  return records.runtimeRequests
+    .filter(
+      (request) =>
+        request.kind === "user_input" && request.status === "pending" && requests.has(request.id),
+    )
+    .map((request) => request.id)
+    .toSorted();
 }
 
 export function isTerminalRunStatus(
@@ -746,8 +780,6 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           cause,
         });
-      // Taken before the first read, so a run update between that read and
-      // the subscription below still replays.
       const afterSequence = yield* orchestrator
         .getThreadEventSequence(input.threadId)
         .pipe(Effect.mapError(loadError));
@@ -755,82 +787,122 @@ const make = Effect.gen(function* () {
       const selectedRun =
         input.runId === undefined
           ? latestRun(target)
-          : target.runs.find((candidate) => candidate.id === input.runId);
-      if (input.runId !== undefined && selectedRun === undefined) {
+          : target.runs.find((run) => run.id === input.runId);
+      if (input.runId !== undefined && selectedRun === undefined)
         return yield* new ThreadManagementRunNotFoundError({
           threadId: input.threadId,
           runId: input.runId,
         });
-      }
-      if (selectedRun === undefined) {
+      if (selectedRun === undefined)
         return { threadId: input.threadId, run: null, timedOut: false };
-      }
-      if (isTerminalRunStatus(selectedRun.status)) {
-        return { threadId: input.threadId, run: selectedRun, timedOut: false };
-      }
-
-      // Re-read the run only when the thread records a run update or its
-      // deletion, instead of polling the projection for up to an hour. Each
-      // stream keeps one event type, so transcript events never fill its buffer.
-      const wait = Stream.merge(
-        orchestrator.streamStoredEventsFrom({
-          threadId: input.threadId,
-          afterSequence,
-          eventType: "run.updated",
-        }),
-        orchestrator.streamStoredEventsFrom({
-          threadId: input.threadId,
-          afterSequence,
-          eventType: "thread.deleted",
-        }),
-      ).pipe(
-        Stream.mapError(loadError),
-        Stream.filter(
-          (stored) =>
-            stored.event.type !== "run.updated" || stored.event.payload.id === selectedRun.id,
-        ),
-        Stream.mapEffect(() =>
-          getProjectThreadRecords(input, ["runs"], { runIds: [selectedRun.id] }).pipe(
-            Effect.flatMap((current) => {
-              const run = current.runs.find((candidate) => candidate.id === selectedRun.id);
-              return run === undefined
-                ? Effect.fail(
-                    new ThreadManagementRunNotFoundError({
-                      threadId: input.threadId,
-                      runId: selectedRun.id,
-                    }),
-                  )
-                : Effect.succeed(run);
+      const ignoredRequestIds = new Set(input.ignoreRequestIds ?? []);
+      const state = (run: OrchestrationV2Run) =>
+        Effect.gen(function* () {
+          let pendingRequestIds: ReadonlyArray<RuntimeRequestId> = [];
+          if (input.releaseOnPendingQuestion !== false) {
+            const items = yield* getProjectThreadRecords(input, ["turnItems"], {
+              turnItemTypes: ["user_input_request"],
+              turnItemRunIds: [selectedRun.id],
+            });
+            const requestIds = items.turnItems.flatMap((item) =>
+              item.type === "user_input_request" &&
+              item.runId === selectedRun.id &&
+              !ignoredRequestIds.has(item.requestId)
+                ? [item.requestId]
+                : [],
+            );
+            if (requestIds.length > 0) {
+              const requests = yield* getProjectThreadRecords(input, ["runtimeRequests"], {
+                runtimeRequestIds: requestIds,
+              });
+              pendingRequestIds = pendingUserInputRequestIdsForRun(
+                { ...items, ...requests },
+                selectedRun.id,
+              ).filter((requestId) => !ignoredRequestIds.has(requestId));
+            }
+          }
+          return {
+            run,
+            pendingRequestIds,
+            ready: isTerminalRunStatus(run.status) || pendingRequestIds.length > 0,
+          };
+        });
+      const result = (
+        current: Effect.Success<ReturnType<typeof state>>,
+        timedOut: boolean,
+      ): ThreadManagementWaitResult => ({
+        threadId: input.threadId,
+        run: current.run,
+        timedOut,
+        ...(current.pendingRequestIds.length === 0
+          ? {}
+          : { pendingRequestIds: current.pendingRequestIds }),
+      });
+      const initial = yield* state(selectedRun);
+      if (initial.ready) return result(initial, false);
+      const reload = () =>
+        Effect.gen(function* () {
+          const records = yield* getProjectThreadRecords(input, ["runs"], {
+            runIds: [selectedRun.id],
+          });
+          const run = records.runs.find((run) => run.id === selectedRun.id);
+          if (run === undefined)
+            return yield* new ThreadManagementRunNotFoundError({
+              threadId: input.threadId,
+              runId: selectedRun.id,
+            });
+          return yield* state(run);
+        });
+      const waited = Option.flatten(
+        yield* Stream.mergeAll(
+          (
+            [
+              "run.updated",
+              "thread.deleted",
+              "runtime-request.updated",
+              "turn-item.updated",
+            ] as const
+          ).map((eventType) =>
+            orchestrator.streamStoredEventsFrom({
+              threadId: input.threadId,
+              afterSequence,
+              eventType,
             }),
           ),
+          { concurrency: "unbounded" },
+        ).pipe(
+          Stream.mapError(loadError),
+          Stream.filter(
+            (stored) =>
+              stored.event.type !== "run.updated" || stored.event.payload.id === selectedRun.id,
+          ),
+          // Some providers store the request before its question item arrives.
+          Stream.filter(
+            (stored) =>
+              stored.event.type !== "turn-item.updated" ||
+              (stored.event.payload.type === "user_input_request" &&
+                stored.event.payload.runId === selectedRun.id),
+          ),
+          Stream.mapEffect(reload),
+          Stream.filter((current) => current.ready),
+          Stream.runHead,
+          Effect.timeoutOption(Duration.millis(Math.max(1, input.timeoutMs))),
         ),
-        Stream.filter((run) => isTerminalRunStatus(run.status)),
-        Stream.runHead,
-        Effect.timeoutOption(Duration.millis(Math.max(1, input.timeoutMs))),
       );
-      const waited = Option.flatten(yield* wait);
-      if (Option.isSome(waited)) {
-        return { threadId: input.threadId, run: waited.value, timedOut: false };
-      }
-      const current = yield* getProjectThreadRecords(input, ["runs"], { runIds: [selectedRun.id] });
-      const run = current.runs.find((candidate) => candidate.id === selectedRun.id);
-      if (run === undefined) {
-        return yield* new ThreadManagementRunNotFoundError({
-          threadId: input.threadId,
-          runId: selectedRun.id,
-        });
-      }
-      // The run may have reached a terminal status while the timeout was
-      // winning the race; the final projection read decides what actually
-      // happened, so only a still-active run counts as timed out.
-      return { threadId: input.threadId, run, timedOut: !isTerminalRunStatus(run.status) };
+      if (Option.isSome(waited)) return result(waited.value, false);
+      const current = yield* reload();
+      return result(current, !current.ready);
     });
 
   const settleAfterRun: ThreadManagementServiceShape["settleAfterRun"] = Effect.fn(
     "orchestrationV2.threadManagement.settleAfterRun",
   )(function* (input) {
     // A turn that outlives this wait leaves its thread active.
-    const { run } = yield* waitForThread({ ...input, timeoutMs: SETTLE_AFTER_RUN_WAIT_MS });
+    const { run } = yield* waitForThread({
+      ...input,
+      timeoutMs: SETTLE_AFTER_RUN_WAIT_MS,
+      releaseOnPendingQuestion: false,
+    });
     if (run?.status !== "completed") return;
     yield* dispatch({
       type: "thread.settle",
@@ -912,6 +984,7 @@ const make = Effect.gen(function* () {
   });
 
   return ThreadManagementService.of({
+    getLaunchedPendingQuestions: orchestrator.getLaunchedPendingQuestions,
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(

@@ -13,6 +13,7 @@ import {
   ProviderInstanceId,
   ProviderDriverKind,
   RunId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -369,6 +370,8 @@ it.effect.each([
       ({
         thread: { id: threadId, projectId, deletedAt: null },
         runs: status === "missing" ? [] : [{ id: runId, status }],
+        turnItems: [],
+        runtimeRequests: [],
       }) as unknown as OrchestrationV2ThreadProjection;
     const layerTest = ThreadManagementService.layer.pipe(
       Layer.provide(
@@ -381,9 +384,9 @@ it.effect.each([
               Stream.drain,
               Stream.concat(Stream.never),
             ),
-          getThreadRecords: () =>
+          getThreadRecords: (_id, fields) =>
             Effect.sync(() => {
-              reads += 1;
+              if (fields.some((field) => field === "runs")) reads += 1;
               return projection(reads === 1 ? "running" : scenario.finalStatus);
             }),
         }),
@@ -448,12 +451,14 @@ it.effect("waitForThread reads the run again only when the run updates", () =>
                   Stream.concat(Stream.fromQueue(events)),
                 )
               : Stream.never,
-          getThreadRecords: () =>
+          getThreadRecords: (_id, fields) =>
             Effect.sync(() => {
-              reads += 1;
+              if (fields.some((field) => field === "runs")) reads += 1;
               return {
                 thread: { id: threadId, projectId, deletedAt: null },
                 runs: [{ id: runId, status }],
+                turnItems: [],
+                runtimeRequests: [],
               } as unknown as OrchestrationV2ThreadProjection;
             }),
         }),
@@ -624,5 +629,411 @@ it.effect("parent Stop does not traverse a remote delegated task (M11)", () =>
     });
     yield* stop({ threadId: parent, commandId: CommandId.make("parent-stop") });
     expect(stops).toBe(0);
+  }),
+);
+
+it("overwrites forged WS response provenance with the user", () => {
+  const command: OrchestrationV2Command = {
+    type: "runtime-request.respond",
+    commandId: CommandId.make("user-response"),
+    threadId: ThreadId.make("asking"),
+    requestId: RuntimeRequestId.make("question"),
+    answers: { q: "  Exact option  " },
+    attachmentsByQuestionId: {},
+    respondedBy: {
+      type: "agent",
+      threadId: ThreadId.make("forged"),
+      environmentId: null,
+      title: "Forged",
+      reason: "Forged",
+    },
+  };
+  const stamped = ThreadManagementService.withCreationProvenance(command, {
+    createdBy: "user",
+    creationSource: "web",
+  });
+  expect(stamped).toMatchObject({ respondedBy: { type: "user" } });
+  if (stamped.type !== "runtime-request.respond") throw new Error("Unexpected command type");
+  expect(stamped.answers).toBe(command.answers);
+  expect(stamped.attachmentsByQuestionId).toBe(command.attachmentsByQuestionId);
+  expect(
+    ThreadManagementService.withCreationProvenance(command, {
+      createdBy: "agent",
+      creationSource: "mcp",
+    }),
+  ).toBe(command);
+});
+
+it("stamps dismissals as user and clears forged user launchers", () => {
+  const dismissed = ThreadManagementService.withCreationProvenance(
+    {
+      type: "thread.user-input.dismiss",
+      commandId: CommandId.make("dismiss"),
+      threadId: ThreadId.make("asking"),
+      requestId: RuntimeRequestId.make("question"),
+      respondedBy: { type: "client", reason: "Forged" },
+    },
+    { createdBy: "user", creationSource: "mobile" },
+  );
+  expect(dismissed).toMatchObject({ respondedBy: { type: "user" } });
+  const create: OrchestrationV2Command = {
+    type: "thread.create",
+    commandId: CommandId.make("create"),
+    threadId: ThreadId.make("child"),
+    projectId: ProjectId.make("project"),
+    title: "Child",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdBy: "agent",
+    creationSource: "mcp",
+    launchedBy: {
+      kind: "launch" as const,
+      environmentLabel: null,
+      threadTitle: null,
+      threadId: ThreadId.make("forged"),
+      environmentId: null,
+      via: "thread_launch",
+    },
+  };
+  expect(
+    ThreadManagementService.withCreationProvenance(create, {
+      createdBy: "user",
+      creationSource: "web",
+    }),
+  ).not.toHaveProperty("launchedBy");
+  expect(
+    ThreadManagementService.withCreationProvenance(create, {
+      createdBy: "agent",
+      creationSource: "mcp",
+    }),
+  ).toMatchObject({ launchedBy: create.launchedBy });
+});
+
+it.effect.each([
+  { status: "running" as const, mode: "live" as const },
+  { status: "completed" as const, mode: "message" as const },
+])("waitForThread returns a $mode question at entry on a $status run", ({ status, mode }) =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("question-project");
+    const threadId = ThreadId.make("question-thread");
+    const runId = RunId.make("question-run");
+    const requestId = RuntimeRequestId.make("question-request");
+    const projection = {
+      thread: { id: threadId, projectId, deletedAt: null },
+      runs: [{ id: runId, status }],
+      turnItems: [
+        { type: "user_input_request", runId, requestId },
+        { type: "user_input_request", runId: "other-run", requestId: "other" },
+      ],
+      runtimeRequests: [
+        {
+          id: requestId,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: mode },
+        },
+        { id: "other", kind: "user_input", status: "pending" },
+        { id: "approval", kind: "command", status: "pending" },
+        { id: "orphan", kind: "user_input", status: "pending" },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const filters: Array<unknown> = [];
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadEventSequence: () => Effect.succeed(0),
+          getThreadRecords: (_id, _fields, filter) => {
+            filters.push(filter);
+            return Effect.succeed(projection);
+          },
+          streamStoredEventsFrom: () => Stream.die("Should return at entry"),
+        }),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layer),
+    );
+    expect(
+      yield* service.waitForThread({ projectId, threadId, runId, timeoutMs: 1000 }),
+    ).toMatchObject({ pendingRequestIds: [requestId], timedOut: false, run: { status } });
+    expect(filters).toContainEqual({
+      turnItemTypes: ["user_input_request"],
+      turnItemRunIds: [runId],
+    });
+    expect(filters).toContainEqual({ runtimeRequestIds: [requestId] });
+  }),
+);
+
+it.effect.each([false, true])(
+  "waitForThread releases on a persisted question, replay=%s",
+  (replay) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("event-project");
+      const threadId = ThreadId.make("event-thread");
+      const runId = RunId.make("event-run");
+      const requestId = RuntimeRequestId.make("event-question");
+      const subscribed = yield* Deferred.make<void>();
+      const ignoredRead = yield* Deferred.make<void>();
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      let pending = false;
+      let selected = false;
+      const projection = () =>
+        ({
+          thread: { id: threadId, projectId, deletedAt: null },
+          runs: [{ id: runId, status: "running" }],
+          runtimeRequests: pending
+            ? [{ id: requestId, kind: "user_input", status: "pending" }]
+            : [],
+          turnItems: pending
+            ? [{ type: "user_input_request", runId: selected ? runId : "other-run", requestId }]
+            : [],
+        }) as unknown as OrchestrationV2ThreadProjection;
+      const event = {
+        sequence: 8,
+        event: { type: "runtime-request.updated", threadId },
+      } as unknown as OrchestrationV2StoredEvent;
+      const layer = ThreadManagementService.layer.pipe(
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(7),
+            getThreadRecords: (_id, fields) =>
+              Effect.gen(function* () {
+                const result = projection();
+                if (pending && !selected && fields.some((field) => field === "turnItems"))
+                  yield* Deferred.succeed(ignoredRead, undefined);
+                return result;
+              }),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "runtime-request.updated"
+                ? Stream.unwrap(
+                    Effect.gen(function* () {
+                      expect(input.afterSequence).toBe(7);
+                      yield* Deferred.succeed(subscribed, undefined);
+                      if (replay) {
+                        pending = true;
+                        selected = true;
+                        return Stream.make(event);
+                      }
+                      return Stream.fromQueue(events);
+                    }),
+                  )
+                : Stream.never,
+          }),
+        ),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layer),
+      );
+      const fiber = yield* service
+        .waitForThread({ projectId, threadId, runId, timeoutMs: 1000 })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      if (!replay) {
+        pending = true;
+        yield* Queue.offer(events, event);
+        yield* Deferred.await(ignoredRead);
+        expect(fiber.pollUnsafe()).toBeUndefined();
+        selected = true;
+        yield* Queue.offer(events, { ...event, sequence: 9 });
+      }
+      expect(yield* Fiber.join(fiber)).toMatchObject({
+        timedOut: false,
+        pendingRequestIds: [requestId],
+        run: { status: "running" },
+      });
+    }),
+);
+
+it.effect.each(["question", "terminal"] as const)(
+  "waitForThread skips forwarded questions and releases on %s",
+  (release) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("ignored-project");
+      const threadId = ThreadId.make("ignored-thread");
+      const runId = RunId.make("ignored-run");
+      const ignored = RuntimeRequestId.make("forwarded");
+      const fresh = RuntimeRequestId.make("fresh");
+      const subscribed = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      const reread = yield* Deferred.make<void>();
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      let status = "running";
+      let requestIds = [ignored];
+      let itemReads = 0;
+      const layer = ThreadManagementService.layer.pipe(
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(7),
+            getThreadRecords: (_id, fields) =>
+              Effect.gen(function* () {
+                const projection = {
+                  thread: { id: threadId, projectId, deletedAt: null },
+                  runs: [{ id: runId, status }],
+                  turnItems: requestIds.map((requestId) => ({
+                    type: "user_input_request",
+                    runId,
+                    requestId,
+                  })),
+                  runtimeRequests: requestIds.map((id) => ({
+                    id,
+                    kind: "user_input",
+                    status: "pending",
+                  })),
+                } as unknown as OrchestrationV2ThreadProjection;
+                if (fields.some((field) => field === "turnItems") && ++itemReads > 1)
+                  yield* Deferred.succeed(reread, undefined);
+                return projection;
+              }),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "runtime-request.updated"
+                ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(Stream.fromQueue(events)),
+                  )
+                : Stream.never,
+          }),
+        ),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layer),
+      );
+      const fiber = yield* service
+        .waitForThread({ projectId, threadId, runId, timeoutMs: 1000, ignoreRequestIds: [ignored] })
+        .pipe(
+          Effect.tap(() => Deferred.succeed(finished, undefined)),
+          Effect.forkChild,
+        );
+      expect(
+        yield* Effect.raceFirst(
+          Deferred.await(subscribed).pipe(Effect.as(true)),
+          Deferred.await(finished).pipe(Effect.as(false)),
+        ),
+      ).toBe(true);
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      const event = {
+        sequence: 8,
+        event: { type: "runtime-request.updated", threadId },
+      } as unknown as OrchestrationV2StoredEvent;
+      yield* Queue.offer(events, event);
+      yield* Deferred.await(reread);
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      if (release === "question") requestIds = [ignored, fresh];
+      else status = "completed";
+      yield* Queue.offer(events, { ...event, sequence: 9 });
+      const result = yield* Fiber.join(fiber);
+      expect(result).toMatchObject({
+        timedOut: false,
+        run: { status: release === "question" ? "running" : "completed" },
+      });
+      expect(result.pendingRequestIds).toEqual(release === "question" ? [fresh] : undefined);
+    }),
+);
+
+it.effect("waitForThread final timeout read prefers a pending question over timeout", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("timeout-project");
+    const threadId = ThreadId.make("timeout-thread");
+    const runId = RunId.make("timeout-run");
+    const requestId = RuntimeRequestId.make("timeout-question");
+    const subscribed = yield* Deferred.make<void>();
+    let pending = false;
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadEventSequence: () => Effect.succeed(0),
+          streamStoredEventsFrom: () =>
+            Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+              Stream.drain,
+              Stream.concat(Stream.never),
+            ),
+          getThreadRecords: () =>
+            Effect.succeed({
+              thread: { id: threadId, projectId, deletedAt: null },
+              runs: [{ id: runId, status: "running" }],
+              turnItems: pending ? [{ type: "user_input_request", runId, requestId }] : [],
+              runtimeRequests: pending
+                ? [{ id: requestId, kind: "user_input", status: "pending" }]
+                : [],
+            } as unknown as OrchestrationV2ThreadProjection),
+        }),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layer),
+    );
+    const fiber = yield* service
+      .waitForThread({ projectId, threadId, runId, timeoutMs: 1 })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(subscribed);
+    pending = true;
+    yield* TestClock.adjust(Duration.millis(1));
+    expect(yield* Fiber.join(fiber)).toMatchObject({
+      timedOut: false,
+      pendingRequestIds: [requestId],
+    });
+  }),
+);
+
+it.effect("settleAfterRun waits through a question and settles on completion", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("settle-project");
+    const threadId = ThreadId.make("settle-thread");
+    const runId = RunId.make("settle-run");
+    const subscribed = yield* Deferred.make<void>();
+    const reread = yield* Deferred.make<void>();
+    const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    let status: OrchestrationV2Run["status"] = "running";
+    let reads = 0;
+    const commands: Array<string> = [];
+    const layer = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadEventSequence: () => Effect.succeed(0),
+          getThreadRecords: () =>
+            Effect.gen(function* () {
+              if (++reads > 1) yield* Deferred.succeed(reread, undefined);
+              return {
+                thread: { id: threadId, projectId, deletedAt: null },
+                runs: [{ id: runId, status }],
+                turnItems: [{ type: "user_input_request", runId, requestId: "q" }],
+                runtimeRequests: [{ id: "q", kind: "user_input", status: "pending" }],
+              } as unknown as OrchestrationV2ThreadProjection;
+            }),
+          streamStoredEventsFrom: (input) =>
+            input?.eventType === "runtime-request.updated"
+              ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                  Stream.drain,
+                  Stream.concat(Stream.fromQueue(events)),
+                )
+              : Stream.never,
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command.type);
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layer),
+    );
+    const fiber = yield* service
+      .settleAfterRun({ projectId, threadId, runId })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(subscribed);
+    yield* Queue.offer(events, {
+      event: { type: "runtime-request.updated", threadId },
+    } as unknown as OrchestrationV2StoredEvent);
+    yield* Deferred.await(reread);
+    expect(commands).toEqual([]);
+    status = "completed";
+    yield* Queue.offer(events, {
+      event: { type: "runtime-request.updated", threadId },
+    } as unknown as OrchestrationV2StoredEvent);
+    yield* Fiber.join(fiber);
+    expect(commands).toEqual(["thread.settle"]);
   }),
 );
