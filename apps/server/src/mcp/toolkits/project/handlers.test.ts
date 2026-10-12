@@ -56,6 +56,7 @@ const launchFromThread = (params: {
   readonly title: string;
   readonly message?: string;
   readonly notifyOnCompletion?: boolean;
+  readonly notifyWebhook?: boolean;
   readonly launchedBy?: ThreadLaunch.ThreadLaunchInput["launchedBy"];
   readonly standingInstructions?: boolean;
   readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
@@ -258,8 +259,11 @@ it.effect("watches the launched thread's first run for the calling thread", () =
         projectId: launched.projectId,
         title: "Audit",
         runId: "launched-run",
+        notifyWebhook: false,
       }),
     ]);
+    const opted = yield* launchFromThread({ title: "Audit", message: "Go", notifyWebhook: true });
+    expect(opted.registrations).toEqual([expect.objectContaining({ notifyWebhook: true })]);
   }),
 );
 
