@@ -9,7 +9,7 @@ import {
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { goatBotItemReaders, presentTaskChip } from "./goatBotReaders";
+import { goatBotItemReaders, presentTaskChip } from "./readers.ts";
 
 const chip = (overrides: Partial<ChannelTaskChip> = {}): ChannelTaskChip => ({
   taskId: ChannelTaskId.make("task-1"),

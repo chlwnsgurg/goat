@@ -1,3 +1,8 @@
+import type {
+  GoatBotCardTarget,
+  GoatBotCardTone,
+  GoatBotTaskCard,
+} from "@t3tools/client-runtime/goatBot";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { Link } from "@tanstack/react-router";
 import {
@@ -17,7 +22,6 @@ import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entiti
 import { useConnectedEnvironmentIds } from "~/state/environments";
 
 import { Button } from "../ui/button";
-import type { GoatBotCardTarget, GoatBotCardTone, GoatBotTaskCard } from "./goatBotRows";
 
 const TONE_ICON = {
   neutral: CircleIcon,

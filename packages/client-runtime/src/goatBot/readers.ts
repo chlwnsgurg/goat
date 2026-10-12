@@ -11,7 +11,7 @@ import type {
   GoatBotItemReaders,
   GoatBotMessagePresentation,
   GoatBotTaskCard,
-} from "./goatBotRows";
+} from "./rows.ts";
 
 const MESSAGE_TONE = {
   inbound: "reply",

@@ -1,3 +1,16 @@
+import {
+  buildGoatBotTimeline,
+  createGoatBotSendQueue,
+  goatBotItemReaders,
+  goatBotReplyingSince,
+  initialGoatBotEnsure,
+  retryGoatBotEnsure,
+  settleGoatBotEnsure,
+  startGoatBotEnsure,
+  syncGoatBotEnsure,
+  type GoatBotEnsureMachine,
+  type GoatBotSendQueue,
+} from "@t3tools/client-runtime/goatBot";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type {
   ChannelBotRef,
@@ -9,6 +22,7 @@ import { useContext, useEffect, useMemo } from "react";
 import { create } from "zustand";
 
 import { useGlobalAgentStore } from "~/globalAgentStore";
+import { randomUUID } from "~/lib/utils";
 import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entities";
 import {
   goatBotHomeReadBack,
@@ -18,18 +32,7 @@ import {
   type GoatBotEnvironmentInput,
 } from "./goatBotAvailability";
 import { GoatBotChannelContext, type GoatBotChannelPort } from "./goatBotChannelPort";
-import {
-  initialGoatBotEnsure,
-  retryGoatBotEnsure,
-  settleGoatBotEnsure,
-  startGoatBotEnsure,
-  syncGoatBotEnsure,
-  type GoatBotEnsureMachine,
-} from "./goatBotEnsure";
 import { useGoatBotEnvironments } from "./goatBotHooks";
-import { goatBotItemReaders } from "./goatBotReaders";
-import { buildGoatBotTimeline, goatBotReplyingSince } from "./goatBotRows";
-import { createGoatBotSendQueue, type GoatBotSendQueue } from "./goatBotSendQueue";
 
 interface Session {
   readonly homeKey: string;
@@ -59,6 +62,7 @@ function update(environmentId: EnvironmentId, session: Session) {
 function newQueue(environmentId: EnvironmentId) {
   return createGoatBotSendQueue({
     onChange: changed,
+    makeKey: randomUUID,
     canDispatch: (bot) => {
       const session = useSessions.getState().sessions.get(environmentId);
       return (

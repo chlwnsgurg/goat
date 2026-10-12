@@ -121,6 +121,7 @@ function itemCreatedAt(item: OrchestrationV2TurnItem): string {
 }
 
 function localDayKey(iso: string): string {
+  // @effect-diagnostics-next-line globalDate:off - day separators follow the device's local calendar.
   const date = new Date(iso);
   return Number.isNaN(date.getTime())
     ? iso

@@ -1,3 +1,4 @@
+import type { GoatBotRow } from "@t3tools/client-runtime/goatBot";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
@@ -17,7 +18,6 @@ import {
   type GoatBotAvailability,
   type GoatBotRemoval,
 } from "./goatBotAvailability";
-import type { GoatBotRow } from "./goatBotRows";
 
 const GOAT_BOT_TITLE = "GOAT Bot";
 
