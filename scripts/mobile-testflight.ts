@@ -321,6 +321,9 @@ function main(): void {
   const archivePath = NodePath.join(output, `${identity.xcodeName}.xcarchive`);
   const signing = [
     "-allowProvisioningUpdates",
+    // Automatic signing archives with a development profile first, and Apple creates one only for
+    // a team with a registered iPhone. This registers an iPhone connected to the Mac.
+    "-allowProvisioningDeviceRegistration",
     ...(keyArgs ?? []),
     `DEVELOPMENT_TEAM=${teamId}`,
     "CODE_SIGN_STYLE=Automatic",
