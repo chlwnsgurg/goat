@@ -1,5 +1,14 @@
+import { APP_SCHEMES } from "@t3tools/shared/mobileAppIdentity";
 import { readHostedPairingRequest } from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
+
+/** App-link protocols whose `pair` URL wraps a pairing URL; T3 Code's are kept for older QR codes. */
+const PAIRING_LINK_PROTOCOLS = new Set([
+  ...APP_SCHEMES.map((scheme) => `${scheme}:`),
+  "t3code:",
+  "t3code-dev:",
+  "t3code-preview:",
+]);
 
 const MOBILE_PAIRING_URL_PARAM = "pairingUrl";
 
@@ -78,7 +87,7 @@ export function extractPairingUrlFromQrPayload(payload: string): string {
 
   try {
     const url = new URL(trimmed);
-    if (url.protocol === "t3code:") {
+    if (PAIRING_LINK_PROTOCOLS.has(url.protocol)) {
       const pairingUrl = url.searchParams.get(MOBILE_PAIRING_URL_PARAM)?.trim() ?? "";
       if (pairingUrl.length > 0) {
         return pairingUrl;

@@ -11,6 +11,8 @@ import * as NodeURL from "node:url";
 
 import { PNG } from "pngjs";
 
+import { MOBILE_APP_IDENTITY } from "@t3tools/shared/mobileAppIdentity";
+
 import showcaseConfig, {
   type ShowcaseAppearance,
   type ShowcaseAndroidDevice,
@@ -32,8 +34,10 @@ import {
 
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const MOBILE_ROOT = NodePath.join(REPO_ROOT, "apps/mobile");
-const ANDROID_PACKAGE = "com.t3tools.t3code";
-const APP_SCHEME = "t3code";
+const SHOWCASE_APP = MOBILE_APP_IDENTITY.production;
+// The iOS bundle id and Android package are the same, so simctl and adb both use this.
+const ANDROID_PACKAGE = SHOWCASE_APP.androidPackage;
+const APP_SCHEME = SHOWCASE_APP.scheme;
 // expo-dev-launcher reads these off the manifest URL and updates the dev menu
 // preferences before the app loads, keeping captures free of dev chrome.
 const DEV_CLIENT_LAUNCH_FLAGS = "disableOnboarding=1&disableFab=1&disableAutoLaunch=1";
@@ -42,7 +46,7 @@ const SERVER_HOST = "0.0.0.0";
 const IOS_SIMULATOR_ARCH = NodeProcess.arch === "arm64" ? "arm64" : "x86_64";
 const IOS_APP_PATH = NodePath.join(
   MOBILE_ROOT,
-  ".showcase/ios-derived-data/Build/Products/Debug-iphonesimulator/T3Code.app",
+  `.showcase/ios-derived-data/Build/Products/Debug-iphonesimulator/${SHOWCASE_APP.xcodeName}.app`,
 );
 const ANDROID_APK_PATH = NodePath.join(
   MOBILE_ROOT,
@@ -707,9 +711,9 @@ async function buildIos(): Promise<string> {
     "xcodebuild",
     [
       "-workspace",
-      NodePath.join(MOBILE_ROOT, "ios/T3Code.xcworkspace"),
+      NodePath.join(MOBILE_ROOT, `ios/${SHOWCASE_APP.xcodeName}.xcworkspace`),
       "-scheme",
-      "T3Code",
+      SHOWCASE_APP.xcodeName,
       "-configuration",
       "Debug",
       "-sdk",

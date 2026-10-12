@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./mobileAppIdentity": {
+      "types": "./src/mobileAppIdentity.ts",
+      "import": "./src/mobileAppIdentity.ts"
+    },
     "./sshRuntimeProtocol": {
       "types": "./src/sshRuntimeProtocol.ts",
       "import": "./src/sshRuntimeProtocol.ts"

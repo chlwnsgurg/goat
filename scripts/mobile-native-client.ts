@@ -12,6 +12,8 @@ import * as Stream from "effect/Stream";
 import { Argument, Command } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
+import { MOBILE_APP_IDENTITY } from "@t3tools/shared/mobileAppIdentity";
+
 export type NativePlatform = "ios" | "android";
 const NativeClientRecord = Schema.Struct({ fingerprint: Schema.String, binary: Schema.String });
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(NativeClientRecord));
@@ -135,7 +137,8 @@ export const hashBundle = Effect.fn("hashBundle")(function* (root: string) {
 });
 type FileSystemError = import("effect/PlatformError").PlatformError;
 
-const bundleId = "com.t3tools.t3code.dev";
+const devApp = MOBILE_APP_IDENTITY.development;
+const bundleId = devApp.iosBundleIdentifier;
 const roots = Effect.gen(function* () {
   const path = yield* Path.Path;
   const repo = yield* path.fromFileUrl(new URL("../", import.meta.url));
@@ -348,9 +351,9 @@ const main = Command.make(
             [
               "xcodebuild",
               "-workspace",
-              path.join(mobile, "ios/T3CodeDev.xcworkspace"),
+              path.join(mobile, `ios/${devApp.xcodeName}.xcworkspace`),
               "-scheme",
-              "T3CodeDev",
+              devApp.xcodeName,
               "-configuration",
               "Debug",
               "-destination",
@@ -367,7 +370,7 @@ const main = Command.make(
               "simctl",
               "install",
               device,
-              path.join(output, "Build/Products/Debug-iphonesimulator/T3CodeDev.app"),
+              path.join(output, `Build/Products/Debug-iphonesimulator/${devApp.xcodeName}.app`),
             ],
             true,
           );

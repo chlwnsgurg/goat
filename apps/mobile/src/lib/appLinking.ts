@@ -1,3 +1,5 @@
+import { isSchemeOnlyUrl } from "@t3tools/shared/mobileAppIdentity";
+
 /**
  * The Expo dev client launches the app via
  * <scheme>://expo-development-client/?url=<packager> — that URL addresses
@@ -12,6 +14,6 @@ export function shouldHandleAppLink(url: string): boolean {
   return (
     !url.includes("expo-development-client") &&
     !url.includes("://expo-sharing") &&
-    !/^t3code(-dev|-preview)?:\/*$/.test(url)
+    !isSchemeOnlyUrl(url)
   );
 }

@@ -1,7 +1,8 @@
-# T3 Code Mobile
+# GOAT Mobile
 
 > [!WARNING]
-> T3 Code Mobile is currently in development and is not distributed yet. If you want to try it out, you can build it from source.
+> GOAT Mobile is in development. Team members install it through TestFlight; see
+> [Mobile TestFlight builds](../../docs/operations/mobile-testflight.md). You can also build it from source.
 
 ## Quickstart
 
@@ -10,9 +11,12 @@
 
 This app has three variants:
 
-- `development`: Expo dev client, installable side-by-side as `T3 Code Dev`
-- `preview`: persistent internal preview build, installable side-by-side as `T3 Code Preview`
-- `production`: store/release build as `T3 Code`
+- `development`: Expo dev client, installable side-by-side as `GOAT Dev` (`si.goat.mobile.dev`)
+- `preview`: persistent internal preview build, installable side-by-side as `GOAT Preview` (`si.goat.mobile.preview`)
+- `production`: TestFlight/release build as `GOAT` (`si.goat.mobile`)
+
+Names, URL schemes (`goat`, `goat-preview`, `goat-dev`) and bundle ids live in
+[`packages/shared/src/mobileAppIdentity.ts`](../../packages/shared/src/mobileAppIdentity.ts).
 
 Run commands from `apps/mobile`.
 
@@ -128,6 +132,9 @@ The development variant uses `appVersion` to avoid recalculating the native fing
 For preview or production EAS environments, set `T3CODE_CLERK_PUBLISHABLE_KEY`,
 `T3CODE_CLERK_JWT_TEMPLATE`, and `T3CODE_RELAY_URL`
 as EAS environment variables. Expo config maps the canonical values into the mobile build.
+EAS builds and OTA updates also need an EAS project the GOAT account owns:
+set `GOAT_MOBILE_EAS_PROJECT_ID` and `GOAT_MOBILE_EAS_OWNER`. Without them the binary ships with
+updates off.
 
 Create a PR preview dev-client build manually:
 
