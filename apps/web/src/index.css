@@ -231,6 +231,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      compositor updates discrete frames instead of every vsync. */
   --animate-status-pulse: status-pulse 2s infinite;
   --animate-status-ping: status-ping 2s infinite;
+  /* GOAT Bot's replying dots: a short hop, then a long hold, stepped like the status pulses. */
+  --animate-typing-wave: typing-wave 1.4s infinite;
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-warning-surface: var(--warning-surface);
@@ -313,6 +315,20 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     }
     100% {
       opacity: 1;
+    }
+  }
+  @keyframes typing-wave {
+    0% {
+      translate: 0 0;
+      animation-timing-function: steps(3);
+    }
+    15% {
+      translate: 0 -3px;
+      animation-timing-function: steps(3);
+    }
+    30%,
+    100% {
+      translate: 0 0;
     }
   }
   @keyframes status-pulse {

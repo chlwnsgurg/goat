@@ -27,6 +27,9 @@ const FOLLOW_THRESHOLD_PX = 48;
  */
 const REPLYING_LIMIT_MS = 90_000;
 
+/** Each dot hops a beat after the one before it, so the three read as a wave. */
+const TYPING_DOT_DELAYS = ["0ms", "150ms", "300ms"] as const;
+
 export function GoatBotTimeline({
   rows,
   replyingSince = null,
@@ -160,11 +163,16 @@ export function GoatBotTimeline({
             <div
               role="status"
               aria-label="GOAT Bot is replying"
-              className="rounded-2xl bg-secondary px-3 py-2 text-sm text-muted-foreground"
+              className="flex h-9 items-center gap-1 rounded-2xl bg-secondary px-3.5"
             >
-              <span aria-hidden className="tracking-widest">
-                •••
-              </span>
+              {TYPING_DOT_DELAYS.map((delay) => (
+                <span
+                  key={delay}
+                  aria-hidden
+                  className="size-1.5 animate-typing-wave rounded-full bg-muted-foreground motion-reduce:animate-none"
+                  style={{ animationDelay: delay }}
+                />
+              ))}
             </div>
           </li>
         ) : null}
