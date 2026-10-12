@@ -215,6 +215,7 @@ import {
   selectSidebarMarkReadTargets,
   isSidebarNestedLinkClick,
   isSidebarThreadWoke,
+  holdSidebarPriorityRank,
   resolveSidebarPriorityRank,
   resolveSidebarThreadPresentation,
   sidebarDelegatedChildState,
@@ -251,6 +252,7 @@ import {
   useSidebarRowSubscriptionLease,
   type SidebarListItem,
   type SidebarListMarker,
+  type SidebarPriorityHolds,
   type SidebarSection,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
@@ -2733,6 +2735,10 @@ export default function Sidebar() {
     readonly assignedKeys: ReadonlyMap<string, string>;
   } | null>(null);
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);
+  // Rows Priority showed in this Activity session. The bell unmounts this sidebar, so
+  // switching away and back lets threads read in the meantime leave Priority.
+  const priorityHoldsRef = useRef<SidebarPriorityHolds>(new Map());
+  const priorityHolds = priorityHoldsRef.current;
   const {
     pinnedThreads,
     draggableThreadKeys,
@@ -2796,14 +2802,20 @@ export default function Sidebar() {
             : { ...projected, snoozedAt: thread.snoozedAt, snoozedUntil: thread.snoozedUntil },
         );
       } else {
-        const rank = resolveSidebarPriorityRank({
-          thread,
-          localLastVisitedAt: localLastVisitedAtByKey[threadKey],
-          wokeAt: threadWokeAt(thread, { now: preciseNow }),
-          hasChildAttention:
-            delegatedChildIndex
-              .get(threadKey)
-              ?.active.some((child) => sidebarDelegatedChildState(child) === "attention") ?? false,
+        const rank = holdSidebarPriorityRank({
+          rank: resolveSidebarPriorityRank({
+            thread,
+            localLastVisitedAt: localLastVisitedAtByKey[threadKey],
+            wokeAt: threadWokeAt(thread, { now: preciseNow }),
+            hasChildAttention:
+              delegatedChildIndex
+                .get(threadKey)
+                ?.active.some((child) => sidebarDelegatedChildState(child) === "attention") ??
+              false,
+          }),
+          key: threadKey,
+          settledOverride: thread.settledOverride,
+          holds: priorityHolds,
         });
         const section = resolveSidebarThreadSection({
           snoozed: supportsSnooze && effectiveSnoozed(thread, { now: preciseNow }),
@@ -2871,7 +2883,16 @@ export default function Sidebar() {
     threads,
     delegatedChildIndex,
     localLastVisitedAtByKey,
+    priorityHolds,
   ]);
+  useEffect(() => {
+    priorityHoldsRef.current = new Map(
+      priorityThreads.map((thread) => [
+        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        thread.settledOverride,
+      ]),
+    );
+  }, [priorityThreads]);
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => subscribeSidebarSearchFocus(() => threadSearchInputRef.current?.focus()), []);

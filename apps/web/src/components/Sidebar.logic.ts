@@ -681,10 +681,9 @@ export function canStopSidebarDelegatedChild(thread: SidebarChildInput): boolean
   );
 }
 
+/** Unfinished delegated tasks; finished ones never appear in the sidebar. */
 export interface SidebarDelegatedChildren<T> {
   readonly active: ReadonlyArray<T>;
-  // Finished children stay off the sidebar; they are kept only so an open one can be pinned.
-  readonly finished: ReadonlyArray<T>;
 }
 
 /** Index once per shell collection, retaining unchanged parent entries for memoized rows. */
@@ -692,14 +691,15 @@ export function buildSidebarDelegatedChildIndex<T extends SidebarChildInput>(
   threads: ReadonlyArray<T>,
   previous?: ReadonlyMap<string, SidebarDelegatedChildren<T>>,
 ): ReadonlyMap<string, SidebarDelegatedChildren<T>> {
-  const groups = new Map<string, { active: T[]; finished: T[] }>();
+  const groups = new Map<string, { active: T[] }>();
   for (const thread of threads) {
     if (!isSidebarDelegatedChildThread(thread) || thread.lineage.parentThreadId === null) continue;
+    if (sidebarDelegatedChildState(thread) === "finished") continue;
     const key = scopedThreadKey(
       scopeThreadRef(thread.environmentId, thread.lineage.parentThreadId),
     );
-    const group = groups.get(key) ?? { active: [], finished: [] };
-    group[sidebarDelegatedChildState(thread) === "finished" ? "finished" : "active"].push(thread);
+    const group = groups.get(key) ?? { active: [] };
+    group.active.push(thread);
     groups.set(key, group);
   }
   const index = new Map<string, SidebarDelegatedChildren<T>>();
@@ -714,12 +714,7 @@ export function buildSidebarDelegatedChildIndex<T extends SidebarChildInput>(
         left.id.localeCompare(right.id),
     );
     const old = previous?.get(key);
-    index.set(
-      key,
-      old && sameElements(old.active, group.active) && sameElements(old.finished, group.finished)
-        ? old
-        : group,
-    );
+    index.set(key, old && sameElements(old.active, group.active) ? old : group);
   }
   return index;
 }
@@ -743,7 +738,7 @@ export function resolveSidebarDelegatedChildWindow<T extends SidebarChildInput>(
     scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === input.openThreadKey;
   const pinnedOpenRow =
     input.openThreadKey !== null && !activeRows.some(isOpen)
-      ? (input.children.active.find(isOpen) ?? input.children.finished.find(isOpen) ?? null)
+      ? (input.children.active.find(isOpen) ?? null)
       : null;
   return {
     activeRows,
@@ -1015,6 +1010,24 @@ export function resolveSidebarPriorityRank(input: {
     isSidebarThreadWoke(input.wokeAt, lastVisitedAt)
     ? 2
     : null;
+}
+
+/** Settled state each Priority row had when Activity last showed it, by scoped thread key. */
+export type SidebarPriorityHolds = ReadonlyMap<string, SidebarThreadSummary["settledOverride"]>;
+
+/**
+ * Reading a thread does not pull its row out of Priority while Activity stays open; it leaves
+ * when Activity is shown again. Settling or unsettling the row is the user's own move, so a
+ * changed settled state ends the hold.
+ */
+export function holdSidebarPriorityRank(input: {
+  readonly rank: 0 | 1 | 2 | null;
+  readonly key: string;
+  readonly settledOverride: SidebarThreadSummary["settledOverride"];
+  readonly holds: SidebarPriorityHolds;
+}): 0 | 1 | 2 | null {
+  if (input.rank !== null || !input.holds.has(input.key)) return input.rank;
+  return input.holds.get(input.key) === input.settledOverride ? 2 : null;
 }
 
 /**

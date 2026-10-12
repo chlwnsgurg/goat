@@ -44,6 +44,7 @@ import {
   resolveSidebarStageBadgeLabel,
   resolveSidebarThreadSection,
   resolveSidebarPriorityRank,
+  holdSidebarPriorityRank,
   resolveSidebarThreadPresentation,
   sortPriorityThreadsForSidebar,
   isSidebarThreadWoke,
@@ -157,8 +158,8 @@ describe("sidebar delegated children", () => {
   });
 
   it("indexes only live MCP subagent children and scopes parent ids by environment", () => {
-    const local = delegatedChild("local");
-    const remote = delegatedChild("remote", {}, EnvironmentId.make("remote"));
+    const local = delegatedChild("local", { status: "running" });
+    const remote = delegatedChild("remote", { status: "running" }, EnvironmentId.make("remote"));
     const excluded = [
       delegatedChild("provider", { creationSource: "provider" }),
       delegatedChild("web", { creationSource: "web" }),
@@ -182,14 +183,14 @@ describe("sidebar delegated children", () => {
     expect(excluded.map(isSidebarDelegatedChildThread)).toEqual(excluded.map(() => false));
     const index = buildSidebarDelegatedChildIndex([local, ...excluded, remote]);
     expect(index.size).toBe(2);
-    expect(index.get(delegatedParentKey)?.finished).toEqual([local]);
+    expect(index.get(delegatedParentKey)?.active).toEqual([local]);
     expect(
       index.get(scopedThreadKey(scopeThreadRef(remote.environmentId, ThreadId.make("parent"))))
-        ?.finished,
+        ?.active,
     ).toEqual([remote]);
   });
 
-  it("puts attention first, merges working and queued oldest first, and keeps finished aside", () => {
+  it("puts attention first, merges working and queued oldest first, and drops finished", () => {
     const newer = delegatedChild("newer", {
       status: "running",
       createdAt: DateTime.makeUnsafe("2026-10-12T01:03:00Z"),
@@ -210,12 +211,13 @@ describe("sidebar delegated children", () => {
       delegatedParentKey,
     )!;
     expect(entry.active).toEqual([attention, older, newer]);
-    expect(entry.finished).toEqual([finished]);
+    expect(buildSidebarDelegatedChildIndex([finished]).size).toBe(0);
   });
 
   it("reuses per-parent entries only when their ordered element identities are unchanged", () => {
     const first = delegatedChild("first", { status: "running" });
     const other = delegatedChild("other", {
+      status: "running",
       lineage: {
         rootThreadId: ThreadId.make("other-parent"),
         parentThreadId: ThreadId.make("other-parent"),
@@ -331,8 +333,7 @@ describe("sidebar delegated child window", () => {
   const running = Array.from({ length: 5 }, (_, index) =>
     delegatedChild(`running-${index}`, { status: index % 2 === 0 ? "running" : "queued" }),
   );
-  const finished = Array.from({ length: 21 }, (_, index) => delegatedChild(`finished-${index}`));
-  const children = { active: [...attention, ...running], finished };
+  const children = { active: [...attention, ...running] };
   const defaults = {
     children,
     runningExpanded: false,
@@ -354,7 +355,6 @@ describe("sidebar delegated child window", () => {
     { row: running[4]!, runningExpanded: false, pinned: true },
     { row: running[4]!, runningExpanded: true, pinned: false },
     { row: attention[3]!, runningExpanded: false, pinned: false },
-    { row: finished[20]!, runningExpanded: true, pinned: true },
   ])("shows the open $row.id once with pinned=$pinned", ({ row, pinned, ...state }) => {
     const window = resolveSidebarDelegatedChildWindow({
       ...defaults,
@@ -374,7 +374,7 @@ describe("sidebar delegated child window", () => {
       resolveSidebarDelegatedChildWindow({
         ...defaults,
         openThreadKey: scopedThreadKey(
-          scopeThreadRef(EnvironmentId.make("remote"), finished[0]!.id),
+          scopeThreadRef(EnvironmentId.make("remote"), running[4]!.id),
         ),
       }).pinnedOpenRow,
     ).toBeNull();
@@ -382,9 +382,7 @@ describe("sidebar delegated child window", () => {
       resolveSidebarDelegatedChildWindow({ ...defaults, openThreadKey: delegatedParentKey })
         .pinnedOpenRow,
     ).toBeNull();
-    expect(
-      resolveSidebarDelegatedChildWindow({ ...defaults, children: { active: [], finished: [] } }),
-    ).toEqual({
+    expect(resolveSidebarDelegatedChildWindow({ ...defaults, children: { active: [] } })).toEqual({
       activeRows: [],
       hiddenActiveCount: 0,
       pinnedOpenRow: null,
@@ -610,6 +608,24 @@ describe("Activity Priority", () => {
     expect(rank({ ...thread, lastVisitedAt: after }, false, after)).toBeNull();
     expect(rank(thread, false, "invalid")).toBeNull();
     expect(isSidebarThreadWoke(after, "invalid")).toBe(true);
+  });
+
+  it("keeps a read Priority row until Activity is shown again, unless its settled state changes", () => {
+    const holds = new Map([
+      ["read", null],
+      ["settled", "settled" as const],
+    ]);
+    const hold = (key: string, rank: 0 | 1 | 2 | null, settledOverride: "settled" | null) =>
+      holdSidebarPriorityRank({ rank, key, settledOverride, holds });
+    expect(hold("read", null, null)).toBe(2);
+    expect(hold("settled", null, "settled")).toBe(2);
+    expect(hold("read", 0, null)).toBe(0);
+    expect(hold("read", null, "settled")).toBeNull();
+    expect(hold("settled", null, null)).toBeNull();
+    expect(hold("never-shown", null, null)).toBeNull();
+    expect(
+      holdSidebarPriorityRank({ rank: null, key: "read", settledOverride: null, holds: new Map() }),
+    ).toBeNull();
   });
 
   it("lifts the parent for delegated attention and retains each child only beneath it", () => {
