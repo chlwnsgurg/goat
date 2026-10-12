@@ -1,4 +1,14 @@
+import {
+  connectionRoutes,
+  routeEntry,
+  type ConnectionCatalogEntry,
+} from "@t3tools/client-runtime/connection";
+import { savedSshWorktreeOptions } from "~/lib/sshWorktree";
 import type {
+  EnvironmentId,
+  ScopedThreadRef,
+  OrchestrationV2ThreadShell,
+  SshWorkspaceFetchBackInput,
   GitRunStackedActionResult,
   GitStackedAction,
   VcsStatusResult,
@@ -491,3 +501,67 @@ export function resolveLiveThreadBranchUpdate(input: {
 
 // Re-export from shared for backwards compatibility in this module's exports
 export { resolveAutoFeatureBranchName } from "@t3tools/shared/git";
+
+export function isManagedSshProjectRoot(workspaceRoot: string): boolean {
+  const segments = workspaceRoot.split("/").filter(Boolean);
+  if (!workspaceRoot.startsWith("/") || segments.some((part) => part === "." || part === "..")) {
+    return false;
+  }
+  return /^\/(?:[^/]+\/)*\.goat\/repos\/[^/]+(?:\/[^/]+)*\/?$/.test(workspaceRoot);
+}
+
+export function resolveSshFetchBackContext(input: {
+  readonly isDesktop: boolean;
+  readonly threadRef: ScopedThreadRef | null;
+  readonly thread: Pick<OrchestrationV2ThreadShell, "branch"> | null;
+  readonly workspaceRoot: string | null;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly catalog: ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>;
+}) {
+  const hidden = { visible: false, target: null, disabledReason: null } as const;
+  const { threadRef, thread, workspaceRoot, primaryEnvironmentId, catalog } = input;
+  if (!input.isDesktop || threadRef === null || thread === null || workspaceRoot === null) {
+    return hidden;
+  }
+  if (threadRef.environmentId === primaryEnvironmentId || !isManagedSshProjectRoot(workspaceRoot)) {
+    return hidden;
+  }
+  const entry = catalog.get(threadRef.environmentId);
+  if (entry === undefined) return hidden;
+  // Validate only this environment, one route at a time: the picker helper
+  // sorts/deduplicates its input, while fetch-back must honor route preference.
+  const option = connectionRoutes(entry)
+    .filter((route) => route.target.environmentId === threadRef.environmentId)
+    .map(
+      (route) =>
+        savedSshWorktreeOptions(
+          new Map([[threadRef.environmentId, routeEntry(entry, route)]]),
+          true,
+        )[0],
+    )
+    .find((candidate) => candidate !== undefined);
+  if (option === undefined) return hidden;
+  const profile = option.profile;
+  const unavailable = (disabledReason: string) =>
+    ({
+      visible: true,
+      target: null,
+      disabledReason,
+    }) as const;
+  if (!entry.enabled) return unavailable("Enable this SSH environment in Settings → Connections.");
+  if (option.disabledReason) return unavailable(option.disabledReason);
+  if (primaryEnvironmentId === null || catalog.get(primaryEnvironmentId)?.enabled !== true) {
+    return unavailable("Connect to this device before fetching its branch.");
+  }
+  if (!thread.branch?.trim()) return unavailable("This thread has no branch to fetch.");
+  const rpcInput = {
+    target: profile.target,
+    remoteWorkspaceRoot: workspaceRoot,
+    branch: thread.branch,
+  } satisfies SshWorkspaceFetchBackInput;
+  return {
+    visible: true,
+    target: { environmentId: primaryEnvironmentId, input: rpcInput },
+    disabledReason: null,
+  } as const;
+}

@@ -3,6 +3,7 @@ import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools
 import type { Project, Thread } from "../types";
 import { makeThreadFixture } from "../test-fixtures";
 import {
+  buildSshFetchBackActionItem,
   buildBrowseGroups,
   buildCommandPaletteProjectMetadata,
   buildCommandPaletteRows,
@@ -892,5 +893,46 @@ describe("virtualized command palette rows", () => {
     expect(findHighlightedCommandPaletteItem(groups, "thread-b")?.value).toBe("thread-b");
     expect(findHighlightedCommandPaletteItem(groups, "offline")).toBeNull();
     expect(findHighlightedCommandPaletteItem(groups, null)).toBeNull();
+  });
+});
+
+describe("SSH fetch-back command palette", () => {
+  it("makes the eligible action searchable by fetch and SSH", () => {
+    const item = buildSshFetchBackActionItem({
+      visible: true,
+      disabled: false,
+      label: "Fetch branch to this device",
+      disabledReason: null,
+      icon: null,
+      run: async () => {},
+    })!;
+    for (const query of ["fetch", "ssh", "local"]) {
+      const groups = filterCommandPaletteGroups({
+        activeGroups: [{ value: "actions", label: "Actions", items: [item] }],
+        query,
+        isInSubmenu: false,
+        projectSearchItems: [],
+        settingsSearchItems: [],
+        threadSearchItems: [],
+      });
+      expect(groups.flatMap((group) => group.items).map((entry) => entry.value)).toContain(
+        item.value,
+      );
+    }
+  });
+  it("omits ineligible threads and excludes denied or pending actions from keyboard navigation", () => {
+    const action = {
+      visible: false,
+      disabled: true,
+      label: "Fetch branch to this device",
+      disabledReason: "This device's connection cannot change source control.",
+      icon: null,
+      run: async () => {},
+    };
+    expect(buildSshFetchBackActionItem(action)).toBeNull();
+    const item = buildSshFetchBackActionItem({ ...action, visible: true })!;
+    const rows = buildCommandPaletteRows([{ value: "actions", label: "Actions", items: [item] }]);
+    expect(rows.itemValues).toEqual([]);
+    expect(rows.rows.find((row) => row.kind === "item")?.itemIndex).toBeNull();
   });
 });

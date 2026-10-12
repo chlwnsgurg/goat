@@ -113,6 +113,7 @@ import {
   useVcsInitAction,
   useVcsPullAction,
 } from "~/lib/sourceControlActions";
+import { useSshWorkspaceFetchBack } from "~/hooks/useSshWorkspaceFetchBack";
 import { useThreadProjection, useThreadShell } from "~/state/entities";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useEnvironmentQuery } from "~/state/query";
@@ -1083,6 +1084,7 @@ export default function GitActionsControl({
   compact = false,
   onOpenChanges,
 }: GitActionsControlProps) {
+  const sshFetchBack = useSshWorkspaceFetchBack(draftId === undefined ? activeThreadRef : null);
   const isPanel = displayMode === "panel";
   const ActionGroup = isPanel ? "div" : Group;
   const panelAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1741,6 +1743,25 @@ export default function GitActionsControl({
           </MenuItem>
         );
       })}
+      {sshFetchBack.visible ? (
+        <div>
+          <MenuItem
+            density={presentation === "menu" ? "touch" : "default"}
+            disabled={sshFetchBack.disabled}
+            onClick={() => {
+              void sshFetchBack.run();
+            }}
+          >
+            <CloudDownloadIcon />
+            <MenuItemLabel>{sshFetchBack.label}</MenuItemLabel>
+          </MenuItem>
+          {sshFetchBack.disabledReason ? (
+            <p className="max-w-64 px-2 pb-2 text-xs text-muted-foreground">
+              {sshFetchBack.disabledReason}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {canPublishRepository ? (
         <MenuItem
           density={presentation === "menu" ? "touch" : "default"}
@@ -1811,7 +1832,10 @@ export default function GitActionsControl({
                 if (open) requestVcsStatusRefresh(refreshVcsStatus, activeEnvironmentId, gitCwd);
               }}
             >
-              <MenuSubTrigger density="touch" disabled={isGitActionRunning}>
+              <MenuSubTrigger
+                density="touch"
+                disabled={isGitActionRunning && !sshFetchBack.visible}
+              >
                 <SourceControlIcon className="size-4" />
                 <MenuItemLabel>Git actions</MenuItemLabel>
               </MenuSubTrigger>
@@ -1833,7 +1857,7 @@ export default function GitActionsControl({
             {initAction.isPending ? "Initializing..." : "Initialize Git"}
           </span>
         </ThreadDetailsControl>
-      ) : compact && !gitActionProgress && !visibleInlineSuccess ? null : (
+      ) : compact && !gitActionProgress && !visibleInlineSuccess && !sshFetchBack.visible ? null : (
         <ActionGroup
           role="group"
           aria-label="Git actions"
@@ -1921,7 +1945,7 @@ export default function GitActionsControl({
               </span>
             </ThreadDetailsControl>
           )}
-          {isPanel && gitActionProgress ? (
+          {isPanel && gitActionProgress && !sshFetchBack.visible ? (
             // The menu is disabled while an action runs, so its chevron slot
             // hosts the elapsed counter instead, leaving the full row width to
             // the status text. Pinned to the title row so it stays put when
@@ -1954,7 +1978,7 @@ export default function GitActionsControl({
                       panel={isPanel}
                     />
                   }
-                  disabled={isGitActionRunning}
+                  disabled={isGitActionRunning && !sshFetchBack.visible}
                 >
                   <ChevronDownIcon
                     aria-hidden="true"

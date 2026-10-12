@@ -10,6 +10,29 @@ rebases, the files Git brought in are left out. A file stays in the list when th
 committed it, or fixed a conflict in it. Use the branch comparison to review everything that changed
 against your base branch. Restore still returns the complete saved workspace.
 
+## Fetch a branch from an SSH worktree
+
+For a thread started with **Worktree on SSH**, open it in the desktop app and choose
+**Git actions → Fetch branch to this device**, or find the action in the command
+palette. Keep the host saved and enabled in **Settings → Connections**.
+
+The branch is fetched into the original repository on this device. The result shows
+`refs/remotes/goat-ssh/<alias>/<branch>`. Fetching leaves your current branch, staged
+changes and working files in place. It brings back committed work; commit changes
+on the remote thread before fetching if you need them locally.
+
+In a terminal in the original repository, inspect the exact ref shown in the result:
+
+    git log --oneline "HEAD..refs/remotes/goat-ssh/<alias>/<branch>"
+    git diff "HEAD...refs/remotes/goat-ssh/<alias>/<branch>"
+
+Replace `<alias>` and `<branch>` with the values from your result. You can then choose
+how to merge or cherry-pick the commits. Fetching itself does not merge them.
+
+If this device no longer has the original project at its original location, fetching
+is refused. Reconnect this device or enable the saved SSH environment when the action
+is disabled. The thread stays on its remote host after fetching.
+
 ## Connect an account
 
 Install Git and configure authentication on the machine running your GOAT server. For a remote

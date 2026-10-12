@@ -110,13 +110,13 @@ export const sshWorkspaceErrorCopy = {
   project_not_found: "The local project no longer exists. Choose a local project.",
   not_git_repository: "SSH worktrees need a Git project.",
   project_not_repo_root: "Choose the repository root as the local project before sending to SSH.",
-  project_read_failed: "Could not read the local project. Check access before sending again.",
-  host_unavailable: "Could not reach <host>. Check its SSH connection before sending again.",
+  project_read_failed: "Could not read the local project. Check access before trying again.",
+  host_unavailable: "Could not reach <host>. Check its SSH connection before trying again.",
   remote_unsupported: "<host> needs an updated server to start SSH worktrees.",
   model_unavailable: "The selected model is unavailable on <host>. Choose a supported model.",
   environment_mismatch: "<host> returned a different environment. Check Settings → Connections.",
   invalid_remote_response:
-    "<host> returned an invalid response. Check its server before sending again.",
+    "<host> returned an invalid response. Check its server before trying again.",
   snapshot_failed: "Could not snapshot this project. Check the project before sending again.",
   unsupported_snapshot: "This repository cannot be copied as an SSH snapshot.",
   head_changed:
