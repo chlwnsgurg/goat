@@ -48,6 +48,7 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
   CloudDownloadIcon,
+  BellIcon,
   ArrowLeftIcon,
   ArrowUpFromLineIcon,
   ChartNoAxesColumnIcon,
@@ -134,6 +135,7 @@ import {
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
+import { useSidebarActivityToggle } from "./sidebar/SidebarViewToggles";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
@@ -744,6 +746,7 @@ function OpenCommandPaletteDialog(props: {
     setHighlightedItemValue(null);
   }
   const clientSettings = useClientSettings();
+  const { activityActive, toggleActivity } = useSidebarActivityToggle();
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -1911,6 +1914,16 @@ function OpenCommandPaletteDialog(props: {
   }, [clearOpenIntent, browseNavigation, openIntent, projectThreadItems, pushPaletteView]);
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+
+  actionItems.push({
+    kind: "action",
+    value: "action:toggle-sidebar-activity",
+    searchTerms: ["sidebar", "activity", "projects", "view", "bell"],
+    title: activityActive ? "Turn off activity view" : "View activity",
+    icon: <BellIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "sidebar.toggleActivity",
+    run: toggleActivity,
+  });
 
   if (projects.length > 0) {
     const activeProjectTitle =

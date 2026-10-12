@@ -1,8 +1,12 @@
 import type { ResolvedKeybindingsConfig, ScopedThreadRef } from "@t3tools/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import {
+  compileResolvedKeybindingsConfig,
+  DEFAULT_RESOLVED_KEYBINDINGS,
+  parseKeybindingShortcut,
+} from "@t3tools/shared/keybindings";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -15,6 +19,9 @@ const state = vi.hoisted(() => ({
   openPreview: vi.fn(),
   setShortcuts: vi.fn(async () => undefined),
   toast: vi.fn(),
+  legacySidebarEnabled: true,
+  updateClientSettings: vi.fn(async (_patch: { legacySidebarEnabled: boolean }) => undefined),
+  toggleSidebar: vi.fn(),
 }));
 
 vi.mock("./preview/openPreviewSession", () => ({ openPreviewSession: state.openPreview }));
@@ -22,6 +29,8 @@ vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.keybindings }))
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => state.navigate,
   useParams: () => state.params,
+  useLocation: ({ select }: { select: (location: { pathname: string }) => unknown }) =>
+    select({ pathname: "/settings" }),
 }));
 vi.mock("../state/server", () => ({ primaryServerKeybindingsAtom: {} }));
 vi.mock("../state/preview", () => ({ previewEnvironment: { open: state.openPreview } }));
@@ -59,11 +68,46 @@ vi.mock("../lib/previewFocus", () => ({ isPreviewFocused: () => false }));
 vi.mock("../lib/terminalFocus", () => ({ isTerminalFocused: () => false }));
 vi.mock("../modelPickerVisibility", () => ({ isModelPickerOpen: () => false }));
 vi.mock("./ui/toast", () => ({ toastManager: { add: state.toast } }));
+vi.mock("../hooks/useSettings", () => ({
+  useEnvironmentIdentificationMode: () => "none",
+  useLegacySidebarEnabled: () => state.legacySidebarEnabled,
+  useUpdateClientSettings: () => state.updateClientSettings,
+}));
+vi.mock("./LegacySidebar", () => ({ default: () => null }));
+vi.mock("./Sidebar", () => ({ default: () => null }));
+vi.mock("./settings/SettingsSidebarNav", () => ({ SettingsSidebarNav: () => null }));
+vi.mock("./sidebar/SidebarChrome", () => ({
+  SidebarBrandWidthProbe: () => null,
+  SidebarChromeHeader: () => null,
+  SidebarCollapsedBrand: () => null,
+}));
+vi.mock("../hooks/useThreadVisitedMigration", () => ({ useThreadVisitedMigration: () => {} }));
+vi.mock("./sidebar/mainAppLocation", () => ({ MainAppLocationTracker: () => null }));
+vi.mock("./SidebarStageBackdrop", () => ({ useSidebarStageBackdropVariant: () => null }));
+vi.mock("../panelAnimations", () => ({
+  PanelAnimationSuppressionProvider: () => null,
+  usePanelAnimationSettings: () => ({}),
+  usePanelNavigationSuppression: () => false,
+}));
+vi.mock("./ui/sidebar", () => ({
+  Sidebar: () => null,
+  SidebarProvider: () => null,
+  SidebarRail: () => null,
+  SidebarTrigger: () => null,
+  useSidebar: () => ({ toggleSidebar: state.toggleSidebar }),
+  useSidebarVisibility: () => true,
+}));
+vi.mock("./ui/tooltip", () => ({
+  Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: () => null,
+  TooltipPopup: () => null,
+}));
 
 import { useClosedViewStore } from "../closedViewStore";
 import { selectThreadRightPanelState, useRightPanelStore } from "../rightPanelStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { ReopenClosedViewShortcut } from "./ReopenClosedViewShortcut";
+import { SidebarControl } from "./AppSidebarLayout";
 
 const ref = { environmentId: "remote", threadId: "thread-1" } as ScopedThreadRef;
 const snapshot = {
@@ -80,11 +124,23 @@ class TestElement extends EventTarget {
   }
 }
 let renderer: ReactTestRenderer | undefined;
-let menuAction: ((action: string) => void) | undefined;
+const menuListeners = new Set<(action: string) => void>();
+function menuAction(action: string) {
+  for (const listener of menuListeners) listener(action);
+}
 
-async function render() {
+function shortcutControls(includeSidebarControl: boolean) {
+  return (
+    <>
+      <ReopenClosedViewShortcut />
+      {includeSidebarControl ? <SidebarControl onCollapsedBrandWidthChange={() => {}} /> : null}
+    </>
+  );
+}
+
+async function render(includeSidebarControl = false) {
   await act(() => {
-    renderer = create(<ReopenClosedViewShortcut />);
+    renderer = create(shortcutControls(includeSidebarControl));
   });
 }
 
@@ -109,9 +165,14 @@ beforeEach(() => {
     params: {},
     paletteOpen: false,
     workspaceAvailable: true,
+    legacySidebarEnabled: true,
   });
   state.navigate.mockResolvedValue(undefined);
   state.openPreview.mockReset();
+  state.updateClientSettings.mockImplementation(async (patch) => {
+    state.legacySidebarEnabled = patch.legacySidebarEnabled;
+  });
+  menuListeners.clear();
   useClosedViewStore.setState({ entries: [] });
   useRightPanelStore.setState({ byThreadKey: {}, userActionRevisionByThreadKey: {} });
   useTerminalUiStateStore.setState({
@@ -126,10 +187,10 @@ beforeEach(() => {
     Object.assign(new EventTarget(), {
       desktopBridge: {
         preview: { setForwardedShortcuts: state.setShortcuts },
-        onMenuAction: (listener: typeof menuAction) => {
-          menuAction = listener;
+        onMenuAction: (listener: (action: string) => void) => {
+          menuListeners.add(listener);
           return () => {
-            menuAction = undefined;
+            menuListeners.delete(listener);
           };
         },
       },
@@ -329,7 +390,46 @@ describe("root reopen shortcut", () => {
     await render();
     expect(state.setShortcuts).toHaveBeenLastCalledWith([
       expect.objectContaining({ command: "sidebar.toggle" }),
+      expect.objectContaining({
+        command: "sidebar.toggleActivity",
+        shortcut: parseKeybindingShortcut("mod+alt+u"),
+      }),
       expect.objectContaining({ command: "rightPanel.toggle" }),
     ]);
+  });
+
+  it("toggles the activity view and back when the guest forwards its command", async () => {
+    await render(true);
+    const forwarded = (
+      state.setShortcuts.mock.lastCall as unknown as [Array<{ command: string }>]
+    )[0].find(({ command }) => command === "sidebar.toggleActivity");
+    expect(forwarded).toBeDefined();
+    await act(() => menuAction(forwarded!.command));
+    expect(state.legacySidebarEnabled).toBe(false);
+    expect(state.updateClientSettings).toHaveBeenLastCalledWith({ legacySidebarEnabled: false });
+    expect(state.toggleSidebar).not.toHaveBeenCalled();
+
+    await act(() => renderer?.update(shortcutControls(true)));
+    await act(() => menuAction(forwarded!.command));
+    expect(state.legacySidebarEnabled).toBe(true);
+    expect(state.updateClientSettings).toHaveBeenLastCalledWith({ legacySidebarEnabled: true });
+    expect(state.updateClientSettings).toHaveBeenCalledTimes(2);
+
+    await act(() => menuAction("sidebar.toggle"));
+    expect(state.toggleSidebar).toHaveBeenCalledOnce();
+    expect(state.updateClientSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("forwards a remapped activity shortcut to the same layout handler", async () => {
+    state.keybindings = compileResolvedKeybindingsConfig([
+      { key: "mod+shift+u", command: "sidebar.toggleActivity" },
+    ]);
+    await render(true);
+    expect(state.setShortcuts).toHaveBeenLastCalledWith([
+      { command: "sidebar.toggleActivity", shortcut: parseKeybindingShortcut("mod+shift+u") },
+    ]);
+    await act(() => menuAction("sidebar.toggleActivity"));
+    expect(state.legacySidebarEnabled).toBe(false);
+    expect(state.toggleSidebar).not.toHaveBeenCalled();
   });
 });
