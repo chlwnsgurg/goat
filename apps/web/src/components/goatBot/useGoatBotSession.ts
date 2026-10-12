@@ -11,6 +11,7 @@ import { create } from "zustand";
 import { useGlobalAgentStore } from "~/globalAgentStore";
 import { useEnvironmentShellsBootstrapped, useThreadShell } from "~/state/entities";
 import {
+  goatBotHomeReadBack,
   pickGoatBotEnvironment,
   resolveGoatBotAvailability,
   resolveGoatBotHomeSelection,
@@ -213,7 +214,7 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
       ? `${home.resolution.claim.environmentId}:${home.resolution.claim.claimedAt}:${home.resolution.claim.claimId}`
       : home.resolution.state;
   const settingsSnapshot = environment?.settingsSnapshot ?? null;
-  const homeReady = !home.supported || home.resolution.state === "claimed";
+  const homeReady = !home.supported || goatBotHomeReadBack(home);
   useEffect(() => {
     if (environmentId === null || session === undefined) return;
     let current = useSessions.getState().sessions.get(environmentId);

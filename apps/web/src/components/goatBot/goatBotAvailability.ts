@@ -1,4 +1,9 @@
-import type { EnvironmentId, ExecutionEnvironmentCapabilities, ThreadId } from "@t3tools/contracts";
+import {
+  compareGoatBotHomeClaims,
+  type EnvironmentId,
+  type ExecutionEnvironmentCapabilities,
+  type ThreadId,
+} from "@t3tools/contracts";
 import {
   pickGoatBotHomeCandidate,
   resolveGoatBotHome,
@@ -52,6 +57,25 @@ export function resolveGoatBotHomeSelection(
     primaryEnvironmentId: environments.find((entry) => entry.primary)?.environmentId ?? null,
   });
   return { targets, supported, resolution, candidateId };
+}
+
+/**
+ * Whether the home server itself holds the winning claim. Another server can publish the claim
+ * first; until the home reads it back, an ensure there would pass its unset-home gate.
+ */
+export function goatBotHomeReadBack(
+  selection: Pick<ReturnType<typeof resolveGoatBotHomeSelection>, "targets" | "resolution">,
+): boolean {
+  const { resolution } = selection;
+  if (resolution.state !== "claimed") return false;
+  const home = selection.targets.find(
+    (target) => target.environmentId === resolution.claim.environmentId,
+  )?.home;
+  return (
+    home != null &&
+    home.environmentId === resolution.claim.environmentId &&
+    compareGoatBotHomeClaims(home, resolution.claim) === 0
+  );
 }
 
 /**

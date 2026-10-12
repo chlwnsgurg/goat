@@ -487,23 +487,47 @@ export const make = Effect.gen(function* () {
       ),
   });
 
-  let appliedHome = yield* lock.withPermits(1)(
+  /**
+   * Applies every saved connection for the given home role, one at a time so one unreadable
+   * connection cannot stop the rest. Returns whether all of them applied.
+   */
+  const applyAllForHome = (
+    connections: ReadonlyArray<StoredConnection>,
+    isHome: boolean,
+    prepare: (connection: StoredConnection) => Effect.Effect<void> = () => Effect.void,
+  ) =>
+    Effect.map(
+      Effect.forEach(connections, (connection) =>
+        prepare(connection).pipe(
+          Effect.andThen(applyForHome(connection, isHome)),
+          Effect.as(true),
+          Effect.catch((error) =>
+            Effect.logWarning("Slack connection did not follow the GOAT Bot home", {
+              connectionId: connection.connectionId,
+              error,
+            }).pipe(Effect.as(false)),
+          ),
+        ),
+      ),
+      (results) => results.every(Boolean),
+    );
+
+  // The home role the runtime fully reflects, or null after a partial apply so the next settings
+  // change applies again; leaving home always stops every connection.
+  let appliedHome: boolean | null = yield* lock.withPermits(1)(
     Effect.gen(function* () {
       const isHome = yield* readHome;
       // Bring saved connections back up. Unreadable secrets leave that connection in error.
-      if (!loaded.loadFailed) {
-        const connections = yield* readConnections;
-        yield* Effect.forEach(connections, (connection) =>
-          deleteRevokedSecrets(connection).pipe(
-            Effect.catch(() =>
-              Effect.logWarning("Slack startup revocation cleanup failed; delivery stays blocked."),
-            ),
-            Effect.andThen(applyForHome(connection, isHome)),
-            Effect.ignore({ log: true }),
+      if (loaded.loadFailed) return isHome;
+      const connections = yield* readConnections;
+      const complete = yield* applyAllForHome(connections, isHome, (connection) =>
+        deleteRevokedSecrets(connection).pipe(
+          Effect.catch(() =>
+            Effect.logWarning("Slack startup revocation cleanup failed; delivery stays blocked."),
           ),
-        );
-      }
-      return isHome;
+        ),
+      );
+      return complete ? isHome : null;
     }),
   );
 
@@ -516,8 +540,7 @@ export const make = Effect.gen(function* () {
             const isHome = yield* readHome;
             if (isHome === appliedHome) return;
             const connections = yield* readConnections;
-            yield* Effect.forEach(connections, (connection) => applyForHome(connection, isHome));
-            appliedHome = isHome;
+            appliedHome = (yield* applyAllForHome(connections, isHome)) ? isHome : null;
           }),
         )
         .pipe(Effect.ignore({ log: true })),

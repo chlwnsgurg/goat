@@ -4,9 +4,11 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   canSendToGoatBot,
   environmentSupportsChannelLedger,
+  goatBotHomeReadBack,
   resolveGoatBotRemoval,
   pickGoatBotEnvironment,
   resolveGoatBotAvailability,
+  resolveGoatBotHomeSelection,
   type GoatBotEnvironmentInput,
 } from "./goatBotAvailability";
 
@@ -186,6 +188,26 @@ const homeEnv = (
 describe("cluster home availability", () => {
   const claim = { environmentId: remote, claimedAt: 100, claimId: "winner" };
   const remembered = { environmentId: primary, threadId: botThread };
+  it("is not read back until the home itself holds the winning claim", () => {
+    // The primary published the claim first; the remote home has not stored it yet.
+    const early = resolveGoatBotHomeSelection(
+      [homeEnv(primary, claim), homeEnv(remote, null)],
+      null,
+    );
+    expect(early.resolution.state).toBe("claimed");
+    expect(goatBotHomeReadBack(early)).toBe(false);
+    const older = { ...claim, claimedAt: 50, claimId: "older" };
+    expect(
+      goatBotHomeReadBack(
+        resolveGoatBotHomeSelection([homeEnv(primary, claim), homeEnv(remote, older)], null),
+      ),
+    ).toBe(false);
+    expect(
+      goatBotHomeReadBack(
+        resolveGoatBotHomeSelection([homeEnv(primary, claim), homeEnv(remote, claim)], null),
+      ),
+    ).toBe(true);
+  });
   it("follows the claim instead of the remembered bot or primary", () => {
     const environments = [homeEnv(primary, claim), homeEnv(remote, claim)];
     expect(pickGoatBotEnvironment(environments, remembered)?.environmentId).toBe(remote);
