@@ -748,9 +748,15 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
+  // One instance for the goat_host_status tool and the server.getHostStatus RPC.
+  Layer.provide(
+    McpHttpServer.layerHostStatusService.pipe(
+      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    ),
+  ),
   Layer.provide(RemoteLaunchCatalog.layerWithoutDependencies),
-  // One launch-watch store and one dispatch coordinator for the MCP tools and the
-  // remote-launch catalog: both follow runs and wake launchers.
+  // One launch-watch store and one dispatch coordinator for the MCP tools, host
+  // status, and the remote-launch catalog: they all follow runs and wake launchers.
   Layer.provide(LaunchWatchService.layer),
   Layer.provide(RemoteDispatchCoordinator.layer),
   Layer.provide(layerSshWorkspace),
