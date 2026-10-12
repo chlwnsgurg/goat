@@ -24,6 +24,7 @@ import {
   persistClientSettingsPatch,
   persistClientSettingsUpdate,
   resolveEnvironmentIdentificationMode,
+  resolveSidebarViewIsProjects,
 } from "./useSettings";
 
 beforeEach(() => {
@@ -449,5 +450,34 @@ describe("onboarding completion persistence", () => {
     );
     expect(getClientSettings()).toEqual(completedSettings);
     expect(persist).toHaveBeenLastCalledWith(completedSettings);
+  });
+});
+
+describe("Projects view hydration policy", () => {
+  it.each([true, false])("uses Projects before hydration even when the snapshot is %s", (value) => {
+    expect(resolveSidebarViewIsProjects({ hydrated: false, value })).toBe(true);
+  });
+  it.each([true, false])("preserves a hydrated choice of %s", (value) => {
+    expect(resolveSidebarViewIsProjects({ hydrated: true, value })).toBe(value);
+  });
+  it("uses Projects with no saved settings", async () => {
+    await ensureClientSettingsHydrated();
+    expect(
+      resolveSidebarViewIsProjects({
+        hydrated: true,
+        value: getClientSettings().legacySidebarEnabled,
+      }),
+    ).toBe(true);
+  });
+  it("uses Projects after hydration fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    persistenceMocks.getClientSettings.mockRejectedValueOnce(new Error("read failed"));
+    await expect(ensureClientSettingsHydrated()).rejects.toThrow("read failed");
+    expect(
+      resolveSidebarViewIsProjects({
+        hydrated: false,
+        value: getClientSettings().legacySidebarEnabled,
+      }),
+    ).toBe(true);
   });
 });

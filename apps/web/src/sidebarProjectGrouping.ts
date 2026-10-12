@@ -98,14 +98,11 @@ export function buildSidebarProjectSnapshots(input: {
     const hasLocal =
       input.primaryEnvironmentId !== null &&
       members.some((member) => member.environmentId === input.primaryEnvironmentId);
-    const hasRemote =
-      input.primaryEnvironmentId !== null
-        ? members.some((member) => member.environmentId !== input.primaryEnvironmentId)
-        : false;
     const remoteMembers = members.filter(
-      (member) =>
-        input.primaryEnvironmentId !== null && member.environmentId !== input.primaryEnvironmentId,
+      (member) => member.environmentId !== input.primaryEnvironmentId,
     );
+    // Hosted clients have no local primary: every environment is remote to the browser.
+    const hasRemote = remoteMembers.length > 0;
     const remoteEnvironmentLabels = remoteMembers
       .flatMap((member) => (member.environmentLabel ? [member.environmentLabel] : []))
       .filter((label, index, labels) => labels.indexOf(label) === index);

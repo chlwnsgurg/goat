@@ -300,6 +300,37 @@ describe("DesktopClientSettings", () => {
     ),
   );
 
+  it.effect.each([
+    { label: "bare missing key", contents: "{}", expected: true },
+    { label: "wrapped missing key", contents: '{"settings":{}}', expected: true },
+    { label: "bare Projects", contents: '{"legacySidebarEnabled":true}', expected: true },
+    {
+      label: "wrapped Projects",
+      contents: '{"settings":{"legacySidebarEnabled":true}}',
+      expected: true,
+    },
+    { label: "bare Activity", contents: '{"legacySidebarEnabled":false}', expected: false },
+    {
+      label: "wrapped Activity",
+      contents: '{"settings":{"legacySidebarEnabled":false}}',
+      expected: false,
+    },
+  ])("preserves sidebar choice in $label documents", (document) =>
+    withClientSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopClientSettings.DesktopClientSettings;
+        yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
+        yield* fileSystem.writeFileString(environment.clientSettingsPath, document.contents);
+        const persisted = yield* settings.get;
+        assert.isTrue(Option.isSome(persisted));
+        if (Option.isSome(persisted))
+          assert.equal(persisted.value.legacySidebarEnabled, document.expected);
+      }),
+    ),
+  );
+
   it.effect("loads defaults from empty client settings documents", () =>
     withClientSettings(
       Effect.gen(function* () {
