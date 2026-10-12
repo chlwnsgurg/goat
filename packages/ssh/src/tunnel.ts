@@ -615,33 +615,73 @@ t3_runtime_ready() {
 }
 if ! t3_runtime_ready; then
   mkdir -p "$HOME/.goat/runtime/goat/versions"
-  # Concurrent launches (two clients, a retry racing a slow first run) must
-  # not both install: mkdir is the atomic lock and the ready check repeats
-  # under it.
   T3_LOCK="$HOME/.goat/runtime/goat/versions/.$T3_ARCHIVE_VERSION.install.lock"
-  # mkdir is the only portable atomic exclusive create (mv would silently
-  # nest a candidate inside an existing lock). The owner publishes its pid
-  # right after, so a lock with a live owner is never reclaimed however
-  # slow its download is, and a lock whose owner is dead is reclaimed at
-  # once. A lock with no pid at all is a crash between mkdir and the pid
-  # write; it is reclaimed after a short grace so a live owner has time to
-  # publish.
+  # Publish a nonempty directory with an immutable pid and unique token by
+  # same-filesystem rename. mv can nest it in an existing lock: only a token
+  # at the lock root proves acquisition; losers clean their candidate and
+  # retry. There is no mkdir-to-pid window at the shared lock path.
+  # Reclaimers cd into the generation BEFORE reading its pid, and delete
+  # only relative contents of that directory. The final rmdir cannot remove
+  # a newer generation because every published lock is already nonempty.
+  # A reclaim counts only once the lock is gone; a lock that cannot be
+  # entered or emptied waits like a live one, so the timeout still applies.
+  # Legacy pid-less locks retain their short grace period.
+  T3_LOCK_CANDIDATE=""
+  T3_LOCK_TOKEN=""
+  T3_STAGING=""
+  t3_remove_lock_contents() {
+    find . ! -name . -prune -exec rm -rf {} \\; 2>/dev/null || true
+    rmdir "$T3_LOCK" 2>/dev/null || [ ! -e "$T3_LOCK" ]
+  }
+  t3_lock_cleanup() {
+    (
+      cd "$T3_LOCK" 2>/dev/null || exit 0
+      [ -n "$T3_LOCK_TOKEN" ] && [ -f "./$T3_LOCK_TOKEN" ] || exit 0
+      t3_remove_lock_contents || true
+    ) || true
+    if [ -n "$T3_LOCK_CANDIDATE" ]; then
+      rm -rf "$T3_LOCK_CANDIDATE" "$T3_LOCK/\${T3_LOCK_CANDIDATE##*/}"
+    fi
+    if [ -n "$T3_STAGING" ]; then rm -rf "$T3_STAGING"; fi
+  }
+  trap 't3_lock_cleanup' 0
+  trap 'exit 1' 1 2 3 15
+  t3_reclaim_lock() (
+    if ! cd "$T3_LOCK" 2>/dev/null; then
+      if [ -e "$T3_LOCK" ]; then exit 3; fi
+      exit 0
+    fi
+    T3_LOCK_OWNER="$(cat pid 2>/dev/null || true)"
+    if [ -n "$T3_LOCK_OWNER" ]; then
+      if kill -0 "$T3_LOCK_OWNER" 2>/dev/null; then exit 2; fi
+    elif [ "$T3_LOCK_UNOWNED" -lt 4 ]; then
+      exit 1
+    fi
+    t3_remove_lock_contents || exit 3
+  )
   T3_LOCK_WAITED=0
   T3_LOCK_UNOWNED=0
-  while ! mkdir "$T3_LOCK" 2>/dev/null; do
-    T3_LOCK_OWNER="$(cat "$T3_LOCK/pid" 2>/dev/null || true)"
-    if [ -n "$T3_LOCK_OWNER" ]; then
-      T3_LOCK_UNOWNED=0
-      if ! kill -0 "$T3_LOCK_OWNER" 2>/dev/null; then
-        rm -rf "$T3_LOCK"
-        continue
-      fi
+  while :; do
+    T3_LOCK_CANDIDATE="$(mktemp -d "$T3_LOCK.candidate-$$-XXXXXX")"
+    T3_LOCK_TOKEN="\${T3_LOCK_CANDIDATE##*/}"
+    if { printf '%s\\n' "$$" > "$T3_LOCK_CANDIDATE/pid" &&
+         : > "$T3_LOCK_CANDIDATE/$T3_LOCK_TOKEN"; } 2>/dev/null; then
+      mv "$T3_LOCK_CANDIDATE" "$T3_LOCK" 2>/dev/null || true
+      if [ -f "$T3_LOCK/$T3_LOCK_TOKEN" ]; then break; fi
+    fi
+    rm -rf "$T3_LOCK_CANDIDATE" "$T3_LOCK/$T3_LOCK_TOKEN"
+    T3_LOCK_CANDIDATE=""
+    if [ ! -e "$T3_LOCK" ]; then
+      # Publication failed with no competing lock; wait so a persistent
+      # failure reaches the timeout.
+      :
+    elif t3_reclaim_lock; then continue
     else
-      T3_LOCK_UNOWNED=$((T3_LOCK_UNOWNED + 1))
-      if [ "$T3_LOCK_UNOWNED" -ge 5 ]; then
-        rm -rf "$T3_LOCK"
-        continue
-      fi
+      T3_LOCK_STATUS=$?
+      case "$T3_LOCK_STATUS" in
+        1) T3_LOCK_UNOWNED=$((T3_LOCK_UNOWNED + 1)) ;;
+        2) T3_LOCK_UNOWNED=0 ;;
+      esac
     fi
     if [ "$T3_LOCK_WAITED" -ge @@T3_ARCHIVE_LOCK_WAIT_SECONDS@@ ]; then
       printf 'Another GOAT %s installation has held %s for too long.\\n' "$T3_ARCHIVE_VERSION" "$T3_LOCK" >&2
@@ -650,8 +690,6 @@ if ! t3_runtime_ready; then
     sleep 1
     T3_LOCK_WAITED=$((T3_LOCK_WAITED + 1))
   done
-  printf '%s\\n' "$$" > "$T3_LOCK/pid.tmp" && mv "$T3_LOCK/pid.tmp" "$T3_LOCK/pid"
-  trap 'rm -rf "$T3_LOCK"' EXIT
 fi
 if ! t3_runtime_ready; then
   case "$(uname -s)" in
@@ -666,7 +704,6 @@ if ! t3_runtime_ready; then
   esac
   T3_ARCHIVE="goat-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
   T3_STAGING="$(mktemp -d "$HOME/.goat/runtime/goat/versions/.staging-XXXXXX")"
-  trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
   t3_fetch() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 30 --max-time "$3" "$1" -o "$2"
     elif command -v wget >/dev/null 2>&1; then wget -q --timeout=30 --tries=1 "$1" -O "$2"
@@ -700,8 +737,8 @@ if ! t3_runtime_ready; then
   mv "$T3_STAGING" "$T3_RUNTIME_DIR"
 fi
 if [ -n "\${T3_LOCK:-}" ]; then
-  rm -rf "$T3_LOCK"
-  trap - EXIT
+  t3_lock_cleanup
+  trap - 0 1 2 3 15
 fi
 exec "$T3_RUNTIME_DIR/goat" "$@"
 `;

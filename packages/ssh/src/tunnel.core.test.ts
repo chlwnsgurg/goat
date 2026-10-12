@@ -110,7 +110,7 @@ describe("ssh tunnel scripts", () => {
   );
   it.effect("preserves literal shell PIDs through every nested script builder", () =>
     Effect.gen(function* () {
-      const lockOwner = `printf '%s\\n' "$$" > "$T3_LOCK/pid.tmp"`;
+      const lockOwner = `printf '%s\\n' "$$" > "$T3_LOCK_CANDIDATE/pid"`;
       for (const input of [
         ARCHIVE,
         { ...ARCHIVE, releaseBaseUrl: "https://example.invalid/mirror/" },
@@ -119,7 +119,11 @@ describe("ssh tunnel scripts", () => {
         const generated = yield* nativeScripts(input);
         for (const field of ["runner", "launch", "pairing", "mcp"] as const) {
           assert.include(generated[field], lockOwner, field);
-          assert.notInclude(generated[field], `printf '%s\\n' "$" > "$T3_LOCK/pid.tmp"`, field);
+          assert.notInclude(
+            generated[field],
+            `printf '%s\\n' "$" > "$T3_LOCK_CANDIDATE/pid"`,
+            field,
+          );
         }
         for (const field of ["launch", "pairing", "mcp"] as const) {
           assert.include(generated[field], 'RUNNER_NEXT="$STATE_DIR/run-t3.next.$$"', field);
@@ -160,22 +164,20 @@ describe("ssh tunnel scripts", () => {
     assert.notInclude(script, "npm exec");
     assert.notInclude(script, "t3@latest");
     assert.notInclude(script, 'exec t3 "$@"');
-    // Concurrent launches serialize on a per-version mkdir lock and recheck
+    // Concurrent launches serialize on a per-version directory lock and recheck
     // the completion marker after acquiring it.
     assert.include(
       script,
       'T3_LOCK="$HOME/.goat/runtime/goat/versions/.$T3_ARCHIVE_VERSION.install.lock"',
     );
-    // mkdir is the exclusive create; the pid follows atomically. A dead owner
-    // is reclaimed at once, a never-published owner after a short grace.
-    assert.include(script, 'while ! mkdir "$T3_LOCK" 2>/dev/null; do');
-    assert.include(script, 'mv "$T3_LOCK/pid.tmp" "$T3_LOCK/pid"');
-    assert.include(script, 'if ! kill -0 "$T3_LOCK_OWNER" 2>/dev/null; then');
-    assert.include(script, 'if [ "$T3_LOCK_UNOWNED" -ge 5 ]; then');
+    // Publish the pid before the atomic move, and pin stale cleanup to a cwd.
+    assert.include(script, 'mv "$T3_LOCK_CANDIDATE" "$T3_LOCK"');
+    assert.include(script, 'cd "$T3_LOCK" 2>/dev/null || exit 0');
+    assert.include(script, 'if kill -0 "$T3_LOCK_OWNER" 2>/dev/null; then exit 2; fi');
+    assert.include(script, 'elif [ "$T3_LOCK_UNOWNED" -lt 4 ]; then');
     assert.include(script, 'if [ "$T3_LOCK_WAITED" -ge 360 ]; then');
     assert.include(script, '"$T3_STAGING/SHA256SUMS" 30');
     assert.include(script, '"$T3_STAGING/$T3_ARCHIVE" 240');
-    assert.notInclude(script, "T3_LOCK_CANDIDATE");
     assert.notInclude(script, "-mmin");
     assert.equal(script.split("if ! t3_runtime_ready; then").length - 1, 2);
     assert.isBelow(
@@ -1732,7 +1734,7 @@ describe("archive runner script", () => {
         yield* fs.makeDirectory(bin);
         yield* fs.writeFileString(
           `${bin}/sleep`,
-          '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\nexec /bin/sleep 0.01\n',
+          '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\n',
         );
         yield* fs.chmod(`${bin}/sleep`, 0o700);
         const afterUnowned = yield* runRunner(home, runner, bin);
@@ -1742,6 +1744,234 @@ describe("archive runner script", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
     60_000,
   );
+
+  describe.skipIf(windowsHost)("lock waits", () => {
+    it.effect.each([
+      "a dead owner's lock it cannot empty",
+      "a candidate it cannot publish",
+    ] as const)(
+      "waits out %s instead of spinning",
+      (blocker) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-lock-stuck-" });
+          const releaseBaseUrl = yield* makeMirror(root);
+          const home = `${root}/home`;
+          const lock = `${home}/.goat/runtime/goat/versions/.${archiveVersion}.install.lock`;
+          const bin = `${root}/bin`;
+          const runner = `${root}/runner.sh`;
+          yield* fs.makeDirectory(bin);
+          if (blocker === "a candidate it cannot publish") {
+            // No lock exists, but every publication fails.
+            yield* fs.makeDirectory(`${home}/.goat/runtime/goat/versions`, { recursive: true });
+            yield* fs.writeFileString(`${bin}/mv`, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+          } else {
+            // A find that cannot delete leaves the stale lock in place, whatever
+            // the test user's permissions.
+            yield* fs.makeDirectory(lock, { recursive: true });
+            yield* fs.writeFileString(`${lock}/pid`, "999999\n");
+            yield* fs.writeFileString(`${bin}/find`, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+          }
+          yield* fs.writeFileString(
+            `${bin}/sleep`,
+            '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\n',
+            { mode: 0o700 },
+          );
+          const script = SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl });
+          assert.include(script, 'if [ "$T3_LOCK_WAITED" -ge 360 ]; then');
+          yield* fs.writeFileString(runner, script.replace("-ge 360 ]", "-ge 3 ]"));
+          const result = yield* runRunner(home, runner, bin);
+          assert.equal(result.exitCode, 1);
+          assert.include(result.stderr, "has held");
+          // Each failed attempt still sleeps and counts toward the timeout.
+          assert.equal(
+            (yield* fs.readFileString(`${bin}/sleep-calls`)).trim().split("\n").length,
+            3,
+          );
+          if (blocker === "a candidate it cannot publish") assert.isFalse(yield* fs.exists(lock));
+          else assert.equal((yield* fs.readFileString(`${lock}/pid`)).trim(), "999999");
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      60_000,
+    );
+  });
+
+  describe.skipIf(windowsHost)("lock reclaim interleavings", () => {
+    it.effect.each(["pid write", "move"] as const)(
+      "retries when its candidate disappears before the %s",
+      (step) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-lock-publication-" });
+          const releaseBaseUrl = yield* makeMirror(root);
+          const home = `${root}/home`;
+          const bin = `${root}/bin`;
+          const runner = `${root}/runner.sh`;
+          yield* fs.makeDirectory(home);
+          yield* fs.makeDirectory(bin);
+          yield* fs.writeFileString(
+            runner,
+            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+          );
+          const mktempPath = yield* runShell(home, ["-c", "command -v mktemp"]);
+          assert.equal(mktempPath.exitCode, 0, mktempPath.stderr);
+          yield* fs.writeFileString(
+            `${bin}/mktemp`,
+            `#!/bin/sh
+candidate=$('${mktempPath.stdout.trim()}' "$@") || exit 1
+case "$candidate" in
+  *.install.lock.candidate-*)
+    echo attempt >> '${root}/attempts'
+    if [ '${step}' = 'pid write' ] && mkdir '${root}/removed' 2>/dev/null; then
+      /bin/rm -rf "$candidate"
+    fi ;;
+esac
+printf '%s\\n' "$candidate"
+`,
+            { mode: 0o700 },
+          );
+          if (step === "move") {
+            yield* fs.writeFileString(
+              `${bin}/mv`,
+              `#!/bin/sh
+case "$1" in
+  *.install.lock.candidate-*)
+    if mkdir '${root}/removed' 2>/dev/null; then /bin/rm -rf "$1"; fi ;;
+esac
+exec /bin/mv "$@"
+`,
+              { mode: 0o700 },
+            );
+          }
+          const result = yield* runRunner(home, runner, bin);
+          assert.equal(result.exitCode, 0, result.stderr);
+          assert.equal(result.stderr, "");
+          assert.equal(result.stdout, `goat v${archiveVersion}\n`);
+          assert.equal((yield* fs.readFileString(`${root}/attempts`)).trim().split("\n").length, 2);
+          assert.deepEqual(yield* fs.readDirectory(`${home}/.goat/runtime/goat/versions`), [
+            archiveVersion,
+          ]);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    it.effect.each(["dead", "unowned"] as const)(
+      "a delayed %s reclaimer cannot remove a newer installer's lock",
+      (owner) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-lock-interleaving-" });
+          const releaseBaseUrl = yield* makeMirror(root);
+          const home = `${root}/home`;
+          const versions = `${home}/.goat/runtime/goat/versions`;
+          const lock = `${versions}/.${archiveVersion}.install.lock`;
+          const bin = `${root}/bin`;
+          const gates = `${root}/gates`;
+          const runner = `${root}/runner.sh`;
+          yield* fs.makeDirectory(lock, { recursive: true });
+          yield* fs.makeDirectory(bin);
+          yield* fs.makeDirectory(gates);
+          if (owner === "dead") yield* fs.writeFileString(`${lock}/pid`, "999999\n");
+          else yield* fs.writeFileString(`${lock}/pid.tmp`, "interrupted publication\n");
+          yield* fs.writeFileString(
+            runner,
+            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+          );
+          // FIFOs put B after its stale read, A inside the download with its live
+          // lock, then B after cleanup. No scheduler speed or elapsed time is an oracle.
+          const curlPath = yield* runShell(home, ["-c", "command -v curl"]);
+          assert.equal(curlPath.exitCode, 0, curlPath.stderr);
+          const wrappers = {
+            cat: `#!/bin/sh
+case "$1" in
+  pid|*/pid)
+    if [ "$T3_RACE_ROLE" = B ] && [ ! -f '${gates}/read-done' ]; then
+      value=$(/bin/cat "$@" 2>/dev/null) || value=
+      echo x >> '${gates}/reads'
+      count=$(wc -l < '${gates}/reads')
+      if [ "$count" -ge ${owner === "dead" ? 1 : 5} ]; then
+        : > '${gates}/read-done'
+        echo ready > '${gates}/read'
+        read -r gate < '${gates}/resume'
+      fi
+      printf '%s\\n' "$value"
+      exit 0
+    fi ;;
+esac
+exec /bin/cat "$@"
+`,
+            curl: `#!/bin/sh
+if [ "$T3_RACE_ROLE" = A ] && mkdir '${gates}/downloading' 2>/dev/null; then
+  /bin/cat '${lock}/pid' > '${gates}/live-pid'
+  echo ready > '${gates}/download'
+  read -r gate < '${gates}/continue'
+fi
+echo fetch >> '${gates}/fetches'
+exec '${curlPath.stdout.trim()}' "$@"
+`,
+            sleep: `#!/bin/sh
+if [ "$T3_RACE_ROLE" = B ] && [ -f '${gates}/read-done' ] && [ ! -f '${gates}/finished' ]; then
+  read -r gate < '${gates}/finish'
+fi
+`,
+          };
+          for (const command of ["rm", "rmdir"] as const) {
+            // rm catches the old destructive protocol; rmdir catches the new one.
+            const script = `#!/bin/sh
+/bin/${command} "$@"
+status=$?
+case "$*" in
+  *'${lock}')
+    if [ "$T3_RACE_ROLE" = B ] && [ -f '${gates}/read-done' ] && mkdir '${gates}/cleaned' 2>/dev/null; then
+      if cmp -s '${lock}/pid' '${gates}/live-pid'; then echo intact > '${gates}/lock-state';
+      else echo lost > '${gates}/lock-state'; fi
+      echo ready > '${gates}/cleanup'
+      read -r gate < '${gates}/finish'
+    fi ;;
+esac
+exit "$status"
+`;
+            yield* fs.writeFileString(`${bin}/${command}`, script, { mode: 0o700 });
+          }
+          for (const [command, script] of Object.entries(wrappers)) {
+            yield* fs.writeFileString(`${bin}/${command}`, script, { mode: 0o700 });
+          }
+          const result = yield* runShell(
+            home,
+            [
+              "-c",
+              `set -eu
+mkfifo '${gates}/read' '${gates}/resume' '${gates}/download' '${gates}/continue' '${gates}/cleanup' '${gates}/finish'
+T3_RACE_ROLE=B ${remoteShellCommand} '${runner}' --version > '${gates}/B.out' 2> '${gates}/B.err' &
+b=$!
+read -r gate < '${gates}/read'
+T3_RACE_ROLE=A ${remoteShellCommand} '${runner}' --version > '${gates}/A.out' 2> '${gates}/A.err' &
+a=$!
+read -r gate < '${gates}/download'
+echo go > '${gates}/resume'
+read -r gate < '${gates}/cleanup'
+echo go > '${gates}/continue'
+wait "$a"
+: > '${gates}/finished'
+echo go > '${gates}/finish'
+wait "$b"
+`,
+            ],
+            undefined,
+            bin,
+          );
+          assert.equal(result.exitCode, 0, result.stderr);
+          assert.equal((yield* fs.readFileString(`${gates}/lock-state`)).trim(), "intact");
+          assert.equal((yield* fs.readFileString(`${gates}/fetches`)).trim().split("\n").length, 2);
+          for (const role of ["A", "B"]) {
+            assert.equal(yield* fs.readFileString(`${gates}/${role}.err`), "");
+            assert.equal(
+              yield* fs.readFileString(`${gates}/${role}.out`),
+              `goat v${archiveVersion}\n`,
+            );
+          }
+          assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  });
 });
 
 describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
