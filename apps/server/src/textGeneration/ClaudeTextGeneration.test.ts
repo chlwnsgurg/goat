@@ -526,6 +526,7 @@ it.layer(layerClaudeTextGenerationTest)("channel reception", (it) => {
             questionId: "",
             answer: "",
             question: "Which project?",
+            options: [],
           },
         }),
         cwdMustNotBe: process.cwd(),

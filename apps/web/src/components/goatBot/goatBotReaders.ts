@@ -87,6 +87,7 @@ export const goatBotItemReaders: GoatBotItemReaders = {
       requestKey: meta.inputId ?? null,
       replyToKey: meta.inReplyToInputId ?? null,
       clientKey: item.type === "user_message" ? item.messageId : null,
+      ...(meta.options === undefined || meta.options.length === 0 ? {} : { options: meta.options }),
     };
   },
   taskCard: (item) => (item.ledgerTask === undefined ? null : presentTaskChip(item.ledgerTask)),

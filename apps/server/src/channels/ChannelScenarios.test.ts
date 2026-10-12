@@ -420,6 +420,46 @@ describe("GOAT bot boundary (scenario 6)", () => {
     },
   );
 
+  it.effect(
+    "offers a clarifying question's choices as buttons in the bot and as a list in Slack",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* setupBot;
+        yield* linkSlackUser();
+        const seenThreads: Array<ReadonlyArray<string>> = [];
+        harness.script.current = (input) => {
+          if (input.mode !== "input") return defaultScript(input);
+          seenThreads.push((input.recentThreads ?? []).map((thread) => thread.title));
+          return Effect.succeed({
+            replyText: "Which one?",
+            action: { type: "clarify", question: "Which one?", options: ["CI fix", "Release"] },
+          });
+        };
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        const runtime = yield* ChannelRuntime.ChannelRuntime;
+        const receipt = yield* gateway.ingest(goatInput("how is it going", "client-q"), rpcContext);
+        yield* runtime.drain;
+        const reply = (yield* botMessages).messages.find(
+          (message) =>
+            message.role === "assistant" && message.channel?.inReplyToInputId === receipt.inputId,
+        );
+        assert.strictEqual(reply?.text, "Which one?");
+        assert.strictEqual(reply?.channel?.kind, "question");
+        assert.deepStrictEqual(reply?.channel?.options, ["CI fix", "Release"]);
+        // The bot never lists its own thread as one to pick.
+        assert.isDefined(seenThreads[0]);
+        assert.notInclude(seenThreads[0] ?? [], "GOAT bot");
+
+        yield* gateway.ingest(slackInput("how is it going", "Ev-q"), slackContext);
+        yield* runtime.drain;
+        const question = resultsTo(harness.slackSent, "question")[0];
+        assert.strictEqual(question?.message.text, "Which one?\n• CI fix\n• Release");
+        assert.isUndefined(question?.message.options);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("keeps a newer task chip when an older one arrives late", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

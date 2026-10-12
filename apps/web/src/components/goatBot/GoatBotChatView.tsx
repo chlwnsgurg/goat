@@ -10,6 +10,7 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { GoatBotAvatar } from "./GoatBotAvatar";
 import { GoatBotComposer } from "./GoatBotComposer";
+import { GoatBotModeButton } from "./GoatBotModeButton";
 import { GoatBotTimeline } from "./GoatBotTimeline";
 import {
   canSendToGoatBot,
@@ -78,6 +79,9 @@ export function GoatBotChatView({
             </p>
           </div>
         </div>
+        <div className="ml-auto flex shrink-0 items-center">
+          <GoatBotModeButton to="thread" />
+        </div>
       </WorkspacePageHeader>
       {availability.kind === "offline" || availability.kind === "connecting" ? (
         <div
@@ -107,6 +111,7 @@ export function GoatBotChatView({
           rows={rows}
           replyingSince={removed ? null : replyingSince}
           onRetry={onRetryInput}
+          onPick={canSend ? onSend : undefined}
         />
       ) : removal !== null ? (
         <GoatBotRemovedNotice

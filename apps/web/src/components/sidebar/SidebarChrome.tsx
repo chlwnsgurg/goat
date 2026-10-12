@@ -33,7 +33,7 @@ import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { observeResize } from "~/lib/observeResize";
-import { useGoatBotEnabled } from "../goatBot/useGoatBotSession";
+import { useGoatBotPreferred } from "../goatBot/GoatBotModeButton";
 import { useGoatBotWaitingCount } from "../goatBot/useGoatBotWaitingCount";
 import { SidebarViewToggles } from "./SidebarViewToggles";
 
@@ -128,7 +128,7 @@ function SidebarBrand({
   onBackdrop: boolean;
   placement?: "header" | "collapsed";
 }) {
-  const { enabled } = useGoatBotEnabled();
+  const enabled = useGoatBotPreferred();
   const botRef = useGlobalAgentStore((state) => state.botRef);
   const logo = globalAgentLogoTarget(enabled);
   const globalAgentRef = useGlobalAgentStore((state) => state.ref);

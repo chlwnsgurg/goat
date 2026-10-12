@@ -27,7 +27,7 @@ async function hydrateFrom(raw: unknown) {
 }
 
 beforeEach(() => {
-  useGlobalAgentStore.setState({ ref: null, botRef: null });
+  useGlobalAgentStore.setState({ ref: null, botRef: null, mode: "bot" });
 });
 
 describe("isGlobalAgentRef", () => {
@@ -45,10 +45,23 @@ describe("isGlobalAgentRef", () => {
 
 describe("persisted global agent", () => {
   it("migrate keeps a valid ref", () => {
-    expect(migratePersistedGlobalAgent({ ref: REF })).toEqual({ ref: REF, botRef: null });
+    expect(migratePersistedGlobalAgent({ ref: REF })).toEqual({
+      ref: REF,
+      botRef: null,
+      mode: "bot",
+    });
   });
   it("migrate drops an invalid ref", () => {
-    expect(migratePersistedGlobalAgent({ ref: 1 })).toEqual({ ref: null, botRef: null });
+    expect(migratePersistedGlobalAgent({ ref: 1 })).toEqual({
+      ref: null,
+      botRef: null,
+      mode: "bot",
+    });
+  });
+  it("keeps the chosen thread mode and reads anything else as the bot", () => {
+    const current = useGlobalAgentStore.getState();
+    expect(mergePersistedGlobalAgent({ mode: "thread" }, current).mode).toBe("thread");
+    expect(mergePersistedGlobalAgent({ mode: "other" }, current).mode).toBe("bot");
   });
   it("merge drops an invalid ref and keeps actions", () => {
     const current = useGlobalAgentStore.getState();

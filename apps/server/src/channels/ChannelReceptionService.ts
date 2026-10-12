@@ -32,6 +32,7 @@ import * as Option from "effect/Option";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ChannelBotTimeline from "./ChannelBotTimeline.ts";
@@ -45,6 +46,8 @@ import { botAddress, chipDelivery, makeTaskEvent, prepareTransition } from "./ch
 
 /** How long a reception pass may take before the sender gets a failure note instead. */
 const CHANNEL_RECEPTION_TIMEOUT_MS = 45_000;
+/** How many recently active threads a reception pass sees by title. */
+const CHANNEL_RECEPTION_RECENT_THREADS = 20;
 
 export class ChannelReceptionService extends Context.Service<
   ChannelReceptionService,
@@ -70,8 +73,16 @@ const replyDelivery = (input: {
   readonly inputId?: ChannelInputId | undefined;
   readonly task?: ChannelTask | undefined;
   readonly mentionActorId?: string | undefined;
+  readonly options?: ReadonlyArray<string> | undefined;
 }): ChannelLedger.ChannelOutboxInsert => {
   const deliveryId = deliveryIdFor(input.causeKey);
+  const options = input.options === undefined || input.options.length === 0 ? [] : input.options;
+  // The GOAT bot shows choices as buttons; other transports read them as a list.
+  const buttons = input.destination.kind === "goat" && options.length > 0;
+  const text =
+    buttons || options.length === 0
+      ? input.text
+      : input.text + "\n" + options.map((option) => "• " + option).join("\n");
   return {
     deliveryId,
     causeKey: input.causeKey,
@@ -81,12 +92,13 @@ const replyDelivery = (input: {
       deliveryId,
       destination: input.destination,
       kind: input.kind,
-      text: input.text,
+      text,
       ...(input.inputId === undefined ? {} : { inReplyToInputId: input.inputId }),
       ...(input.task === undefined
         ? {}
         : { taskId: input.task.taskId, taskVersion: input.task.version }),
       ...(input.mentionActorId === undefined ? {} : { mentionActorId: input.mentionActorId }),
+      ...(buttons ? { options } : {}),
     },
   };
 };
@@ -118,11 +130,38 @@ const make = Effect.gen(function* () {
   const wake = yield* ChannelWake.ChannelWake;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const remoteWorkers = yield* ChannelRemoteWorkers.ChannelRemoteWorkers;
+  const threads = yield* ThreadManagement.ThreadManagementService;
 
   const allowedTargets = Effect.gen(function* () {
     const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
     return shells.map((shell) => ({ projectId: shell.id, label: shell.title }));
   });
+
+  /** Newest first, leaving out the bot's own thread. Titles only; contents stay private. */
+  const recentThreads = (
+    targets: ReadonlyArray<{ readonly projectId: string; readonly label: string }>,
+    botThreadId: string | undefined,
+  ) =>
+    threads.listProjectThreads({ projectId: undefined, includeSubagents: false }).pipe(
+      Effect.map((shells) => {
+        const labels = new Map(targets.map((target) => [target.projectId, target.label]));
+        return shells
+          .filter(
+            (shell) =>
+              shell.id !== botThreadId && shell.archivedAt === null && shell.title.trim() !== "",
+          )
+          .slice(0, CHANNEL_RECEPTION_RECENT_THREADS)
+          .map((shell) => {
+            const project = labels.get(shell.projectId)?.trim();
+            return {
+              title: shell.title.trim(),
+              ...(project ? { project } : {}),
+              working: shell.activeRunId !== null,
+            };
+          });
+      }),
+      Effect.orElseSucceed(() => []),
+    );
 
   const generate = (input: ChannelReceptionInput) =>
     Effect.gen(function* () {
@@ -182,6 +221,7 @@ const make = Effect.gen(function* () {
       const tasks = yield* ledger.listConversationTasks(conversationId);
       const targets = yield* allowedTargets;
       const hosts = yield* remoteWorkers.knownHosts;
+      const bot = (yield* ledger.getBot(stored.ownerId))?.bot;
       const decision: ChannelReceptionResult | undefined =
         message.intent === "answer" &&
         message.taskId !== undefined &&
@@ -201,6 +241,7 @@ const make = Effect.gen(function* () {
                   conversationId,
                   CHANNEL_RECEPTION_TAIL_LIMITS.messages,
                 );
+                const recent = yield* recentThreads(targets, bot?.threadId);
                 return yield* generate({
                   mode: "input",
                   conversationId,
@@ -238,6 +279,7 @@ const make = Effect.gen(function* () {
                   })),
                   allowedTargets: targets,
                   ...(hosts.length === 0 ? {} : { allowedHosts: hosts }),
+                  ...(recent.length === 0 ? {} : { recentThreads: recent }),
                   requester,
                 });
               }),
@@ -266,7 +308,6 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const bot = (yield* ledger.getBot(stored.ownerId))?.bot;
       let replyText = decision.replyText;
       let finalDecision = decision;
       let createdTask:
@@ -429,6 +470,8 @@ const make = Effect.gen(function* () {
           inputId,
           task: relatedTask,
           mentionActorId: mention,
+          options:
+            finalDecision.action.type === "clarify" ? finalDecision.action.options : undefined,
         }),
       );
 

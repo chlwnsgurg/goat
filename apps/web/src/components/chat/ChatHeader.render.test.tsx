@@ -22,6 +22,9 @@ vi.mock("../../hooks/useSettings", () => ({
 vi.mock("../ProjectFavicon", () => ({
   ProjectFavicon: () => null,
 }));
+vi.mock("../goatBot/GoatBotModeButton", () => ({
+  GoatBotModeButton: () => null,
+}));
 
 import { ChatHeader } from "./ChatHeader";
 

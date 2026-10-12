@@ -150,6 +150,7 @@ vi.mock("@tanstack/react-router", () => ({
     state.paramsReads();
     return {};
   },
+  useNavigate: () => () => Promise.resolve(),
   Link: ({
     to,
     params,

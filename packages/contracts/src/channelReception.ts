@@ -51,6 +51,17 @@ export const ChannelReceptionTargetOption = Schema.Struct({
 });
 export type ChannelReceptionTargetOption = typeof ChannelReceptionTargetOption.Type;
 
+/** A recently active thread, so the model can name it in a reply or offer it as a choice. */
+export const ChannelReceptionThreadSummary = Schema.Struct({
+  title: TrimmedNonEmptyString,
+  project: Schema.optional(TrimmedNonEmptyString),
+  working: Schema.Boolean,
+});
+export type ChannelReceptionThreadSummary = typeof ChannelReceptionThreadSummary.Type;
+
+/** The most choices a clarifying question offers. */
+export const CHANNEL_RECEPTION_MAX_OPTIONS = 4;
+
 export const ChannelReceptionInput = Schema.Struct({
   mode: ChannelReceptionMode,
   conversationId: ChannelConversationId,
@@ -64,6 +75,8 @@ export const ChannelReceptionInput = Schema.Struct({
   allowedTargets: Schema.Array(ChannelReceptionTargetOption),
   /** Other machines (SSH aliases) the requester may send work to. */
   allowedHosts: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /** Titles of the requester's most recently active threads, newest first. */
+  recentThreads: Schema.optional(Schema.Array(ChannelReceptionThreadSummary)),
   requester: ChannelRequester,
 });
 export type ChannelReceptionInput = typeof ChannelReceptionInput.Type;
@@ -95,6 +108,8 @@ export const ChannelReceptionAction = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("clarify"),
     question: TrimmedNonEmptyString,
+    /** Short answers the person can pick instead of typing one. */
+    options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   }),
   Schema.Struct({ type: Schema.Literal("report_only") }),
 ]);

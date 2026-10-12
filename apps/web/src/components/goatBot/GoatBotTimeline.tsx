@@ -1,5 +1,13 @@
 import { CircleAlertIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { type UIEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  type UIEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
@@ -23,10 +31,13 @@ export function GoatBotTimeline({
   rows,
   replyingSince = null,
   onRetry,
+  onPick,
 }: {
   readonly rows: ReadonlyArray<GoatBotRow>;
   readonly replyingSince?: string | null;
   readonly onRetry: (clientKey: string) => void;
+  /** Sends a question's choice as the user's answer; absent while the bot can't take messages. */
+  readonly onPick?: ((answer: string) => void) | undefined;
 }) {
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -83,32 +94,56 @@ export function GoatBotTimeline({
               );
             case "bot":
               return (
-                <li key={row.id} className={cn("flex items-end gap-2", row.firstInGroup && "mt-2")}>
-                  <BotSlot first={row.firstInGroup} />
-                  <div
-                    className={cn(
-                      "flex max-w-3/4 gap-1.5 rounded-2xl bg-secondary px-3 py-2 text-sm text-secondary-foreground",
-                      row.tone === "failure" && "border border-destructive/32",
-                    )}
-                  >
-                    {row.tone === "failure" ? (
-                      <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive-foreground" />
-                    ) : row.tone === "question" ? (
-                      <MessageCircleQuestionIcon className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
-                    ) : null}
-                    <div className="min-w-0 break-words whitespace-pre-wrap">
-                      {row.replyTo ? (
-                        <blockquote className="mb-1 border-l-2 border-border pl-2 text-xs text-muted-foreground">
-                          {row.replyTo}
-                        </blockquote>
+                <Fragment key={row.id}>
+                  <li className={cn("flex items-end gap-2", row.firstInGroup && "mt-2")}>
+                    <BotSlot first={row.firstInGroup} />
+                    <div
+                      className={cn(
+                        "flex max-w-3/4 gap-1.5 rounded-2xl bg-secondary px-3 py-2 text-sm text-secondary-foreground",
+                        row.tone === "failure" && "border border-destructive/32",
+                      )}
+                    >
+                      {row.tone === "failure" ? (
+                        <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive-foreground" />
+                      ) : row.tone === "question" ? (
+                        <MessageCircleQuestionIcon className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
                       ) : null}
-                      {row.text}
+                      <div className="min-w-0 break-words whitespace-pre-wrap">
+                        {row.replyTo ? (
+                          <blockquote className="mb-1 border-l-2 border-border pl-2 text-xs text-muted-foreground">
+                            {row.replyTo}
+                          </blockquote>
+                        ) : null}
+                        {row.text}
+                      </div>
                     </div>
-                  </div>
-                  <span className="shrink-0 pb-0.5 text-xs text-muted-foreground">
-                    {time(row.createdAt)}
-                  </span>
-                </li>
+                    <span className="shrink-0 pb-0.5 text-xs text-muted-foreground">
+                      {time(row.createdAt)}
+                    </span>
+                  </li>
+                  {row.options.length > 0 ? (
+                    <li className="flex gap-2 pt-1">
+                      <span aria-hidden className="w-7 shrink-0" />
+                      <div
+                        role="group"
+                        aria-label="Suggested answers"
+                        className="flex max-w-3/4 flex-wrap gap-1.5"
+                      >
+                        {row.options.map((option) => (
+                          <Button
+                            key={option}
+                            size="sm-multiline"
+                            variant="outline"
+                            disabled={onPick === undefined}
+                            onClick={() => onPick?.(option)}
+                          >
+                            {option}
+                          </Button>
+                        ))}
+                      </div>
+                    </li>
+                  ) : null}
+                </Fragment>
               );
             case "task":
               return (

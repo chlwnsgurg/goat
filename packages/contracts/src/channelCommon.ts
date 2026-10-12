@@ -108,6 +108,8 @@ export const ChannelMessageMeta = Schema.Struct({
   taskId: Schema.optional(ChannelTaskId),
   inReplyToInputId: Schema.optional(ChannelInputId),
   readAt: Schema.optional(IsoDateTime),
+  /** Answers a question offers. The GOAT bot shows them as buttons that send the answer. */
+  options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });
 export type ChannelMessageMeta = typeof ChannelMessageMeta.Type;
 

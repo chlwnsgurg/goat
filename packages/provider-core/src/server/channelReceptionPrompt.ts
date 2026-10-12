@@ -7,7 +7,11 @@
  *
  * @module channelReceptionPrompt
  */
-import { ChannelReceptionResult, type ChannelReceptionInput } from "@t3tools/contracts";
+import {
+  CHANNEL_RECEPTION_MAX_OPTIONS,
+  ChannelReceptionResult,
+  type ChannelReceptionInput,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -24,10 +28,21 @@ export const ChannelReceptionModelOutput = Schema.Struct({
   questionId: Schema.String,
   answer: Schema.String,
   question: Schema.String,
+  options: Schema.Array(Schema.String),
 });
 export type ChannelReceptionModelOutput = typeof ChannelReceptionModelOutput.Type;
 
 const decodeResult = Schema.decodeUnknownOption(ChannelReceptionResult);
+
+/** Distinct, non-empty choices, at most CHANNEL_RECEPTION_MAX_OPTIONS of them. */
+function clarifyOptions(options: ReadonlyArray<string>): string[] {
+  const seen = new Set<string>();
+  for (const option of options) {
+    const trimmed = option.trim();
+    if (trimmed !== "") seen.add(trimmed);
+  }
+  return [...seen].slice(0, CHANNEL_RECEPTION_MAX_OPTIONS);
+}
 
 /** The typed result, or None when the model's choice is missing what its action needs. */
 export function toChannelReceptionResult(
@@ -64,8 +79,17 @@ export function toChannelReceptionResult(
           answer: output.answer,
         },
       });
-    case "clarify":
-      return decodeResult({ replyText, action: { type: "clarify", question: output.question } });
+    case "clarify": {
+      const options = clarifyOptions(output.options);
+      return decodeResult({
+        replyText,
+        action: {
+          type: "clarify",
+          question: output.question,
+          ...(options.length < 2 ? {} : { options }),
+        },
+      });
+    }
     case "report_only":
       return decodeResult({ replyText, action: { type: "report_only" } });
   }
@@ -96,6 +120,15 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     .map((target) => "- project " + target.projectId + ": " + target.label)
     .join("\n");
   const hosts = (input.allowedHosts ?? []).map((host) => "- " + host).join("\n");
+  const threads = (input.recentThreads ?? [])
+    .map(
+      (thread) =>
+        "- " +
+        thread.title +
+        (thread.project === undefined ? "" : " (" + thread.project + ")") +
+        (thread.working ? " [working]" : ""),
+    )
+    .join("\n");
   const subject =
     input.mode === "input"
       ? "New message from " +
@@ -119,10 +152,10 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     "- create_task: the person asks for new work, or asks something you can only answer by looking it up. Fill title (short) and instruction (complete, self-contained). Set projectId only to one listed below. Set host only when the person asks for the work to run on one of the other machines listed below.",
     "- status: the person asks about work listed below in this conversation. Set taskId when one task is meant.",
     "- answer_question: the message answers one listed open question. Fill taskId, questionId, answer.",
-    "- clarify: only when the message is too unclear to start any work, or it could mean several listed tasks. Fill question and put the same question in replyText.",
+    "- clarify: only when the message is too unclear to start any work, or it could mean several listed tasks or recent threads. Fill question and put the same question in replyText. When the answer is one of a few concrete choices, such as a task, a recent thread, or a project listed below, put two to four of them in options, each worded as the person's short reply. Otherwise leave options empty.",
     "- report_only: anything else, and always for task updates.",
     "",
-    "Return a JSON object with every key: replyText, action, title, instruction, projectId, host, taskId, questionId, answer, question. Use an empty string for keys the action does not use.",
+    "Return a JSON object with every key: replyText, action, title, instruction, projectId, host, taskId, questionId, answer, question, options. Use an empty string for text keys the action does not use and an empty list for options unless the action is clarify.",
     "",
     "Projects work can go to:",
     projects === "" ? "(none listed)" : projects,
@@ -132,6 +165,9 @@ export function buildChannelReceptionPrompt(input: ChannelReceptionInput) {
     "",
     "Work in this conversation:",
     tasks === "" ? "(none)" : tasks,
+    "",
+    "Recently active threads (titles only; you cannot read their contents):",
+    threads === "" ? "(none)" : threads,
     "",
     "Recent conversation:",
     tail === "" ? "(none)" : limitSection(tail, 16_000),

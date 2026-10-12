@@ -146,6 +146,7 @@ export const layerGoatTransport = Layer.effectDiscard(
               ? {}
               : { inReplyToInputId: message.inReplyToInputId }),
             ...(message.taskId === undefined ? {} : { taskId: message.taskId }),
+            ...(message.options === undefined ? {} : { options: message.options }),
           };
           yield* timeline.record({
             threadId,

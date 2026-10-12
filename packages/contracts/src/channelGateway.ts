@@ -119,6 +119,8 @@ export const ChannelOutboundMessage = Schema.Struct({
   chip: Schema.optional(ChannelTaskChip),
   /** The original requester to tag, such as a Slack user id. */
   mentionActorId: Schema.optional(TrimmedNonEmptyString),
+  /** Answers a question offers; transports without buttons list them in the text. */
+  options: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });
 export type ChannelOutboundMessage = typeof ChannelOutboundMessage.Type;
 

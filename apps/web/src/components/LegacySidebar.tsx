@@ -246,7 +246,7 @@ import {
 } from "../sidebarProjectGrouping";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { GoatBotSidebarRow } from "./goatBot/GoatBotSidebarRow";
-import { useGoatBotEnabled } from "./goatBot/useGoatBotSession";
+import { useGoatBotPreferred } from "./goatBot/GoatBotModeButton";
 const projectsViewEnvironments = createProjectsViewEnvironmentAtoms({
   catalogAtom: environmentCatalog.catalogValueAtom,
   presentationsAtom: environmentPresentations.presentationsAtom,
@@ -3168,7 +3168,7 @@ interface SidebarProjectsContentProps {
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
 ) {
-  const { enabled: goatBotEnabled } = useGoatBotEnabled();
+  const goatBotPreferred = useGoatBotPreferred();
   const {
     showArm64IntelBuildWarning,
     arm64IntelBuildWarningDescription,
@@ -3235,7 +3235,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   );
 
   return (
-    <SidebarContent fixedHeader={goatBotEnabled ? <GoatBotSidebarRow /> : undefined}>
+    <SidebarContent fixedHeader={goatBotPreferred ? <GoatBotSidebarRow /> : undefined}>
       {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
         <SidebarGroup>
           <Alert variant="warning">

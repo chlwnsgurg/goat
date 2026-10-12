@@ -47,6 +47,8 @@ export interface GoatBotMessagePresentation {
   readonly requestKey: string | null;
   readonly replyToKey?: string | null;
   readonly clientKey?: string | null;
+  /** Answers a bot question offers. */
+  readonly options?: ReadonlyArray<string>;
 }
 
 type MessageItem = Extract<OrchestrationV2TurnItem, { type: "user_message" | "assistant_message" }>;
@@ -92,6 +94,8 @@ export type GoatBotRow =
       readonly createdAt: string;
       readonly tone: GoatBotBotTone;
       readonly replyTo: string | null;
+      /** Answers to pick, only while nothing has been sent since the question. */
+      readonly options: ReadonlyArray<string>;
       readonly firstInGroup: boolean;
     }
   | {
@@ -104,6 +108,7 @@ export type GoatBotRow =
 
 /** Messages further apart than this start a new group. */
 const GOAT_BOT_GROUP_GAP_MS = 5 * 60 * 1000;
+const NO_OPTIONS: ReadonlyArray<string> = [];
 
 type ContentRow = Exclude<GoatBotRow, { kind: "day" }>;
 type UngroupedRow =
@@ -197,6 +202,7 @@ export function buildGoatBotTimeline(input: {
           presentation?.replyToKey && presentation.replyToKey !== previousInputKey
             ? (inputTexts.get(presentation.replyToKey)?.slice(0, 160) ?? null)
             : null,
+        options: presentation?.options ?? NO_OPTIONS,
       });
       previousInputKey = null;
       continue;
@@ -244,9 +250,20 @@ export function buildGoatBotTimeline(input: {
             : { state: "sending" },
     }));
 
+  const ordered = [...committed, ...pending];
+  // Choices answer the question they came with; anything the user sent since retires them.
+  let answered = false;
+  for (let index = ordered.length - 1; index >= 0; index--) {
+    const row = ordered[index]!;
+    if (row.kind === "user") answered = true;
+    else if (answered && row.kind === "bot" && row.options.length > 0) {
+      ordered[index] = { ...row, options: NO_OPTIONS };
+    }
+  }
+
   const rows: GoatBotRow[] = [];
   let previous: UngroupedRow | null = null;
-  for (const row of [...committed, ...pending]) {
+  for (const row of ordered) {
     const day = localDayKey(row.createdAt);
     const newDay = previous === null || localDayKey(previous.createdAt) !== day;
     if (newDay) rows.push({ kind: "day", id: `day:${day}:${row.id}`, at: row.createdAt });

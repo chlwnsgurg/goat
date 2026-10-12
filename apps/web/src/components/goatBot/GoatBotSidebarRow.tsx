@@ -13,15 +13,15 @@ import {
   useSidebar,
 } from "../ui/sidebar";
 import { GoatBotAvatar } from "./GoatBotAvatar";
-import { useGoatBotEnabled } from "./useGoatBotSession";
+import { useGoatBotPreferred } from "./GoatBotModeButton";
 import { GoatBotChannelContext } from "./goatBotChannelPort";
 import { useGoatBotWaitingCount } from "./useGoatBotWaitingCount";
 import { Badge } from "../ui/badge";
 
-/** GOAT Bot's pinned place at the top of the thread list. */
+/** GOAT Bot's pinned place at the top of the thread list, hidden in thread mode. */
 export function GoatBotSidebarRow() {
   const port = useContext(GoatBotChannelContext);
-  const { enabled } = useGoatBotEnabled();
+  const enabled = useGoatBotPreferred();
   return enabled ? <GoatBotSidebarObserver key={port ? "port" : "none"} /> : null;
 }
 

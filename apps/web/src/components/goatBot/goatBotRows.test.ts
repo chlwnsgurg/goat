@@ -289,6 +289,42 @@ describe("buildGoatBotTimeline", () => {
     });
     expect(content(rows)).toMatchObject([{ id: "b1", kind: "bot", tone: "failure" }]);
   });
+
+  it("offers a question's choices only until the user sends something", () => {
+    const question = {
+      tone: "question",
+      readAt: null,
+      requestKey: null,
+      options: ["CI fix", "Release"],
+    } as const;
+    const asked = [
+      user("u1", "2026-10-12T12:00:00Z", "how is it going"),
+      bot("b1", "2026-10-12T12:00:01Z", "Which one?"),
+    ];
+    const options = (pendingInputs: GoatBotPendingInput[], extra: OrchestrationV2TurnItem[] = []) =>
+      content(
+        buildGoatBotTimeline({
+          visibleTurnItems: rowsOf([...asked, ...extra]),
+          pendingInputs,
+          readers: readers({ b1: question }),
+        }),
+      ).flatMap((row) => (row.kind === "bot" ? [row.options] : []));
+
+    expect(options([])).toEqual([["CI fix", "Release"]]);
+    // A send still on its way already answers the question.
+    expect(
+      options([
+        {
+          clientKey: "c1",
+          text: "CI fix",
+          createdAt: "2026-10-12T12:00:02Z",
+          state: "sending",
+          requestKey: null,
+        },
+      ]),
+    ).toEqual([[]]);
+    expect(options([], [user("u2", "2026-10-12T12:00:03Z", "Release")])).toEqual([[]]);
+  });
 });
 
 describe("goatBotReplyingSince", () => {
