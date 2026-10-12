@@ -604,8 +604,6 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
 }
 
 export const SIDEBAR_CHILD_RUNNING_LIMIT = 3;
-export const SIDEBAR_CHILD_FINISHED_INITIAL_COUNT = 6;
-export const SIDEBAR_CHILD_FINISHED_PAGE_COUNT = 12;
 
 type SidebarChildInput = Pick<
   SidebarThreadSummary,
@@ -685,6 +683,7 @@ export function canStopSidebarDelegatedChild(thread: SidebarChildInput): boolean
 
 export interface SidebarDelegatedChildren<T> {
   readonly active: ReadonlyArray<T>;
+  // Finished children stay off the sidebar; they are kept only so an open one can be pinned.
   readonly finished: ReadonlyArray<T>;
 }
 
@@ -714,12 +713,6 @@ export function buildSidebarDelegatedChildIndex<T extends SidebarChildInput>(
         left.createdAt.localeCompare(right.createdAt) ||
         left.id.localeCompare(right.id),
     );
-    group.finished.sort(
-      (left, right) =>
-        (right.latestRun?.completedAt ?? right.updatedAt).localeCompare(
-          left.latestRun?.completedAt ?? left.updatedAt,
-        ) || left.id.localeCompare(right.id),
-    );
     const old = previous?.get(key);
     index.set(
       key,
@@ -734,9 +727,6 @@ export function buildSidebarDelegatedChildIndex<T extends SidebarChildInput>(
 export function resolveSidebarDelegatedChildWindow<T extends SidebarChildInput>(input: {
   readonly children: SidebarDelegatedChildren<T>;
   readonly runningExpanded: boolean;
-  readonly finishedExpanded: boolean;
-  readonly finishedVisibleCount: number;
-  readonly showFinished: boolean;
   readonly openThreadKey: string | null;
 }) {
   const attention = input.children.active.filter(
@@ -749,23 +739,15 @@ export function resolveSidebarDelegatedChildWindow<T extends SidebarChildInput>(
     ...attention,
     ...(input.runningExpanded ? running : running.slice(0, SIDEBAR_CHILD_RUNNING_LIMIT)),
   ];
-  const finishedCount = input.showFinished ? input.children.finished.length : 0;
-  const finishedRows =
-    input.showFinished && input.finishedExpanded
-      ? input.children.finished.slice(0, input.finishedVisibleCount)
-      : [];
   const isOpen = (thread: T) =>
     scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === input.openThreadKey;
   const pinnedOpenRow =
-    input.openThreadKey !== null && !activeRows.some(isOpen) && !finishedRows.some(isOpen)
+    input.openThreadKey !== null && !activeRows.some(isOpen)
       ? (input.children.active.find(isOpen) ?? input.children.finished.find(isOpen) ?? null)
       : null;
   return {
     activeRows,
     hiddenActiveCount: running.length - (activeRows.length - attention.length),
-    finishedCount,
-    finishedRows,
-    hiddenFinishedCount: finishedCount - finishedRows.length,
     pinnedOpenRow,
   };
 }
@@ -1052,7 +1034,7 @@ export function sortPriorityThreadsForSidebar<
   );
 }
 
-/** Row controls and child history follow lifecycle even inside Priority. */
+/** Row controls follow lifecycle even inside Priority. */
 export function resolveSidebarThreadPresentation(input: {
   readonly snoozed: boolean;
   readonly settled: boolean;
@@ -1063,7 +1045,6 @@ export function resolveSidebarThreadPresentation(input: {
       : input.settled
         ? ("unsettle" as const)
         : ("settle" as const),
-    showFinished: !input.snoozed && !input.settled,
   };
 }
 

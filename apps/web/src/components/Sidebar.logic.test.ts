@@ -189,7 +189,7 @@ describe("sidebar delegated children", () => {
     ).toEqual([remote]);
   });
 
-  it("puts attention first, merges working and queued oldest first, and orders finished by completion", () => {
+  it("puts attention first, merges working and queued oldest first, and keeps finished aside", () => {
     const newer = delegatedChild("newer", {
       status: "running",
       createdAt: DateTime.makeUnsafe("2026-10-12T01:03:00Z"),
@@ -205,20 +205,12 @@ describe("sidebar delegated children", () => {
         createdAt: DateTime.makeUnsafe("2026-10-12T01:04:00Z"),
       },
     });
-    const finishedOld = delegatedChild("finished-old", {
-      latestRunCompletedAt: DateTime.makeUnsafe("2026-10-12T01:02:00Z"),
-      updatedAt: DateTime.makeUnsafe("2026-10-12T04:00:00Z"),
-    });
-    const finishedNew = delegatedChild("finished-new");
-    const entry = buildSidebarDelegatedChildIndex([
-      newer,
-      finishedOld,
-      older,
-      finishedNew,
-      attention,
-    ]).get(delegatedParentKey)!;
+    const finished = delegatedChild("finished");
+    const entry = buildSidebarDelegatedChildIndex([newer, finished, older, attention]).get(
+      delegatedParentKey,
+    )!;
     expect(entry.active).toEqual([attention, older, newer]);
-    expect(entry.finished).toEqual([finishedNew, finishedOld]);
+    expect(entry.finished).toEqual([finished]);
   });
 
   it("reuses per-parent entries only when their ordered element identities are unchanged", () => {
@@ -344,18 +336,13 @@ describe("sidebar delegated child window", () => {
   const defaults = {
     children,
     runningExpanded: false,
-    finishedExpanded: false,
-    finishedVisibleCount: 6,
-    showFinished: true,
     openThreadKey: null,
   };
 
   it("shows all attention plus three working/queued rows and expands the rest", () => {
-    expect(resolveSidebarDelegatedChildWindow(defaults)).toMatchObject({
+    expect(resolveSidebarDelegatedChildWindow(defaults)).toEqual({
       activeRows: [...attention, ...running.slice(0, 3)],
       hiddenActiveCount: 2,
-      finishedCount: 21,
-      finishedRows: [],
       pinnedOpenRow: null,
     });
     expect(
@@ -363,91 +350,11 @@ describe("sidebar delegated child window", () => {
     ).toMatchObject({ activeRows: children.active, hiddenActiveCount: 0 });
   });
 
-  it("keeps finished collapsed by default, then shows six and twelve more", () => {
-    expect(
-      resolveSidebarDelegatedChildWindow({ ...defaults, finishedExpanded: true }),
-    ).toMatchObject({ finishedRows: finished.slice(0, 6), hiddenFinishedCount: 15 });
-    expect(
-      resolveSidebarDelegatedChildWindow({
-        ...defaults,
-        finishedExpanded: true,
-        finishedVisibleCount: 18,
-      }),
-    ).toMatchObject({ finishedRows: finished.slice(0, 18), hiddenFinishedCount: 3 });
-    expect(
-      resolveSidebarDelegatedChildWindow({
-        ...defaults,
-        finishedExpanded: true,
-        finishedVisibleCount: 30,
-      }).hiddenFinishedCount,
-    ).toBe(0);
-  });
-
-  it("hides finished controls for settled/snoozed parents even when expanded", () => {
-    expect(
-      resolveSidebarDelegatedChildWindow({
-        ...defaults,
-        finishedExpanded: true,
-        showFinished: false,
-      }),
-    ).toMatchObject({
-      activeRows: [...attention, ...running.slice(0, 3)],
-      finishedCount: 0,
-      finishedRows: [],
-      hiddenFinishedCount: 0,
-    });
-  });
-
   it.each([
-    {
-      row: running[4]!,
-      runningExpanded: false,
-      finishedExpanded: false,
-      showFinished: true,
-      pinned: true,
-    },
-    {
-      row: running[4]!,
-      runningExpanded: true,
-      finishedExpanded: false,
-      showFinished: true,
-      pinned: false,
-    },
-    {
-      row: attention[3]!,
-      runningExpanded: false,
-      finishedExpanded: false,
-      showFinished: true,
-      pinned: false,
-    },
-    {
-      row: finished[0]!,
-      runningExpanded: false,
-      finishedExpanded: false,
-      showFinished: true,
-      pinned: true,
-    },
-    {
-      row: finished[0]!,
-      runningExpanded: false,
-      finishedExpanded: true,
-      showFinished: true,
-      pinned: false,
-    },
-    {
-      row: finished[20]!,
-      runningExpanded: false,
-      finishedExpanded: true,
-      showFinished: true,
-      pinned: true,
-    },
-    {
-      row: finished[0]!,
-      runningExpanded: false,
-      finishedExpanded: true,
-      showFinished: false,
-      pinned: true,
-    },
+    { row: running[4]!, runningExpanded: false, pinned: true },
+    { row: running[4]!, runningExpanded: true, pinned: false },
+    { row: attention[3]!, runningExpanded: false, pinned: false },
+    { row: finished[20]!, runningExpanded: true, pinned: true },
   ])("shows the open $row.id once with pinned=$pinned", ({ row, pinned, ...state }) => {
     const window = resolveSidebarDelegatedChildWindow({
       ...defaults,
@@ -456,11 +363,9 @@ describe("sidebar delegated child window", () => {
     });
     expect(window.pinnedOpenRow).toBe(pinned ? row : null);
     expect(
-      [
-        ...window.activeRows,
-        ...window.finishedRows,
-        ...(window.pinnedOpenRow ? [window.pinnedOpenRow] : []),
-      ].filter((child) => child === row),
+      [...window.activeRows, ...(window.pinnedOpenRow ? [window.pinnedOpenRow] : [])].filter(
+        (child) => child === row,
+      ),
     ).toHaveLength(1);
   });
 
@@ -479,10 +384,8 @@ describe("sidebar delegated child window", () => {
     ).toBeNull();
     expect(
       resolveSidebarDelegatedChildWindow({ ...defaults, children: { active: [], finished: [] } }),
-    ).toMatchObject({
+    ).toEqual({
       activeRows: [],
-      finishedRows: [],
-      finishedCount: 0,
       hiddenActiveCount: 0,
       pinnedOpenRow: null,
     });
@@ -734,14 +637,10 @@ describe("Activity Priority", () => {
     const window = resolveSidebarDelegatedChildWindow({
       children,
       runningExpanded: true,
-      finishedExpanded: true,
-      finishedVisibleCount: 12,
-      showFinished: presentation.showFinished,
       openThreadKey: null,
     });
     expect(window.activeRows).toEqual([attention]);
-    expect(window.finishedRows).toEqual([]);
-    expect(window.finishedCount).toBe(0);
+    expect(window.pinnedOpenRow).toBeNull();
   });
 
   it("keeps global agents, delegated children, archived threads and out-of-scope threads out of candidates", () => {
@@ -812,11 +711,9 @@ describe("Activity Priority", () => {
   it("uses lifecycle for row actions independently of pinning or Priority", () => {
     expect(resolveSidebarThreadPresentation({ settled: false, snoozed: false })).toEqual({
       action: "settle",
-      showFinished: true,
     });
     expect(resolveSidebarThreadPresentation({ settled: true, snoozed: true })).toEqual({
       action: "unsnooze",
-      showFinished: false,
     });
     const rows = [
       { key: "working-pin", settled: false, snoozed: false },

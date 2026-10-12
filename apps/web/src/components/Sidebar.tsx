@@ -1067,7 +1067,6 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
   delegatedChildren?: SidebarDelegatedChildrenEntry<EnvironmentThreadShell> | undefined;
-  delegatedChildrenShowFinished: boolean;
   openThreadKey: string | null;
   onOpenDelegatedChild: (threadRef: ScopedThreadRef) => void;
   onStopDelegatedChild: (threadRef: ScopedThreadRef) => void;
@@ -1179,7 +1178,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const delegatedChildrenGroup = props.delegatedChildren ? (
     <SidebarDelegatedChildren
       parentKey={threadKey}
-      showFinished={props.delegatedChildrenShowFinished}
       openThreadKey={props.openThreadKey}
       onOpen={props.onOpenDelegatedChild}
       onStop={props.onStopDelegatedChild}
@@ -3904,19 +3902,12 @@ export default function Sidebar() {
       const rows = resolveSidebarDelegatedChildWindow({
         children,
         runningExpanded: ui.running,
-        finishedExpanded: ui.finished,
-        finishedVisibleCount: ui.finishedVisible,
-        showFinished: resolveSidebarThreadPresentation({
-          snoozed: item.section === "snoozed",
-          settled: threadByKey.get(item.key)?.settledOverride === "settled",
-        }).showFinished,
         openThreadKey: routeThreadKey,
       });
-      if (rows.activeRows.length > 0 || rows.finishedCount > 0 || rows.pinnedOpenRow !== null)
-        keys.add(item.key);
+      if (rows.activeRows.length > 0 || rows.pinnedOpenRow !== null) keys.add(item.key);
     }
     return keys;
-  }, [delegatedChildIndex, delegatedChildrenUi, routeThreadKey, sidebarListItems, threadByKey]);
+  }, [delegatedChildIndex, delegatedChildrenUi, routeThreadKey, sidebarListItems]);
   const sidebarSortingStrategy = useMemo(
     () =>
       createSidebarSortingStrategy({
@@ -5385,7 +5376,6 @@ export default function Sidebar() {
                             key={`${threadKey}:${rowVariant}`}
                             thread={thread}
                             delegatedChildren={delegatedChildIndex.get(threadKey)}
-                            delegatedChildrenShowFinished={presentation.showFinished}
                             openThreadKey={
                               delegatedChildIndex.has(threadKey) ? routeThreadKey : null
                             }

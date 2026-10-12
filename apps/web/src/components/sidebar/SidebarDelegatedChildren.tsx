@@ -1,7 +1,7 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
-import { BotIcon, ChevronRightIcon, SquareIcon } from "lucide-react";
+import { BotIcon, SquareIcon } from "lucide-react";
 import { memo, useCallback } from "react";
 import { create } from "zustand";
 import { useNowMinute } from "../../hooks/useNowMinute";
@@ -12,8 +12,6 @@ import {
   canStopSidebarDelegatedChild,
   resolveSidebarDelegatedChildWindow,
   sidebarDelegatedChildState,
-  SIDEBAR_CHILD_FINISHED_INITIAL_COUNT,
-  SIDEBAR_CHILD_FINISHED_PAGE_COUNT,
   SIDEBAR_CHILD_RUNNING_LIMIT,
   type SidebarDelegatedChildren as DelegatedChildren,
 } from "../Sidebar.logic";
@@ -21,14 +19,10 @@ import { Button } from "../ui/button";
 
 interface SidebarDelegatedChildrenUi {
   readonly running: boolean;
-  readonly finished: boolean;
-  readonly finishedVisible: number;
 }
 
 export const DEFAULT_SIDEBAR_DELEGATED_CHILDREN_UI: SidebarDelegatedChildrenUi = {
   running: false,
-  finished: false,
-  finishedVisible: SIDEBAR_CHILD_FINISHED_INITIAL_COUNT,
 };
 
 // Parent row variants remount as they move between shelves. Keep their temporary
@@ -59,7 +53,6 @@ function useSidebarDelegatedChildrenUi(parentKey: string) {
 interface SidebarDelegatedChildrenProps {
   readonly parentKey: string;
   readonly children: DelegatedChildren<EnvironmentThreadShell>;
-  readonly showFinished: boolean;
   readonly openThreadKey: string | null;
   readonly onOpen: (threadRef: ScopedThreadRef) => void;
   readonly onStop: (threadRef: ScopedThreadRef) => void;
@@ -170,18 +163,6 @@ export const SidebarDelegatedChildren = memo(function SidebarDelegatedChildren(
     () => update(props.parentKey, (current) => ({ ...current, running: !current.running })),
     [props.parentKey, update],
   );
-  const toggleFinished = useCallback(
-    () => update(props.parentKey, (current) => ({ ...current, finished: !current.finished })),
-    [props.parentKey, update],
-  );
-  const showMoreFinished = useCallback(
-    () =>
-      update(props.parentKey, (current) => ({
-        ...current,
-        finishedVisible: current.finishedVisible + SIDEBAR_CHILD_FINISHED_PAGE_COUNT,
-      })),
-    [props.parentKey, update],
-  );
   const stopPointerPropagation = useCallback(
     (event: React.PointerEvent) => event.stopPropagation(),
     [],
@@ -189,13 +170,9 @@ export const SidebarDelegatedChildren = memo(function SidebarDelegatedChildren(
   const rows = resolveSidebarDelegatedChildWindow({
     children: props.children,
     runningExpanded: ui.running,
-    finishedExpanded: ui.finished,
-    finishedVisibleCount: ui.finishedVisible,
-    showFinished: props.showFinished,
     openThreadKey: props.openThreadKey,
   });
-  if (rows.activeRows.length === 0 && rows.finishedCount === 0 && rows.pinnedOpenRow === null)
-    return null;
+  if (rows.activeRows.length === 0 && rows.pinnedOpenRow === null) return null;
   const runningCount = props.children.active.filter(
     (thread) => sidebarDelegatedChildState(thread) !== "attention",
   ).length;
@@ -227,27 +204,6 @@ export const SidebarDelegatedChildren = memo(function SidebarDelegatedChildren(
             onClick={toggleRunning}
           >
             {ui.running ? "Show fewer running" : `+${rows.hiddenActiveCount} more running`}
-          </button>
-        </li>
-      ) : null}
-      {rows.finishedCount > 0 ? (
-        <li>
-          <button
-            type="button"
-            className={toggleClassName}
-            aria-expanded={ui.finished}
-            onClick={toggleFinished}
-          >
-            <ChevronRightIcon aria-hidden className={cn("size-3", ui.finished && "rotate-90")} />
-            {rows.finishedCount} finished
-          </button>
-        </li>
-      ) : null}
-      {rows.finishedRows.map(renderRow)}
-      {props.showFinished && ui.finished && rows.hiddenFinishedCount > 0 ? (
-        <li>
-          <button type="button" className={toggleClassName} onClick={showMoreFinished}>
-            Show {Math.min(rows.hiddenFinishedCount, SIDEBAR_CHILD_FINISHED_PAGE_COUNT)} more
           </button>
         </li>
       ) : null}
