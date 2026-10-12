@@ -15,10 +15,10 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "ThreadRunResults",
 ]);
 
-type MigrationEntry = readonly [
+type MigrationEntry<E> = readonly [
   id: number,
   name: string,
-  migration: Effect.Effect<unknown, unknown, SqlClient.SqlClient>,
+  migration: Effect.Effect<unknown, E, SqlClient.SqlClient>,
 ];
 
 /**
@@ -28,8 +28,8 @@ type MigrationEntry = readonly [
  * upstream migrations they displaced. Upstream migrations it runs must be idempotent, as upstream
  * writes them (`CREATE ... IF NOT EXISTS`).
  */
-export const reconcileGoatMigrationIds = Effect.fn("reconcileGoatMigrationIds")(function* (
-  entries: ReadonlyArray<MigrationEntry>,
+export const reconcileGoatMigrationIds = Effect.fn("reconcileGoatMigrationIds")(function* <E>(
+  entries: ReadonlyArray<MigrationEntry<E>>,
 ) {
   const sql = yield* SqlClient.SqlClient;
   return yield* sql.withTransaction(
