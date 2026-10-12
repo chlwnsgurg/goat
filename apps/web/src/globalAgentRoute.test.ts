@@ -7,6 +7,9 @@ import {
   excludeGlobalAgentThreads,
   isGlobalAgentRoute,
   isGlobalAgentThread,
+  isGoatBotRoute,
+  isGoatBotThread,
+  legacyGlobalAgentRoute,
 } from "./globalAgentRoute";
 
 const ENV = "env-1" as EnvironmentId;
@@ -67,5 +70,48 @@ describe("isGlobalAgentRoute", () => {
   });
   it("is inactive without a saved ref", () => {
     expect(isGlobalAgentRoute("/env-1/thread-1", serverTarget(ENV, "thread-1"), null)).toBe(false);
+  });
+});
+
+describe("legacyGlobalAgentRoute", () => {
+  it("opens the old global agent's thread directly, never through /", () => {
+    expect(legacyGlobalAgentRoute(REF, { archivedAt: null, deletedAt: null }, false)).toEqual({
+      kind: "thread",
+      environmentId: ENV,
+      threadId: REF.threadId,
+    });
+  });
+
+  it("falls back to its unsent draft, and to nothing once it is gone", () => {
+    expect(legacyGlobalAgentRoute(REF, null, true)).toEqual({
+      kind: "draft",
+      draftId: REF.draftId,
+    });
+    expect(legacyGlobalAgentRoute(REF, { archivedAt: "2026-10-12T00:00:00Z" }, false)).toBeNull();
+    expect(legacyGlobalAgentRoute(null, null, true)).toBeNull();
+  });
+});
+
+describe("GOAT Bot routes", () => {
+  const BOT = { environmentId: ENV, threadId: "bot" as ThreadId };
+
+  it("recognizes the bot thread and leaves it out of thread lists", () => {
+    const threads = [
+      { environmentId: ENV, id: "bot" },
+      { environmentId: ENV, id: "thread-1" },
+      { environmentId: ENV, id: "thread-2" },
+    ];
+    expect(isGoatBotThread({ environmentId: ENV, id: "bot" }, BOT)).toBe(true);
+    expect(isGoatBotThread({ environmentId: OTHER_ENV, id: "bot" }, BOT)).toBe(false);
+    expect(excludeGlobalAgentThreads(threads, REF, BOT).map((thread) => thread.id)).toEqual([
+      "thread-2",
+    ]);
+  });
+
+  it("is active on /bot and on the bot thread", () => {
+    expect(isGoatBotRoute("/bot", null, null)).toBe(true);
+    expect(isGoatBotRoute("/env-1/bot", serverTarget(ENV, "bot"), BOT)).toBe(true);
+    expect(isGoatBotRoute("/env-1/thread-1", serverTarget(ENV, "thread-1"), BOT)).toBe(false);
+    expect(isGoatBotRoute("/env-1/bot", serverTarget(ENV, "bot"), null)).toBe(false);
   });
 });
