@@ -307,6 +307,8 @@ function main(): void {
         "generic/platform=iOS Simulator",
         "-derivedDataPath",
         NodePath.join(output, "DerivedData"),
+        // The vendored GhosttyKit simulator slice is arm64 only.
+        "ARCHS=arm64",
         "CODE_SIGNING_ALLOWED=NO",
         "build",
       ],
