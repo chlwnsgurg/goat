@@ -481,6 +481,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     },
   } as const;
   const T3_MCP_ENVIRONMENT = {
+    NO_PROXY: "127.0.0.1",
     T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token",
   } as const;
 
@@ -514,6 +515,33 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     });
 
     assert.deepEqual(overrides, { allowedTools: ["Read"] });
+  });
+
+  it("keeps the goat endpoint off any configured proxy without dropping existing exemptions", () => {
+    const bypass = ClaudeAdapterV2.claudeMcpProxyBypassEnvironment;
+    const endpoint = "http://127.0.0.1:43123/mcp";
+
+    assert.deepEqual(bypass(endpoint, {}), { NO_PROXY: "127.0.0.1" });
+    assert.deepEqual(bypass(endpoint, { NO_PROXY: "corp.internal, .example.com" }), {
+      NO_PROXY: "corp.internal,.example.com,127.0.0.1",
+    });
+    assert.deepEqual(bypass(endpoint, { no_proxy: "corp.internal" }), {
+      NO_PROXY: "corp.internal,127.0.0.1",
+      no_proxy: "corp.internal,127.0.0.1",
+    });
+    assert.deepEqual(bypass(endpoint, { NO_PROXY: "localhost,127.0.0.1" }), {});
+    assert.deepEqual(bypass(endpoint, { NO_PROXY: "*" }), {});
+    assert.deepEqual(bypass("http://[::1]:43123/mcp", {}), { NO_PROXY: "::1" });
+
+    const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: mcpSessionFor(ThreadId.make("thread-claude-mcp-proxy-bypass")),
+      readOnlySandbox: false,
+      environment: { NO_PROXY: "corp.internal" },
+    });
+    assert.deepEqual(overrides.mcpEnvironment, {
+      NO_PROXY: "corp.internal,127.0.0.1",
+      T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token",
+    });
   });
 
   it("pre-approves all goat tools when attaching an MCP session without an allowlist", () => {
@@ -687,7 +715,10 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
           timeout: ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
         },
       },
-      mcpEnvironment: { T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token" },
+      mcpEnvironment: {
+        NO_PROXY: "127.0.0.1",
+        T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token",
+      },
     });
 
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({

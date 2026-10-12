@@ -1002,10 +1002,34 @@ export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 // and the CLI expands the `${VAR}` reference when it connects.
 const CLAUDE_T3_MCP_AUTHORIZATION_ENV = "T3_CODE_MCP_AUTHORIZATION";
 
+// Claude Code sends HTTP MCP traffic through any configured HTTPS_PROXY, including
+// one set in the user's Claude settings.json, and it does so even for loopback URLs.
+// Proxies cannot reach this server's local endpoint (an intercepting CONNECT proxy
+// answers 405), so the goat server would silently fail to attach. Exempting the
+// endpoint host keeps the user's proxy for everything else. A NO_PROXY set in
+// Claude's own settings env still wins over the process environment.
+export function claudeMcpProxyBypassEnvironment(
+  endpoint: string,
+  environment: NodeJS.ProcessEnv | undefined,
+): Readonly<Record<string, string>> {
+  const host = new URL(endpoint).hostname.replace(/^\[(.*)\]$/u, "$1");
+  const existing = environment?.NO_PROXY ?? environment?.no_proxy ?? "";
+  const entries = existing
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.includes("*") || entries.includes(host)) return {};
+  const value = [...entries, host].join(",");
+  return environment?.no_proxy === undefined
+    ? { NO_PROXY: value }
+    : { NO_PROXY: value, no_proxy: value };
+}
+
 export function claudeMcpQueryOverrides(input: {
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly readOnlySandbox: boolean;
   readonly allowedTools?: ReadonlyArray<string>;
+  readonly environment?: NodeJS.ProcessEnv;
 }): {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
@@ -1030,7 +1054,10 @@ export function claudeMcpQueryOverrides(input: {
         timeout: CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
       },
     },
-    mcpEnvironment: { [CLAUDE_T3_MCP_AUTHORIZATION_ENV]: session.authorizationHeader },
+    mcpEnvironment: {
+      ...claudeMcpProxyBypassEnvironment(session.endpoint, input.environment),
+      [CLAUDE_T3_MCP_AUTHORIZATION_ENV]: session.authorizationHeader,
+    },
   };
 }
 
@@ -7323,6 +7350,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             mcpSession: yield* mcpSessions.read(turnInput.threadId),
             readOnlySandbox:
               sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
+            environment: adapterOptions.environment,
             ...(queryPolicy.allowedTools === undefined
               ? {}
               : { allowedTools: queryPolicy.allowedTools }),
