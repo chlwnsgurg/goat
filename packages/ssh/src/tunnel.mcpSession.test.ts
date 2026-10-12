@@ -1,5 +1,5 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 // Execute the generated remote script without contacting SSH or a release server.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
@@ -34,7 +34,7 @@ describe("remote MCP session script", () => {
 
   beforeEach(() => {
     home = NodeFS.realpathSync(
-      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-mcp-session-")),
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-mcp-session-")),
     );
     const stateDirectory = NodePath.join(home, ".goat", "ssh-launch", stateKey);
     NodeFS.mkdirSync(stateDirectory, { recursive: true });
@@ -85,7 +85,7 @@ JSON
       [
         "--input-type=module",
         "-e",
-        `import * as t from ${JSON.stringify(url)}; process.stdout.write(t.buildRemoteT3RunnerScript({archiveVersion:${JSON.stringify(archiveVersion)}}));`,
+        `import * as t from ${JSON.stringify(url)}; process.stdout.write(t.buildRemoteGoatRunnerScript({archiveVersion:${JSON.stringify(archiveVersion)}}));`,
       ],
       { encoding: "utf8" },
     );

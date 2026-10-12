@@ -6,10 +6,10 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
-} from "@t3tools/contracts";
-import { isDevProxiedPath } from "@t3tools/shared/devProxy";
-import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
-import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+} from "@goat/contracts";
+import { isDevProxiedPath } from "@goat/shared/devProxy";
+import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@goat/shared/mcpApp";
+import { decodeOtlpTraceRecords } from "@goat/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -268,7 +268,7 @@ export const layerBrowserApiCors = Layer.unwrap(
     // Dev uses credentialed requests from Vite or the Electron custom origin, so both must be
     // explicit. Packaged desktop omits credentials and uses Effect's default wildcard origin.
     //
-    // T3CODE_DEV_ALLOWED_ORIGINS covers dev servers reached from a second
+    // GOAT_DEV_ALLOWED_ORIGINS covers dev servers reached from a second
     // origin — a tailnet name, a LAN IP, a phone. Browser dev normally proxies
     // through Vite and is same-origin (no preflight at all), so this is a
     // safety net for the desktop renderer and any direct-to-backend caller.
@@ -335,30 +335,29 @@ export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const descriptor = (endpointName: string) =>
+      Effect.fn("environment.metadata.descriptor")(function* () {
+        yield* annotateEnvironmentRequest(endpointName);
+        return yield* serverEnvironment.getDescriptor;
+      }, traceRelayRequest);
+    const sshActivity = Effect.fn("environment.metadata.sshActivity")(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const remoteAddress = Option.getOrUndefined(request.remoteAddress);
+      if (remoteAddress !== undefined && !isLoopbackHostname(remoteAddress)) {
+        return yield* new EnvironmentHttpForbiddenError({
+          message: "SSH activity requires a loopback peer.",
+        });
+      }
+      const activity = yield* projections
+        .getServerActivity()
+        .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+      return { activity, serverVersion: packageJson.version, pid: process.pid };
+    });
     return handlers
-      .handle(
-        "descriptor",
-        Effect.fn("environment.metadata.descriptor")(function* (args) {
-          yield* annotateEnvironmentRequest(args.endpoint.name);
-          return yield* serverEnvironment.getDescriptor;
-        }, traceRelayRequest),
-      )
-      .handle(
-        "sshActivity",
-        Effect.fn("environment.metadata.sshActivity")(function* () {
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          const remoteAddress = Option.getOrUndefined(request.remoteAddress);
-          if (remoteAddress !== undefined && !isLoopbackHostname(remoteAddress)) {
-            return yield* new EnvironmentHttpForbiddenError({
-              message: "SSH activity requires a loopback peer.",
-            });
-          }
-          const activity = yield* projections
-            .getServerActivity()
-            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
-          return { activity, serverVersion: packageJson.version, pid: process.pid };
-        }),
-      );
+      .handle("descriptor", descriptor("descriptor"))
+      .handle("goatDescriptor", descriptor("goatDescriptor"))
+      .handle("sshActivity", sshActivity)
+      .handle("goatSshActivity", sshActivity);
   }),
 ).pipe(Layer.provide(ProjectionStore.layer));
 

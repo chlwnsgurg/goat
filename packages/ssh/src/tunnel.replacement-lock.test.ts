@@ -4,9 +4,9 @@ import * as NodeOS from "node:os";
 import * as NodeChildProcess from "node:child_process";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -401,7 +401,7 @@ case "$3" in */replacement.lock)
         yield* f.fs.writeFileString(`${directory}/.install-complete`, newer);
         yield* f.fs.writeFileString(
           `${f.state}/run-t3.sh`,
-          SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: newer }),
+          SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion: newer }),
         );
         yield* Effect.sync(() => process.kill(f.pid, "SIGTERM"));
         const child = yield* f.realSpawner.spawn(

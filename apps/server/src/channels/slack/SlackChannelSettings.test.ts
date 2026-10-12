@@ -6,7 +6,7 @@ import {
   ProjectId,
   SlackChannelConnectionId,
   type SlackChannelSettingsError,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -144,7 +144,7 @@ const withServer = <A, E>(
 
 const tempBaseDir = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix: "t3-slack-settings-test-" });
+  return yield* fs.makeTempDirectoryScoped({ prefix: "goat-slack-settings-test-" });
 }).pipe(Effect.provide(NodeServices.layer));
 
 const reason = (error: SlackChannelSettingsError) => error.reason;

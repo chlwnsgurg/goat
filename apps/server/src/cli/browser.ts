@@ -10,7 +10,7 @@
  * Both need root. Without it, the command prints what it would change and the
  * `sudo` line to run. It is safe to run again; it skips what is already done.
  */
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,6 +23,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as PreviewBrowserHost from "../preview/PreviewBrowserHost.ts";
 import { resolveBaseDir } from "../os-jank.ts";
+import { resolveGoatHome } from "@goat/shared/goatHome";
 import { baseDirFlag } from "./config.ts";
 import { resolveRootCliCommand } from "./invocation.ts";
 
@@ -54,13 +55,13 @@ const runStep = Effect.fn("browserSetup.runStep")(function* (
 
 /**
  * The GOAT home to check. Under `sudo` the process home is root's, so an
- * unspecified home falls back to the invoking user's `~/.t3`.
+ * unspecified home falls back to the invoking user's home.
  */
 export const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (
   explicit: Option.Option<string>,
 ) {
   const env = yield* HostProcess.Environment;
-  const raw = Option.getOrUndefined(explicit) ?? env.T3CODE_HOME;
+  const raw = Option.getOrUndefined(explicit) ?? env.GOAT_HOME;
   if (raw !== undefined || env.SUDO_USER === undefined) return yield* resolveBaseDir(raw);
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const entry = yield* spawner
@@ -69,8 +70,7 @@ export const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (
     )
     .pipe(Effect.orElseSucceed(() => ""));
   const home = entry.trim().split(":")[5];
-  const path = yield* Path.Path;
-  return home ? path.join(home, ".t3") : yield* resolveBaseDir(undefined);
+  return home ? yield* resolveGoatHome(home, "userdata") : yield* resolveBaseDir(undefined);
 });
 
 /** Whether apt has an installable candidate for `name`. */

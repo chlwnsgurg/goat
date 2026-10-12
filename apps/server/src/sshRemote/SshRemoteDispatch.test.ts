@@ -11,7 +11,7 @@ import {
   type ChatFileAttachment,
   type ChatImageAttachment,
   type DesktopSshEnvironmentTarget,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
@@ -30,15 +30,15 @@ import * as TestClock from "effect/testing/TestClock";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
-import * as SshConfig from "@t3tools/ssh/config";
-import { SshCommandError } from "@t3tools/ssh/errors";
-import * as SshTunnel from "@t3tools/ssh/tunnel";
+import * as SshConfig from "@goat/ssh/config";
+import { SshCommandError } from "@goat/ssh/errors";
+import * as SshTunnel from "@goat/ssh/tunnel";
 
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpClient } from "effect/http";
-import { buildRemoteT3RunnerScript } from "@t3tools/ssh/tunnel";
+import { buildRemoteGoatRunnerScript } from "@goat/ssh/tunnel";
 
 import * as ServerConfig from "../config.ts";
 import { hostFailure } from "../mcp/hostFailure.ts";
@@ -374,11 +374,11 @@ describe("SSH dispatch release mirror", () => {
         Effect.provideService(
           ConfigProvider.ConfigProvider,
           ConfigProvider.fromEnvRecord({
-            T3CODE_RELEASE_BASE_URL: "  https://mirror.example/goat/  ",
+            GOAT_RELEASE_BASE_URL: "  https://mirror.example/goat/  ",
           }),
         ),
       );
-      const script = buildRemoteT3RunnerScript(runner);
+      const script = buildRemoteGoatRunnerScript(runner);
       expect(script).toContain("T3_RELEASE_BASE_URL='https://mirror.example/goat'");
       expect(script).not.toContain("github.com/goat-si/goat-releases/releases/download");
       expect(runner.archiveDirectory).toBe("/fixture/home/runtime/archives");
@@ -394,13 +394,13 @@ describe("SSH dispatch release mirror", () => {
           Effect.provideService(
             ConfigProvider.ConfigProvider,
             ConfigProvider.fromEnvRecord(
-              { T3CODE_RELEASE_BASE_URL: value },
+              { GOAT_RELEASE_BASE_URL: value },
               { preserveEmptyStrings: true },
             ),
           ),
         );
         expect("releaseBaseUrl" in runner).toBe(false);
-        expect(buildRemoteT3RunnerScript(runner)).toContain(
+        expect(buildRemoteGoatRunnerScript(runner)).toContain(
           "T3_RELEASE_BASE_URL='https://github.com/goat-si/goat-releases/releases/download'",
         );
         // The library's blank-mirror behavior test separately proves gh acquisition,
@@ -416,9 +416,9 @@ describe("SSH dispatch packaged runtime", () => {
         Effect.provideService(
           ConfigProvider.ConfigProvider,
           ConfigProvider.fromEnvRecord({
-            T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR:
+            GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR:
               "  /Applications/GOAT.app/Contents/Resources/ssh-runtime/archives  ",
-            T3CODE_SSH_RUNTIME_ARCHIVE_DIR: "/fixture/user-cache",
+            GOAT_SSH_RUNTIME_ARCHIVE_DIR: "/fixture/user-cache",
           }),
         ),
       );
@@ -436,7 +436,7 @@ describe("SSH dispatch packaged runtime", () => {
           ConfigProvider.ConfigProvider,
           ConfigProvider.fromEnvRecord(
             {
-              T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: value,
+              GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: value,
             },
             { preserveEmptyStrings: true },
           ),

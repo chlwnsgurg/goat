@@ -1,7 +1,9 @@
-export const BUILT_IN_THEME_IDS = ["t3-chat", "grove", "ocean", "ember", "iris"] as const;
+import { LEGACY_THEME_ID_ALIASES } from "@goat/contracts/legacyT3Names";
+
+export const BUILT_IN_THEME_IDS = ["goat-chat", "grove", "ocean", "ember", "iris"] as const;
 
 /** The standard GOAT palette, kept separate from the optional built-in theme library. */
-export const MOBILE_DEFAULT_THEME_ID = "t3-code";
+export const MOBILE_DEFAULT_THEME_ID = "goat-code";
 
 /**
  * Every palette the mobile app can render. Declared here so host-side tooling
@@ -21,11 +23,11 @@ export const RESERVED_THEME_IDS: ReadonlySet<string> = new Set([
   "light",
   "dark",
   ...BUILT_IN_THEME_IDS,
-  "t3-chat-dark",
-  "t3-grove",
-  "t3-ocean",
-  "t3-ember",
-  "t3-iris",
+  ...Object.keys(LEGACY_THEME_ID_ALIASES),
+  "goat-chat-light",
+  "goat-chat-dark",
+  "goat-code-light",
+  "goat-code-dark",
 ]);
 
 /**
@@ -38,6 +40,18 @@ export const UNPUBLISHABLE_THEME_IDS: ReadonlySet<string> = new Set([
   ...RESERVED_THEME_IDS,
   MOBILE_DEFAULT_THEME_ID,
 ]);
+
+/** Translate saved ids while retaining the appearance hint. */
+export function normalizeThemePreference(themeId: string): string {
+  return Object.hasOwn(LEGACY_THEME_ID_ALIASES, themeId)
+    ? LEGACY_THEME_ID_ALIASES[themeId]!
+    : themeId;
+}
+
+/** Resolve a saved appearance variant to its palette id. */
+export function normalizeThemeId(themeId: string): string {
+  return normalizeThemePreference(themeId).replace(/^(goat-(?:chat|code))-(?:light|dark)$/, "$1");
+}
 
 export type BuiltInThemeId = (typeof BUILT_IN_THEME_IDS)[number];
 export type MobileThemeId = (typeof MOBILE_THEME_IDS)[number];
@@ -134,7 +148,7 @@ export type ThemeDefinition = Readonly<{
  * Search uses amber across built-ins to separate matches from accent-tinted
  * inline code. The current match uses a stronger gold with dark text.
  */
-export const T3_CODE_LIGHT_THEME_COLORS: ThemeColors = {
+export const GOAT_LIGHT_THEME_COLORS: ThemeColors = {
   searchMatchBackground: "#ffde8b",
   searchMatchForeground: "#21180a",
   searchMatchActiveBackground: "#eea52b",
@@ -198,7 +212,7 @@ export const T3_CODE_LIGHT_THEME_COLORS: ThemeColors = {
   terminalScrollbarHover: "#bdbdbd",
 };
 
-export const T3_CODE_DARK_THEME_COLORS: ThemeColors = {
+export const GOAT_DARK_THEME_COLORS: ThemeColors = {
   searchMatchBackground: "#8c6c1f",
   searchMatchForeground: "#f5f5f5",
   searchMatchActiveBackground: "#eea52b",
@@ -262,8 +276,8 @@ export const T3_CODE_DARK_THEME_COLORS: ThemeColors = {
   terminalScrollbarHover: "#363636",
 };
 
-export const T3_CHAT_THEME: ThemeDefinition = {
-  id: "t3-chat",
+export const GOAT_CHAT_THEME: ThemeDefinition = {
+  id: "goat-chat",
   label: "T3 Chat",
   appearance: "light",
   colors: {
@@ -938,7 +952,7 @@ export const IRIS_THEME: ThemeDefinition = {
 };
 
 export const BUILT_IN_THEMES: ReadonlyArray<ThemeDefinition> = [
-  T3_CHAT_THEME,
+  GOAT_CHAT_THEME,
   GROVE_THEME,
   OCEAN_THEME,
   EMBER_THEME,

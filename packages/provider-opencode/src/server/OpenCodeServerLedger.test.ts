@@ -3,7 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -83,7 +83,7 @@ describe.each(observedPlatforms)("OpenCodeServerLedger observing as %s", (platfo
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-ledger-" });
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-ledger-" });
       const orphan = yield* spawnGroup(SERVE_ARGS);
       yield* recordFromDeadServer(stateDir, orphan);
       expect(yield* fs.readDirectory(path.join(stateDir, "opencode-servers"))).toHaveLength(1);
@@ -101,7 +101,7 @@ describe.each(observedPlatforms)("OpenCodeServerLedger observing as %s", (platfo
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-ledger-" });
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-ledger-" });
       // The wrapper starts the serve process in its group and exits.
       const wrapper = yield* spawnGroup(
         SERVE_ARGS,
@@ -125,7 +125,7 @@ describe.each(observedPlatforms)("OpenCodeServerLedger observing as %s", (platfo
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-ledger-" });
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-ledger-" });
       const unrelated = yield* spawnGroup(SERVE_ARGS);
       yield* recordFromDeadServer(stateDir, unrelated);
       const entryPath = path.join(stateDir, "opencode-servers", `${unrelated.pid}.json`);
@@ -145,7 +145,7 @@ describe.each(observedPlatforms)("OpenCodeServerLedger observing as %s", (platfo
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-ledger-" });
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-ledger-" });
       const unrelated = yield* spawnGroup(SERVE_ARGS);
       yield* recordFromDeadServer(stateDir, unrelated);
       const entryPath = path.join(stateDir, "opencode-servers", `${unrelated.pid}.json`);
@@ -165,7 +165,7 @@ describe.each(observedPlatforms)("OpenCodeServerLedger observing as %s", (platfo
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-ledger-" });
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-ledger-" });
       const running = yield* OpenCodeServerLedger.make({ stateDir });
       const server = yield* spawnGroup(SERVE_ARGS);
       const forget = yield* running.track({ pid: server.pid, port: 4096, args: SERVE_ARGS });
@@ -185,7 +185,7 @@ describe.skipIf(observedPlatforms.length === 0)("OpenCode server startup", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-startup-" });
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-startup-" });
       // A wrapper that leaves the serve process running in its group and exits 0,
       // which the spawner's own cleanup does not stop.
       const binaryPath = path.join(tempDir, "opencode");

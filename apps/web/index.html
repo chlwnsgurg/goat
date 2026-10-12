@@ -12,12 +12,27 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <script>
       (() => {
+        // Runs before module imports; mirrors storageMigration.ts.
+        const readStorage = (key) => {
+          const current = window.localStorage.getItem(key);
+          if (current !== null) return current === "__goat_storage_removed_v1__" ? null : current;
+          const legacy = `t3code:${key.slice(5)}`; // goat-rename: legacy
+          const value = window.localStorage.getItem(legacy);
+          if (value !== null) {
+            try {
+              window.localStorage.setItem(key, value);
+            } catch {
+              /* Read-only storage. */
+            }
+          }
+          return value;
+        };
         const LIGHT_BACKGROUND = "#ffffff";
         const DARK_BACKGROUND = "#0a0a0a";
-        const CUSTOM_THEMES_STORAGE_KEY = "t3code:themes:v1";
-        const THEME_FOLLOW_SYSTEM_STORAGE_KEY = "t3code:theme-follow-system";
-        const THEME_APPEARANCE_MODE_STORAGE_KEY = "t3code:theme-appearance-mode";
-        const THEME_HALVES_STORAGE_KEY = "t3code:theme-halves:v1";
+        const CUSTOM_THEMES_STORAGE_KEY = "goat:themes:v1";
+        const THEME_FOLLOW_SYSTEM_STORAGE_KEY = "goat:theme-follow-system";
+        const THEME_APPEARANCE_MODE_STORAGE_KEY = "goat:theme-appearance-mode";
+        const THEME_HALVES_STORAGE_KEY = "goat:theme-halves:v1";
         const SPLASH_COLORS = {
           light: {
             background: "#ffffff",
@@ -51,7 +66,7 @@
         // Keep this small boot-time copy in sync with the built-in palettes so
         // the selected theme is visible before the app has mounted.
         const BUILT_IN_THEME_PALETTES = {
-          "t3-chat": {
+          "goat-chat": {
             light: {
               background: "oklch(0.982446 0.010114 325.653)",
               foreground: "oklch(0.325698 0.116116 325.037)",
@@ -134,16 +149,27 @@
           "system",
           "light",
           "dark",
-          "t3-chat",
+          "goat-chat",
           "grove",
           "ocean",
           "ember",
           "iris",
+          "goat-chat-light",
+          "goat-chat-dark",
+          "goat-code-light",
+          "goat-code-dark",
+          // goat-rename: legacy-begin
+          "t3-chat",
+          "t3-chat-light",
           "t3-chat-dark",
-          "t3-grove",
-          "t3-ocean",
-          "t3-ember",
-          "t3-iris",
+          "t3-code",
+          "t3-code-light",
+          "t3-code-dark",
+          // goat-rename: legacy-end
+          "t3-grove", // goat-rename: legacy
+          "t3-ocean", // goat-rename: legacy
+          "t3-ember", // goat-rename: legacy
+          "t3-iris", // goat-rename: legacy
         ];
         // Update every theme-color meta so any element another layer added
         // carries the resolved color too.
@@ -204,9 +230,7 @@
         const findCustomTheme = (themeId) => {
           if (RESERVED_THEME_IDS.includes(themeId)) return null;
           try {
-            const parsed = JSON.parse(
-              window.localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY) ?? "null",
-            );
+            const parsed = JSON.parse(readStorage(CUSTOM_THEMES_STORAGE_KEY) ?? "null");
             if (!Array.isArray(parsed)) return null;
             return (
               parsed.find((value) => isStoredCustomTheme(value) && value.id === themeId) ?? null
@@ -217,22 +241,35 @@
         };
 
         try {
-          const storedTheme = window.localStorage.getItem("t3code:theme");
+          const storedTheme = readStorage("goat:theme");
           const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
           // Older builds stored the dark T3 Chat palette as its own theme id
           // and every maintainer theme under a t3- prefix; keep those
           // preferences readable. Mirrors the runtime's legacy alias table.
+          // Inline because this runs before module imports; mirrors shared theme normalization.
+          // goat-rename: legacy-begin
           const LEGACY_THEME_IDS = {
-            "t3-chat-dark": "t3-chat",
+            "t3-chat": "goat-chat",
+            "t3-chat-light": "goat-chat-light",
+            "t3-chat-dark": "goat-chat-dark",
             "t3-grove": "grove",
             "t3-ocean": "ocean",
             "t3-ember": "ember",
             "t3-iris": "iris",
           };
-          const isLegacyT3ChatDark = storedTheme === "t3-chat-dark";
-          const themeId =
-            storedTheme === null ? "" : (LEGACY_THEME_IDS[storedTheme] ?? storedTheme);
-          const legacyMode = isLegacyT3ChatDark ? "dark" : null;
+          // goat-rename: legacy-end
+          const normalizeThemePreference = (id) =>
+            Object.hasOwn(LEGACY_THEME_IDS, id) ? LEGACY_THEME_IDS[id] : id;
+          const normalizeThemeId = (id) =>
+            normalizeThemePreference(id).replace(/^(goat-(?:chat|code))-(?:light|dark)$/, "$1");
+          const normalizedTheme = storedTheme === null ? "" : normalizeThemePreference(storedTheme);
+          const themeId = normalizeThemeId(normalizedTheme);
+          const legacyMode =
+            normalizedTheme === "goat-chat-dark"
+              ? "dark"
+              : normalizedTheme === "goat-chat-light"
+                ? "light"
+                : null;
           const builtInModes = BUILT_IN_THEME_MODES[themeId] ?? null;
           const customTheme = builtInModes ? null : findCustomTheme(themeId);
           const themeModes =
@@ -252,10 +289,8 @@
           const isThemed = isKnownTheme && themeModes !== null;
           const baseAppearance = customTheme ? customTheme.appearance : "light";
           const systemMode = prefersDark ? "dark" : "light";
-          const storedAppearanceMode = window.localStorage.getItem(
-            THEME_APPEARANCE_MODE_STORAGE_KEY,
-          );
-          const storedFollowSystem = window.localStorage.getItem(THEME_FOLLOW_SYSTEM_STORAGE_KEY);
+          const storedAppearanceMode = readStorage(THEME_APPEARANCE_MODE_STORAGE_KEY);
+          const storedFollowSystem = readStorage(THEME_FOLLOW_SYSTEM_STORAGE_KEY);
           // Mirrors the runtime's getThemePreferenceMode fallback: a bare
           // "light"/"dark" preference names its own mode.
           const preferenceMode =
@@ -276,12 +311,10 @@
           let halfThemeId = null;
           let halfCustomTheme = null;
           try {
-            const halvesRaw = JSON.parse(
-              window.localStorage.getItem(THEME_HALVES_STORAGE_KEY) ?? "null",
-            );
+            const halvesRaw = JSON.parse(readStorage(THEME_HALVES_STORAGE_KEY) ?? "null");
             const candidate = isRecord(halvesRaw) ? halvesRaw[wantedMode] : null;
             if (typeof candidate === "string") {
-              const halfId = LEGACY_THEME_IDS[candidate] ?? candidate;
+              const halfId = normalizeThemeId(candidate);
               const halfBuiltIn = BUILT_IN_THEME_MODES[halfId] ?? null;
               const halfCustom = halfBuiltIn ? null : findCustomTheme(halfId);
               const halfModes =

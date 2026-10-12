@@ -11,7 +11,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { DEVELOPMENT_ICON_OVERRIDES } from "../../../scripts/lib/brand-assets.ts";
 import { findEsmImportsOfExternalPackages } from "../../../scripts/lib/cli-executable-imports.ts";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { resolveSpawnCommand } from "@goat/shared/shell";
 import {
   ServerCliBuildAssetMissingError,
   ServerCliCommandExitError,
@@ -132,13 +132,13 @@ const buildExeCmd = Command.make(
           cwd: serverDir,
           env: {
             ...process.env,
-            T3CODE_PACK_EXE: "1",
+            GOAT_PACK_EXE: "1",
             ...Option.match(config.target, {
               onNone: () => ({}),
               onSome: (target) =>
                 target.trim() === "host"
-                  ? { T3CODE_PACK_EXE_TARGET: "" }
-                  : { T3CODE_PACK_EXE_TARGET: target },
+                  ? { GOAT_PACK_EXE_TARGET: "" }
+                  : { GOAT_PACK_EXE_TARGET: target },
             }),
           },
           stdout: config.verbose ? "inherit" : "ignore",
@@ -171,7 +171,7 @@ const buildExeCmd = Command.make(
 
 /**
  * Publishes the tarballs scripts/build-npm-platform-packages.ts produced:
- * every `@t3code/t3-<platform>.tgz` first, `t3.tgz` (the launcher) last, so
+ * every `@goat/cli-<platform>.tgz` first, `t3.tgz` (the launcher) last, so
  * the launcher is never installable before the executables it depends on.
  * Tarballs rather than directories because `npm publish <dir>` strips the
  * `node_modules/` the executable loads its native addons from.
@@ -195,17 +195,17 @@ const publishCmd = Command.make(
       // npm runs with cwd set to the packages dir below, so tarball paths are
       // resolved once here rather than joined twice.
       const packagesDir = path.resolve(config.packagesDir);
-      const scopeDir = path.join(packagesDir, "@t3code");
-      const launcherTarball = path.join(packagesDir, "t3.tgz");
+      const scopeDir = path.join(packagesDir, "@goat");
+      const launcherTarball = path.join(packagesDir, "goat.tgz");
       const platformTarballs = (yield* fs
         .readDirectory(scopeDir)
         .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => [])))
-        .filter((entry) => entry.startsWith("t3-") && entry.endsWith(".tgz"))
+        .filter((entry) => entry.startsWith("cli-") && entry.endsWith(".tgz"))
         .sort()
         .map((entry) => path.join(scopeDir, entry));
       if (platformTarballs.length === 0) {
         return yield* new ServerCliBuildAssetMissingError({
-          assetPath: path.join(scopeDir, "t3-<platform>.tgz"),
+          assetPath: path.join(scopeDir, "cli-<platform>.tgz"),
         });
       }
       if (!(yield* fs.exists(launcherTarball))) {
@@ -234,7 +234,7 @@ const publishCmd = Command.make(
     }),
 ).pipe(
   Command.withDescription(
-    "Publish the @t3code/t3-<platform> tarballs and then the t3 launcher to npm.",
+    "Publish the @goat/cli-<platform> tarballs and then the t3 launcher to npm.",
   ),
 );
 

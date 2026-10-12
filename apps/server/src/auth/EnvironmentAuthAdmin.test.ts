@@ -1,4 +1,4 @@
-import { AuthAdministrativeScopes } from "@t3tools/contracts";
+import { AuthAdministrativeScopes } from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -26,7 +26,7 @@ const layerServerConfig = (
   ).pipe(
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), {
-        prefix: "t3-auth-control-plane-test-",
+        prefix: "goat-auth-control-plane-test-",
       }),
     ),
   );

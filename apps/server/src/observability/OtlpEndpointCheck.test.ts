@@ -1,8 +1,8 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
-import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
+import * as OtelEnvironment from "@goat/shared/otelEnvironment";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
@@ -56,7 +56,7 @@ const checkWith = (
       const config = yield* ServerConfig.ServerConfig;
       return ServerConfig.make({ ...config, ...overrides });
     }),
-  ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-otlp-check-" })));
+  ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-otlp-check-" })));
   const layer = OtlpEndpointCheck.layer.pipe(
     Layer.provide(httpClientLayer ?? Layer.succeed(HttpClient.HttpClient, httpClient)),
     Layer.provide(configLayer),

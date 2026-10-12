@@ -10,8 +10,8 @@ import {
   ServerSettings,
   ServerSettingsPatch,
   UsageLimitSourceId,
-} from "@t3tools/contracts";
-import { createModelSelection } from "@t3tools/shared/model";
+} from "@goat/contracts";
+import { createModelSelection } from "@goat/shared/model";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -30,9 +30,25 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import { sourceControlHostSecretName } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as ServerConfig from "./config.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
-import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { writeFileStringAtomically } from "@goat/shared/atomicWrite";
 import * as ServerSettingsModule from "./serverSettings.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
+
+// goat-rename: legacy-begin
+it.effect("translates a persisted environment theme on load", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const config = yield* ServerConfig.ServerConfig;
+    yield* fs.writeFileString(
+      config.settingsPath,
+      JSON.stringify({ defaultTheme: "t3-chat-dark" }),
+    );
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    yield* service.start;
+    assert.strictEqual((yield* service.getSettings).defaultTheme, "goat-chat-dark");
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+// goat-rename: legacy-end
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
@@ -45,7 +61,7 @@ const layerServerSettings = () =>
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3code-server-settings-test-",
+          prefix: "goat-server-settings-test-",
         }),
       ),
     ),
@@ -59,7 +75,7 @@ const layerServerSettingsWithSecrets = () =>
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3code-server-settings-test-",
+          prefix: "goat-server-settings-test-",
         }),
       ),
     ),
@@ -223,7 +239,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const service = yield* ServerSettingsModule.ServerSettingsService;
-      const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "t3-settings-dotfiles-" });
+      const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-dotfiles-" });
       const linkedSettingsPath = path.join(dotfiles, "settings.json");
       yield* fs.writeFileString(linkedSettingsPath, `{ "responseStreamingMode": "turn" }`);
       yield* fs.remove(config.settingsPath, { force: true });
@@ -246,7 +262,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const service = yield* ServerSettingsModule.ServerSettingsService;
-        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "t3-settings-dotfiles-" });
+        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-dotfiles-" });
         const linkedSettingsPath = path.join(dotfiles, "settings.json");
         yield* fs.writeFileString(linkedSettingsPath, `{ "responseStreamingMode": "turn" }`);
         yield* fs.remove(config.settingsPath, { force: true });
@@ -272,7 +288,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const service = yield* ServerSettingsModule.ServerSettingsService;
-        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "t3-settings-dotfiles-" });
+        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-dotfiles-" });
         const firstSettingsPath = path.join(dotfiles, "first", "settings.json");
         const secondSettingsPath = path.join(dotfiles, "second", "settings.json");
         yield* fs.makeDirectory(path.dirname(firstSettingsPath), { recursive: true });
@@ -307,7 +323,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const service = yield* ServerSettingsModule.ServerSettingsService;
-        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "t3-settings-dotfiles-" });
+        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-dotfiles-" });
         const linkedSettingsPath = path.join(dotfiles, "not-yet", "settings.json");
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(linkedSettingsPath, config.settingsPath);
@@ -339,7 +355,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     });
     const layerConfig = Layer.fresh(
       ServerConfig.layerTest(process.cwd(), {
-        prefix: "t3code-server-settings-secret-failure-test-",
+        prefix: "goat-server-settings-secret-failure-test-",
       }),
     );
     const layerSettings = ServerSettingsModule.layer.pipe(
@@ -1309,7 +1325,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       Layer.provideMerge(
         Layer.fresh(
           ServerConfig.layerTest(process.cwd(), {
-            prefix: "t3code-inline-secret-failure-test-",
+            prefix: "goat-inline-secret-failure-test-",
           }),
         ),
       ),
@@ -1809,7 +1825,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       Layer.provideMerge(
         Layer.fresh(
           ServerConfig.layerTest(process.cwd(), {
-            prefix: "t3code-server-settings-legacy-failure-test-",
+            prefix: "goat-server-settings-legacy-failure-test-",
           }),
         ),
       ),
@@ -2064,7 +2080,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         Layer.provideMerge(
           Layer.fresh(
             ServerConfig.layerTest(process.cwd(), {
-              prefix: "t3code-server-settings-materialization-failure-test-",
+              prefix: "goat-server-settings-materialization-failure-test-",
             }),
           ),
         ),

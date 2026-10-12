@@ -2,8 +2,8 @@ import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
-} from "@t3tools/client-runtime/platform";
-import { ConnectionTransientError } from "@t3tools/client-runtime/connection";
+} from "@goat/client-runtime/platform";
+import { ConnectionTransientError } from "@goat/client-runtime/connection";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -13,8 +13,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as MobileSecureStorage from "../persistence/mobile-secure-storage";
 import { migrateLegacyConnectionCatalog } from "./migration";
 
-export const CONNECTION_CATALOG_KEY = "t3code.connection-catalog.v1";
-export const LEGACY_CONNECTIONS_KEY = "t3code.connections";
+export const CONNECTION_CATALOG_KEY = "goat.connection-catalog.v1";
+export const LEGACY_CONNECTIONS_KEY = "goat.connections";
 
 function catalogError(operation: string, cause: unknown) {
   return new ConnectionTransientError({
@@ -75,7 +75,6 @@ export const make = Effect.fn("mobile.connectionStorage.makeCatalogStore")(funct
     if (legacyRaw !== null && legacyRaw.trim() !== "") {
       const encoded = yield* encodeCatalog(catalog);
       yield* setItem(CONNECTION_CATALOG_KEY, encoded);
-      yield* deleteItem(LEGACY_CONNECTIONS_KEY);
     }
     return catalog;
   });

@@ -12,7 +12,7 @@ import {
   type AuthSessionState,
   type ExecutionEnvironmentDescriptor,
   type EnvironmentAuthInvalidError,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import type * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -81,7 +81,9 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
                 return yield* scenario.descriptor?.() ?? unexpectedEndpoint("metadata.descriptor");
               }),
             )
-            .handle("sshActivity", () => unexpectedEndpoint("metadata.sshActivity")),
+            .handle("goatDescriptor", () => unexpectedEndpoint("metadata.goatDescriptor"))
+            .handle("sshActivity", () => unexpectedEndpoint("metadata.sshActivity"))
+            .handle("goatSshActivity", () => unexpectedEndpoint("metadata.goatSshActivity")),
         ),
         HttpApiBuilder.group(EnvironmentHttpApi, "auth", (handlers) =>
           handlers

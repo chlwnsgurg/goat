@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import { afterEach, assert, describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,7 +23,7 @@ describe("ResourceMonitorBinary", () => {
       });
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
       const binaryPath = `${baseDir}/t3-resource-monitor.exe`;
       yield* fileSystem.writeFileString(binaryPath, "binary");
@@ -33,7 +33,7 @@ describe("ResourceMonitorBinary", () => {
         Effect.provideService(HostProcess.Platform, "win32"),
         Effect.provideService(HostProcess.Architecture, "arm64"),
         Effect.provideService(HostProcess.Environment, {
-          T3CODE_RESOURCE_MONITOR_PATH: binaryPath,
+          GOAT_RESOURCE_MONITOR_PATH: binaryPath,
         }),
       );
 
@@ -46,7 +46,7 @@ describe("ResourceMonitorBinary", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
       const binaryPath = `${baseDir}/t3-resource-monitor`;
       yield* fileSystem.writeFileString(binaryPath, "binary");
@@ -58,7 +58,7 @@ describe("ResourceMonitorBinary", () => {
         Effect.provideService(HostProcess.Architecture, "x64"),
         Effect.provideService(ResourceMonitorBinary.ResourceMonitorHostLinuxLibc, "musl"),
         Effect.provideService(HostProcess.Environment, {
-          T3CODE_RESOURCE_MONITOR_PATH: binaryPath,
+          GOAT_RESOURCE_MONITOR_PATH: binaryPath,
         }),
       );
 
@@ -70,7 +70,7 @@ describe("ResourceMonitorBinary", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
       const binaryPath = `${baseDir}/custom-resource-monitor`;
       yield* fileSystem.writeFileString(binaryPath, "binary");
@@ -81,7 +81,7 @@ describe("ResourceMonitorBinary", () => {
         Effect.provideService(HostProcess.Platform, "freebsd"),
         Effect.provideService(HostProcess.Architecture, "ia32"),
         Effect.provideService(HostProcess.Environment, {
-          T3CODE_RESOURCE_MONITOR_PATH: binaryPath,
+          GOAT_RESOURCE_MONITOR_PATH: binaryPath,
         }),
       );
 
@@ -93,7 +93,7 @@ describe("ResourceMonitorBinary", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
       const binaryPath = `${baseDir}/t3-resource-monitor`;
       yield* fileSystem.writeFileString(binaryPath, "binary");
@@ -105,7 +105,7 @@ describe("ResourceMonitorBinary", () => {
         Effect.provideService(HostProcess.Architecture, "x64"),
         Effect.provideService(ResourceMonitorBinary.ResourceMonitorHostLinuxLibc, "gnu"),
         Effect.provideService(HostProcess.Environment, {
-          T3CODE_RESOURCE_MONITOR_PATH: binaryPath,
+          GOAT_RESOURCE_MONITOR_PATH: binaryPath,
         }),
       );
       const error = yield* Effect.flip(service.resolve);
@@ -119,7 +119,7 @@ describe("ResourceMonitorBinary", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
 
       const service = yield* ResourceMonitorBinary.make().pipe(
@@ -127,7 +127,7 @@ describe("ResourceMonitorBinary", () => {
         Effect.provideService(HostProcess.Platform, "win32"),
         Effect.provideService(HostProcess.Architecture, "arm64"),
         Effect.provideService(HostProcess.Environment, {
-          T3CODE_RESOURCE_MONITOR_PATH: baseDir,
+          GOAT_RESOURCE_MONITOR_PATH: baseDir,
         }),
       );
       const error = yield* Effect.flip(service.resolve);
@@ -141,7 +141,7 @@ describe("ResourceMonitorBinary", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
       const service = yield* ResourceMonitorBinary.make().pipe(
         Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -159,7 +159,7 @@ describe("ResourceMonitorBinary", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-resource-monitor-binary-",
+        prefix: "goat-resource-monitor-binary-",
       });
       const service = yield* ResourceMonitorBinary.make().pipe(
         Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),

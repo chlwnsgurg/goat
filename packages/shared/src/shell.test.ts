@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -49,7 +49,7 @@ describe("readPathFromLoginShell", () => {
         args: ReadonlyArray<string>,
         options: { encoding: "utf8"; timeout: number },
       ) => string
-    >(() => "__T3CODE_ENV_PATH_START__\n/a:/b\n__T3CODE_ENV_PATH_END__\n");
+    >(() => "__GOAT_ENV_PATH_START__\n/a:/b\n__GOAT_ENV_PATH_END__\n");
 
     expect(readPathFromLoginShell("/opt/homebrew/bin/fish", execFile)).toBe("/a:/b");
     expect(execFile).toHaveBeenCalledTimes(1);
@@ -67,8 +67,8 @@ describe("readPathFromLoginShell", () => {
     expect(args).toHaveLength(2);
     expect(args?.[0]).toBe("-ilc");
     expect(args?.[1]).toContain("printenv PATH || true");
-    expect(args?.[1]).toContain("__T3CODE_ENV_PATH_START__");
-    expect(args?.[1]).toContain("__T3CODE_ENV_PATH_END__");
+    expect(args?.[1]).toContain("__GOAT_ENV_PATH_START__");
+    expect(args?.[1]).toContain("__GOAT_ENV_PATH_END__");
     expect(options).toEqual({ encoding: "utf8", timeout: 5000 });
   });
 });
@@ -115,12 +115,12 @@ describe("readEnvironmentFromLoginShell", () => {
       ) => string
     >(() =>
       [
-        "__T3CODE_ENV_PATH_START__",
+        "__GOAT_ENV_PATH_START__",
         "/a:/b",
-        "__T3CODE_ENV_PATH_END__",
-        "__T3CODE_ENV_SSH_AUTH_SOCK_START__",
+        "__GOAT_ENV_PATH_END__",
+        "__GOAT_ENV_SSH_AUTH_SOCK_START__",
         "/tmp/secretive.sock",
-        "__T3CODE_ENV_SSH_AUTH_SOCK_END__",
+        "__GOAT_ENV_SSH_AUTH_SOCK_END__",
       ].join("\n"),
     );
 
@@ -140,11 +140,11 @@ describe("readEnvironmentFromLoginShell", () => {
       ) => string
     >(() =>
       [
-        "__T3CODE_ENV_PATH_START__",
+        "__GOAT_ENV_PATH_START__",
         "/a:/b",
-        "__T3CODE_ENV_PATH_END__",
-        "__T3CODE_ENV_SSH_AUTH_SOCK_START__",
-        "__T3CODE_ENV_SSH_AUTH_SOCK_END__",
+        "__GOAT_ENV_PATH_END__",
+        "__GOAT_ENV_SSH_AUTH_SOCK_START__",
+        "__GOAT_ENV_SSH_AUTH_SOCK_END__",
       ].join("\n"),
     );
 
@@ -161,7 +161,7 @@ describe("readEnvironmentFromLoginShell", () => {
         options: { encoding: "utf8"; timeout: number },
       ) => string
     >(() =>
-      ["__T3CODE_ENV_CUSTOM_VAR_START__", "  padded value  ", "__T3CODE_ENV_CUSTOM_VAR_END__"].join(
+      ["__GOAT_ENV_CUSTOM_VAR_START__", "  padded value  ", "__GOAT_ENV_CUSTOM_VAR_END__"].join(
         "\n",
       ),
     );
@@ -209,7 +209,7 @@ describe("readEnvironmentFromWindowsShell", () => {
       ) => string
     >(
       () =>
-        "__T3CODE_ENV_PATH_START__\nC:\\Users\\testuser\\AppData\\Roaming\\npm\n__T3CODE_ENV_PATH_END__\n",
+        "__GOAT_ENV_PATH_START__\nC:\\Users\\testuser\\AppData\\Roaming\\npm\n__GOAT_ENV_PATH_END__\n",
     );
 
     expect(readEnvironmentFromWindowsShell(["PATH"], execFile)).toEqual({
@@ -231,7 +231,7 @@ describe("readEnvironmentFromWindowsShell", () => {
       ) => string
     >(
       () =>
-        "__T3CODE_ENV_FNM_DIR_START__\r\nC:\\Users\\testuser\\AppData\\Roaming\\fnm\r\n__T3CODE_ENV_FNM_DIR_END__\r\n",
+        "__GOAT_ENV_FNM_DIR_START__\r\nC:\\Users\\testuser\\AppData\\Roaming\\fnm\r\n__GOAT_ENV_FNM_DIR_END__\r\n",
     );
 
     expect(readEnvironmentFromWindowsShell(["FNM_DIR"], execFile)).toEqual({
@@ -246,7 +246,7 @@ describe("readEnvironmentFromWindowsShell", () => {
         args: ReadonlyArray<string>,
         options: { encoding: "utf8"; timeout: number },
       ) => string
-    >(() => "__T3CODE_ENV_PATH_START__\nC:\\Tools\n__T3CODE_ENV_PATH_END__\n");
+    >(() => "__GOAT_ENV_PATH_START__\nC:\\Tools\n__GOAT_ENV_PATH_END__\n");
 
     expect(readEnvironmentFromWindowsShell(["PATH"], { loadProfile: true }, execFile)).toEqual({
       PATH: "C:\\Tools",
@@ -270,7 +270,7 @@ describe("readEnvironmentFromWindowsShell", () => {
       if (file === "pwsh.exe") {
         throw new Error("spawn pwsh.exe ENOENT");
       }
-      return "__T3CODE_ENV_PATH_START__\nC:\\Tools\n__T3CODE_ENV_PATH_END__\n";
+      return "__GOAT_ENV_PATH_START__\nC:\\Tools\n__GOAT_ENV_PATH_END__\n";
     });
 
     expect(readEnvironmentFromWindowsShell(["PATH"], execFile)).toEqual({
@@ -419,7 +419,7 @@ effectIt.layer(NodeServices.layer)("resolveCommandPath", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-case-sensitive-path-" });
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-case-sensitive-path-" });
         const executable = path.join(cwd, "audit-command.cmd");
         yield* fs.writeFileString(executable, "@echo off\n");
 
@@ -444,7 +444,7 @@ effectIt.layer(NodeServices.layer)("resolveCommandPath", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-path-cache-" });
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "goat-path-cache-" });
       const executable = path.join(cwd, "appeared.CMD");
       const options = { env: { PATH: `${cwd};${cwd}`, PATHEXT: ".CMD" } };
 

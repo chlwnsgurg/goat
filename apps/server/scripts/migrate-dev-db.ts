@@ -34,7 +34,9 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
-import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
+import { resolveWorktreeHome } from "@goat/shared/devHome";
+import { GOAT_HOME_DIR_NAME } from "@goat/shared/goatHome";
+import { LEGACY_HOME_DIR_NAME } from "@goat/contracts/legacyT3Names";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -47,7 +49,7 @@ import { Command, Flag } from "effect/cli";
 
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import { migrationManifest, runMigrations } from "../src/persistence/Migrations.ts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 
 export class MigrateDevDbNotInWorktreeError extends Schema.TaggedError<MigrateDevDbNotInWorktreeError>()(
   "MigrateDevDbNotInWorktreeError",
@@ -510,7 +512,8 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
 
   const homeDirectory = NodeOS.homedir();
   const sourceHomes = (
-    options.sourceHomes ?? [path.join(homeDirectory, ".goat"), path.join(homeDirectory, ".t3")]
+    options.sourceHomes ??
+    [GOAT_HOME_DIR_NAME, LEGACY_HOME_DIR_NAME].map((name) => path.join(homeDirectory, name))
   ).map((home) => path.resolve(home));
   const protectedHomes = [
     ...sourceHomes,
@@ -530,7 +533,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   const baseDir =
     input.baseDir !== undefined
       ? path.resolve(input.baseDir)
-      : yield* resolveWorktreeT3Home(process.cwd());
+      : yield* resolveWorktreeHome(process.cwd());
   if (baseDir === undefined) {
     return yield* new MigrateDevDbNotInWorktreeError();
   }

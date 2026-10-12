@@ -1,6 +1,7 @@
-import type { ProviderInteractionMode } from "@t3tools/contracts";
+import { LEGACY_THREAD_LINK_PROTOCOL } from "@goat/contracts/legacyT3Names";
+import type { ProviderInteractionMode } from "@goat/contracts";
 
-export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
+export const GOAT_ORCHESTRATION_INSTRUCTIONS = `
 
 ## GOAT orchestration
 
@@ -11,7 +12,7 @@ The \`goat\` MCP server provides app-owned orchestration. Treat these concepts d
 - For every GOAT delegated review round, call \`delegate_task\` again. Include the original brief, prior findings, responses, and unresolved objections in each new task prompt. Track each round by its own \`taskId\`. Use a distinct \`clientRequestId\` per round, stable across retries of that round. Do not use \`goat_thread_send\` on \`childThreadId\` to continue a delegated review.
 - \`schedule_task\` creates persistent recurring work in the app scheduler. Pass \`schedule\` as a structured object, never as JSON text: \`{"type":"interval","everyMs":3600000}\` for an interval, or \`{"type":"fixed_time","timeOfDay":"09:00","weekdays":[1,2,3,4,5]}\` for a wall-clock schedule, or \`{"type":"webhook"}\` to run on each request to the returned \`webhookUrl\` (the run sees the request only through \`{{body.path}}\`-style placeholders in the prompt). By default runs return to the current thread, which suits orchestrating: each trigger arrives here and you delegate or dedupe; set \`bindToCurrentThread=false\` only when the user wants a fresh thread for every run. After scheduling a timer, report the returned cadence and next run time; for a webhook, report its \`webhookUrl\`, or, when it is missing, pass on \`webhookUrlUnavailableReason\`, which says why and what the user should do. Never share the bare hook path instead.
 - When you need a secret from the user (a token, API key, or webhook signing secret), call \`request_secret\` so they enter it privately, then pass the returned \`secretRef\` to the tool that needs it, e.g. \`signature.secretRef\` on a webhook task for a sender that signs requests such as GitHub. A \`secretRef\` works once. Never ask for a secret in chat, never invent one, and never repeat one.
-- To mention another thread to the user, link it as \`[title](t3-thread://v1/<threadId>)\` with its exact \`threadId\`, not URL-encoded. GOAT opens the thread in the app and shows its current title.
+- To mention another thread to the user, link it as \`[title](${LEGACY_THREAD_LINK_PROTOCOL}://v1/<threadId>)\` with its exact \`threadId\`, not URL-encoded. GOAT opens the thread in the app and shows its current title.
 
 Questions from threads you launched here or on hosts arrive as notifications: read with \`goat_pending_request_read\`, decide with \`goat_pending_request_respond\` (\`host\` for remote threads, \`reason\` required), or forward to the user; approvals and \`humanRequired\` questions are human-only.
 Forward to the user any decision your own user has not authorized, such as pushing, deploying, sending outside, or starting new work beyond the request.
@@ -36,14 +37,14 @@ To work on ANOTHER machine, use the SSH tools instead of running ssh in a termin
 
 Tool names may include a harness-normalized MCP prefix, such as \`mcp__goat__delegate_task\`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show GOAT tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known GOAT tool name on the next tool step. In Codex code mode, for example, call \`tools.mcp__goat__orchestrator_capabilities({})\` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable \`clientRequestId\` values when retrying tools that accept them.
 
-ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the GOAT tools are absent and \`T3_ACP_MCP_NODE\` is present, call the same tools through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" \${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`T3_ACP_MCP_ENTRYPOINT\` is unset when GOAT runs as a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. This is the supported GOAT transport fallback, not an ordinary shell-based substitute for delegation.
+ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the GOAT tools are absent and \`GOAT_ACP_MCP_NODE\` is present, call the same tools through the terminal: \`ELECTRON_RUN_AS_NODE=1 "$GOAT_ACP_MCP_NODE" \${GOAT_ACP_MCP_ENTRYPOINT:+"$GOAT_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'\` (\`GOAT_ACP_MCP_ENTRYPOINT\` is unset when GOAT runs as a standalone executable). Delegate with \`acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'\`. This is the supported GOAT transport fallback, not an ordinary shell-based substitute for delegation.
 
 ### Showing visuals
 
 When a chart, table, diagram, image collage, or mockup would say more than prose, build a self-contained HTML page, check it with \`html_preview\`, then publish it with \`html_render\` before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.
 `;
 
-export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
+export const GOAT_BROWSER_TOOL_INSTRUCTIONS = `
 
 ## GOAT collaborative browser
 
@@ -59,42 +60,42 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 - preview calls on an open tab have failed twice on the same step (timeouts, \`chrome-error://\` pages, a different client answering). Quote the raw error and switch without asking the user which browser to use.
 `;
 
-const T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS = `## GOAT interaction mode: Default
+const GOAT_ACP_DEFAULT_MODE_INSTRUCTIONS = `## GOAT interaction mode: Default
 
 Prefer making reasonable assumptions and carrying out the user's request. Ask a concise question only when a missing user decision would materially change the result. Treat this mode as active until GOAT supplies a different interaction-mode instruction.`;
 
-const T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS = `## GOAT interaction mode: Plan
+const GOAT_ACP_PLAN_MODE_INSTRUCTIONS = `## GOAT interaction mode: Plan
 
 Investigate with read-only actions and do not edit files or otherwise execute the implementation. Resolve discoverable facts before asking questions. When the requirements are decision complete, return a concrete implementation plan and do not start implementing it. Treat this mode as active until GOAT supplies a different interaction-mode instruction.`;
 
-export interface T3AcpInstructionState {
+export interface GoatAcpInstructionState {
   readonly interactionMode: ProviderInteractionMode;
-  readonly hasT3Mcp: boolean;
+  readonly hasGoatMcp: boolean;
 }
 
 /**
  * ACP has no system/developer prompt field, so send T3-owned context in the
  * first user prompt and whenever the available tools or interaction mode change.
  */
-export function t3AcpPromptWithInstructions(input: {
+export function goatAcpPromptWithInstructions(input: {
   readonly prompt: string;
-  readonly state: T3AcpInstructionState;
-  readonly previousState?: T3AcpInstructionState;
+  readonly state: GoatAcpInstructionState;
+  readonly previousState?: GoatAcpInstructionState;
 }): string {
   // Native slash commands must remain at the start of the prompt.
   if (input.prompt.trimStart().startsWith("/")) return input.prompt;
   if (
     input.previousState?.interactionMode === input.state.interactionMode &&
-    input.previousState.hasT3Mcp === input.state.hasT3Mcp
+    input.previousState.hasGoatMcp === input.state.hasGoatMcp
   ) {
     return input.prompt;
   }
   const instructions = [
     input.state.interactionMode === "plan"
-      ? T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS
-      : T3_CODE_ACP_DEFAULT_MODE_INSTRUCTIONS,
-    ...(input.state.hasT3Mcp
-      ? [T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(), T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()]
+      ? GOAT_ACP_PLAN_MODE_INSTRUCTIONS
+      : GOAT_ACP_DEFAULT_MODE_INSTRUCTIONS,
+    ...(input.state.hasGoatMcp
+      ? [GOAT_BROWSER_TOOL_INSTRUCTIONS.trim(), GOAT_ORCHESTRATION_INSTRUCTIONS.trim()]
       : []),
   ];
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
@@ -105,20 +106,20 @@ export function t3AcpPromptWithInstructions(input: {
  * context in the first prompt. Keep the wrapper explicit so it cannot be
  * mistaken for text authored by the user.
  */
-function prependT3OrchestrationInstructions(prompt: string): string {
-  return `<t3_code_orchestration_instructions>${T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
+function prependGoatOrchestrationInstructions(prompt: string): string {
+  return `<t3_code_orchestration_instructions>${GOAT_ORCHESTRATION_INSTRUCTIONS.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
 }
 
-export function t3OrchestrationPromptForFirstRun(input: {
+export function goatOrchestrationPromptForFirstRun(input: {
   readonly prompt: string;
   readonly runOrdinal: number;
-  readonly hasT3Mcp: boolean;
+  readonly hasGoatMcp: boolean;
 }): string {
-  return input.runOrdinal === 1 && input.hasT3Mcp
-    ? prependT3OrchestrationInstructions(input.prompt)
+  return input.runOrdinal === 1 && input.hasGoatMcp
+    ? prependGoatOrchestrationInstructions(input.prompt)
     : input.prompt;
 }
 
-export function t3OrchestrationSystemPrompt(hasT3Mcp: boolean): string | undefined {
-  return hasT3Mcp ? T3_CODE_ORCHESTRATION_INSTRUCTIONS : undefined;
+export function goatOrchestrationSystemPrompt(hasGoatMcp: boolean): string | undefined {
+  return hasGoatMcp ? GOAT_ORCHESTRATION_INSTRUCTIONS : undefined;
 }

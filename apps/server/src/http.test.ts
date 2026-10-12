@@ -1,3 +1,10 @@
+import {
+  LEGACY_ACTIVITY_PATH,
+  GOAT_ACTIVITY_PATH,
+  LEGACY_ENVIRONMENT_PATH,
+  GOAT_ENVIRONMENT_PATH,
+  GOAT_ORCHESTRATION_PROTOCOL_HEADER,
+} from "@goat/contracts/legacyT3Names";
 import * as Option from "effect/Option";
 import { expect, it } from "@effect/vitest";
 import { describe, vi } from "vite-plus/test";
@@ -22,8 +29,8 @@ import {
   injectMcpAppCookieBootstrap,
   injectMcpAppThemeBootstrap,
   MCP_APP_MAX_HTML_BYTES,
-} from "@t3tools/shared/mcpApp";
-import { ORCHESTRATION_PROTOCOL_HEADER } from "@t3tools/contracts";
+} from "@goat/shared/mcpApp";
+import { ORCHESTRATION_PROTOCOL_HEADER } from "@goat/contracts";
 
 import * as ServerConfig from "./config.ts";
 
@@ -44,7 +51,7 @@ describe("MCP app asset responses", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mcp-theme-" });
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-mcp-theme-" });
         const file = path.join(directory, "app.html");
         const html = injectMcpAppCsp(
           "<html><head><script>vendor()</script></head><body>☃</body></html>",
@@ -92,7 +99,7 @@ describe("MCP app asset responses", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mcp-theme-size-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-mcp-theme-size-" });
       const file = path.join(directory, "app.html");
       yield* fs.writeFileString(file, "x".repeat(MCP_APP_MAX_HTML_BYTES + 128 * 1024 + 1));
       const response = yield* assetFileResponse({ path: file, renderIntent: "mcp-app" });
@@ -163,6 +170,7 @@ describe("browser API CORS", () => {
             "access-control-request-method": "GET",
             "access-control-request-headers": [
               ORCHESTRATION_PROTOCOL_HEADER,
+              GOAT_ORCHESTRATION_PROTOCOL_HEADER,
               "authorization",
               "dpop",
             ].join(", "),
@@ -178,6 +186,7 @@ describe("browser API CORS", () => {
           .map((header) => header.trim().toLowerCase()),
       );
       expect(allowedHeaders.has(ORCHESTRATION_PROTOCOL_HEADER)).toBe(true);
+      expect(allowedHeaders.has(GOAT_ORCHESTRATION_PROTOCOL_HEADER)).toBe(true);
       expect(allowedHeaders.has("authorization")).toBe(true);
       expect(allowedHeaders.has("dpop")).toBe(true);
     } finally {
@@ -211,7 +220,7 @@ const makeStaticRequest = Effect.fn("HttpTest.makeStaticRequest")(function* (sta
 });
 
 it.layer(
-  ServerConfig.layerTest(process.cwd(), { prefix: "t3-static-http-test-" }).pipe(
+  ServerConfig.layerTest(process.cwd(), { prefix: "goat-static-http-test-" }).pipe(
     Layer.provideMerge(NodeServices.layer),
   ),
 )("static HTTP responses", (it) => {
@@ -219,7 +228,7 @@ it.layer(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-cache-" });
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-cache-" });
       const assetPath = path.join(staticDir, "app.js");
       yield* fs.writeFileString(assetPath, 'export const build = "first";');
       const request = yield* makeStaticRequest(staticDir);
@@ -262,7 +271,7 @@ it.layer(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-html-" });
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-html-" });
       const indexPath = path.join(staticDir, "index.html");
       const modifiedAt = DateTime.toDateUtc(DateTime.makeUnsafe("1985-10-26T08:15:00.000Z"));
       yield* fs.writeFileString(indexPath, "<html>old build</html>");
@@ -301,7 +310,7 @@ it.layer(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-close-" });
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-static-close-" });
       const filePath = path.join(staticDir, "app.txt");
       const body = "file content\n".repeat(1024);
       yield* fs.writeFileString(filePath, body);
@@ -387,7 +396,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-current-stat-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-guarded-current-stat-" });
       const filePath = path.join(directory, "clip.mp4");
       for (const [contents, range, method, expected, status, contentRange] of [
         ["1234", undefined, "GET", "1234", 200, null],
@@ -430,7 +439,9 @@ describe("video asset byte ranges", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-offset-limit-" });
+        const directory = yield* fs.makeTempDirectoryScoped({
+          prefix: "goat-guarded-offset-limit-",
+        });
         const filePath = path.join(directory, "clip.mp4");
         yield* fs.writeFileString(filePath, "0123456789");
         const canonicalPath = yield* fs.realPath(filePath);
@@ -473,7 +484,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-range-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-guarded-range-" });
       const filePath = path.join(directory, "clip.mp4");
       yield* fs.writeFileString(filePath, "0123456789");
       const canonicalPath = yield* fs.realPath(filePath);
@@ -513,7 +524,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-attachment-media-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-attachment-media-" });
       const filePath = path.join(directory, "audio.wav");
       yield* fs.writeFileString(filePath, "RIFF");
       const canonicalPath = yield* fs.realPath(filePath);
@@ -531,7 +542,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-guarded-cleanup-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-guarded-cleanup-" });
       const filePath = path.join(directory, "clip.mp4");
       const bytes = new Uint8Array(1024 * 1024).fill(42);
       yield* fs.writeFile(filePath, bytes);
@@ -578,7 +589,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-video-range-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-video-range-" });
       const file = path.join(directory, "clip.mp4");
       yield* fs.writeFileString(file, "0123456789");
       const asset = { path: file, mimeType: "video/mp4" };
@@ -633,7 +644,7 @@ describe("video asset byte ranges", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-audio-range-" });
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-audio-range-" });
         const file = path.join(directory, "recording.wav");
         yield* fs.writeFileString(file, "0123456789");
         const asset = { path: file, mimeType: "audio/wav" };
@@ -661,7 +672,7 @@ describe("video asset byte ranges", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-video-range-" });
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "goat-video-range-" });
       const file = path.join(directory, "clip.mp4");
       yield* fs.writeFileString(file, "0123456789");
       for (const header of ["bytes=10-", "bytes=-0", "bytes=999999999999999999999999-"]) {
@@ -843,9 +854,16 @@ describe("SSH activity HTTP", () => {
       const Etag = await import("effect/http/Etag");
       const HttpApi = await import("effect/http-api/HttpApi");
       const HttpApiBuilder = await import("effect/http-api/HttpApiBuilder");
-      const { EnvironmentHttpApi, EnvironmentId } = await import("@t3tools/contracts");
+      const { EnvironmentHttpApi, EnvironmentId } = await import("@goat/contracts");
       const ServerEnvironment = await import("./environment/ServerEnvironment.ts");
       const Sqlite = await import("./persistence/Sqlite.ts");
+      const descriptor = {
+        environmentId: EnvironmentId.make("test"),
+        label: "Test",
+        platform: { os: "linux" as const, arch: "x64" as const },
+        serverVersion: "1.0.0",
+        capabilities: { repositoryIdentity: false },
+      };
       const layerApp = HttpApiBuilder.layer(
         HttpApi.make("environment").add(EnvironmentHttpApi.groups.metadata),
       ).pipe(
@@ -853,7 +871,7 @@ describe("SSH activity HTTP", () => {
         Layer.provide(
           Layer.succeed(ServerEnvironment.ServerEnvironment, {
             getEnvironmentId: Effect.succeed(EnvironmentId.make("test")),
-            getDescriptor: Effect.die("Activity must not load descriptor"),
+            getDescriptor: Effect.succeed(descriptor),
           }),
         ),
         Layer.provide(Sqlite.layerMemory),
@@ -876,24 +894,28 @@ describe("SSH activity HTTP", () => {
           }),
       });
       try {
-        const response = await handler(
-          new Request("http://127.0.0.1/.well-known/t3/activity"),
-          Context.empty(),
-        );
-        expect(response.status).toBe(status);
-        if (status === 403) {
-          expect(await response.json()).toEqual({
-            _tag: "EnvironmentHttpForbiddenError",
-            message: "SSH activity requires a loopback peer.",
-          });
-          return;
+        for (const route of [LEGACY_ENVIRONMENT_PATH, GOAT_ENVIRONMENT_PATH]) {
+          const response = await handler(new Request(`http://127.0.0.1${route}`), Context.empty());
+          expect(response.status).toBe(200);
+          expect(await response.json()).toEqual(descriptor);
         }
-        expect(await response.json()).toEqual({
-          activity: "idle",
-          serverVersion: (await import("../package.json", { with: { type: "json" } })).default
-            .version,
-          pid: process.pid,
-        });
+        for (const route of [LEGACY_ACTIVITY_PATH, GOAT_ACTIVITY_PATH]) {
+          const response = await handler(new Request(`http://127.0.0.1${route}`), Context.empty());
+          expect(response.status).toBe(status);
+          if (status === 403) {
+            expect(await response.json()).toEqual({
+              _tag: "EnvironmentHttpForbiddenError",
+              message: "SSH activity requires a loopback peer.",
+            });
+            continue;
+          }
+          expect(await response.json()).toEqual({
+            activity: "idle",
+            serverVersion: (await import("../package.json", { with: { type: "json" } })).default
+              .version,
+            pid: process.pid,
+          });
+        }
       } finally {
         await dispose();
       }
@@ -907,7 +929,7 @@ it.effect("serves SSH activity to a real IPv4-mapped loopback peer", () =>
     const HttpApiBuilder = yield* Effect.promise(() => import("effect/http-api/HttpApiBuilder"));
     const { HttpServer, HttpServerRequest } = yield* Effect.promise(() => import("effect/http"));
     const { EnvironmentHttpApi, EnvironmentId } = yield* Effect.promise(
-      () => import("@t3tools/contracts"),
+      () => import("@goat/contracts"),
     );
     const ServerEnvironment = yield* Effect.promise(
       () => import("./environment/ServerEnvironment.ts"),
@@ -946,9 +968,9 @@ it.effect("serves SSH activity to a real IPv4-mapped loopback peer", () =>
     origin.hostname = "127.0.0.1";
     const client = HttpClient.mapRequest(
       Context.get(services, HttpClient.HttpClient),
-      HttpClientRequest.setUrl(new URL("/.well-known/t3/activity", origin)),
+      HttpClientRequest.setUrl(new URL("/.well-known/t3/activity", origin)), // goat-rename: legacy
     );
-    const response = yield* client.get("/.well-known/t3/activity");
+    const response = yield* client.get("/.well-known/t3/activity"); // goat-rename: legacy
     expect(response.status).toBe(200);
     expect(yield* response.json).toMatchObject({
       activity: "idle",

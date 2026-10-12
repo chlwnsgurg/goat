@@ -10,6 +10,8 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
+import { adoptLegacyEnv, withLegacyEnvNames } from "@goat/contracts/legacyT3Names";
+
 import type {
   PendingServiceUpdate,
   ServiceLauncherChildMessage,
@@ -50,7 +52,7 @@ interface ManagedChild {
 // built-ins only.
 const runtimePaths = (baseDir: string, version: string) => {
   const versionDir = NodePath.join(baseDir, "runtime", "goat", "versions", version);
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+  // oxlint-disable-next-line goat/no-global-process-runtime -- Standalone launcher has no Effect runtime.
   const executableName = process.platform === "win32" ? "goat.exe" : "goat";
   return {
     versionDir,
@@ -501,7 +503,10 @@ export class Launcher {
     };
     const spawnArguments = runtimeSpawnArguments(paths);
     const child = NodeChildProcess.spawn(spawnArguments.command, spawnArguments.args, {
-      env: { ...process.env, [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) },
+      env: {
+        ...process.env,
+        ...withLegacyEnvNames({ [SERVICE_LAUNCHER_CONTEXT_ENV]: JSON.stringify(context) }),
+      },
       stdio: ["inherit", "inherit", "inherit", "ipc"],
     });
     await new Promise<void>((resolve, reject) => {
@@ -715,9 +720,12 @@ export class Launcher {
 }
 
 export async function main(): Promise<void> {
-  const baseDir = process.env.T3CODE_HOME?.trim();
+  // Units installed before the GOAT rename set only legacy names, and the retained server
+  // versions this launcher starts may be older builds that read only those: carry both.
+  Object.assign(process.env, withLegacyEnvNames(adoptLegacyEnv(process.env)));
+  const baseDir = process.env.GOAT_HOME?.trim();
   if (baseDir === undefined || baseDir === "") {
-    throw new Error("T3CODE_HOME is required by the GOAT service launcher.");
+    throw new Error("GOAT_HOME is required by the GOAT service launcher.");
   }
   const statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
   const state = await readServiceState(statePath);

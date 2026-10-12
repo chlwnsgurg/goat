@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as NetService from "@t3tools/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -13,10 +13,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as NodeNet from "node:net";
 
 import { REMOTE_RUNTIME_STATE_KEY } from "./command.ts";
-import { buildRemoteStopScript, buildRemoteT3RunnerScript } from "./tunnel.ts";
+import { buildRemoteStopScript, buildRemoteGoatRunnerScript } from "./tunnel.ts";
 
 // An absolute default also works in the runner fixture's deliberately minimal PATH.
-const remoteShell = process.env.T3_SSH_TEST_SHELL ?? "/bin/sh";
+const remoteShell = process.env.GOAT_SSH_TEST_SHELL ?? "/bin/sh";
 
 const Started = Schema.Struct({
   pid: Schema.Number,
@@ -33,7 +33,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-runner-" });
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "goat-runner-" });
         const bin = path.join(fixture, "bin");
         const cliPath = path.join(fixture, "installed cli.mjs");
         yield* fs.makeDirectory(bin);
@@ -49,7 +49,7 @@ const server = net.createServer((socket) => {
 process.on("SIGTERM", () => server.close(() => {
   process.stdout.write("graceful shutdown\\n");
 }));
-server.listen(Number(process.env.T3_TEST_PORT ?? 0), "127.0.0.1", () => {
+server.listen(Number(process.env.GOAT_TEST_PORT ?? 0), "127.0.0.1", () => {
   process.stdout.write(JSON.stringify({
     pid: process.pid,
     port: server.address().port,
@@ -67,11 +67,13 @@ server.listen(Number(process.env.T3_TEST_PORT ?? 0), "127.0.0.1", () => {
                 cwd: fixture,
                 env: {
                   PATH: bin,
-                  T3_TEST_PORT: String(port),
+                  GOAT_TEST_PORT: String(port),
                 },
                 detached: false,
                 stdin: Stream.make(
-                  new TextEncoder().encode(buildRemoteT3RunnerScript({ nodeScriptPath: cliPath })),
+                  new TextEncoder().encode(
+                    buildRemoteGoatRunnerScript({ nodeScriptPath: cliPath }),
+                  ),
                 ),
               }),
             );
@@ -144,7 +146,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-          const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-stop-" });
+          const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "goat-stop-" });
           const home = path.join(fixture, "home");
           const baseDir = path.join(home, ".goat");
           const stateDir = path.join(baseDir, "ssh-launch", REMOTE_RUNTIME_STATE_KEY);
@@ -168,8 +170,8 @@ import * as net from "node:net";
 const server = net.createServer((socket) => socket.end());
 let signals = 0;
 process.on("SIGTERM", () => {
-  fs.writeFileSync(process.env.T3_TEST_SIGNAL_PATH, String(++signals));
-  if (process.env.T3_TEST_STOP_MODE !== "timeout" || signals > 1) server.close();
+  fs.writeFileSync(process.env.GOAT_TEST_SIGNAL_PATH, String(++signals));
+  if (process.env.GOAT_TEST_STOP_MODE !== "timeout" || signals > 1) server.close();
 });
 server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0.1", () => {
   process.stdout.write(JSON.stringify({ pid: process.pid, port: server.address().port, args: process.argv.slice(2) }) + "\\n");
@@ -181,8 +183,8 @@ server.listen(Number(process.argv[process.argv.indexOf("--port") + 1]), "127.0.0
               cwd: fixture,
               env: {
                 HOME: home,
-                T3_TEST_STOP_MODE: mode,
-                T3_TEST_SIGNAL_PATH: signalPath,
+                GOAT_TEST_STOP_MODE: mode,
+                GOAT_TEST_SIGNAL_PATH: signalPath,
               },
               detached: false,
             }),

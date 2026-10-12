@@ -1,9 +1,9 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert, describe, it, beforeEach, afterEach, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NetService from "@goat/shared/Net";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
@@ -106,15 +106,15 @@ describe("ssh tunnel scripts", () => {
           assert.equal(first.runner, ordinary);
         }
         assert.throws(
-          () => SshTunnel.buildRemoteT3UploadInstallerScript(inputs.node, "a".repeat(64)),
+          () => SshTunnel.buildRemoteGoatUploadInstallerScript(inputs.node, "a".repeat(64)),
           SshLaunchError,
         );
         assert.throws(
-          () => SshTunnel.buildRemoteT3UploadInstallerScript({}, "a".repeat(64)),
+          () => SshTunnel.buildRemoteGoatUploadInstallerScript({}, "a".repeat(64)),
           SshLaunchError,
         );
         assert.throws(
-          () => SshTunnel.buildRemoteT3UploadInstallerScript(ARCHIVE, "no"),
+          () => SshTunnel.buildRemoteGoatUploadInstallerScript(ARCHIVE, "no"),
           SshLaunchError,
         );
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -156,13 +156,13 @@ describe("ssh tunnel scripts", () => {
   );
 
   it("embeds the runner in the launch script byte for byte", () => {
-    const runner = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
+    const runner = SshTunnel.buildRemoteGoatRunnerScript(ARCHIVE);
     assert.include(runner, 'printf \'%s\\n\' "$$" > "$T3_LOCK_CANDIDATE/pid"');
     assert.include(SshTunnel.buildRemoteLaunchScript(ARCHIVE), runner);
   });
 
   it("installs and runs the release archive without Node, npm, or npx", () => {
-    const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
+    const script = SshTunnel.buildRemoteGoatRunnerScript(ARCHIVE);
 
     assert.include(script, "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
     assert.include(script, "T3_NODE_SCRIPT_PATH=''");
@@ -235,14 +235,14 @@ describe("ssh tunnel scripts", () => {
       "v1.2.3",
     ]) {
       assert.throws(
-        () => SshTunnel.buildRemoteT3RunnerScript({ archiveVersion }),
+        () => SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion }),
         SshTunnel.SshInvalidArchiveVersionError,
         undefined,
         archiveVersion,
       );
     }
     assert.include(
-      SshTunnel.buildRemoteT3RunnerScript(ARCHIVE),
+      SshTunnel.buildRemoteGoatRunnerScript(ARCHIVE),
       "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
     );
   });
@@ -250,7 +250,7 @@ describe("ssh tunnel scripts", () => {
   it("refuses to build a runner with neither an archive version nor a node script", () => {
     for (const input of [undefined, {}, { archiveVersion: "  " }, { nodeScriptPath: null }]) {
       assert.throws(
-        () => SshTunnel.buildRemoteT3RunnerScript(input),
+        () => SshTunnel.buildRemoteGoatRunnerScript(input),
         SshTunnel.SshMissingRunnerError,
       );
     }
@@ -258,14 +258,14 @@ describe("ssh tunnel scripts", () => {
   });
 
   it("does not hard-code a remote node engine range", () => {
-    const script = SshTunnel.buildRemoteT3RunnerScript(NODE_SCRIPT);
+    const script = SshTunnel.buildRemoteGoatRunnerScript(NODE_SCRIPT);
 
     assert.include(script, "T3_NODE_ENGINE_RANGE=''");
     assert.notInclude(script, TEST_NODE_ENGINE_RANGE);
   });
 
   it("builds the remote t3 runner with a node script override", () => {
-    const script = SshTunnel.buildRemoteT3RunnerScript({
+    const script = SshTunnel.buildRemoteGoatRunnerScript({
       ...NODE_SCRIPT,
       nodeEngineRange: TEST_NODE_ENGINE_RANGE,
     });
@@ -988,7 +988,7 @@ describe("runtime preparation", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-retained-preparation-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-retained-preparation-" });
       const stateKey = REMOTE_RUNTIME_STATE_KEY;
       const state = `${root}/.goat/ssh-launch/${stateKey}`;
       const retainedVersion = mode === "invalid" ? "01.2.3" : "1.2.2-preview.20260910.1";
@@ -1143,7 +1143,7 @@ else exit 2; fi
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-preparation-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-managed-preparation-" });
       const runtime = `${root}/.goat/runtime/goat/versions/${ARCHIVE.archiveVersion}`;
       const state = `${root}/.goat/ssh-launch/${REMOTE_RUNTIME_STATE_KEY}`;
       yield* fs.makeDirectory(runtime, { recursive: true });
@@ -1325,7 +1325,7 @@ else {
             const installer = yield* realSpawner.spawn(
               ChildProcess.make(
                 remoteShell,
-                ["-c", SshTunnel.buildRemoteT3RunnerScript(runner), "--", "--version"],
+                ["-c", SshTunnel.buildRemoteGoatRunnerScript(runner), "--", "--version"],
                 { env: { HOME: root } },
               ),
             );
@@ -1681,7 +1681,7 @@ describe("archive runner script", () => {
   it.effect.skipIf(windowsHost)("fails on an uploaded archive checksum mismatch", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-upload-bad-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-upload-bad-" });
       yield* makeMirror(root);
       const platform = hostPlatform === "darwin" ? "darwin" : "linux";
       const arch = hostArch === "arm64" ? "arm64" : "x64";
@@ -1709,7 +1709,7 @@ describe("archive runner script", () => {
   it.effect.skipIf(windowsHost)("installs once when two uploads race", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-upload-race-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-upload-race-" });
       yield* makeMirror(root);
       const platform = hostPlatform === "darwin" ? "darwin" : "linux";
       const arch = hostArch === "arm64" ? "arm64" : "x64";
@@ -1742,12 +1742,12 @@ describe("archive runner script", () => {
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-archive-runner-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-archive-runner-" });
         const releaseBaseUrl = yield* makeMirror(root);
         const runner = `${root}/run-t3.sh`;
         yield* fs.writeFileString(
           runner,
-          SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+          SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl }),
         );
         const home = `${root}/home`;
         yield* fs.makeDirectory(home, { recursive: true });
@@ -1825,7 +1825,7 @@ describe("archive runner script", () => {
             '#!/bin/sh\necho x >> "$(dirname "$0")/sleep-calls"\n',
             { mode: 0o700 },
           );
-          const script = SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl });
+          const script = SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl });
           assert.include(script, 'if [ "$T3_LOCK_WAITED" -ge 360 ]; then');
           yield* fs.writeFileString(runner, script.replace("-ge 360 ]", "-ge 3 ]"));
           const result = yield* runRunner(home, runner, bin);
@@ -1858,7 +1858,7 @@ describe("archive runner script", () => {
           yield* fs.makeDirectory(bin);
           yield* fs.writeFileString(
             runner,
-            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+            SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl }),
           );
           const mktempPath = yield* runShell(home, ["-c", "command -v mktemp"]);
           assert.equal(mktempPath.exitCode, 0, mktempPath.stderr);
@@ -1921,7 +1921,7 @@ exec /bin/mv "$@"
           else yield* fs.writeFileString(`${lock}/pid.tmp`, "interrupted publication\n");
           yield* fs.writeFileString(
             runner,
-            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+            SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion, releaseBaseUrl }),
           );
           // FIFOs put B after its stale read, A inside the download with its live
           // lock, then B after cleanup. No scheduler speed or elapsed time is an oracle.
@@ -2338,7 +2338,7 @@ describe("bundled runtime acquisition", () => {
             yield* fs.makeDirectory(state, { recursive: true });
             yield* fs.writeFileString(
               `${state}/run-t3.sh`,
-              SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: retainedVersion }),
+              SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion: retainedVersion }),
             );
             yield* fs.chmod(`${state}/run-t3.sh`, 0o700);
           }
@@ -2558,7 +2558,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           runner,
           mode === "runner code"
             ? "T3_NODE_SCRIPT_PATH='$(touch \"$HOME/.test/evaluated\")'\n"
-            : SshTunnel.buildRemoteT3RunnerScript({ nodeScriptPath: entry }),
+            : SshTunnel.buildRemoteGoatRunnerScript({ nodeScriptPath: entry }),
         );
         if (mode !== "runner code") {
           // Stop asks the runner for activity and signals only an idle server.
@@ -2695,7 +2695,7 @@ cat "$HOME/.test/command"
           yield* fs.writeFileString(`${state}/managed`, "managed\n");
           yield* fs.writeFileString(
             `${state}/run-t3.sh`,
-            SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: "1.2.2" }),
+            SshTunnel.buildRemoteGoatRunnerScript({ archiveVersion: "1.2.2" }),
           );
           if (mode !== "missing identity")
             yield* fs.writeFileString(

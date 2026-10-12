@@ -1,8 +1,16 @@
 {
-  "name": "@t3tools/client-runtime",
+  "name": "@goat/client-runtime",
   "private": true,
   "type": "module",
   "exports": {
+    "./storage-migration": {
+      "types": "./src/storageMigration.ts",
+      "default": "./src/storageMigration.ts"
+    },
+    "./goat-project-file": {
+      "types": "./src/goatProjectFile.ts",
+      "default": "./src/goatProjectFile.ts"
+    },
     "./goatBot/home": {
       "types": "./src/goatBot/home.ts",
       "default": "./src/goatBot/home.ts"
@@ -119,9 +127,9 @@
       "types": "./src/voice-input/index.ts",
       "default": "./src/voice-input/index.ts"
     },
-    "./t3ToolSummary": {
-      "types": "./src/t3ToolSummary.ts",
-      "default": "./src/t3ToolSummary.ts"
+    "./goatToolSummary": {
+      "types": "./src/goatToolSummary.ts",
+      "default": "./src/goatToolSummary.ts"
     },
     "./relay": {
       "types": "./src/relay/index.ts",
@@ -437,16 +445,16 @@
     "test": "vp test run"
   },
   "dependencies": {
+    "@goat/contracts": "workspace:*",
+    "@goat/shared": "workspace:*",
+    "@goat/source-control-azure-devops": "workspace:*",
+    "@goat/source-control-bitbucket": "workspace:*",
+    "@goat/source-control-core": "workspace:*",
+    "@goat/source-control-forgejo": "workspace:*",
+    "@goat/source-control-gitcafe": "workspace:*",
+    "@goat/source-control-github": "workspace:*",
+    "@goat/source-control-gitlab": "workspace:*",
     "@pierre/diffs": "catalog:",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
-    "@t3tools/source-control-azure-devops": "workspace:*",
-    "@t3tools/source-control-bitbucket": "workspace:*",
-    "@t3tools/source-control-core": "workspace:*",
-    "@t3tools/source-control-forgejo": "workspace:*",
-    "@t3tools/source-control-gitcafe": "workspace:*",
-    "@t3tools/source-control-github": "workspace:*",
-    "@t3tools/source-control-gitlab": "workspace:*",
     "effect": "catalog:",
     "three": "0.180.0"
   },

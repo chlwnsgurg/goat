@@ -23,9 +23,9 @@ import {
   RunId,
   ThreadId,
   TextGenerationError,
-} from "@t3tools/contracts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+} from "@goat/contracts";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -335,7 +335,9 @@ export function makeHarness(
     }),
     layerSettings,
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-channel-scenarios-" })),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "goat-channel-scenarios-" }),
+    ),
     Layer.provideMerge(NodeServices.layer),
   );
 

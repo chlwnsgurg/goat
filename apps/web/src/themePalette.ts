@@ -1,16 +1,19 @@
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
 import "culori/css";
 import { converter, parse } from "culori/fn";
 import {
   BUILT_IN_THEMES,
+  normalizeThemeId,
+  normalizeThemePreference,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
   OCEAN_THEME,
-  T3_CHAT_THEME,
-  T3_CODE_LIGHT_THEME_COLORS,
-  T3_CODE_DARK_THEME_COLORS,
+  GOAT_CHAT_THEME,
+  GOAT_LIGHT_THEME_COLORS,
+  GOAT_DARK_THEME_COLORS,
   RESERVED_THEME_IDS,
   THEME_COLOR_ROLES,
   type ThemeAppearance,
@@ -18,23 +21,18 @@ import {
   type ThemeColors,
   type ThemeDefinition,
   type ThemeVariants,
-} from "@t3tools/shared/themePalettes";
+} from "@goat/shared/themePalettes";
 
-export { EMBER_THEME, GROVE_THEME, IRIS_THEME, OCEAN_THEME, T3_CHAT_THEME, THEME_COLOR_ROLES };
+export { EMBER_THEME, GROVE_THEME, IRIS_THEME, OCEAN_THEME, GOAT_CHAT_THEME, THEME_COLOR_ROLES };
 export type { ThemeAppearance, ThemeColorRole, ThemeColors, ThemeDefinition, ThemeVariants };
 
-export const T3_CHAT_THEME_ID = "t3-chat" as const;
-const GROVE_THEME_ID = "grove" as const;
+export const GOAT_CHAT_THEME_ID = "goat-chat" as const;
 export const OCEAN_THEME_ID = "ocean" as const;
-const EMBER_THEME_ID = "ember" as const;
-const IRIS_THEME_ID = "iris" as const;
 export const THEME_FILE_VERSION = 1 as const;
-export const CUSTOM_THEMES_STORAGE_KEY = "t3code:themes:v1";
-export const THEME_FOLLOW_SYSTEM_STORAGE_KEY = "t3code:theme-follow-system";
-export const THEME_APPEARANCE_MODE_STORAGE_KEY = "t3code:theme-appearance-mode";
-export const THEME_HALVES_STORAGE_KEY = "t3code:theme-halves:v1";
-
-const LEGACY_T3_CHAT_DARK_THEME_ID = "t3-chat-dark";
+export const CUSTOM_THEMES_STORAGE_KEY = "goat:themes:v1";
+export const THEME_FOLLOW_SYSTEM_STORAGE_KEY = "goat:theme-follow-system";
+export const THEME_APPEARANCE_MODE_STORAGE_KEY = "goat:theme-appearance-mode";
+export const THEME_HALVES_STORAGE_KEY = "goat:theme-halves:v1";
 
 export const ThemePreference = Schema.String;
 export type ThemePreference = typeof ThemePreference.Type;
@@ -207,7 +205,7 @@ function readCustomThemeLibrarySnapshot(): CustomThemeLibrarySnapshot {
 
   let raw: string | null;
   try {
-    raw = window.localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
+    raw = migratingStorage(window.localStorage).getItem(CUSTOM_THEMES_STORAGE_KEY);
   } catch (cause) {
     return { status: "unavailable", reason: "storage-unavailable", cause };
   }
@@ -294,38 +292,20 @@ export function subscribeToCustomThemes(listener: () => void): () => void {
   };
 }
 
-// Earlier builds shipped every maintainer theme under a t3- prefix; only the
-// genuinely T3-branded palette keeps it. Stored preferences and mixes with the
-// old ids stay readable through this alias table.
-const LEGACY_THEME_ID_ALIASES: Readonly<Record<string, string>> = {
-  [LEGACY_T3_CHAT_DARK_THEME_ID]: T3_CHAT_THEME_ID,
-  "t3-grove": GROVE_THEME_ID,
-  "t3-ocean": OCEAN_THEME_ID,
-  "t3-ember": EMBER_THEME_ID,
-  "t3-iris": IRIS_THEME_ID,
-};
-
-function normalizeThemeId(themeId: string): string {
-  return LEGACY_THEME_ID_ALIASES[themeId] ?? themeId;
-}
-
-/**
- * Map a stored preference onto the id the runtime applies, so selection state
- * matches the theme cards. The legacy dark-variant id stays as-is because it
- * still carries the appearance hint getThemePreferenceMode reads.
- */
+/** Map persisted ids to current ids, preserving explicit appearance variants. */
 export function canonicalThemePreference(theme: string): string {
-  return theme === LEGACY_T3_CHAT_DARK_THEME_ID ? theme : normalizeThemeId(theme);
+  return normalizeThemePreference(theme);
 }
 
 function themeIdFromPreference(theme: ThemePreference): string {
   return normalizeThemeId(theme);
 }
 
-// Older builds stored the dark T3 Chat palette as a separate theme. Keep
-// those preferences readable while mapping them to the dark variant.
 function legacyThemeMode(theme: ThemePreference): ThemeAppearance | null {
-  return theme === LEGACY_T3_CHAT_DARK_THEME_ID ? "dark" : null;
+  const normalized = normalizeThemePreference(theme);
+  if (normalized === "goat-chat-dark") return "dark";
+  if (normalized === "goat-chat-light") return "light";
+  return null;
 }
 
 /**
@@ -336,9 +316,9 @@ function legacyThemeMode(theme: ThemePreference): ThemeAppearance | null {
  */
 export function getStandardThemeColors(appearance: ThemeAppearance): ThemeColors {
   if (appearance === "dark") {
-    return (standardDarkThemeColors ??= decodeThemeColors(T3_CODE_DARK_THEME_COLORS));
+    return (standardDarkThemeColors ??= decodeThemeColors(GOAT_DARK_THEME_COLORS));
   }
-  return (standardLightThemeColors ??= decodeThemeColors(T3_CODE_LIGHT_THEME_COLORS));
+  return (standardLightThemeColors ??= decodeThemeColors(GOAT_LIGHT_THEME_COLORS));
 }
 
 type ThemeRgbColor = {
@@ -880,7 +860,7 @@ function standardMutedThemeText(
 
 /** Theme-file defaults follow the flagship palette for the requested mode. */
 export function getDefaultThemeColors(appearance: ThemeAppearance): ThemeColors {
-  return appearance === "dark" ? T3_CHAT_THEME.variants!.dark! : T3_CHAT_THEME.colors;
+  return appearance === "dark" ? GOAT_CHAT_THEME.variants!.dark! : GOAT_CHAT_THEME.colors;
 }
 
 /**
@@ -1172,7 +1152,10 @@ function saveCustomThemes(
 ): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(storedThemes));
+    migratingStorage(window.localStorage).setItem(
+      CUSTOM_THEMES_STORAGE_KEY,
+      JSON.stringify(storedThemes),
+    );
     customThemeLibrarySnapshot = { status: "ready", storedThemes, themes };
   } catch (cause) {
     throw new ThemeLibraryStorageError({

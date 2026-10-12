@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it as test, vi } from "vite-plus/test";
 import { CaptureShortcutConfig, niriCaptureConfigPath } from "./CaptureShortcutConfig.ts";
 import { captureConfigBinding } from "./captureConfigEdit.ts";
 
-// oxlint-disable-next-line t3code/no-global-process-runtime -- Test collection checks the host before starting these Linux-native filesystem tests.
+// oxlint-disable-next-line goat/no-global-process-runtime -- Test collection checks the host before starting these Linux-native filesystem tests.
 const it = test.runIf(process.platform === "linux");
 let directory: string;
 let path: string;
@@ -23,7 +23,7 @@ const appId = "com.t3tools.T3Code";
 const install = { operation: "install", chooseFile: false } as const;
 const target = () => ({ desktop: "niri" as const, path, appId });
 beforeEach(async () => {
-  directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-capture-config-"));
+  directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "goat-capture-config-"));
   path = NodePath.join(directory, "config.kdl");
   await NodeFSP.writeFile(path, "binds {\n    Mod+Q { quit; }\n}\n", { mode: 0o640 });
   tools.validateNiri.mockReset().mockResolvedValue(undefined);

@@ -9,12 +9,12 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { FetchHttpClient } from "effect/http";
-import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_REPOSITORY } from "@goat/shared/cliRelease";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 import { repointLauncher, resolveLauncherPath, resolveNewestVersion } from "./update.ts";
 
@@ -23,7 +23,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-update-" });
       const oldExe = path.join(root, "runtime/goat/versions/1.0.0/goat");
       const newExe = path.join(root, "runtime/goat/versions/2.0.0/goat");
       const launcher = path.join(root, "bin/goat");
@@ -49,7 +49,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-update-" });
       const newExe = path.join(root, "runtime/goat/versions/2.0.0/goat");
       const copy = path.join(root, "copy/goat");
       const foreign = path.join(root, "foreign/goat");
@@ -83,7 +83,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-update-" });
       const launcher = path.join(root, "bin/goat");
       yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
       yield* fs.writeFileString(launcher, "");
@@ -187,7 +187,7 @@ it.layer(NodeServices.layer)("goat release index", (it) => {
       if (Result.isFailure(result)) {
         assert.equal(result.failure.status, 503);
         assert.include(result.failure.message, "HTTP 503");
-        assert.include(result.failure.message, "T3CODE_VERSION");
+        assert.include(result.failure.message, "GOAT_VERSION");
       }
       assert.equal(h.requests.length, 3);
       assert.isFalse(yield* fs.exists(`${baseDir}/cache/release-index.json`));

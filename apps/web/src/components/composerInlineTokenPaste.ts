@@ -1,15 +1,11 @@
-import { ComposerContextId } from "@t3tools/contracts";
-import type { ComposerContextClipboardFragment } from "@t3tools/contracts";
-import {
-  COMPOSER_CONTEXT_CLIPBOARD_MIME,
-  decodeComposerContextFragment,
-  decodeComposerContextClipboardHtml,
-} from "@t3tools/shared/composerContextClipboard";
+import { ComposerContextId } from "@goat/contracts";
+import type { ComposerContextClipboardFragment } from "@goat/contracts";
+import { readComposerContextClipboardFragment } from "@goat/shared/composerContextClipboard";
 import {
   collectComposerContextReferences,
   formatComposerContextReference,
   replaceComposerContextReferences,
-} from "@t3tools/shared/composerContextReferences";
+} from "@goat/shared/composerContextReferences";
 /** Clipboard records referenced by the copied text, including dependent screenshots. */
 export function readPastedComposerContext(
   clipboardData: Pick<DataTransfer, "getData">,
@@ -17,9 +13,7 @@ export function readPastedComposerContext(
   const pastedText = clipboardData.getData("text/plain");
   // Only records whose links are in the pasted text get imported; a fragment may carry
   // more (it was built for a larger copy) and must not start transfers for those.
-  const decodedFragment =
-    decodeComposerContextFragment(clipboardData.getData(COMPOSER_CONTEXT_CLIPBOARD_MIME)) ??
-    decodeComposerContextClipboardHtml(clipboardData.getData("text/html"));
+  const decodedFragment = readComposerContextClipboardFragment(clipboardData);
   if (decodedFragment === null) return null;
   const pastedIds = new Set<string>(
     collectComposerContextReferences(pastedText).map((occurrence) => occurrence.contextId),

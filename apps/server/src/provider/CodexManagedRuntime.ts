@@ -1,5 +1,5 @@
 import { resolveManagedCodexHomeLayout } from "./CodexManagedHome.ts";
-import { CodexSettings, ProviderSetupError, type ProviderInstanceId } from "@t3tools/contracts";
+import { CodexSettings, ProviderSetupError, type ProviderInstanceId } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import { makeCodexChatGptAuth } from "./CodexChatGptAuth.ts";
+import { legacyEnvName } from "@goat/contracts/legacyT3Names";
 import { materializeCodexShadowHome } from "./Drivers/CodexHomeLayout.ts";
 
 export interface CodexEffectiveRuntime {
@@ -95,7 +96,9 @@ export const makeCodexManagedRuntime = Effect.fn("makeCodexManagedRuntime")(func
       ACCESS_TOKEN: credentials.accessToken,
       CODEX_HOME: homePath,
     };
-    delete environment.T3CODE_CODEX_LAUNCH_ARGS;
+    for (const name of ["GOAT_CODEX_LAUNCH_ARGS", legacyEnvName("GOAT_CODEX_LAUNCH_ARGS")]) {
+      if (name !== undefined) delete environment[name];
+    }
     delete environment.OPENAI_API_KEY;
     delete environment.OPENAI_BASE_URL;
     return {

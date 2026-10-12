@@ -4,7 +4,7 @@
  *
  * A linked git worktree gets its own (gitignored) `.t3`: feature work in a
  * throwaway branch must not share a database with the real app, and an ambient
- * `T3CODE_HOME` counts as an explicit base dir — flipping the state directory
+ * `GOAT_HOME` counts as an explicit base dir — flipping the state directory
  * from `<base>/dev` to `<base>/userdata`, the live production database.
  */
 
@@ -12,6 +12,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+
+import { resolveGoatHome } from "./goatHome.ts";
 
 /**
  * A `.git` file points at the real git directory. A linked worktree's lives at
@@ -89,8 +91,9 @@ export const resolveGitWorktreePath = (
  * The worktree-local data directory for `cwd`, or undefined outside a linked
  * worktree. Deliberately does not require the directory to exist yet: falling
  * back because it is missing would send callers at the shared home.
+ * A worktree set up before the GOAT rename keeps its `.t3` (see `resolveGoatHome`).
  */
-export const resolveWorktreeT3Home = (
+export const resolveWorktreeHome = (
   cwd: string,
 ): Effect.Effect<string | undefined, never, FileSystem.FileSystem | Path.Path> =>
   Effect.gen(function* () {
@@ -98,6 +101,6 @@ export const resolveWorktreeT3Home = (
     if (worktreePath === undefined) {
       return undefined;
     }
-    const path = yield* Path.Path;
-    return path.join(worktreePath, ".t3");
+    // The dev runner hands this home to the server as an explicit base dir, which reads userdata.
+    return yield* resolveGoatHome(worktreePath, "userdata");
   });

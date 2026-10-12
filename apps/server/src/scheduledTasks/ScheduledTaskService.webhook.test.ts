@@ -7,7 +7,7 @@ import {
   ScheduledTaskUpsertInput,
   type ScheduledTaskWebhookUrlUnavailableReason,
   SecretRequestError,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -859,13 +859,13 @@ it.effect("a signature without any secret is refused", () =>
 const signatureFor = (secret: string) =>
   `sha256=${NodeCrypto.createHmac("sha256", secret).update(pullRequestBody).digest("hex")}`;
 
-/** Count recorded by `t3_webhook_deliveries_total` for one outcome and source. */
+/** Count recorded by `goat_webhook_deliveries_total` for one outcome and source. */
 const deliveriesCounted = (outcome: string, source: "relay" | "direct") =>
   Metric.snapshot.pipe(
     Effect.map((snapshots) => {
       const found = snapshots.find(
         (snapshot) =>
-          snapshot.id === "t3_webhook_deliveries_total" &&
+          snapshot.id === "goat_webhook_deliveries_total" &&
           snapshot.attributes?.outcome === outcome &&
           snapshot.attributes?.source === source,
       );

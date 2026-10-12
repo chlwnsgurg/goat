@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Turns the per-platform CLI archives of one release into the npm packages
- * behind `npx t3` / `npm i -g t3`: one `@t3code/t3-<platformKey>` package per
+ * behind `npx t3` / `npm i -g t3`: one `@goat/cli-<platformKey>` package per
  * archive holding the archive's contents verbatim, plus the `t3` launcher
  * that lists them as optionalDependencies and execs the one npm installed.
  * The bytes a user gets from npm are therefore the release archive's, and
@@ -9,9 +9,9 @@
  *
  * Output layout under `--output-dir`:
  *
- *   @t3code/t3-<platformKey>/      archive contents flattened + package.json
- *   @t3code/t3-<platformKey>.tgz   the same tree as an npm tarball
- *   t3/                             launcher: package.json, bin/t3.js, README.md
+ *   @goat/cli-<platformKey>/      archive contents flattened + package.json
+ *   @goat/cli-<platformKey>.tgz   the same tree as an npm tarball
+ *   goat/                           launcher: package.json, bin/goat.js, README.md
  *   t3.tgz                          the launcher as an npm tarball
  *
  * The tarballs are what gets published. `npm publish <dir>` always drops
@@ -19,7 +19,7 @@
  * bundleDependencies needs an arborist tree these flattened installs are
  * not), whereas `npm publish <tarball>` uploads the bytes as given.
  */
-import { legacyCliLauncherScript } from "@t3tools/shared/legacyCliLauncher";
+import { legacyCliLauncherScript } from "@goat/shared/legacyCliLauncher";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -35,16 +35,16 @@ import {
   CLI_ARCHIVE_PLATFORM_KEYS,
   cliArchiveFileName,
   type CliArchivePlatformKey,
-} from "@t3tools/shared/cliRelease";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
-import { isCommandAvailable } from "@t3tools/shared/shell";
+} from "@goat/shared/cliRelease";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { fromJsonStringPretty } from "@goat/shared/schemaJson";
+import { isCommandAvailable } from "@goat/shared/shell";
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 import { windowsSystemTar } from "./build-cli-archive.ts";
 
-export const NPM_PLATFORM_PACKAGE_SCOPE = "@t3code";
-export const NPM_LAUNCHER_PACKAGE_NAME = "t3";
+export const NPM_PLATFORM_PACKAGE_SCOPE = "@goat";
+export const NPM_LAUNCHER_PACKAGE_NAME = "goat";
 
 const encodePackageJson = Schema.encodeEffect(fromJsonStringPretty(Schema.Unknown));
 
@@ -85,7 +85,7 @@ export class NpmPackagesArchiveLayoutError extends Schema.TaggedError<NpmPackage
 }
 
 export function npmPlatformPackageName(platformKey: CliArchivePlatformKey): string {
-  return `${NPM_PLATFORM_PACKAGE_SCOPE}/t3-${platformKey}`;
+  return `${NPM_PLATFORM_PACKAGE_SCOPE}/cli-${platformKey}`;
 }
 
 /**
@@ -168,7 +168,7 @@ export function npmPlatformPackageReadme(platformKey: CliArchivePlatformKey): st
   ].join("\n");
 }
 
-/** package.json for the `t3` launcher. No engines: bin/t3.js is trivial CJS. */
+/** package.json for the `goat` launcher. No engines: bin/goat.js is trivial CJS. */
 export function npmLauncherPackageManifest(
   version: string,
   platformKeys: ReadonlyArray<CliArchivePlatformKey>,
@@ -179,7 +179,7 @@ export function npmLauncherPackageManifest(
     description: "GOAT CLI. Installs the self-contained executable for this platform.",
     license: serverPackageJson.license,
     repository: serverPackageJson.repository,
-    bin: { goat: "./bin/t3.js", t3: "./bin/t3.js" },
+    bin: { goat: "./bin/goat.js", t3: "./bin/goat.js" },
     files: ["bin", "dist"],
     optionalDependencies: Object.fromEntries(
       platformKeys.map((key) => [npmPlatformPackageName(key), version]),
@@ -203,13 +203,13 @@ const key = process.platform + "-" + process.arch;
 
 let packageDir;
 try {
-  packageDir = dirname(require.resolve("${NPM_PLATFORM_PACKAGE_SCOPE}/t3-" + key + "/package.json"));
+  packageDir = dirname(require.resolve("${NPM_PLATFORM_PACKAGE_SCOPE}/cli-" + key + "/package.json"));
 } catch {
   process.stderr.write(
     [
       "goat: no GOAT CLI build is available for this platform (" + key + ").",
       "Supported platforms: " + SUPPORTED.join(", ") + ".",
-      "If yours is listed, reinstall t3 so npm fetches its optional dependency.",
+      "If yours is listed, reinstall goat so npm fetches its optional dependency.",
       "The desktop app and release archives are at https://github.com/goat-si/goat-releases/releases",
       "",
     ].join("\\n"),
@@ -365,7 +365,7 @@ const stagePlatformPackage = Effect.fn("stagePlatformPackage")(function* (input:
   return output;
 }, Effect.scoped);
 
-/** Writes the launcher package (package.json, bin/t3.js, README) and its tarball. */
+/** Writes the launcher package (package.json, bin/goat.js, README) and its tarball. */
 const stageLauncherPackage = Effect.fn("stageLauncherPackage")(function* (input: {
   readonly outputDir: string;
   readonly version: string;
@@ -383,7 +383,7 @@ const stageLauncherPackage = Effect.fn("stageLauncherPackage")(function* (input:
     path.join(stageDir, "package.json"),
     `${yield* encodePackageJson(npmLauncherPackageManifest(input.version, input.platformKeys))}\n`,
   );
-  const launcherScript = path.join(stageDir, "bin/t3.js");
+  const launcherScript = path.join(stageDir, "bin/goat.js");
   yield* fs.writeFileString(launcherScript, NPM_LAUNCHER_SCRIPT);
   yield* fs.chmod(launcherScript, 0o755);
   // Older service updaters and launchers run this exact path with Node.
@@ -477,7 +477,7 @@ const command = Command.make(
   buildNpmPlatformPackages,
 ).pipe(
   Command.withDescription(
-    "Build the t3 launcher and @t3code/t3-<platform> npm packages from CLI release archives.",
+    "Build the t3 launcher and @goat/cli-<platform> npm packages from CLI release archives.",
   ),
 );
 

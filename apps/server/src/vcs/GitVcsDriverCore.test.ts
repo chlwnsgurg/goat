@@ -1,7 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
+import { GOAT_PROJECT_FILE_NAME } from "@goat/contracts";
+import { LEGACY_PROJECT_FILE_NAME } from "@goat/contracts/legacyT3Names";
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import { assert, it, describe } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -28,7 +30,7 @@ import {
   type ReviewDiffFileContentsInput,
   type ReviewDiffPreviewResult,
   type WorktreeSubmodules,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as ServerConfig from "../config.ts";
 import { gitCommandDuration } from "../observability/Metrics.ts";
 import {
@@ -42,7 +44,7 @@ import * as GitVcsDriver from "./GitVcsDriver.ts";
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
 
 const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-git-vcs-driver-test-",
+  prefix: "goat-git-vcs-driver-test-",
 });
 const layerTest = GitVcsDriver.layer.pipe(
   Layer.provide(layerServerConfig),
@@ -2607,7 +2609,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           "GIT_TERMINAL_PROMPT",
           "SSH_ASKPASS",
           "SSH_ASKPASS_REQUIRE",
-          "T3_TEST_SSH_ASKPASS_LOG",
+          "GOAT_TEST_SSH_ASKPASS_LOG",
         ] as const;
         const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 
@@ -2622,7 +2624,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           process.env.GIT_TERMINAL_PROMPT = "1";
           process.env.SSH_ASKPASS = "ssh-askpass";
           process.env.SSH_ASKPASS_REQUIRE = "force";
-          process.env.T3_TEST_SSH_ASKPASS_LOG = sshLogPath;
+          process.env.GOAT_TEST_SSH_ASKPASS_LOG = sshLogPath;
 
           yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
 
@@ -3195,12 +3197,17 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const worktreesDir = yield* makeTmpDir("git-worktrees-");
 
         const createWithMode = Effect.fn(function* (
-          fileMode: WorktreeSubmodules,
+          fileMode: WorktreeSubmodules | "invalid",
           branch: string,
           submodules: WorktreeSubmodules | null = null,
+          fileName = GOAT_PROJECT_FILE_NAME,
         ) {
-          yield* writeTextFile(cwd, "t3.json", `{ "worktreeSubmodules": "${fileMode}" }`);
-          yield* git(cwd, ["add", "t3.json"]);
+          yield* writeTextFile(
+            cwd,
+            fileName,
+            fileMode === "invalid" ? "{ not json" : `{ "worktreeSubmodules": "${fileMode}" }`,
+          );
+          yield* git(cwd, ["add", fileName]);
           // Consecutive cases may reuse a file mode to test the option alone.
           yield* git(cwd, ["commit", "--allow-empty", "-m", `submodules: ${fileMode}`]);
           const worktreePath = pathService.join(worktreesDir, branch);
@@ -3221,6 +3228,14 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           };
         });
 
+        assert.deepEqual(
+          yield* createWithMode("top-level", "legacy", null, LEGACY_PROJECT_FILE_NAME),
+          {
+            disabled: false,
+            inner: true,
+            nested: false,
+          },
+        );
         assert.deepEqual(yield* createWithMode("recursive", "recursive"), {
           disabled: false,
           inner: true,
@@ -3230,6 +3245,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           disabled: false,
           inner: true,
           nested: false,
+        });
+        assert.deepEqual(yield* createWithMode("invalid", "invalid"), {
+          disabled: false,
+          inner: true,
+          nested: true,
         });
         // A resolved setting outranks the file in both directions.
         assert.deepEqual(yield* createWithMode("recursive", "setting-none", "none"), {

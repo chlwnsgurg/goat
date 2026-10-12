@@ -4,7 +4,9 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 
-export interface T3CodePublicConfig {
+import { withLegacyEnvAliases } from "@goat/contracts/legacyT3Names";
+
+export interface GoatPublicConfig {
   readonly clerkPublishableKey: string | undefined;
   readonly clerkJwtTemplate: string | undefined;
   readonly clerkCliOAuthClientId: string | undefined;
@@ -30,14 +32,17 @@ export function loadRepoEnv({
   readonly baseEnv?: Environment;
   readonly repoRoot?: string;
 } = {}): Record<string, string | undefined> {
-  const rootEnv = readEnvFile(NodePath.join(repoRoot, ".env"));
-  const localEnv = readEnvFile(NodePath.join(repoRoot, ".env.local"));
-  const config = resolvePublicConfig(baseEnv, localEnv, rootEnv);
+  // Each source is aliased on its own, so a legacy name in a higher-priority source
+  // still beats a GOAT name in a lower one.
+  const rootEnv = withLegacyEnvAliases(readEnvFile(NodePath.join(repoRoot, ".env")));
+  const localEnv = withLegacyEnvAliases(readEnvFile(NodePath.join(repoRoot, ".env.local")));
+  const processEnv = withLegacyEnvAliases(baseEnv);
+  const config = resolvePublicConfig(processEnv, localEnv, rootEnv);
 
   return {
     ...rootEnv,
     ...localEnv,
-    ...baseEnv,
+    ...processEnv,
     ...(config.clerkPublishableKey
       ? {
           T3CODE_CLERK_PUBLISHABLE_KEY: config.clerkPublishableKey,
@@ -103,7 +108,7 @@ export function loadRepoEnv({
   };
 }
 
-export function resolvePublicConfig(...sources: readonly Environment[]): T3CodePublicConfig {
+export function resolvePublicConfig(...sources: readonly Environment[]): GoatPublicConfig {
   return {
     clerkPublishableKey: firstNonEmpty(
       sources,

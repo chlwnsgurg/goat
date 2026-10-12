@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/shared",
+  "name": "@goat/shared",
   "private": true,
   "type": "module",
   "exports": {
@@ -167,9 +167,9 @@
       "types": "./src/projectSettings.ts",
       "import": "./src/projectSettings.ts"
     },
-    "./t3ProjectFile": {
-      "types": "./src/t3ProjectFile.ts",
-      "import": "./src/t3ProjectFile.ts"
+    "./goatProjectFile": {
+      "types": "./src/goatProjectFile.ts",
+      "import": "./src/goatProjectFile.ts"
     },
     "./orchestrationTiming": {
       "types": "./src/orchestrationTiming.ts",
@@ -355,6 +355,10 @@
       "types": "./src/devHome.ts",
       "import": "./src/devHome.ts"
     },
+    "./goatHome": {
+      "types": "./src/goatHome.ts",
+      "import": "./src/goatHome.ts"
+    },
     "./devProxy": {
       "types": "./src/devProxy.ts",
       "import": "./src/devProxy.ts"
@@ -395,9 +399,9 @@
       "types": "./src/orchestrationV2Timeline.ts",
       "import": "./src/orchestrationV2Timeline.ts"
     },
-    "./t3McpToolPresentation": {
-      "types": "./src/t3McpToolPresentation.ts",
-      "import": "./src/t3McpToolPresentation.ts"
+    "./goatMcpToolPresentation": {
+      "types": "./src/goatMcpToolPresentation.ts",
+      "import": "./src/goatMcpToolPresentation.ts"
     },
     "./Array": {
       "types": "./src/Array.ts",
@@ -505,9 +509,9 @@
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
+    "@goat/contracts": "workspace:*",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
-    "@t3tools/contracts": "workspace:*",
     "effect": "catalog:",
     "jose": "catalog:",
     "mdast-util-directive": "catalog:",

@@ -21,7 +21,7 @@ import {
   ThreadId,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2ThreadShell,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Ref from "effect/Ref";
@@ -88,11 +88,11 @@ import { PullRequestsToolkit } from "./pullRequests/tools.ts";
 import { HtmlToolkit } from "./html/tools.ts";
 import { ChannelToolkit } from "./channel/tools.ts";
 import {
-  resolveT3McpToolDefinition,
-  resolveT3McpToolPresentation,
-  resolveT3McpToolSummaryAction,
-} from "@t3tools/shared/t3McpToolPresentation";
-import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+  resolveGoatMcpToolDefinition,
+  resolveGoatMcpToolPresentation,
+  resolveGoatMcpToolSummaryAction,
+} from "@goat/shared/goatMcpToolPresentation";
+import { htmlRenderFromToolItem } from "@goat/shared/toolOutput";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
@@ -142,15 +142,15 @@ it("publishes unique tool names with reference-free object-root inputs", () => {
       // The published tool catalog must also work with providers without $ref support.
       expect(JSON.stringify(schema), tool.name).not.toContain('"$ref"');
       // Every published tool must have labels for its lifecycle, branding, and a summary.
-      const definition = resolveT3McpToolDefinition(tool.name);
+      const definition = resolveGoatMcpToolDefinition(tool.name);
       expect(definition, tool.name).not.toBeNull();
       expect(
         definition?.labels.every((label) => label.trim().length > 0),
         tool.name,
       ).toBe(true);
       for (const name of [tool.name, `mcp__t3-code__${tool.name}`, `T3-code.${tool.name}`]) {
-        expect(resolveT3McpToolPresentation(name)?.logo, name).toBe("t3-code");
-        expect(resolveT3McpToolSummaryAction(name), name).not.toBeNull();
+        expect(resolveGoatMcpToolPresentation(name)?.logo, name).toBe("t3-code");
+        expect(resolveGoatMcpToolSummaryAction(name), name).not.toBeNull();
       }
     }
   }
@@ -415,7 +415,7 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
       McpHttpServer.layerHtmlToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(PreviewBrowser.layer),
-        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-html-render-" })),
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-html-render-" })),
         Layer.provide(NodeServices.layer),
         // The preview browser is not installed in a fresh home, so nothing downloads.
         Layer.provide(FetchHttpClient.layer),
@@ -1064,7 +1064,7 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(ServerSecretStore.layer),
-        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-attachment-" })),
+        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-mcp-attachment-" })),
         Layer.provide(NodeServices.layer),
       ),
     ),
@@ -1091,8 +1091,8 @@ it.effect(
         responseCapability: { type: "message" },
         createdAt: now,
         resolvedAt: null,
-      } as import("@t3tools/contracts").OrchestrationV2RuntimeRequest;
-      const item: import("@t3tools/contracts").OrchestrationV2TurnItem = {
+      } as import("@goat/contracts").OrchestrationV2RuntimeRequest;
+      const item: import("@goat/contracts").OrchestrationV2TurnItem = {
         id: TurnItemId.make("question-item"),
         type: "user_input_request",
         threadId: targetId,

@@ -104,8 +104,8 @@ import {
   wslRuntimeArchiveStem,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { symlinksSupported } from "@goat/shared/testing/symlinks";
 
 // Keeps pnpm from auto-installing TypeScript, a types-only peer, into the app.
 const stagePackageExtensions = {
@@ -200,7 +200,7 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const tempDir = yield* fs.makeTempDirectoryScoped({
-    prefix: "t3-windows-payload-test-",
+    prefix: "goat-windows-payload-test-",
   });
   const sourceDir = path.join(tempDir, "server-source");
   const serverEntryPath = path.join(sourceDir, "apps/server/dist/bin.mjs");
@@ -307,34 +307,34 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     Effect.gen(function* () {
       for (const env of [
         {
-          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
           GITHUB_REPOSITORY: "goat-si/goat",
-          T3CODE_DESKTOP_UPDATE_REPOSITORY: "",
+          GOAT_DESKTOP_UPDATE_REPOSITORY: "",
         },
         {
-          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
           GITHUB_REPOSITORY: "goat-si/goat",
-          T3CODE_DESKTOP_UPDATE_REPOSITORY: "  ",
+          GOAT_DESKTOP_UPDATE_REPOSITORY: "  ",
         },
         {},
         { GITHUB_REPOSITORY: "pingdotgg/t3code" },
         { GITHUB_REPOSITORY: "goat-si/goat" },
-        { T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true", GITHUB_REPOSITORY: "goat-si/goat" },
-        { T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat" },
-        { T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true", GITHUB_REPOSITORY: "some/fork" },
+        { GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true", GITHUB_REPOSITORY: "goat-si/goat" },
+        { GOAT_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat" },
+        { GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true", GITHUB_REPOSITORY: "some/fork" },
         {
-          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
           GITHUB_REPOSITORY: "goat-si/goat",
-          T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+          GOAT_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
         },
         {
-          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
-          T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat/extra",
+          GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GOAT_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat/extra",
         },
         // The private source repository is never a feed: binaries live in goat-releases.
         {
-          T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
-          T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat",
+          GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
+          GOAT_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat",
         },
       ]) {
         const config = yield* createBuildConfig(
@@ -394,9 +394,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ConfigProvider.layer(
           ConfigProvider.fromEnv({
             env: {
-              T3CODE_DESKTOP_UPDATE_REPOSITORY: " goat-si/goat-releases ",
+              GOAT_DESKTOP_UPDATE_REPOSITORY: " goat-si/goat-releases ",
               GITHUB_REPOSITORY: "some/fork",
-              T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
+              GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
             },
           }),
         ),
@@ -425,8 +425,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     const entitled = resolveOptionalMacPasskeySigningConfiguration(
       { ...local, macPasskeys: true, version: "1.2.3-nightly.20261011.1" },
       {
-        T3CODE_APPLE_TEAM_ID: "ABC1234567",
-        T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/goat.provisionprofile",
+        GOAT_APPLE_TEAM_ID: "ABC1234567",
+        GOAT_MACOS_PROVISIONING_PROFILE: "/tmp/goat.provisionprofile",
         T3CODE_CLERK_PASSKEY_RP_DOMAINS: "clerk.example.com",
       },
     );
@@ -486,8 +486,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat-releases",
+                GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
+                GOAT_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat-releases",
               },
             }),
           ),
@@ -498,8 +498,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat-releases",
+                GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
+                GOAT_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat-releases",
               },
             }),
           ),
@@ -568,8 +568,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ConfigProvider.layer(
           ConfigProvider.fromEnv({
             env: {
-              T3CODE_DESKTOP_UPDATE_FEED_ENABLED: "true",
-              T3CODE_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat-releases",
+              GOAT_DESKTOP_UPDATE_FEED_ENABLED: "true",
+              GOAT_DESKTOP_UPDATE_REPOSITORY: "goat-si/goat-releases",
             },
           }),
         ),
@@ -586,8 +586,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "@crowecawcaw/xa11y": "0.13.0",
           "@effect/platform-node": "catalog:",
           "@napi-rs/keyring": "^1.3.0",
-          "@t3tools/contracts": "workspace:*",
-          "@t3tools/shared": "workspace:*",
+          "@goat/contracts": "workspace:*",
+          "@goat/shared": "workspace:*",
           "dbus-next": "0.10.2",
           effect: "catalog:",
           electron: "41.5.0",
@@ -1038,7 +1038,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cursor-helpers-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cursor-helpers-" });
         const nodeModules = path.join(root, "node_modules");
         const destination = path.join(root, "resources/node_modules/@cursor");
         const cursorDirectory = symlinksSupported
@@ -1108,7 +1108,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const tempDir = yield* fs.makeTempDirectoryScoped({
-          prefix: "t3-windows-architecture-test-",
+          prefix: "goat-windows-architecture-test-",
         });
         const sourceDir = path.join(tempDir, "server");
         const nativeFiles = [
@@ -1171,8 +1171,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-repo-vp-test-" });
-        const pathDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-path-vp-test-" });
+        const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "goat-repo-vp-test-" });
+        const pathDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-path-vp-test-" });
         const onHost = (platform: NodeJS.Platform, env: NodeJS.ProcessEnv) =>
           resolveVp(repoRoot).pipe(
             Effect.provideService(HostProcess.Environment, env),
@@ -1205,7 +1205,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const repoRoot = yield* fs.makeTempDirectoryScoped({
-          prefix: "t3-resource-monitor-cache-test-",
+          prefix: "goat-resource-monitor-cache-test-",
         });
         const binaryPath = path.join(
           repoRoot,
@@ -1225,7 +1225,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           Effect.provide(
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
-                env: { T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true" },
+                env: { GOAT_DESKTOP_REUSE_RESOURCE_MONITOR: "true" },
               }),
             ),
           ),
@@ -1321,7 +1321,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-windows-preflight-" });
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-windows-preflight-" });
         const pythonPath = path.join(tempDir, "python.exe");
         yield* fs.writeFileString(pythonPath, "python");
         const spawner = Layer.succeed(
@@ -1363,7 +1363,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-windows-preflight-" });
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-windows-preflight-" });
         const pythonPath = path.join(tempDir, "python.exe");
         yield* fs.writeFileString(pythonPath, "python");
         const commands: string[] = [];
@@ -1387,7 +1387,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
                 ConfigProvider.fromEnv({
                   env: {
                     npm_config_python: pythonPath,
-                    T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
+                    GOAT_DESKTOP_REUSE_RESOURCE_MONITOR: "true",
                   },
                 }),
               ),
@@ -1405,7 +1405,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-python2-preflight-" });
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-python2-preflight-" });
         const pythonPath = path.join(tempDir, "python");
         yield* fs.writeFileString(pythonPath, "python2");
         const spawner = Layer.succeed(
@@ -1433,7 +1433,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
               spawner,
               ConfigProvider.layer(
                 ConfigProvider.fromEnv({
-                  env: { T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true" },
+                  env: { GOAT_DESKTOP_REUSE_RESOURCE_MONITOR: "true" },
                 }),
               ),
             ),
@@ -1452,7 +1452,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-kde-stage-test-" });
+        const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "goat-kde-stage-test-" });
         const protocols = path.join(repoRoot, "native/hyprland-snap-shot/protocols");
         yield* fs.makeDirectory(protocols, { recursive: true });
         yield* fs.writeFileString(path.join(protocols, "capture.xml"), "BSD protocol notice");
@@ -2137,7 +2137,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const stageResourcesDir = yield* fs.makeTempDirectoryScoped({
-          prefix: "t3code-dmg-background-",
+          prefix: "goat-dmg-background-",
         });
         const dmgDir = path.join(stageResourcesDir, "dmg");
         yield* fs.makeDirectory(dmgDir, { recursive: true });
@@ -2188,7 +2188,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const stageResourcesDir = yield* fs.makeTempDirectoryScoped({
-          prefix: "t3code-dmg-background-missing-",
+          prefix: "goat-dmg-background-missing-",
         });
 
         const error = yield* stageDesktopDmgBackground(stageResourcesDir, "latest", false).pipe(
@@ -2204,8 +2204,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("derives macOS passkey signing configuration from the Clerk publishable key", () => {
     const configuration = resolveMacPasskeySigningConfiguration({
-      T3CODE_APPLE_TEAM_ID: "abc1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      GOAT_APPLE_TEAM_ID: "abc1234567",
+      GOAT_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
       T3CODE_CLERK_PUBLISHABLE_KEY: `pk_test_${btoa("example.clerk.accounts.dev$")}`,
     });
 
@@ -2219,8 +2219,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("normalizes explicit macOS passkey RP domains and renders required entitlements", () => {
     const configuration = resolveMacPasskeySigningConfiguration({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      GOAT_APPLE_TEAM_ID: "ABC1234567",
+      GOAT_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
       T3CODE_CLERK_PASSKEY_RP_DOMAINS:
         " Clerk.Example.com,example.clerk.accounts.dev,clerk.example.com ",
     });
@@ -2322,20 +2322,20 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     };
 
     const missingProfileError = captureError({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
+      GOAT_APPLE_TEAM_ID: "ABC1234567",
       T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev",
     });
     assert.instanceOf(missingProfileError, MissingMacPasskeyProvisioningProfileError);
     assert.equal(
       missingProfileError.message,
-      "T3CODE_MACOS_PROVISIONING_PROFILE must point to an Associated Domains provisioning profile.",
+      "GOAT_MACOS_PROVISIONING_PROFILE must point to an Associated Domains provisioning profile.",
     );
 
     const unsafeDomain =
       "https://domain-user:domain-secret@example.clerk.accounts.dev/path?token=query-secret";
     const invalidDomainError = captureError({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      GOAT_APPLE_TEAM_ID: "ABC1234567",
+      GOAT_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
       T3CODE_CLERK_PASSKEY_RP_DOMAINS: unsafeDomain,
     });
     assert.instanceOf(invalidDomainError, InvalidMacPasskeyRpDomainError);
@@ -2352,15 +2352,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.throws(
       () =>
         resolveMacPasskeySigningConfiguration({
-          T3CODE_APPLE_TEAM_ID: "ABC1234567",
-          T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+          GOAT_APPLE_TEAM_ID: "ABC1234567",
+          GOAT_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
           T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev:8443",
         }),
       /Invalid passkey RP domain/u,
     );
     const invalidPublishableKeyError = captureError({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      GOAT_APPLE_TEAM_ID: "ABC1234567",
+      GOAT_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
       T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_%",
     });
     assert.instanceOf(invalidPublishableKeyError, InvalidMacPasskeyPublishableKeyError);
@@ -2514,7 +2514,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wsl-runtime-stage-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-wsl-runtime-stage-" });
         const sourceArchivePath = yield* makeLinuxCliArchiveFixture({
           root,
           stem: "goat-1.2.3-linux-x64",
@@ -2543,7 +2543,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-wsl-runtime-missing-" });
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-wsl-runtime-missing-" });
         const error = yield* stageWslRuntimeArchive({
           sourceArchivePath: path.join(root, "goat-1.2.3-linux-x64.tar.gz"),
           archivePath: path.join(root, WSL_RUNTIME_ARCHIVE_NAME),
@@ -2687,8 +2687,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_MAC_PASSKEYS: "true",
-                T3CODE_DESKTOP_SIGNED: "true",
+                GOAT_DESKTOP_MAC_PASSKEYS: "true",
+                GOAT_DESKTOP_SIGNED: "true",
               },
             }),
           ),
@@ -2753,11 +2753,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_SKIP_BUILD: "true",
-                T3CODE_DESKTOP_KEEP_STAGE: "true",
-                T3CODE_DESKTOP_SIGNED: "true",
-                T3CODE_DESKTOP_VERBOSE: "true",
-                T3CODE_DESKTOP_MOCK_UPDATES: "true",
+                GOAT_DESKTOP_SKIP_BUILD: "true",
+                GOAT_DESKTOP_KEEP_STAGE: "true",
+                GOAT_DESKTOP_SIGNED: "true",
+                GOAT_DESKTOP_VERBOSE: "true",
+                GOAT_DESKTOP_MOCK_UPDATES: "true",
               },
             }),
           ),
@@ -2807,7 +2807,7 @@ it.effect.skipIf(!symlinksSupported)("rebases packaged links into the isolated t
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-copy-symlinks-" });
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-copy-symlinks-" });
     const source = path.join(root, "source");
     const destination = path.join(root, "destination");
     const packageDir = path.join(source, "node_modules/.pnpm/example@1/node_modules/example");
@@ -3030,10 +3030,10 @@ it.effect.each([
                 mode === "ci" || mode.startsWith("preview-") || mode === "ci-without-bundle"
                   ? "true"
                   : "false",
-              T3CODE_DESKTOP_SSH_RUNTIME_BUNDLE_OPTIONAL: mode.startsWith("preview-")
+              GOAT_DESKTOP_SSH_RUNTIME_BUNDLE_OPTIONAL: mode.startsWith("preview-")
                 ? "true"
                 : "false",
-              ...(mode === "env-override" ? { T3CODE_DESKTOP_VERSION: "9.9.9" } : {}),
+              ...(mode === "env-override" ? { GOAT_DESKTOP_VERSION: "9.9.9" } : {}),
             }),
           ),
         ),

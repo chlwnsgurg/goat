@@ -7,7 +7,7 @@ import {
   type DesktopUpdateInstallPolicy,
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -24,7 +24,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Queue from "effect/Queue";
-import { compareSemverVersions } from "@t3tools/shared/semver";
+import { compareSemverVersions } from "@goat/shared/semver";
 import * as DesktopBackendActivity from "./DesktopBackendActivity.ts";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -196,7 +196,7 @@ export class DesktopUpdates extends Context.Service<
       options?: { readonly waitForCheck: boolean },
     ) => Effect.Effect<DesktopPreparedUpdateInstallResult>;
   }
->()("@t3tools/desktop/updates/DesktopUpdates") {}
+>()("@goat/desktop/updates/DesktopUpdates") {}
 
 const {
   logInfo: logUpdaterInfo,
@@ -269,7 +269,7 @@ function getAutoUpdateDisabledReason(args: {
     return "Automatic updates are only available in packaged production builds.";
   }
   if (args.disabledByEnv) {
-    return "Automatic updates are disabled by the T3CODE_DISABLE_AUTO_UPDATE setting.";
+    return "Automatic updates are disabled by the GOAT_DISABLE_AUTO_UPDATE setting.";
   }
   if (args.platform === "linux" && !args.appImage && !args.isDebPackage) {
     return "Automatic updates on Linux require the AppImage or the .deb package.";

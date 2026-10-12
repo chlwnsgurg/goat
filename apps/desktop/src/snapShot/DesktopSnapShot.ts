@@ -19,7 +19,7 @@ import {
   type SnapShotShortcut,
   type DesktopSnapShotEvent,
   type DesktopSnapShotId,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -88,7 +88,7 @@ import {
   snapShotShortcutRegistrationFailureMessage,
   snapShotShortcutSystemConflict,
 } from "./snapShot.ts";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 
 const MAX_CAPTURE_WIDTH = 2_560;
 const MAX_CAPTURE_HEIGHT = 1_600;
@@ -201,7 +201,7 @@ export class DesktopSnapShot extends Context.Service<
     readonly dismissAnimation: (id: string) => Effect.Effect<void>;
     readonly acknowledge: (id: string) => Effect.Effect<void, DesktopSnapShotError>;
   }
->()("@t3tools/desktop/snapShot/DesktopSnapShot") {}
+>()("@goat/desktop/snapShot/DesktopSnapShot") {}
 
 export class DesktopSnapShotSetupError extends Schema.TaggedError<DesktopSnapShotSetupError>()(
   "DesktopSnapShotSetupError",
@@ -1333,7 +1333,7 @@ export const make = Effect.gen(function* () {
       yield* Effect.scoped(
         Effect.gen(function* () {
           const directory = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3-snapshot-test-",
+            prefix: "goat-snapshot-test-",
           });
           yield* Effect.tryPromise(async () => {
             const active = await activeWindow("darwin");

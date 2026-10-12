@@ -29,7 +29,7 @@ import {
   ThreadId,
   WsRpcGroup,
   type OrchestrationV2ThreadProjection,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 
 const { values } = NodeUtil.parseArgs({
   options: {
@@ -52,7 +52,7 @@ const repeat = Number(values.repeat);
 NodeAssert.ok(Number.isSafeInteger(repeat) && repeat > 0, "repeat must be a positive integer");
 if (values.scenario === "all" || repeat > 1) {
   const reportDirectory = NodeFS.mkdtempSync(
-    NodePath.join(NodeOS.tmpdir(), "t3-background-suite-"),
+    NodePath.join(NodeOS.tmpdir(), "goat-background-suite-"),
   );
   console.log(`Suite report: ${reportDirectory}`);
   const outcomes = [];
@@ -111,7 +111,7 @@ if (values.scenario === "all" || repeat > 1) {
   console.log(JSON.stringify(outcomes, null, 2));
   process.exit(outcomes.some((outcome) => outcome.status === "failed") ? 1 : 0);
 }
-const evidence = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-background-live-"));
+const evidence = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-background-live-"));
 const home = NodePath.join(evidence, "home");
 const project = NodePath.join(evidence, "project");
 NodeFS.mkdirSync(project);

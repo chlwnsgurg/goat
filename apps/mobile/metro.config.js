@@ -1,4 +1,9 @@
 const fs = require("node:fs");
+
+// goat-rename: legacy-begin
+// Set before the GOAT rename as T3CODE_LICENSES_STRICT.
+process.env.GOAT_LICENSES_STRICT ??= process.env.T3CODE_LICENSES_STRICT;
+// goat-rename: legacy-end
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { getDefaultConfig } = require("expo/metro-config");
@@ -47,9 +52,9 @@ config.resolver = {
   ],
   extraNodeModules: {
     ...config.resolver?.extraNodeModules,
-    "@t3tools/mobile-third-party-licenses": generatedLicenseModuleRoot,
-    "@t3tools/mobile-device-stream": generatedDeviceStreamRoot,
-    "@t3tools/mobile-preview-stream": generatedPreviewStreamRoot,
+    "@goat/mobile-third-party-licenses": generatedLicenseModuleRoot,
+    "@goat/mobile-device-stream": generatedDeviceStreamRoot,
+    "@goat/mobile-preview-stream": generatedPreviewStreamRoot,
     shiki: mobileShikiRoot,
     "@shikijs/core": resolveShikiDependencyRoot("@shikijs/core"),
     "@shikijs/engine-javascript": resolveShikiDependencyRoot("@shikijs/engine-javascript"),
@@ -82,7 +87,7 @@ async function generateMobileThirdPartyLicenses() {
     allowMissingGeneratedNotices:
       process.env.NODE_ENV !== "production" &&
       process.env.EAS_BUILD !== "true" &&
-      process.env.T3CODE_LICENSES_STRICT !== "1",
+      process.env.GOAT_LICENSES_STRICT !== "1",
   });
 
   await Promise.all([

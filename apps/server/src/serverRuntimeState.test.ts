@@ -9,8 +9,8 @@ import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import packageJson from "../package.json" with { type: "json" };
 
 import * as ServerRuntimeState from "./serverRuntimeState.ts";
@@ -46,7 +46,7 @@ describe("serverRuntimeState", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-runtime-state-test-",
+        prefix: "goat-server-runtime-state-test-",
       });
       const statePath = path.join(root, "runtime", "server.json");
       const state: ServerRuntimeState.PersistedServerRuntimeState = {
@@ -108,7 +108,7 @@ describe("serverRuntimeState", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-runtime-state-test-",
+        prefix: "goat-server-runtime-state-test-",
       });
 
       const restored = yield* ServerRuntimeState.readPersistedServerRuntimeState(
@@ -132,7 +132,7 @@ describe("serverRuntimeState", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-runtime-state-test-",
+        prefix: "goat-server-runtime-state-test-",
       });
       const statePath = path.join(root, "server.json");
       yield* fileSystem.writeFileString(statePath, "{not json");
@@ -197,7 +197,7 @@ describe("serverRuntimeState", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-runtime-state-test-",
+        prefix: "goat-server-runtime-state-test-",
       });
       const statePath = path.join(root, "server.json");
       yield* fileSystem.makeDirectory(statePath);
@@ -226,7 +226,7 @@ describe("serverRuntimeState", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-server-runtime-state-test-",
+        prefix: "goat-server-runtime-state-test-",
       });
       const blockedDirectory = path.join(root, "not-a-directory");
       const statePath = path.join(blockedDirectory, "server.json");

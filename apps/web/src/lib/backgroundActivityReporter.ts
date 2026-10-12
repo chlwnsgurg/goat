@@ -1,15 +1,16 @@
-import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
+import { EnvironmentRegistry } from "@goat/client-runtime/connection";
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 import {
   EnvironmentRpcSubscriptionObserver,
   request,
   type EnvironmentRpcSubscriptionObservation,
-} from "@t3tools/client-runtime/rpc";
+} from "@goat/client-runtime/rpc";
 import {
   type BackgroundScope,
   type ClientActivityReportInput,
   type EnvironmentId,
   WS_METHODS,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -21,7 +22,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { randomUUID } from "./utils";
 
-const CLIENT_ID_STORAGE_KEY = "t3.backgroundActivity.clientId";
+const CLIENT_ID_STORAGE_KEY = "goat.backgroundActivity.clientId";
 const REPORT_INTERVAL_MS = 25_000;
 const LEASE_TTL_MS = 45_000;
 const RECENT_INTERACTION_WINDOW_MS = LEASE_TTL_MS;
@@ -63,10 +64,12 @@ function stableScopeKey(environmentId: EnvironmentId, scope: BackgroundScope): s
 
 function getClientId(): string {
   try {
-    const existing = window.localStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    // Keep the identity this browser reported under before the GOAT rename.
+    const storage = migratingStorage(window.localStorage);
+    const existing = storage.getItem(CLIENT_ID_STORAGE_KEY);
     if (existing) return existing;
     const next = randomUUID();
-    window.localStorage.setItem(CLIENT_ID_STORAGE_KEY, next);
+    storage.setItem(CLIENT_ID_STORAGE_KEY, next);
     return next;
   } catch {
     return "ephemeral-browser-client";

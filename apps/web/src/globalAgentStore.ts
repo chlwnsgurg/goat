@@ -1,11 +1,11 @@
-import type { ChannelBotRef, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { ChannelBotRef, EnvironmentId, ThreadId } from "@goat/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import type { DraftId } from "./composerDraftStore";
 import { resolveStorage } from "./lib/storage";
 
-export const GLOBAL_AGENT_STORAGE_KEY = "t3code:global-agent:v1";
+export const GLOBAL_AGENT_STORAGE_KEY = "goat:global-agent:v1";
 const GLOBAL_AGENT_STORAGE_VERSION = 2;
 
 /**

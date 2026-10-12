@@ -14,6 +14,8 @@
  *   resource-monitor/    per-platform Rust helper, same paths as the npm package
  *   node_modules/        runtime externals (node-pty, msgpackr-extract, fff)
  */
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Config from "effect/Config";
@@ -28,9 +30,9 @@ import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import * as HostProcess from "@t3tools/shared/HostProcess";
-import { fromYaml } from "@t3tools/shared/schemaYaml";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as HostProcess from "@goat/shared/HostProcess";
+import { fromYaml } from "@goat/shared/schemaYaml";
+import { resolveSpawnCommand } from "@goat/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
@@ -284,13 +286,13 @@ const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, ta
 });
 
 const MacSigningConfig = Config.all({
-  identity: Config.String("T3CODE_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
+  identity: Config.String("GOAT_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
   appleKeychainProfile: Config.String("APPLE_KEYCHAIN_PROFILE").pipe(Config.option),
   appleKeychain: Config.String("APPLE_KEYCHAIN").pipe(Config.option),
   appleApiKey: Config.String("APPLE_API_KEY").pipe(Config.option),
   appleApiKeyId: Config.String("APPLE_API_KEY_ID").pipe(Config.option),
   appleApiIssuer: Config.String("APPLE_API_ISSUER").pipe(Config.option),
-  requireNotarization: Config.String("T3CODE_REQUIRE_NOTARIZATION").pipe(Config.withDefault("0")),
+  requireNotarization: Config.String("GOAT_REQUIRE_NOTARIZATION").pipe(Config.withDefault("0")),
 });
 
 /**
@@ -328,7 +330,7 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
     if (identity === "-") {
       return yield* new CliNotarizationCredentialsMissingError({
         detail:
-          "Required notarization needs a Developer ID in T3CODE_CLI_MAC_SIGN_IDENTITY; ad hoc signing is not allowed.",
+          "Required notarization needs a Developer ID in GOAT_CLI_MAC_SIGN_IDENTITY; ad hoc signing is not allowed.",
       });
     }
     if (!authArgs) {
@@ -364,7 +366,7 @@ export const signMacArchiveContents = Effect.fn("signMacArchiveContents")(functi
     );
   }
   if (identity === "-") {
-    yield* Effect.log("[cli-archive] Signed ad hoc (no T3CODE_CLI_MAC_SIGN_IDENTITY).");
+    yield* Effect.log("[cli-archive] Signed ad hoc (no GOAT_CLI_MAC_SIGN_IDENTITY).");
     return;
   }
 
@@ -584,14 +586,17 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     builtExecutable,
     `Run \`node apps/server/scripts/cli.ts build-exe --target ${targetKey}\` first.`,
   );
-  yield* requireInput(path.join(webClient, "index.html"), "Run `vp run --filter t3 build` first.");
+  yield* requireInput(
+    path.join(webClient, "index.html"),
+    "Run `vp run --filter goat build` first.",
+  );
   yield* requireInput(
     resourceMonitorDir,
     "Build the resource monitor or pass --resource-monitor-dir.",
   );
 
   const stem = cliArchiveStem(input.version, input.platform, input.arch);
-  const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
+  const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "goat-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
   yield* fs.makeDirectory(contentDir, { recursive: true });
 

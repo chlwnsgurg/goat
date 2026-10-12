@@ -1,11 +1,12 @@
 import {
+  GOAT_PROJECT_FILE_NAME,
   DEFAULT_SERVER_SETTINGS,
   PROJECT_FILE_BACKED_SETTINGS,
   type ProjectFileBackedSettingKey,
   resolveEnvironmentMachineKind,
   type ServerSettings,
   type WorktreeSubmodules,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { CheckIcon, LayersIcon } from "lucide-react";
 import * as Equal from "effect/Equal";
 
@@ -116,7 +117,7 @@ export function settingInheritanceLayers(
   if (fileBacked && target.projectId !== null) {
     layers.push({
       key: "t3.json",
-      label: "t3.json",
+      label: target.projectFileName ?? GOAT_PROJECT_FILE_NAME,
       value: source === "t3.json" ? formatValue(key, target.settings[key]) : "Inherits",
       effective: source === "t3.json",
       set: source === "t3.json",

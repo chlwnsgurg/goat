@@ -1,7 +1,7 @@
-import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
-import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
 import { assert } from "@effect/vitest";
-import * as NetService from "@t3tools/shared/Net";
+import * as NetService from "@goat/shared/Net";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
 import * as Effect from "effect/Effect";
@@ -403,7 +403,7 @@ exec -a node '${process.execPath.replaceAll("'", "'\\''")}' "$@"
   const run = (
     entry: "launch" | "pairing" | "mcp",
     secondary = false,
-    options: SshTunnel.RemoteT3RunnerOptions = {},
+    options: SshTunnel.RemoteGoatRunnerOptions = {},
     prepared?: SshTunnel.PreparedRemoteRuntime,
   ) => {
     const inputRunner = { ...runner, ...options, keepExistingRunner: secondary };

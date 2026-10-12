@@ -1,6 +1,6 @@
 # Desktop
 
-`apps/desktop` (`@t3tools/desktop`) is the Electron host. `apps/desktop/package.json` points `main`
+`apps/desktop` (`@goat/desktop`) is the Electron host. `apps/desktop/package.json` points `main`
 at `dist-electron/boot.cjs`. The main process source is `apps/desktop/src/main.ts`, which composes
 the desktop layers and runs `DesktopApp.program`.
 
@@ -23,6 +23,6 @@ not import the server's orchestration modules.
 
 Where the desktop process stores server state is the [state roots](settings-and-storage.md#state-roots)
 contract: `~/.goat/desktop` for a packaged build, `~/.t3` for a development build unless
-`T3CODE_HOME` is set.
+`GOAT_HOME` is set.
 
 > Decision record: [ADR-0004](decisions/ADR-0004-electron-shell.md)

@@ -7,7 +7,7 @@ import {
   makeProviderSettingsSchema,
   SourceControlProviderKind,
   TrimmedString,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
@@ -15,7 +15,7 @@ import {
   isChangeRequestInProjectRepository,
   isChangeRequestOnProjectHost,
   isChangeRequestPath,
-} from "@t3tools/source-control-core/client/definition";
+} from "@goat/source-control-core/client/definition";
 
 const safeShellArgument = /^[A-Za-z0-9._/@+=,-]+$/;
 const repositoryName = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
@@ -29,7 +29,7 @@ const text = (annotations: Schema.Annotations.Key<string>) =>
   );
 
 /**
- * Bitbucket API credentials, used before the `T3CODE_BITBUCKET_*` environment variables: an
+ * Bitbucket API credentials, used before the `GOAT_BITBUCKET_*` environment variables: an
  * access token, or an Atlassian account email with an API token. The access token wins when both
  * are saved.
  */

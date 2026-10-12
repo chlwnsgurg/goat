@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, expect, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -115,7 +115,7 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
     );
 
   /** A directory holding an executable `t3`, to stand in for one on PATH. */
-  const pathWithT3 = Effect.gen(function* () {
+  const pathWithGoat = Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const bin = yield* fs.makeTempDirectoryScoped();
@@ -138,7 +138,7 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
         yield* rootCommand({
           node: "/home/theo/.local/node/bin/node",
           entry: "/home/theo/.local/lib/node_modules/t3/dist/bin.mjs",
-          path: yield* pathWithT3,
+          path: yield* pathWithGoat,
         }),
       ).toBe('sudo env "PATH=$PATH" goat browser setup');
     }).pipe(Effect.scoped),
@@ -155,12 +155,12 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
       const desktop = {
         node: "/tmp/.mount_T3abc/t3code",
         entry: "/tmp/.mount_T3abc/resources/app.asar/apps/server/dist/bin.mjs",
-        env: { T3CODE_CLI_PATH: shim },
+        env: { GOAT_CLI_PATH: shim },
       };
       // The desktop app's shim, quoted for the shell and run as root as is.
       expect(yield* rootCommand(desktop)).toBe(`sudo '${shim}' browser setup`);
       // A `t3` the person put on PATH still wins.
-      expect(yield* rootCommand({ ...desktop, path: yield* pathWithT3 })).toBe(
+      expect(yield* rootCommand({ ...desktop, path: yield* pathWithGoat })).toBe(
         'sudo env "PATH=$PATH" goat browser setup',
       );
       // A standalone binary names itself.
@@ -173,7 +173,7 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
       ).toBe("sudo /opt/t3/t3 browser setup");
       // A stale shim path, then no launcher at all, fall back to plain `goat`.
       expect(
-        yield* rootCommand({ ...desktop, env: { T3CODE_CLI_PATH: path.join(home, "gone") } }),
+        yield* rootCommand({ ...desktop, env: { GOAT_CLI_PATH: path.join(home, "gone") } }),
       ).toBe('sudo env "PATH=$PATH" goat browser setup');
     }).pipe(Effect.scoped),
   );
@@ -187,7 +187,7 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
       const root = yield* fs.makeTempDirectoryScoped();
       for (const [relative, kind] of [
         ["npm/_npx/hash/node_modules/t3/dist/bin.mjs", "npx"],
-        ["npm/_npx/hash/node_modules/@t3code/t3-linux-x64/t3", "npx"],
+        ["npm/_npx/hash/node_modules/@goat/cli-linux-x64/t3", "npx"],
         ["pnpm/dlx/hash/node_modules/t3/dist/bin.mjs", "pnpm-dlx"],
         [".bun/install/cache/t3/dist/bin.mjs", "bunx"],
       ] as const) {
@@ -245,9 +245,9 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
         .makeTempDirectoryScoped()
         .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
       const prefix = path.join(root, "bunx-tools");
-      const packageRoot = path.join(prefix, "lib/node_modules/t3");
-      const launcher = path.join(packageRoot, "bin/t3.js");
-      const entry = path.join(packageRoot, "node_modules/@t3code/t3-linux-x64/t3");
+      const packageRoot = path.join(prefix, "lib/node_modules/goat");
+      const launcher = path.join(packageRoot, "bin/goat.js");
+      const entry = path.join(packageRoot, "node_modules/@goat/cli-linux-x64/goat");
       yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
       yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
       yield* fs.makeDirectory(path.join(prefix, "bin"));
@@ -255,9 +255,9 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
       yield* fs.writeFileString(entry, "");
       yield* fs.writeFileString(
         path.join(packageRoot, "package.json"),
-        '{"name":"t3","version":"0.0.45","bin":{"t3":"./bin/t3.js"},"optionalDependencies":{"@t3code/t3-linux-x64":"0.0.45"}}',
+        '{"name":"goat","version":"0.0.45","bin":{"goat":"./bin/goat.js"},"optionalDependencies":{"@goat/cli-linux-x64":"0.0.45"}}',
       );
-      yield* fs.symlink(launcher, path.join(prefix, "bin/t3"));
+      yield* fs.symlink(launcher, path.join(prefix, "bin/goat"));
       const resolve = resolveServerInstallation.pipe(
         Effect.provideService(HostProcess.ExecutablePath, entry),
         Effect.provideService(HostProcess.IsExecutable, true),
@@ -269,7 +269,7 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
       ]) {
         yield* fs.writeFileString(
           path.join(path.dirname(entry), "package.json"),
-          `{"name":"@t3code/t3-linux-x64","version":"${version}"}`,
+          `{"name":"@goat/cli-linux-x64","version":"${version}"}`,
         );
         expect(yield* resolve).toEqual(expected);
       }
@@ -283,9 +283,9 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
       const prefix = yield* fs
         .makeTempDirectoryScoped()
         .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
-      const packageRoot = path.join(prefix, "lib/node_modules/t3");
-      const launcher = path.join(packageRoot, "bin/t3.js");
-      const entry = path.join(packageRoot, "node_modules/@t3code/t3-linux-x64/goat");
+      const packageRoot = path.join(prefix, "lib/node_modules/goat");
+      const launcher = path.join(packageRoot, "bin/goat.js");
+      const entry = path.join(packageRoot, "node_modules/@goat/cli-linux-x64/goat");
       yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
       yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
       yield* fs.makeDirectory(path.join(prefix, "bin"));
@@ -293,11 +293,11 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
       yield* fs.writeFileString(entry, "");
       yield* fs.writeFileString(
         path.join(packageRoot, "package.json"),
-        '{"name":"t3","version":"0.0.45","bin":{"goat":"./bin/t3.js","t3":"./bin/t3.js"},"optionalDependencies":{"@t3code/t3-linux-x64":"0.0.45"}}',
+        '{"name":"goat","version":"0.0.45","bin":{"goat":"./bin/goat.js","t3":"./bin/goat.js"},"optionalDependencies":{"@goat/cli-linux-x64":"0.0.45"}}',
       );
       yield* fs.writeFileString(
         path.join(path.dirname(entry), "package.json"),
-        '{"name":"@t3code/t3-linux-x64","version":"0.0.45"}',
+        '{"name":"@goat/cli-linux-x64","version":"0.0.45"}',
       );
       const foreign = path.join(prefix, "bin/t3");
       yield* fs.writeFileString(foreign, "upstream command\n");
@@ -312,7 +312,7 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
       expect(yield* fs.readFileString(foreign)).toBe("upstream command\n");
       yield* fs.writeFileString(
         path.join(path.dirname(entry), "package.json"),
-        '{"name":"@t3code/t3-linux-x64","version":"0.0.44"}',
+        '{"name":"@goat/cli-linux-x64","version":"0.0.44"}',
       );
       expect(yield* resolve).toBeNull();
     }),

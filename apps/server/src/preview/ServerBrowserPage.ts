@@ -16,7 +16,7 @@ import {
   type PreviewAutomationTypeInput,
   type PreviewAutomationUploadInput,
   type PreviewAutomationWaitForInput,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import { constVoid } from "effect/Function";
 import type { CDPSession, Locator, Page } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
@@ -574,7 +574,7 @@ export const RECORDING_ENCODER_SCRIPT = `(() => {
       context.restore();
     }
   };
-  window.__t3Recorder = {
+  window.__goatRecorder = {
     async frame(base64, cssWidth) {
       if (tooLarge) return false;
       const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));

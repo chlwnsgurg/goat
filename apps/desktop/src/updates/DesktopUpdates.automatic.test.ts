@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { DesktopUpdateStateSchema, type DesktopUpdateState } from "@t3tools/contracts";
+import { DesktopUpdateStateSchema, type DesktopUpdateState } from "@goat/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -301,7 +301,7 @@ describe("DesktopUpdates automatic coordinator", () => {
   it.effect("disabled updater retains intent without pretending to restore", () => {
     const harness = makeHarness({
       initialSettings: { ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS, pendingUpdate: pending },
-      env: { T3CODE_DISABLE_AUTO_UPDATE: "true" },
+      env: { GOAT_DISABLE_AUTO_UPDATE: "true" },
     });
     return Effect.scoped(
       Effect.gen(function* () {

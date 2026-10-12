@@ -6,15 +6,17 @@
  * dependencies, links the main checkout's gitignored env files into this
  * worktree, then warms the web dependency cache.
  */
+// Adopts legacy T3 env names before anything reads the environment.
+import "@goat/contracts/adoptLegacyEnv";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 const ENV_FILES = [".env", NodePath.join("infra", "relay", ".env")];
 
-const projectRoot = process.env.T3CODE_PROJECT_ROOT;
+const projectRoot = process.env.GOAT_PROJECT_ROOT;
 if (!projectRoot) {
-  throw new Error("T3CODE_PROJECT_ROOT is not set. Run this through the t3.json setup action.");
+  throw new Error("GOAT_PROJECT_ROOT is not set. Run this through the t3.json setup action.");
 }
 const worktree = NodePath.dirname(import.meta.dirname);
 

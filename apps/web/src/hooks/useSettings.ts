@@ -1,3 +1,4 @@
+import { migratingStorage } from "@goat/client-runtime/storage-migration";
 /**
  * Environment-scoped settings hooks.
  *
@@ -21,24 +22,24 @@ import {
   ServerSettings,
   type ServerSettingsPatch,
   sessionGrantsScope,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   type ClientSettingsPatch,
   type ClientSettings,
   DEFAULT_CLIENT_SETTINGS,
   type EnvironmentIdentificationMode,
   type UnifiedSettings,
-} from "@t3tools/contracts/settings";
-import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
+} from "@goat/contracts/settings";
+import { safeErrorLogAttributes } from "@goat/client-runtime/errors";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+} from "@goat/client-runtime/state/runtime";
 import {
   filterSharedServerPatch,
   splitSharedServerPatch,
   supportsSharedSettingsSync,
-} from "@t3tools/client-runtime/state/shared-settings";
+} from "@goat/client-runtime/state/shared-settings";
 import { ensureLocalApi } from "~/localApi";
 import { readBrowserClientSettings } from "~/clientPersistenceStorage";
 import { resolveSidebarViewIsProjects } from "~/components/Sidebar.logic";
@@ -52,7 +53,7 @@ import {
 import {
   modelPreferencesMigrationPatch,
   resolveModelPreferences,
-} from "@t3tools/shared/serverSettings";
+} from "@goat/shared/serverSettings";
 import * as Struct from "effect/Struct";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -66,7 +67,7 @@ import { environmentSession, readEnvironmentScope, useEnvironmentScope } from "~
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
-const SIDEBAR_VIEW_STORAGE_KEY = "t3code:sidebar-view";
+const SIDEBAR_VIEW_STORAGE_KEY = "goat:sidebar-view";
 
 const sidebarViewMirrorListeners = new Set<() => void>();
 let sidebarViewMirrorCache: boolean | null | undefined;
@@ -74,7 +75,7 @@ let sidebarViewMirrorCache: boolean | null | undefined;
 function readSynchronousSidebarView(): boolean | null {
   if (typeof window === "undefined") return null;
   try {
-    const stored = window.localStorage.getItem(SIDEBAR_VIEW_STORAGE_KEY);
+    const stored = migratingStorage(window.localStorage).getItem(SIDEBAR_VIEW_STORAGE_KEY);
     if (stored === "projects") return true;
     if (stored === "activity") return false;
   } catch {
@@ -115,7 +116,10 @@ function writeSynchronousSidebarView(projects: boolean): void {
   sidebarViewMirrorCache = projects;
   if (typeof window !== "undefined") {
     try {
-      window.localStorage.setItem(SIDEBAR_VIEW_STORAGE_KEY, projects ? "projects" : "activity");
+      migratingStorage(window.localStorage).setItem(
+        SIDEBAR_VIEW_STORAGE_KEY,
+        projects ? "projects" : "activity",
+      );
     } catch (error) {
       console.error("Could not persist the sidebar view.", error);
     }
@@ -870,7 +874,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
   sidebarViewMirrorListeners.clear();
   if (typeof window !== "undefined") {
     try {
-      window.localStorage.removeItem(SIDEBAR_VIEW_STORAGE_KEY);
+      migratingStorage(window.localStorage).removeItem(SIDEBAR_VIEW_STORAGE_KEY);
     } catch {
       // ignore
     }

@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -62,6 +62,23 @@ it("reads the served T3 home back out of a rendered unit or plist", () => {
     ),
   ).toBe("/Users/theo/a&b");
   expect(BootService.bootServiceBaseDirOf("[Service]\nExecStart=/x\n")).toBeUndefined();
+});
+
+it("reads the home of units installed before the GOAT rename", () => {
+  // goat-rename: legacy-begin
+  expect(
+    BootService.bootServiceBaseDirOf("[Service]\nEnvironment=T3CODE_HOME=/home/theo/.t3\n"),
+  ).toBe("/home/theo/.t3");
+  expect(
+    BootService.bootServiceBaseDirOf(
+      "<dict>\n    <key>T3CODE_HOME</key>\n    <string>/Users/theo/.t3</string>\n</dict>",
+    ),
+  ).toBe("/Users/theo/.t3");
+  // goat-rename: legacy-end
+  const unit = BootService.renderBootServiceUnit(linuxPlan);
+  expect(BootService.bootServiceBaseDirOf(unit)).toBe(linuxPlan.baseDir);
+  expect(unit).toContain(`Environment=GOAT_HOME=${linuxPlan.baseDir}`);
+  expect(unit).toContain(`Environment=T3CODE_HOME=${linuxPlan.baseDir}`); // goat-rename: legacy
 });
 
 it("survives the kernel OOM-killing a greedy agent child", () => {
@@ -132,7 +149,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-boot-service-test-" });
+  const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-boot-service-test-" });
   const baseDir = path.join(home, ".t3");
   const statePath = path.join(baseDir, "runtime", "service-state.json");
   // A complete pinned runtime is already present, so install only validates
@@ -587,7 +604,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       yield* service.install();
       commands.length = 0;
       const path = yield* Path.Path;
-      const otherHome = yield* fs.makeTempDirectoryScoped({ prefix: "t3-other-home-" });
+      const otherHome = yield* fs.makeTempDirectoryScoped({ prefix: "goat-other-home-" });
 
       const other = yield* makeService(undefined, "1.2.3", path.join(otherHome, ".t3"));
       expect(yield* other.restart).toBe(false);

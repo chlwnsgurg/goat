@@ -1,4 +1,4 @@
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import {
   CLI_RELEASE_BASE_URL_ENV,
   CLI_RELEASE_REPOSITORY,
@@ -7,7 +7,7 @@ import {
   cliReleaseChannelOf,
   newestCliReleaseVersion,
   type CliReleaseChannel,
-} from "@t3tools/shared/cliRelease";
+} from "@goat/shared/cliRelease";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
@@ -90,7 +90,7 @@ class CliReleaseIndexError extends Schema.TaggedError<CliReleaseIndexError>()(
           : this.failure === "unpublished"
             ? `No published ${this.channel} release was found.`
             : `Could not list goat releases${this.status === undefined ? "" : ` (HTTP ${this.status})`}.`;
-    return `${reason} Run goat update <version>, or set T3CODE_VERSION to an exact published version when running the installer to bypass release discovery.`;
+    return `${reason} Run goat update <version>, or set GOAT_VERSION to an exact published version when running the installer to bypass release discovery.`;
   }
 }
 
@@ -314,7 +314,7 @@ export const findWindowsShim = Effect.fn("cli.update.find_windows_shim")(functio
   const path = yield* Path.Path;
   const environment = yield* HostProcess.Environment;
   const candidates = [
-    ...(environment["T3CODE_INSTALL_BIN_DIR"] ? [environment["T3CODE_INSTALL_BIN_DIR"]] : []),
+    ...(environment["GOAT_INSTALL_BIN_DIR"] ? [environment["GOAT_INSTALL_BIN_DIR"]] : []),
     ...(environment["PATH"] ?? environment["Path"] ?? "").split(";"),
   ].filter((entry) => entry.trim().length > 0);
   for (const directory of candidates) {

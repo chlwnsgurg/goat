@@ -1,8 +1,9 @@
+import { createMigratingDatabaseOpener } from "../lib/indexedDbMigration";
 import {
   computeDpopAccessTokenHash,
   computeDpopJwkThumbprint,
   DpopPublicJwk,
-} from "@t3tools/shared/dpop";
+} from "@goat/shared/dpop";
 import * as Crypto from "effect/Crypto";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -21,7 +22,7 @@ export class BrowserDpopError extends Data.TaggedError("BrowserDpopError")<{
   readonly cause?: unknown;
 }> {}
 
-const DPOP_DATABASE_NAME = "t3code:cloud-auth";
+const DPOP_DATABASE_NAME = "goat:cloud-auth";
 const DPOP_DATABASE_VERSION = 1;
 const DPOP_KEY_STORE_NAME = "keys";
 const DPOP_KEY_ID = "relay-dpop-proof-key";
@@ -44,20 +45,18 @@ function dpopError(message: string, cause?: unknown) {
   return new BrowserDpopError({ message, ...(cause === undefined ? {} : { cause }) });
 }
 
+const openMigratedDpopDatabase = createMigratingDatabaseOpener(
+  DPOP_DATABASE_NAME,
+  DPOP_DATABASE_VERSION,
+  (database) => {
+    if (!database.objectStoreNames.contains(DPOP_KEY_STORE_NAME))
+      database.createObjectStore(DPOP_KEY_STORE_NAME);
+  },
+);
 function openDpopDatabase(): Effect.Effect<IDBDatabase, BrowserDpopError> {
-  return Effect.callback<IDBDatabase, BrowserDpopError>((resume) => {
-    const request = indexedDB.open(DPOP_DATABASE_NAME, DPOP_DATABASE_VERSION);
-    request.addEventListener("error", () =>
-      resume(
-        Effect.fail(dpopError("Could not open DPoP key storage.", request.error ?? undefined)),
-      ),
-    );
-    request.addEventListener("upgradeneeded", () => {
-      if (!request.result.objectStoreNames.contains(DPOP_KEY_STORE_NAME)) {
-        request.result.createObjectStore(DPOP_KEY_STORE_NAME);
-      }
-    });
-    request.addEventListener("success", () => resume(Effect.succeed(request.result)));
+  return Effect.tryPromise({
+    try: openMigratedDpopDatabase,
+    catch: (cause) => dpopError("Could not open DPoP key storage.", cause),
   });
 }
 

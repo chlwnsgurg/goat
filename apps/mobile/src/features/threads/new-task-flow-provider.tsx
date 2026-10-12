@@ -1,4 +1,4 @@
-import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
+import { resolveFilesystemReadAccess } from "@goat/client-runtime/state/filesystem";
 import { useEnvironmentPresentation } from "../../state/presentation";
 import { environmentSession } from "../../state/session";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -12,7 +12,7 @@ import type {
   ProviderOptionSelection,
   RuntimeMode,
   ServerProvider,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -20,12 +20,13 @@ import {
   DEFAULT_SERVER_SETTINGS,
   MessageId,
   repositoryGroupingKeyOf,
-  T3_PROJECT_FILE_NAME,
+  GOAT_PROJECT_FILE_NAME,
   ThreadId,
-} from "@t3tools/contracts";
-import { sanitizeNewRefName } from "@t3tools/shared/git";
-import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
+} from "@goat/contracts";
+import { sanitizeNewRefName } from "@goat/shared/git";
+import { resolveNewThreadEnvMode, resolveProjectSettings } from "@goat/shared/projectSettings";
+import { goatProjectFileReadPath } from "@goat/client-runtime/goat-project-file";
+import { parseGoatProjectFile } from "@goat/shared/goatProjectFile";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 
@@ -95,14 +96,14 @@ import {
   useRemoteConnectionStatus,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
-import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
+import { availableScratchWorkspaceRoot } from "@goat/client-runtime/operations/projects";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
+} from "@goat/client-runtime/state/runtime";
+import { isScratchProject } from "@goat/client-runtime/state/projects";
+import { EnvironmentProject } from "@goat/client-runtime/state/shell";
+import { type VcsRef } from "@goat/client-runtime/state/vcs";
 import {
   buildHomeProjectScopes,
   sortHomeProjectScopes,
@@ -505,21 +506,41 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const { canReadFiles } = fileAccess;
   const fileAccessPending =
     selectedProject !== null && selectedProject.workspaceRoot !== "" && fileAccess.isPending;
-  const t3ProjectFileQuery = useEnvironmentQuery(
+  const goatProjectFileQuery = useEnvironmentQuery(
     canReadFiles && selectedProject !== null && selectedProject.workspaceRoot !== ""
       ? projectEnvironment.readFile({
           environmentId: selectedProject.environmentId,
-          input: { cwd: selectedProject.workspaceRoot, relativePath: T3_PROJECT_FILE_NAME },
+          input: { cwd: selectedProject.workspaceRoot, relativePath: GOAT_PROJECT_FILE_NAME },
         })
       : null,
   );
-  const t3ProjectFileData = t3ProjectFileQuery.data as ProjectReadFileResult | null;
-  const t3ProjectFile = useMemo(
+  const projectFilePath = goatProjectFileReadPath(
+    goatProjectFileQuery.data,
+    goatProjectFileQuery.cause,
+    goatProjectFileQuery.isPending,
+  );
+  const legacyProjectFileQuery = useEnvironmentQuery(
+    canReadFiles &&
+      selectedProject !== null &&
+      selectedProject.workspaceRoot !== "" &&
+      projectFilePath !== GOAT_PROJECT_FILE_NAME
+      ? projectEnvironment.readFile({
+          environmentId: selectedProject.environmentId,
+          input: { cwd: selectedProject.workspaceRoot, relativePath: projectFilePath },
+        })
+      : null,
+  );
+  const goatProjectFileData = (
+    projectFilePath === GOAT_PROJECT_FILE_NAME
+      ? goatProjectFileQuery.data
+      : legacyProjectFileQuery.data
+  ) as ProjectReadFileResult | null;
+  const goatProjectFile = useMemo(
     () =>
-      t3ProjectFileData === null || t3ProjectFileData.truncated
+      goatProjectFileData === null || goatProjectFileData.truncated
         ? null
-        : parseT3ProjectFile(t3ProjectFileData.contents),
-    [t3ProjectFileData],
+        : parseGoatProjectFile(goatProjectFileData.contents),
+    [goatProjectFileData],
   );
   // Environment settings with the project's overrides and its t3.json
   // applied; the aggregate's own legacy fields still count until the server
@@ -530,9 +551,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         selectedEnvironmentServerConfig?.settings ?? DEFAULT_SERVER_SETTINGS,
         selectedProject?.id ?? null,
         selectedProject,
-        t3ProjectFile,
+        goatProjectFile,
       ),
-    [selectedEnvironmentServerConfig?.settings, selectedProject, t3ProjectFile],
+    [selectedEnvironmentServerConfig?.settings, selectedProject, goatProjectFile],
   );
   // A thread without a project runs in a plain folder, so worktree mode
   // would leave it unsendable: it is always local and offers no choice.
@@ -559,7 +580,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const defaultWorkspaceModeSettled =
     selectedProjectDraft.workspaceSelection?.mode !== undefined ||
     projectSettings.sources.defaultThreadEnvMode !== "environment" ||
-    (!t3ProjectFileQuery.isPending && !fileAccessPending);
+    (!goatProjectFileQuery.isPending && !legacyProjectFileQuery.isPending && !fileAccessPending);
   const workspaceMode = canChooseWorkspace
     ? (selectedProjectDraft.workspaceSelection?.mode ?? defaultWorkspaceMode)
     : "local";

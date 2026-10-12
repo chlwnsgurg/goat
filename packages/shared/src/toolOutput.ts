@@ -1,7 +1,8 @@
+import { GOAT_MCP_APP_OUTPUT_KEY } from "@goat/contracts/legacyT3Names";
 import {
   isProviderSendTurnSupportedImageMimeType,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
-} from "@t3tools/contracts";
+} from "@goat/contracts";
 import * as Predicate from "effect/Predicate";
 
 import {
@@ -10,7 +11,7 @@ import {
   type HtmlRenderReference,
 } from "./htmlRender.ts";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference, type McpAppReference } from "./mcpApp.ts";
-import { resolveT3McpToolId } from "./t3McpToolPresentation.ts";
+import { resolveGoatMcpToolId } from "./goatMcpToolPresentation.ts";
 
 const MAX_PARSED_BYTES = 16_384;
 const MAX_METADATA_BYTES = 8_192;
@@ -126,8 +127,10 @@ export function compactDynamicToolOutput(value: unknown): CompactToolOutput | un
     if (data.status === "rolled_back") output.status = "rolled_back";
     const htmlRender = readHtmlRenderReference(data.htmlRender);
     if (htmlRender !== undefined) output.htmlRender = htmlRender;
-    const mcpApp = readMcpAppReference(data[MCP_APP_OUTPUT_KEY]);
-    // Kept under its stored key, so the compact wire output reads back the same way.
+    const mcpApp =
+      readMcpAppReference(data[GOAT_MCP_APP_OUTPUT_KEY]) ??
+      readMcpAppReference(data[MCP_APP_OUTPUT_KEY]);
+    // Compact wire output retains the legacy key for older clients.
     if (mcpApp !== undefined) output[MCP_APP_OUTPUT_KEY] = mcpApp;
     const nestedThreadId = Predicate.isObject(data.thread)
       ? boundedId(data.thread.threadId)
@@ -187,7 +190,7 @@ export function htmlRenderFromToolItem(item: {
   readonly toolName: string | null | undefined;
   readonly output?: unknown;
 }): HtmlRenderReference | undefined {
-  if (resolveT3McpToolId(item.toolName) !== HTML_RENDER_TOOL_NAME) return undefined;
+  if (resolveGoatMcpToolId(item.toolName) !== HTML_RENDER_TOOL_NAME) return undefined;
   const output = compactDynamicToolOutput(item.output);
   return output?.isError ? undefined : output?.htmlRender;
 }

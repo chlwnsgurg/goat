@@ -8,9 +8,9 @@ import {
   DesktopAppActivationResponse,
   type DesktopAppActivationPlatform,
   type DesktopAppActivationRequest,
-} from "@t3tools/contracts";
-import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+} from "@goat/contracts";
+import { resolveDesktopAppControlAddresses } from "@goat/shared/desktopAppControl";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
@@ -19,6 +19,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Argument, Command } from "effect/cli";
+import { LEGACY_HOME_DIR_NAME } from "@goat/contracts/legacyT3Names";
 
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 import { baseDirFlag } from "./config.ts";
@@ -175,7 +176,7 @@ function sendDesktopAppActivationRequest(input: {
 }
 
 const appEnvironment = Config.all({
-  t3Home: Config.String("T3CODE_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  goatHome: Config.String("GOAT_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
   sshConnection: Config.String("SSH_CONNECTION").pipe(Config.option),
   sshTty: Config.String("SSH_TTY").pipe(Config.option),
 });
@@ -194,21 +195,21 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
   }
 
   const path = yield* Path.Path;
-  const configuredBaseDir = Option.getOrUndefined(flags.baseDir) ?? environment.t3Home;
+  const configuredBaseDir = Option.getOrUndefined(flags.baseDir) ?? environment.goatHome;
   const baseDir = yield* resolveBaseDir(configuredBaseDir);
-  const allowDefaultSearch = Option.isNone(flags.baseDir) && !environment.t3Home?.trim();
+  const allowDefaultSearch = Option.isNone(flags.baseDir) && !environment.goatHome?.trim();
   const rawWorkspaceRoot =
     Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcess.WorkingDirectory);
   const workspaceRoot = path.resolve(yield* expandHomePath(rawWorkspaceRoot));
   const userId = yield* HostProcess.UserId;
-  const resolveAddress = (stateDir: string) =>
-    resolveDesktopAppControlAddress({
+  const resolveAddresses = (stateDir: string) =>
+    resolveDesktopAppControlAddresses({
       stateDir,
       platform: hostPlatform,
       tempDir: NodeOS.tmpdir(),
       userId,
       joinPath: path.join,
-    }).address;
+    }).map(({ address }) => address);
   const crypto = yield* Crypto.Crypto;
   const requestId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
   const request: DesktopAppActivationRequest = {
@@ -218,14 +219,16 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
     workspaceRoot,
     platform: hostPlatform,
   };
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  // A desktop started before the GOAT rename may still run on the legacy home.
+  const defaultHomes = [...new Set([baseDir, path.join(homeDirectory, LEGACY_HOME_DIR_NAME)])];
   const stateDirectories = allowDefaultSearch
     ? [
-        path.join(yield* HostProcess.HomeDirectory, ".goat", "desktop", "userdata"),
-        path.join(baseDir, "userdata"),
-        path.join(baseDir, "dev"),
+        path.join(homeDirectory, ".goat", "desktop", "userdata"),
+        ...defaultHomes.flatMap((home) => [path.join(home, "userdata"), path.join(home, "dev")]),
       ]
     : [path.join(baseDir, "userdata")];
-  const [address, ...fallbackAddresses] = stateDirectories.map(resolveAddress);
+  const [address, ...fallbackAddresses] = stateDirectories.flatMap(resolveAddresses);
 
   const response = yield* Effect.tryPromise({
     try: () =>

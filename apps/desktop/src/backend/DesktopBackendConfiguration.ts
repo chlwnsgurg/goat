@@ -1,7 +1,8 @@
+import { LEGACY_DESKTOP_BOOTSTRAP_HOME_KEY } from "@goat/contracts/legacyT3Names";
 import * as NodeOS from "node:os";
 
-import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
-import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
+import { parsePersistedServerObservabilitySettings } from "@goat/shared/serverSettings";
+import { currentDesktopBootstrapToken } from "@goat/shared/desktopBootstrapToken";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -23,6 +24,7 @@ import * as DesktopServerExposure from "./DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
+import { legacyEnvName, withLegacyEnvNames } from "@goat/contracts/legacyT3Names";
 
 export class DesktopBackendObservabilitySettingsReadError extends Schema.TaggedError<DesktopBackendObservabilitySettingsReadError>()(
   "DesktopBackendObservabilitySettingsReadError",
@@ -69,7 +71,7 @@ export class DesktopBackendConfiguration extends Context.Service<
     // so the renderer never holds one long-lived admin credential.
     readonly currentBootstrapToken: Effect.Effect<string, PlatformError.PlatformError>;
   }
->()("@t3tools/desktop/backend/DesktopBackendConfiguration") {}
+>()("@goat/desktop/backend/DesktopBackendConfiguration") {}
 
 interface BackendObservabilitySettings {
   readonly otlpTracesUrl: Option.Option<string>;
@@ -84,16 +86,16 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
-  "T3CODE_PORT",
-  "T3CODE_MODE",
-  "T3CODE_NO_BROWSER",
-  "T3CODE_HOST",
-  "T3CODE_DESKTOP_WS_URL",
-  "T3CODE_DESKTOP_LAN_ACCESS",
-  "T3CODE_DESKTOP_LAN_HOST",
-  "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
-  "T3CODE_TAILSCALE_SERVE",
-  "T3CODE_TAILSCALE_SERVE_PORT",
+  "GOAT_PORT",
+  "GOAT_MODE",
+  "GOAT_NO_BROWSER",
+  "GOAT_HOST",
+  "GOAT_DESKTOP_WS_URL",
+  "GOAT_DESKTOP_LAN_ACCESS",
+  "GOAT_DESKTOP_LAN_HOST",
+  "GOAT_DESKTOP_HTTPS_ENDPOINTS",
+  "GOAT_TAILSCALE_SERVE",
+  "GOAT_TAILSCALE_SERVE_PORT",
 ] as const;
 
 // Env vars that the WSL backend needs but Windows process.env won't forward
@@ -102,18 +104,18 @@ const DESKTOP_BACKEND_ENV_NAMES = [
 const WSL_FORWARDED_ENV_NAMES = [
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
-  "T3CODE_TELEMETRY_ENABLED",
+  "GOAT_TELEMETRY_ENABLED",
   // Otherwise the WSL server keeps exporting to endpoints from the bootstrap.
-  "T3CODE_OTEL_SDK_DISABLED",
+  "GOAT_OTEL_SDK_DISABLED",
   "OTEL_SDK_DISABLED",
-  "T3CODE_OTLP_HEADERS",
-  "T3CODE_OTLP_PROTOCOL",
+  "GOAT_OTLP_HEADERS",
+  "GOAT_OTLP_PROTOCOL",
   // Forwarded without a WSLENV flag, so the values arrive untranslated. The
   // server prefers an OTEL endpoint over the bootstrap envelope, so the GOAT URLs
   // travel as variables to keep winning inside the distro as they do on Windows.
-  "T3CODE_OTLP_TRACES_URL",
-  "T3CODE_OTLP_METRICS_URL",
-  "T3CODE_OTLP_LOGS_URL",
+  "GOAT_OTLP_TRACES_URL",
+  "GOAT_OTLP_METRICS_URL",
+  "GOAT_OTLP_LOGS_URL",
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
   "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
@@ -563,7 +565,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       mode: "desktop" as const,
       noBrowser: true,
       port: backendExposure.port,
-      t3Home: environment.baseDir,
+      [LEGACY_DESKTOP_BOOTSTRAP_HOME_KEY]: environment.baseDir,
       host: backendExposure.bindHost,
       desktopBootstrapToken: input.bootstrapToken,
       desktopBootstrapSecret: input.bootstrapSecret,
@@ -601,13 +603,13 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       env: {
         ...backendChildEnvPatch(),
         ELECTRON_RUN_AS_NODE: "1",
-        T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: environment.isPackaged
+        GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: environment.isPackaged
           ? environment.path.join(environment.resourcesPath, "ssh-runtime", "archives")
           : undefined,
         // The server names this launcher in commands it asks a person to run.
-        T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
+        GOAT_CLI_PATH: Option.getOrUndefined(input.cliPath),
       },
-      // Primary wants process.env (PATH, dev-runner's T3CODE_HOME, etc.).
+      // Primary wants process.env (PATH, dev-runner's GOAT_HOME, etc.).
       extendEnv: true,
       bootstrap,
       bootstrapDelivery: "fd3",
@@ -751,36 +753,46 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
   for (const name of WSL_FORWARDED_ENV_NAMES) {
     const value = process.env[name];
     if (value !== undefined && value.length > 0) {
-      forwardedEnv[name] = value;
-      forwardedEnvNames.push(name);
+      // A WSL runtime installed by an older build reads the legacy spelling.
+      for (const forwardedName of [name, legacyEnvName(name)]) {
+        if (forwardedName === undefined || forwardedEnv[forwardedName] !== undefined) continue;
+        forwardedEnv[forwardedName] = value;
+        forwardedEnvNames.push(forwardedName);
+      }
     }
   }
 
-  // Build an explicit copy of process.env minus T3CODE_HOME (dev-runner
+  // Build an explicit copy of process.env minus GOAT_HOME (dev-runner
   // exports the Windows-side base dir for the primary; if it leaks into
   // the WSL backend the Linux side ends up sharing C:\Users\...\.t3 via
   // /mnt/c, which means both backends read/write the same database and
   // their env-ids collide).
-  const parentEnvWithoutT3Home: Record<string, string | undefined> = {};
+  const parentEnvWithoutGoatHome: Record<string, string | undefined> = {};
+  const ownedNames = new Set(
+    ["GOAT_HOME", "GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR"].flatMap((name) => [
+      name,
+      legacyEnvName(name) ?? name,
+    ]),
+  );
   for (const [key, value] of Object.entries(process.env)) {
-    if (key === "T3CODE_HOME" || key === "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR") continue;
+    if (ownedNames.has(key)) continue;
     // mergeWslEnv preserves inherited suffixes; remove this owned variable
     // before appending its already-translated Linux value as a bare name.
-    parentEnvWithoutT3Home[key] =
+    parentEnvWithoutGoatHome[key] =
       key === "WSLENV"
         ? value
             ?.split(":")
-            .filter(
-              (entry) =>
-                getWslEnvEntryName(entry.trim()) !== "T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR",
-            )
+            .filter((entry) => !ownedNames.has(getWslEnvEntryName(entry.trim())))
             .join(":")
         : value;
   }
-  if (Option.isSome(bundledArchiveDirectory)) {
-    forwardedEnvNames.push("T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR");
-  }
-  const wslEnv = mergeWslEnv(parentEnvWithoutT3Home.WSLENV, forwardedEnvNames);
+  // A WSL runtime installed by an older build reads the legacy spelling here too.
+  const bundledArchiveEnv = Option.match(bundledArchiveDirectory, {
+    onNone: (): Record<string, string> => ({}),
+    onSome: (directory) => withLegacyEnvNames({ GOAT_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: directory }),
+  });
+  forwardedEnvNames.push(...Object.keys(bundledArchiveEnv));
+  const wslEnv = mergeWslEnv(parentEnvWithoutGoatHome.WSLENV, forwardedEnvNames);
 
   const baseConfig = {
     executablePath: "wsl.exe",
@@ -788,17 +800,15 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       preflight._tag === "Ready" ? preflight.windowsEntryPath : environment.backendEntryPath,
     cwd: environment.backendCwd,
     env: {
-      ...parentEnvWithoutT3Home,
+      ...parentEnvWithoutGoatHome,
       ...backendChildEnvPatch(),
       ...forwardedEnv,
       // wsl.exe receives Windows env; /mnt/... is already a Linux path. WSLENV
       // forwards this value without /p, avoiding a second path conversion.
-      ...(Option.isSome(bundledArchiveDirectory)
-        ? { T3CODE_SSH_BUNDLED_RUNTIME_ARCHIVE_DIR: bundledArchiveDirectory.value }
-        : {}),
+      ...bundledArchiveEnv,
       ...(wslEnv !== undefined ? { WSLENV: wslEnv } : {}),
     },
-    // env is already a complete process.env minus T3CODE_HOME; pass it
+    // env is already a complete process.env minus GOAT_HOME; pass it
     // verbatim instead of letting the spawner re-merge process.env on top.
     extendEnv: false,
     bootstrap,

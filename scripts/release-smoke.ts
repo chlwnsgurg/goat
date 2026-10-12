@@ -22,7 +22,7 @@ const workspaceFiles = [
   "apps/mobile/modules/t3-terminal/package.json",
   "apps/marketing/package.json",
   "infra/relay/package.json",
-  "oxlint-plugin-t3code/package.json",
+  "oxlint-plugin-goat/package.json",
   "packages/client-runtime/package.json",
   "packages/contracts/package.json",
   "packages/shared/package.json",
@@ -208,7 +208,7 @@ function assertMissing(path: string, message: string): void {
   }
 }
 
-const tempRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-smoke-"));
+const tempRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-release-smoke-"));
 
 try {
   NodeChildProcess.execFileSync(

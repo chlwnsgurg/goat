@@ -12,7 +12,7 @@ describe("DesktopEarlyElectronStartup", () => {
   const joinPath = NodePath.posix.join;
 
   it("reads production password-store preferences from the GOAT home including a blank override", () => {
-    for (const env of [{}, { T3CODE_HOME: " " }]) {
+    for (const env of [{}, { GOAT_HOME: " " }]) {
       const observed: string[] = [];
       const preference = resolveEarlyLinuxPasswordStorePreference({
         env,
@@ -30,7 +30,7 @@ describe("DesktopEarlyElectronStartup", () => {
 
   it("reads the persisted linux password-store preference before Electron is ready", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
-      env: { T3CODE_HOME: "/home/user/.t3-test" },
+      env: { GOAT_HOME: "/home/user/.t3-test" },
       homeDirectory: "/home/user",
       joinPath,
       readFileString: (path) => {
@@ -44,7 +44,7 @@ describe("DesktopEarlyElectronStartup", () => {
 
   it("accepts JSONC in the early desktop settings file", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
-      env: { T3CODE_HOME: "/home/user/.t3-test" },
+      env: { GOAT_HOME: "/home/user/.t3-test" },
       homeDirectory: "/home/user",
       joinPath,
       readFileString: () => `{
@@ -71,7 +71,7 @@ describe("DesktopEarlyElectronStartup", () => {
 
   it("preserves absolute root paths when resolving early settings", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
-      env: { T3CODE_HOME: "/" },
+      env: { GOAT_HOME: "/" },
       homeDirectory: "/home/user",
       joinPath,
       readFileString: (path) => {
@@ -86,7 +86,7 @@ describe("DesktopEarlyElectronStartup", () => {
   it("resolves the early linux Electron switches", () => {
     const options = resolveEarlyLinuxElectronOptions({
       env: {
-        T3CODE_HOME: "/home/user/.t3-test",
+        GOAT_HOME: "/home/user/.t3-test",
         XDG_CURRENT_DESKTOP: "niri",
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
       },
@@ -106,7 +106,7 @@ describe("DesktopEarlyElectronStartup", () => {
     });
   });
 
-  it("keeps implicit development state under ~/.t3/dev when T3CODE_HOME is unset", () => {
+  it("keeps implicit development state under ~/.goat/dev when GOAT_HOME is unset", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: {
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
@@ -114,7 +114,7 @@ describe("DesktopEarlyElectronStartup", () => {
       homeDirectory: "/home/user",
       joinPath,
       readFileString: (path) => {
-        assert.equal(path, "/home/user/.t3/dev/desktop-settings.json");
+        assert.equal(path, "/home/user/.goat/dev/desktop-settings.json");
         return JSON.stringify({ linuxPasswordStore: "kwallet" });
       },
     });
@@ -122,16 +122,16 @@ describe("DesktopEarlyElectronStartup", () => {
     assert.equal(preference, "kwallet");
   });
 
-  it("treats whitespace-only T3CODE_HOME as unconfigured in development", () => {
+  it("treats whitespace-only GOAT_HOME as unconfigured in development", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: {
-        T3CODE_HOME: "   ",
+        GOAT_HOME: "   ",
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
       },
       homeDirectory: "/home/user",
       joinPath,
       readFileString: (path) => {
-        assert.equal(path, "/home/user/.t3/dev/desktop-settings.json");
+        assert.equal(path, "/home/user/.goat/dev/desktop-settings.json");
         return JSON.stringify({ linuxPasswordStore: "gnome-libsecret" });
       },
     });

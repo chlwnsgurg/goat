@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, assert, beforeEach, describe, it, vi } from "@effect/vitest";
-import { CLI_RELEASE_REPOSITORY, cliArchiveFileName } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_REPOSITORY, cliArchiveFileName } from "@goat/shared/cliRelease";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -156,7 +156,7 @@ const assertCleanStaging = Effect.fn("test.cleanStaging")(function* (
   for (const directory of state.staging) assert.isFalse(yield* state.fs.exists(directory));
 });
 
-function invoke(entry: "launch" | "pairing" | "mcp", runner: SshTunnel.RemoteT3RunnerOptions) {
+function invoke(entry: "launch" | "pairing" | "mcp", runner: SshTunnel.RemoteGoatRunnerOptions) {
   return entry === "launch"
     ? SshTunnel.launchOrReuseRemoteServer(target, {}, runner).pipe(Effect.asVoid)
     : entry === "pairing"
@@ -213,7 +213,7 @@ describe("SSH archives from locally authenticated gh", () => {
         ]);
         assert.equal(command?.options.shell, false);
         assert.equal(command?.options.env?.GH_PROMPT_DISABLED, "1");
-        assert.equal(command?.options.env?.T3_SSH_AUTH_SECRET, undefined);
+        assert.equal(command?.options.env?.GOAT_SSH_AUTH_SECRET, undefined);
         yield* assertCleanStaging(state);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );

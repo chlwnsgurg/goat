@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -41,19 +41,21 @@ it.effect(
           Effect.provideService(HostProcess.HomeDirectory, path.join(root, "root")),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
+      // alice still keeps her state in the legacy home, so it stays selected.
+      yield* fs.makeDirectory(path.join(userHome, ".t3", "userdata"), { recursive: true }); // goat-rename: legacy
       const selected = yield* resolve(Option.none(), { SUDO_USER: "alice" });
-      assert.equal(selected, path.join(userHome, ".t3"));
+      assert.equal(selected, path.join(userHome, ".t3")); // goat-rename: legacy
       yield* fs.makeDirectory(path.join(selected, "tools"), { recursive: true });
       yield* fs.writeFileString(path.join(selected, "tools", "sentinel"), "GOAT browser data");
       assert.equal(
         yield* resolve(Option.some(path.join(root, "explicit")), {
           SUDO_USER: "alice",
-          T3CODE_HOME: path.join(root, "env"),
+          GOAT_HOME: path.join(root, "env"),
         }),
         path.join(root, "explicit"),
       );
       assert.equal(
-        yield* resolve(Option.none(), { SUDO_USER: "alice", T3CODE_HOME: path.join(root, "env") }),
+        yield* resolve(Option.none(), { SUDO_USER: "alice", GOAT_HOME: path.join(root, "env") }),
         path.join(root, "env"),
       );
       assert.equal(getentCalls, 1);
