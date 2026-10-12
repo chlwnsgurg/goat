@@ -10,6 +10,8 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import {
   createProjectsViewEnvironmentAtoms,
   isProjectsViewPinnedThread,
+  isProjectsViewListedThread,
+  resolveProjectsViewPreview,
   resolveProjectConnectionStatus,
   resolveProjectsViewProjectConnectionStatus,
   resolveProjectsViewThreadOrder,
@@ -74,6 +76,43 @@ describe("Projects view pins", () => {
       "remote:last",
     ]);
     expect(resolveProjectsViewThreadOrder(orderedPins, [])).toEqual(orderedPins);
+  });
+});
+
+describe("Projects view rows", () => {
+  const row = { ...pinned, pinnedAt: null };
+  const subagent = {
+    ...row,
+    lineage: {
+      ...row.lineage,
+      parentThreadId: ThreadId.make("parent"),
+      relationshipToParent: "subagent" as const,
+    },
+  };
+  it("lists live unpinned threads and forks once", () => {
+    expect(isProjectsViewListedThread(row)).toBe(true);
+    expect(
+      isProjectsViewListedThread({
+        ...subagent,
+        lineage: { ...subagent.lineage, relationshipToParent: "fork" },
+      }),
+    ).toBe(true);
+    expect(isProjectsViewListedThread(pinned)).toBe(false);
+    expect(isProjectsViewListedThread({ ...row, archivedAt: pinned.pinnedAt })).toBe(false);
+  });
+  it("never lists a subagent, pinned or not", () => {
+    expect(isProjectsViewListedThread(subagent)).toBe(false);
+    expect(isProjectsViewListedThread({ ...subagent, pinnedAt: pinned.pinnedAt })).toBe(false);
+  });
+  it("keeps the open subagent's owner past the preview limit, in order", () => {
+    const keys = ["a", "b", "c", "d", "e"];
+    const preview = (owner: string | null) =>
+      resolveProjectsViewPreview(keys, 2, owner, (key) => key);
+    expect(preview(null)).toEqual(["a", "b"]);
+    expect(preview("b")).toEqual(["a", "b"]);
+    expect(preview("d")).toEqual(["a", "b", "d"]);
+    expect(preview("other-project")).toEqual(["a", "b"]);
+    expect(resolveProjectsViewPreview(keys, 10, "d", (key) => key)).toEqual(keys);
   });
 });
 
