@@ -1,3 +1,5 @@
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -23,15 +25,15 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "SSH runtime protocol selection",
   () => {
     it.live.each(["busy", "unknown", "idle", "failure"] as const)(
-      "manager consumes its startup decision once: %s",
+      "manager consumes settled startup decisions and retries pending ones: %s",
       (mode) =>
         Effect.gen(function* () {
           const f = yield* makeProtocolFixture({
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
-            ssh: 1,
-            orchestration: 2,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
           yield* f.fs.writeFileString(
             `${f.test}/activity`,
@@ -80,15 +82,15 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             yield* f.fs.writeFileString(`${f.test}/activity`, "idle");
             yield* manager.disconnectEnvironment(uploadTarget);
             yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true });
-            assert.equal(yield* f.fs.readFileString(`${f.test}/activity-requests`), count);
+            assert.equal(
+              yield* f.fs.readFileString(`${f.test}/activity-requests`),
+              mode === "busy" || mode === "unknown" ? "3" : count,
+            );
             const events = (yield* f.fs.readFileString(`${f.test}/events`))
               .trim()
               .split("\n")
               .map((line) => JSON.parse(line));
-            assert.equal(
-              events.filter((event) => event.type === "stop").length,
-              mode === "busy" || mode === "unknown" ? 0 : 1,
-            );
+            assert.equal(events.filter((event) => event.type === "stop").length, 1);
           }).pipe(Effect.provide(layer), Effect.scoped);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
@@ -99,8 +101,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
-          ssh: 1,
-          orchestration: 2,
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });
         yield* f.fs.writeFileString(`${f.test}/activity`, "busy");
         yield* f.fs.writeFileString(`${f.test}/pairing-fail`, "fail");

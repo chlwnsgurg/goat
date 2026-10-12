@@ -1,3 +1,5 @@
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -34,8 +36,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
-            ssh: 1,
-            orchestration: 2,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
           let current = { ...f.runner, archiveVersion: String(f.runner.archiveVersion) };
           const layer = Layer.mergeAll(
@@ -54,11 +56,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             const manager = yield* SshTunnel.SshEnvironmentManager;
             yield* manager.ensureEnvironment(uploadTarget);
             current = { ...f.runner, archiveVersion: "9.9.9" };
-            assert.equal(
-              (yield* manager.ensureEnvironment(uploadTarget, { issuePairingToken: true }))
-                .pairingToken,
-              "1.2.2",
-            );
+            const result = yield* manager.ensureEnvironment(uploadTarget, {
+              issuePairingToken: true,
+            });
+            if ("type" in result) throw new Error("Expected a ready environment");
+            assert.equal(result.pairingToken, "1.2.2");
             yield* f.fs.writeFileString(`${f.test}/reject-ceiling`, "1");
             const session = yield* manager.issueMcpClientSession(uploadTarget, {
               label: "fixture",
@@ -205,8 +207,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           live: true,
           kind: "managed",
           oldVersion: "1.2.2",
-          ssh: 1,
-          orchestration: 2,
+          ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });
         const unrelated =
           mode === "unrelated PID"
@@ -250,8 +252,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               yield* f.fs.writeFileString(
                 `${bin}/ps`,
                 mode === "runtime command"
-                  ? `#!/bin/sh\nprintf '%s\\n' "$HOME/.goat/runtime/goat/versions/1.2.2/goat serve --host 127.0.0.1 --port ${f.port} --base-dir $HOME/.goat"\n`
-                  : "#!/bin/sh\nprintf 'unavailable command identity\\n'\n",
+                  ? `#!/bin/sh\nif [ "$1 $2" != '-o command=' ]; then exec /bin/ps "$@"; fi\nprintf '%s\\n' "$HOME/.goat/runtime/goat/versions/1.2.2/goat serve --host 127.0.0.1 --port ${f.port} --base-dir $HOME/.goat"\n`
+                  : "#!/bin/sh\nif [ \"$1 $2\" != '-o command=' ]; then exec /bin/ps \"$@\"; fi\nprintf 'unavailable command identity\\n'\n",
               );
               yield* f.fs.chmod(`${bin}/ps`, 0o700);
               f.setRemotePath(`${bin}:${process.env.PATH ?? ""}`);
@@ -293,8 +295,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             live: false,
             kind: "managed",
             oldVersion: "1.2.2",
-            ssh: 1,
-            orchestration: 2,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
           const entry = `${f.home}/dev's old entry.cjs`;
           const nextEntry = `${f.home}/new entry.cjs`;
@@ -303,7 +305,11 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
               file,
               protocolExecutable(
                 "1.2.3",
-                { ssh: 1, orchestration: 2, nodeReadiness: true },
+                {
+                  ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+                  orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+                  nodeReadiness: true,
+                },
                 f.state,
               ),
             );

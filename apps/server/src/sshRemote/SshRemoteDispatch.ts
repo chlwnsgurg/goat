@@ -911,6 +911,15 @@ const make = Effect.gen(function* () {
     const bootstrap = yield* withRuntime(manager.ensureEnvironment(input.target)).pipe(
       sshFailed(input.target.alias),
     );
+    if ("type" in bootstrap)
+      return yield* failure(
+        "host_unavailable",
+        pendingRuntimeMessage(
+          input.target.alias,
+          bootstrap.pending.reason,
+          bootstrap.pending.detail,
+        ),
+      );
     const session = yield* sessionFor(input.target, input.runtimeMode);
     if (!session.ceilingApplied)
       return yield* failure("remote_refused", "Update the remote GOAT before sending a workspace.");
@@ -1013,6 +1022,11 @@ const make = Effect.gen(function* () {
     const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
       sshFailed(target.alias),
     );
+    if ("type" in bootstrap)
+      return yield* failure(
+        "host_unavailable",
+        pendingRuntimeMessage(target.alias, bootstrap.pending.reason, bootstrap.pending.detail),
+      );
     connected.add(target.alias);
     // Bootstrap may have taken a while; the session carries the caller's authority.
     yield* beforeLaunch;
@@ -1199,6 +1213,11 @@ const make = Effect.gen(function* () {
     const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
       unavailable(target.alias),
     );
+    if ("type" in bootstrap)
+      return yield* failure(
+        "host_unavailable",
+        pendingRuntimeMessage(target.alias, bootstrap.pending.reason, bootstrap.pending.detail),
+      );
     connected.add(target.alias);
     // Right before the request: the caller may have lost authority during SSH.
     const stillAuthorized = authorize.pipe(
@@ -1334,3 +1353,17 @@ export const layer = Layer.effect(SshRemoteDispatch, make).pipe(
   Layer.provide(layerManager),
   Layer.provide(NetService.layer),
 );
+
+function pendingRuntimeMessage(
+  alias: string,
+  reason: "busy" | "unknown" | "contended",
+  detail?: "recovery-stale",
+) {
+  if (detail === "recovery-stale")
+    return `${alias}'s recovery is locked. Remove ~/.goat/ssh-launch/replacement.recovery on the remote host after checking that no GOAT client is replacing this runtime.`;
+  return reason === "contended"
+    ? `Another client is replacing ${alias}'s GOAT runtime; retry later`
+    : reason === "unknown"
+      ? `${alias}'s GOAT runtime is waiting for a verified idle response before replacement; retry later`
+      : `${alias}'s GOAT runtime is being replaced when its current work finishes; retry later`;
+}

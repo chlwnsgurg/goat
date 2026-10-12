@@ -40,6 +40,10 @@ function getDescription(): ReactNode {
 
 function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateState {
   return {
+    installPolicy: "restart-when-idle",
+    pendingRestartReason: null,
+    pendingUpdate: null,
+    recoveryStatus: null,
     enabled: true,
     status: "downloaded",
     channel: "latest",
@@ -73,7 +77,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
     link?.props.onClick?.();
     await vi.waitFor(() => {
       expect(openExternal).toHaveBeenCalledWith(
-        "https://github.com/goat-si/goat/releases/tag/v0.0.30",
+        "https://github.com/goat-si/goat-releases/releases/tag/v0.0.30",
       );
     });
     expect(testState.addToast).toHaveBeenCalledTimes(1);
@@ -91,7 +95,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
 
     await vi.waitFor(() => {
       expect(openExternal).toHaveBeenCalledWith(
-        "https://github.com/goat-si/goat/releases/tag/v0.0.30",
+        "https://github.com/goat-si/goat-releases/releases/tag/v0.0.30",
       );
     });
   });

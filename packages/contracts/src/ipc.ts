@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { SnapShotSource } from "./chatAttachment.ts";
@@ -267,7 +268,22 @@ export interface DesktopRuntimeInfo {
   runningUnderArm64Translation: boolean;
 }
 
+export const DesktopUpdateInstallPolicySchema = Schema.Literals([
+  "restart-when-idle",
+  "install-on-quit",
+  "paused",
+]);
+export type DesktopUpdateInstallPolicy = typeof DesktopUpdateInstallPolicySchema.Type;
+
 export interface DesktopUpdateState {
+  installPolicy: DesktopUpdateInstallPolicy;
+  pendingRestartReason: null | "busy" | "unknown" | "paused";
+  pendingUpdate: null | {
+    readonly version: string;
+    readonly channel: DesktopUpdateChannel;
+    readonly downloadedAt: string;
+  };
+  recoveryStatus: null | "restoring" | "needs-network";
   enabled: boolean;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
@@ -298,7 +314,30 @@ export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   totalItems: Schema.Number,
 });
 
+/** The downloaded update the desktop app will install; persisted in desktop settings. */
+export const DesktopUpdatePendingRecordSchema = Schema.NullOr(
+  Schema.Struct({
+    version: Schema.String,
+    channel: DesktopUpdateChannelSchema,
+    downloadedAt: Schema.String,
+  }),
+);
+
 export const DesktopUpdateStateSchema = Schema.Struct({
+  // These four fields arrived with automatic updates; defaults keep reports from
+  // older desktops and servers decodable during a version transition.
+  installPolicy: DesktopUpdateInstallPolicySchema.pipe(
+    Schema.withDecodingDefault(Effect.succeed("restart-when-idle" as const)),
+  ),
+  pendingRestartReason: Schema.NullOr(Schema.Literals(["busy", "unknown", "paused"])).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  pendingUpdate: DesktopUpdatePendingRecordSchema.pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  recoveryStatus: Schema.NullOr(Schema.Literals(["restoring", "needs-network"])).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   enabled: Schema.Boolean,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,
@@ -426,6 +465,25 @@ export const DesktopSshEnvironmentBootstrapSchema = Schema.Struct({
   remoteServerKind: Schema.optionalKey(Schema.Literals(["external", "managed"])),
 });
 
+export const SshRuntimePendingReplacementSchema = Schema.Struct({
+  reason: Schema.Literals(["busy", "unknown", "contended"]),
+  detail: Schema.optionalKey(Schema.Literal("recovery-stale")),
+  replacement: Schema.Literals(["older", "legacy", "incompatible"]),
+  requestedVersion: Schema.String,
+  liveVersion: Schema.String,
+});
+export type SshRuntimePendingReplacement = typeof SshRuntimePendingReplacementSchema.Type;
+
+export const DesktopSshRuntimePendingResultSchema = Schema.Struct({
+  type: Schema.Literal("ssh-runtime-pending"),
+  target: DesktopSshEnvironmentTargetSchema,
+  pending: SshRuntimePendingReplacementSchema,
+});
+export type DesktopSshRuntimePendingResult = typeof DesktopSshRuntimePendingResultSchema.Type;
+export type DesktopSshEnvironmentReadyOrPending =
+  | DesktopSshEnvironmentBootstrap
+  | DesktopSshRuntimePendingResult;
+
 export interface DesktopSshPasswordPromptRequest {
   requestId: string;
   destination: string;
@@ -453,6 +511,7 @@ export const DesktopSshEnvironmentEnsureInputSchema = Schema.Struct({
 
 export const DesktopSshEnvironmentEnsureResultSchema = Schema.Union([
   DesktopSshEnvironmentBootstrapSchema,
+  DesktopSshRuntimePendingResultSchema,
   DesktopSshPasswordPromptCancelledResultSchema,
 ]);
 
@@ -1178,7 +1237,7 @@ export interface DesktopBridge {
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
     options?: { issuePairingToken?: boolean; keyOnly?: boolean },
-  ) => Promise<DesktopSshEnvironmentBootstrap>;
+  ) => Promise<DesktopSshEnvironmentReadyOrPending>;
   disconnectSshEnvironment: (target: DesktopSshEnvironmentTarget) => Promise<void>;
   fetchSshEnvironmentDescriptor: (httpBaseUrl: string) => Promise<ExecutionEnvironmentDescriptor>;
   bootstrapSshBearerSession: (
@@ -1248,6 +1307,7 @@ export interface DesktopBridge {
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
+  setUpdateInstallPolicy: (policy: DesktopUpdateInstallPolicy) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;

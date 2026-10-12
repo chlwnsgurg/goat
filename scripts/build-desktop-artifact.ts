@@ -35,6 +35,7 @@ import {
   resolveWebAssetBrandForChannel,
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
+import { scanReleasePayload, writePayloadReport } from "./lib/release-verify.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import {
   findInlinedExternalPackages,
@@ -62,7 +63,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "si.goat.desktop";
-const DESKTOP_UPDATE_REPOSITORY = "goat-si/goat";
+const DESKTOP_UPDATE_REPOSITORY = "goat-si/goat-releases";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -181,6 +182,7 @@ interface BuildCliInput {
   readonly arch: Option.Option<typeof BuildArch.Type>;
   readonly buildVersion: Option.Option<string>;
   readonly outputDir: Option.Option<string>;
+  readonly payloadReport?: Option.Option<string>;
   readonly skipBuild: Option.Option<boolean>;
   readonly keepStage: Option.Option<boolean>;
   readonly signed: Option.Option<boolean>;
@@ -969,6 +971,7 @@ interface ResolvedBuildOptions {
   readonly arch: typeof BuildArch.Type;
   readonly version: string | undefined;
   readonly outputDir: string;
+  readonly payloadReport: string | undefined;
   readonly skipBuild: boolean;
   readonly keepStage: boolean;
   readonly signed: boolean;
@@ -1030,6 +1033,7 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   "!apps/desktop/prod-resources/ssh-runtime/**/*",
   "!apps/desktop/prod-resources/wsl-runtime.tar.gz",
   "!apps/desktop/prod-resources/wsl-runtime.tar.gz.sha256",
+  "!apps/desktop/prod-resources/LICENSE-T3CODE.txt",
   "!apps/desktop/gnome-extension",
   "!apps/desktop/gnome-extension/**/*",
 ] as const;
@@ -1152,6 +1156,11 @@ export const DESKTOP_EXTRA_RESOURCES = [
   {
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
+  },
+  // Upstream T3 Code's MIT notice ships with every GOAT app (staged from LICENSE).
+  {
+    from: "apps/desktop/prod-resources/LICENSE-T3CODE.txt",
+    to: "LICENSE-T3CODE.txt",
   },
 ] as const;
 export const LINUX_CAPTURE_EXTRA_RESOURCES = [
@@ -1728,6 +1737,7 @@ const BuildEnvConfig = Config.all({
   arch: Config.schema(BuildArch, "T3CODE_DESKTOP_ARCH").pipe(Config.option),
   version: Config.String("T3CODE_DESKTOP_VERSION").pipe(Config.option),
   outputDir: Config.String("T3CODE_DESKTOP_OUTPUT_DIR").pipe(Config.option),
+  payloadReport: Config.String("T3CODE_DESKTOP_PAYLOAD_REPORT").pipe(Config.option),
   skipBuild: Config.Boolean("T3CODE_DESKTOP_SKIP_BUILD").pipe(Config.withDefault(false)),
   keepStage: Config.Boolean("T3CODE_DESKTOP_KEEP_STAGE").pipe(Config.withDefault(false)),
   signed: Config.Boolean("T3CODE_DESKTOP_SIGNED").pipe(Config.withDefault(false)),
@@ -1870,6 +1880,9 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     arch,
     version,
     outputDir,
+    payloadReport:
+      Option.getOrUndefined(input.payloadReport ?? Option.none()) ??
+      Option.getOrUndefined(env.payloadReport),
     skipBuild,
     keepStage,
     signed,
@@ -4102,6 +4115,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
+  yield* fs.copyFile(
+    path.join(repoRoot, "LICENSE"),
+    path.join(stageProdResourcesDir, "LICENSE-T3CODE.txt"),
+  );
 
   const configuredMacPasskeySigning = yield* Effect.try({
     try: () =>
@@ -4284,7 +4301,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // electron-builder treats several set-but-empty variables (e.g. CSC_LINK="")
   // as enabled, so copy the host env and scrub empty values instead of relying
   // on `extendEnv` merging.
-  const buildEnv: NodeJS.ProcessEnv = {
+  let buildEnv: NodeJS.ProcessEnv = {
     ...process.env,
   };
   buildEnv.npm_config_user_agent = resolvePackageManagerUserAgent(rootPackageJson.packageManager);
@@ -4306,6 +4323,19 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     delete buildEnv.APPLE_API_KEY_ID;
     delete buildEnv.APPLE_API_ISSUER;
   }
+
+  const { resolveMacNotarizationEnv, DesktopNotarizationCredentialsMissingError } =
+    yield* Effect.promise(() => import("./lib/mac-notarization.ts"));
+  const notarization = resolveMacNotarizationEnv(buildEnv, {
+    signed: options.signed,
+    platform: options.platform,
+    requireNotarization:
+      (yield* Config.String("T3CODE_REQUIRE_NOTARIZATION").pipe(Config.withDefault("0"))) === "1",
+  });
+  if (notarization.problem) {
+    return yield* new DesktopNotarizationCredentialsMissingError({ detail: notarization.problem });
+  }
+  buildEnv = notarization.env;
 
   if (hostPlatform === "win32") {
     const python = yield* resolvePythonForNodeGyp();
@@ -4397,6 +4427,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
+  if (options.payloadReport !== undefined) {
+    const problems = yield* scanReleasePayload(stageDistDir);
+    yield* writePayloadReport(
+      stageDistDir,
+      options.payloadReport,
+      `desktop-${options.platform}-${options.arch}`,
+      appVersion,
+      problems,
+    );
+  }
+
   const stageEntries = yield* fs.readDirectory(stageDistDir);
   yield* fs.makeDirectory(options.outputDir, { recursive: true });
 
@@ -4474,6 +4515,10 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   mockUpdateServerPort: Flag.Int("mock-update-server-port").pipe(
     Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }))),
     Flag.withDescription("Mock update server port (env: T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT)."),
+    Flag.optional,
+  ),
+  payloadReport: Flag.String("payload-report").pipe(
+    Flag.withDescription("Payload verification report (env: T3CODE_DESKTOP_PAYLOAD_REPORT)."),
     Flag.optional,
   ),
   sshRuntimeArchiveDir: Flag.String("ssh-runtime-archive-dir").pipe(

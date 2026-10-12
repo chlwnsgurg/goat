@@ -1,3 +1,5 @@
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -68,7 +70,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           prefix = `if [ "$1 $2 $3 $4" = '-o uid= -p ${f.pid}' ]; then printf '# changed during inspection\\n' >> '${f.state}/run-t3.sh'; fi\n`;
         if (failure.startsWith("start time changes")) {
           const condition = failure.endsWith("before kill")
-            ? `grep -q "T3_ARCHIVE_VERSION='${ARCHIVE.archiveVersion}'" '${f.state}/run-t3.sh'`
+            ? `[ -f '${f.state}/identity' ]`
             : `[ -e '${f.test}/start-inspected' ]`;
           prefix = `if [ "$1 $2 $3 $4" = '-o lstart= -p ${f.pid}' ]; then if ${condition}; then printf 'Thu Jan  1 00:00:00 1970\\n'; else touch '${f.test}/start-inspected'; /bin/ps "$@"; fi; exit 0; fi\n`;
         }
@@ -127,8 +129,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             live: true,
             kind: "managed",
             oldVersion: "1.2.2",
-            ssh: 1,
-            orchestration: 2,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
           yield* f.fs.writeFileString(`${f.test}/activity`, activity);
           const before = yield* f.snapshot;
@@ -137,13 +139,14 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
           });
           assert.isTrue(Result.isSuccess(result));
           if (Result.isSuccess(result)) {
+            assert.equal(result.success.refresh, activity === "idle" ? "replaced" : undefined);
             assert.equal(
-              result.success.refresh,
+              result.success.pending?.reason,
               activity === "idle"
-                ? "replaced"
+                ? undefined
                 : activity === "busy" || activity === "idle,busy"
-                  ? "reused-busy"
-                  : "reused-unknown",
+                  ? "busy"
+                  : "unknown",
             );
             assert.equal(
               result.success.version,

@@ -1,3 +1,5 @@
+import { SSH_RUNTIME_PROTOCOL_VERSION } from "@t3tools/shared/sshRuntimeProtocol";
+import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -33,21 +35,25 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
             live: false,
             kind: "managed",
             oldVersion: "1.2.2",
-            ssh: 1,
-            orchestration: 2,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
           const entry = `${f.home}/old entry.cjs`;
           const nextEntry = `${f.home}/new entry.cjs`;
           const executable = protocolExecutable(
             "1.2.3",
-            { ssh: 1, orchestration: 2, nodeReadiness: true },
+            {
+              ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+              orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+              nodeReadiness: true,
+            },
             f.state,
           );
           yield* f.fs.writeFileString(
             entry,
             executable.replace(
               "JSON.stringify(descriptor)",
-              'JSON.stringify({...descriptor, sshRuntimeProtocolVersion: fs.existsSync(path.join(test, "incompatible-live")) ? 99 : 1})',
+              `JSON.stringify({...descriptor, sshRuntimeProtocolVersion: fs.existsSync(path.join(test, "incompatible-live")) ? 99 : ${SSH_RUNTIME_PROTOCOL_VERSION}})`,
             ),
           );
           yield* f.fs.writeFileString(nextEntry, executable);
@@ -86,7 +92,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
 const fs = require('node:fs');
 const cp = require('node:child_process');
 const args = process.argv.slice(2);
-if (args[3] === ${JSON.stringify(pid)}) fs.appendFileSync(${JSON.stringify(`${f.test}/inspections`)}, JSON.stringify({ runner: fs.readFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)}, 'utf8'), identity: fs.existsSync(${JSON.stringify(`${f.state}/identity`)}) ? fs.readFileSync(${JSON.stringify(`${f.state}/identity`)}, 'utf8') : null, command: cp.execFileSync('/bin/ps', args, {encoding:'utf8'}).trim() }) + '\\n');
+if (args[1] === 'command=' && args[3] === ${JSON.stringify(pid)}) fs.appendFileSync(${JSON.stringify(`${f.test}/inspections`)}, JSON.stringify({ runner: fs.readFileSync(${JSON.stringify(`${f.state}/run-t3.sh`)}, 'utf8'), identity: fs.existsSync(${JSON.stringify(`${f.state}/identity`)}) ? fs.readFileSync(${JSON.stringify(`${f.state}/identity`)}, 'utf8') : null, command: cp.execFileSync('/bin/ps', args, {encoding:'utf8'}).trim() }) + '\\n');
 process.stdout.write(cp.execFileSync('/bin/ps', args));
 `,
           );
@@ -102,7 +108,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
             if (Result.isFailure(result)) assert.include(String(result.failure), `kill ${pid}`);
             assert.deepEqual(yield* f.snapshot, before);
             yield* Effect.sync(() => process.kill(Number(pid), 0));
-            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '\"type\":\"stop\"');
+            assert.notInclude(yield* f.fs.readFileString(`${f.test}/events`), '"type":"stop"');
             return;
           }
           assert.isTrue(Result.isSuccess(result));
@@ -113,7 +119,12 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           assert.isAtLeast(inspections.length, 2);
           assert.include(inspections[0].runner, entry);
           assert.notInclude(inspections[0].runner, nextEntry);
-          assert.isTrue(inspections.some((inspection) => inspection.runner.includes(nextEntry)));
+          // Publication follows confirmed termination, so every old-PID inspection
+          // must still see the old runner.
+          for (const inspection of inspections) {
+            assert.include(inspection.runner, entry);
+            assert.notInclude(inspection.runner, nextEntry);
+          }
           const expectedIdentity =
             before.identity ??
             `${entry} serve --host 127.0.0.1 --port ${metadata.port} --base-dir ${f.home}/.goat\n`;
@@ -133,6 +144,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
             events.filter((event) => event.type === "stop"),
             2,
           );
+          assert.include(events.filter((event) => event.type === "start")[1].runner, nextEntry);
           for (const file of ["pid", "port", "managed", "identity"])
             assert.isFalse(yield* f.fs.exists(`${f.state}/${file}`));
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -168,7 +180,7 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           kind: mode === "external" ? "external" : "managed",
           oldVersion: "1.2.2",
           ssh: 99,
-          orchestration: 2,
+          orchestration: ORCHESTRATION_PROTOCOL_VERSION,
         });
         const file = `${f.home}/.goat/userdata/server-runtime.json`;
         if (mode === "missing record") yield* f.fs.remove(file);
@@ -201,8 +213,8 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
             live: false,
             kind: "managed",
             oldVersion: "1.2.2",
-            ssh: 1,
-            orchestration: 2,
+            ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+            orchestration: ORCHESTRATION_PROTOCOL_VERSION,
           });
           const upstream = `${f.home}/.t3`;
           yield* f.fs.makeDirectory(upstream, { recursive: true });
@@ -210,7 +222,15 @@ process.stdout.write(cp.execFileSync('/bin/ps', args));
           const cli = `${f.home}/dev.cjs`;
           yield* f.fs.writeFileString(
             cli,
-            protocolExecutable("1.2.3", { ssh: 1, orchestration: 2, nodeReadiness: true }, f.state),
+            protocolExecutable(
+              "1.2.3",
+              {
+                ssh: SSH_RUNTIME_PROTOCOL_VERSION,
+                orchestration: ORCHESTRATION_PROTOCOL_VERSION,
+                nodeReadiness: true,
+              },
+              f.state,
+            ),
           );
           const scripts = yield* nativeScripts({ nodeScriptPath: cli });
           const key = f.state.slice(f.state.lastIndexOf("/") + 1);

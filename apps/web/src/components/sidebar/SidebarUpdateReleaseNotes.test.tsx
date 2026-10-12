@@ -19,6 +19,10 @@ type AnchorElement = ReactElement<{
 }>;
 
 const baseState: DesktopUpdateState = {
+  installPolicy: "restart-when-idle",
+  pendingRestartReason: null,
+  pendingUpdate: null,
+  recoveryStatus: null,
   enabled: true,
   status: "available",
   channel: "nightly",
@@ -87,9 +91,9 @@ describe("SidebarUpdateReleaseNotes", () => {
     );
 
     expect(anchors.map(({ props }) => props.href)).toEqual([
-      "https://github.com/goat-si/goat/releases/tag/v0.0.36-nightly.3",
-      "https://github.com/goat-si/goat/releases/tag/v0.0.36-nightly.2",
-      "https://github.com/goat-si/goat/releases/tag/v0.0.36-nightly.1",
+      "https://github.com/goat-si/goat-releases/releases/tag/v0.0.36-nightly.3",
+      "https://github.com/goat-si/goat-releases/releases/tag/v0.0.36-nightly.2",
+      "https://github.com/goat-si/goat-releases/releases/tag/v0.0.36-nightly.1",
     ]);
     expect(anchors.map(({ props }) => textContent(props.children))).toEqual([
       "View release on GitHub",
@@ -107,7 +111,7 @@ describe("SidebarUpdateReleaseNotes", () => {
       }),
     );
 
-    expect(anchors.at(-1)?.props.href).toBe("https://github.com/goat-si/goat/releases");
+    expect(anchors.at(-1)?.props.href).toBe("https://github.com/goat-si/goat-releases/releases");
     expect(textContent(anchors.at(-1)?.props.children)).toBe("1 older release on GitHub");
   });
 
@@ -141,7 +145,7 @@ describe("SidebarUpdateReleaseNotes", () => {
     expect(preventDefault).toHaveBeenCalledOnce();
     await vi.waitFor(() => {
       expect(openExternal).toHaveBeenCalledWith(
-        "https://github.com/goat-si/goat/releases/tag/v0.0.36-nightly.3",
+        "https://github.com/goat-si/goat-releases/releases/tag/v0.0.36-nightly.3",
       );
       expect(testState.addToast).toHaveBeenCalledWith({
         type: "error",
