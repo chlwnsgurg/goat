@@ -767,9 +767,9 @@ describe("Activity Priority", () => {
     expect(visible).toEqual([candidate]);
   });
 
-  it("sorts attention, work and unread by activity with stable scoped-key ties", () => {
-    const thread = (id: string, updatedAt: string, overrides: ThreadFixtureOverrides = {}) =>
-      makeThread({ id: ThreadId.make(id), updatedAt, ...overrides });
+  it("sorts attention, work and unread by creation time with stable scoped-key ties", () => {
+    const thread = (id: string, createdAt: string, overrides: ThreadFixtureOverrides = {}) =>
+      makeThread({ id: ThreadId.make(id), createdAt, updatedAt: createdAt, ...overrides });
     const attention = thread("attention", before, { hasPendingApprovals: true });
     const childAttention = thread("child-attention", after);
     const working = thread("working", after, {
@@ -793,6 +793,13 @@ describe("Activity Priority", () => {
       "unread",
     ]);
     expect(sortPriorityThreadsForSidebar(threads.toReversed(), ranks)).toEqual(ordered);
+    // A streaming thread's updatedAt moves constantly; it must not reorder rows.
+    const streamed = threads.map((candidate) =>
+      candidate === attention ? { ...candidate, updatedAt: "2999-01-01T00:00:00.000Z" } : candidate,
+    );
+    expect(sortPriorityThreadsForSidebar(streamed, ranks).map((thread) => thread.id)).toEqual(
+      ordered.map((thread) => thread.id),
+    );
     expect(searchSidebarThreads(ordered, "Thread")).toEqual(ordered);
     expect(
       resolveAdjacentThreadId({

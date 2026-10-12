@@ -1003,16 +1003,19 @@ export function resolveSidebarPriorityRank(input: {
     : null;
 }
 
-/** Cache ranks before sorting; activity ties use the environment-qualified key. */
+/**
+ * Cache ranks before sorting. Within a rank, newer threads come first by
+ * creation time: updatedAt moves on every streamed event of a running thread,
+ * so ordering by it would swap working rows while they stream.
+ */
 export function sortPriorityThreadsForSidebar<
-  T extends Pick<SidebarThreadSummary, "environmentId" | "id" | "updatedAt" | "createdAt">,
+  T extends Pick<SidebarThreadSummary, "environmentId" | "id" | "createdAt">,
 >(threads: readonly T[], ranks: ReadonlyMap<string, number>): T[] {
   const key = (thread: T) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   return threads.toSorted(
     (left, right) =>
       (ranks.get(key(left)) ?? 2) - (ranks.get(key(right)) ?? 2) ||
-      firstValidTimestampMs(right.updatedAt, right.createdAt) -
-        firstValidTimestampMs(left.updatedAt, left.createdAt) ||
+      firstValidTimestampMs(right.createdAt) - firstValidTimestampMs(left.createdAt) ||
       key(left).localeCompare(key(right)),
   );
 }
