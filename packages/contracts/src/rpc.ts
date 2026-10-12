@@ -351,6 +351,8 @@ import {
   ResourceTelemetryRetryResult,
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
+import { GoatHostStatusResult } from "./hostStatus.ts";
+import { OrchestratorMcpFailure } from "./orchestratorMcp.ts";
 import {
   UsageLimitSourceError,
   ProviderConsumeResetCreditInput,
@@ -407,6 +409,11 @@ import {
   SshWorkspaceError,
 } from "./sshWorkspace.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  RemoteLaunchesError,
+  RemoteLaunchesListInput,
+  RemoteLaunchesListResult,
+} from "./remoteReports.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
@@ -542,6 +549,7 @@ export const WS_METHODS = {
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
   serverGetHostResources: "server.getHostResources",
+  serverGetHostStatus: "server.getHostStatus",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetResourceTelemetryHistory: "server.getResourceTelemetryHistory",
   serverRetryResourceTelemetry: "server.retryResourceTelemetry",
@@ -564,6 +572,9 @@ export const WS_METHODS = {
   secretsAnswerRequest: "secrets.answerRequest",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
+
+  // Threads this environment launched or watches on other machines
+  remoteLaunchesList: "remoteLaunches.list",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -916,6 +927,13 @@ const WsServerGetHostResourcesRpc = Rpc.make(WS_METHODS.serverGetHostResources, 
   payload: Schema.Struct({}),
   success: HostResourcesSnapshot,
   error: EnvironmentAuthorizationError,
+});
+
+/** The `goat_host_status` payload: this machine, plus connected SSH hosts for sessions that may operate threads. */
+const WsServerGetHostStatusRpc = Rpc.make(WS_METHODS.serverGetHostStatus, {
+  payload: Schema.Struct({}),
+  success: GoatHostStatusResult,
+  error: Schema.Union([OrchestratorMcpFailure, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetProcessResourceHistoryRpc = Rpc.make(WS_METHODS.serverGetProcessResourceHistory, {
@@ -1895,6 +1913,12 @@ const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
 });
 
+const WsRemoteLaunchesListRpc = Rpc.make(WS_METHODS.remoteLaunchesList, {
+  payload: RemoteLaunchesListInput,
+  success: RemoteLaunchesListResult,
+  error: Schema.Union([RemoteLaunchesError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
   {
@@ -2070,6 +2094,7 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
   WsServerGetHostResourcesRpc,
+  WsServerGetHostStatusRpc,
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
@@ -2087,6 +2112,7 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsSecretsAnswerRequestRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
+  WsRemoteLaunchesListRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

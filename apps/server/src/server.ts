@@ -1,4 +1,7 @@
 import * as SshRemoteDispatch from "./sshRemote/SshRemoteDispatch.ts";
+import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
+import * as RemoteDispatchCoordinator from "./remoteReports/RemoteDispatchCoordinator.ts";
+import * as LaunchWatchService from "./mcp/LaunchWatchService.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as ConnectionCatalogBroker from "./connections/ConnectionCatalogBroker.ts";
 import * as ChannelLayers from "./channels/ChannelLayers.ts";
@@ -753,6 +756,17 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
+  // One instance for the goat_host_status tool and the server.getHostStatus RPC.
+  Layer.provide(
+    McpHttpServer.layerHostStatusService.pipe(
+      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    ),
+  ),
+  Layer.provide(RemoteLaunchCatalog.layerWithoutDependencies),
+  // One launch-watch store and one dispatch coordinator for the MCP tools, host
+  // status, and the remote-launch catalog: they all follow runs and wake launchers.
+  Layer.provide(LaunchWatchService.layer),
+  Layer.provide(RemoteDispatchCoordinator.layer),
   Layer.provide(layerSshWorkspace),
   Layer.provide(SshRemoteDispatch.layer),
   // Guides read through the same pull request service as every other surface.

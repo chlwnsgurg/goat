@@ -116,6 +116,9 @@ export const RPC_REQUIRED_SCOPES = {
   // Load-balancing new threads reads host load; that is part of operating
   // threads, not of inspecting diagnostics.
   [WS_METHODS.serverGetHostResources]: AuthOrchestrationReadScope,
+  // Reaching SSH hosts also needs orchestration:operate; HostStatusMcpService.readForClient
+  // reports only this machine without it.
+  [WS_METHODS.serverGetHostStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetProcessResourceHistory]: AuthDiagnosticsReadScope,
   [WS_METHODS.serverGetResourceTelemetryHistory]: AuthDiagnosticsReadScope,
   [WS_METHODS.serverRetryResourceTelemetry]: AuthDiagnosticsReadScope,
@@ -131,6 +134,7 @@ export const RPC_REQUIRED_SCOPES = {
   // Delivery logs hold request bodies, so they need the same scope as the URL.
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,
+  [WS_METHODS.remoteLaunchesList]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,
   [WS_METHODS.pullRequestsList]: AuthOrchestrationReadScope,
