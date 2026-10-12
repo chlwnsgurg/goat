@@ -451,7 +451,7 @@ describe("settings search targets", () => {
     const streaming = getSettingsSearchTargetScope("response-streaming")!;
     expect(streaming.scope).toBe("project-defaults");
     expect(isSettingsSearchScopeAvailable(streaming.scope, "project")).toBe(true);
-    for (const id of ["legacy-plan-mode", "legacy-context-window-indicator", "legacy-sidebar"]) {
+    for (const id of ["legacy-plan-mode", "legacy-context-window-indicator"]) {
       expect(getSettingsSearchTargetScope(id)!.scope).toBeNull();
     }
   });
@@ -561,4 +561,17 @@ describe("settings sidebar scope", () => {
     expect(isSettingsOverviewVisible({ project: "project" })).toBe(true);
     expect(isSettingsOverviewVisible({ project: "project", checkout: "checkout" })).toBe(true);
   });
+});
+
+describe("sidebar view search", () => {
+  it.each(["sidebar", "projects", "activity", "priority"])(
+    "finds the general sidebar view control for %s",
+    (query) => {
+      expect(
+        searchSettings(query).some(
+          (entry) => entry.id === "sidebar-view" && entry.to === "/settings/general",
+        ),
+      ).toBe(true);
+    },
+  );
 });

@@ -461,11 +461,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   proactivePanelsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showSkillsInSlashMenu: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  // Legacy sidebar (the original per-project tree). Deliberately a fresh key
-  // (was `sidebarV2Enabled` + `sidebarV2ConfiguredByUser`): decoding drops the
-  // old keys, so everyone, including prior beta opt-outs, resets to the new
-  // default sidebar.
-  legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Wire-compatible name: true selects Projects view; false selects Activity view.
+  // Missing keys use Projects; explicit persisted choices survive decoding.
+  legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Beta: working and monitoring threads fold into a Working shelf and return
   // to the top of the inbox once they need the user. The inbox then orders by
   // time, so manual placement there is ignored (and kept) while it is on.

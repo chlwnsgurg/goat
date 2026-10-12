@@ -568,10 +568,10 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["composer meter usage tokens circle old"],
   },
   {
-    id: "legacy-sidebar",
-    title: "Sidebar (legacy)",
+    id: "sidebar-view",
+    title: "Sidebar view",
     to: "/settings/general",
-    searchTerms: ["project thread tree old flat list"],
+    searchTerms: ["sidebar projects activity priority project thread tree flat list"],
   },
   {
     id: "keybindings",

@@ -130,6 +130,8 @@ function ChatRouteGlobalShortcuts() {
         // The default sidebar routes creation through the command palette
         // whenever there is a real choice to make; the legacy sidebar (and
         // single-project setups) keep the immediate contextual create.
+        // Activity view chooses a project; Projects view creates in the current context,
+        // including before client settings finish hydrating.
         if (!legacySidebarEnabled && projectGroupCount > 1) {
           openCommandPalette({ open: "new-thread-in" });
           return;

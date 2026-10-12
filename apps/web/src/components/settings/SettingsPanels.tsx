@@ -2080,7 +2080,6 @@ function AutoSettleDaysInput({
 const LEGACY_FEATURE_TARGET_IDS: ReadonlySet<string> = new Set([
   "legacy-plan-mode",
   "legacy-context-window-indicator",
-  "legacy-sidebar",
 ]);
 
 /**
@@ -2144,19 +2143,6 @@ function LegacyFeaturesSection() {
                     updateSettings({ contextWindowMeterEnabled: Boolean(checked) })
                   }
                   aria-label="Context window indicator (legacy)"
-                />
-              }
-            />
-            <SettingsRow
-              {...searchableSetting("legacy-sidebar")}
-              description="Restore per-project thread trees instead of the default flat sidebar."
-              control={
-                <Switch
-                  checked={settings.legacySidebarEnabled}
-                  onCheckedChange={(checked) =>
-                    updateSettings({ legacySidebarEnabled: Boolean(checked) })
-                  }
-                  aria-label="Sidebar (legacy)"
                 />
               }
             />
@@ -2258,6 +2244,28 @@ export function GeneralSettingsPanel() {
     <SettingsPageContainer>
       <ProjectDefaultsSettings category="general" />
       <SettingsSection id="organization" title="Organization">
+        <SettingsRow
+          {...searchableSetting("sidebar-view")}
+          description="Choose Projects view for per-project thread trees or Activity view for thread activity."
+          control={
+            <Select
+              value={settings.legacySidebarEnabled ? "projects" : "activity"}
+              onValueChange={(value) => {
+                if (value === "projects" || value === "activity") {
+                  updateSettings({ legacySidebarEnabled: value === "projects" });
+                }
+              }}
+            >
+              <SelectTrigger aria-label="Sidebar view">
+                <SelectValue>{settings.legacySidebarEnabled ? "Projects" : "Activity"}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="projects">Projects</SelectItem>
+                <SelectItem value="activity">Activity</SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
         <SettingsRow
           {...searchableSetting("project-grouping")}
           description="Combine matching repositories across environments."
