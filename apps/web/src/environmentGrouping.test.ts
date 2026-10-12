@@ -52,6 +52,67 @@ function makeProject(overrides: Partial<Project> = {}): Project {
 }
 
 describe("environment grouping", () => {
+  it("shows every host when a hosted client has no primary, preserving desktop group keys", () => {
+    const primary = makeProject({ repositoryIdentity });
+    const remote = makeProject({
+      id: ProjectId.make("remote-copy"),
+      environmentId: remoteEnvironmentId,
+      repositoryIdentity,
+    });
+    const build = (primaryId: EnvironmentId | null) =>
+      buildSidebarProjectSnapshots({
+        projects: [primary, remote],
+        settings: defaultGroupingSettings,
+        primaryEnvironmentId: primaryId,
+        resolveEnvironmentLabel: (id) => (id === primaryEnvironmentId ? "Desktop" : "Remote"),
+      });
+    const hosted = build(null);
+    const desktop = build(primaryEnvironmentId);
+    expect(hosted).toHaveLength(1);
+    expect(hosted[0]?.environmentPresence).toBe("remote-only");
+    expect(hosted[0]?.remoteEnvironmentLabels).toEqual(["Desktop", "Remote"]);
+    expect(desktop[0]?.environmentPresence).toBe("mixed");
+    expect(desktop[0]?.remoteEnvironmentLabels).toEqual(["Remote"]);
+    expect(hosted[0]?.projectKey).toBe(repositoryIdentity.canonicalKey);
+    expect(hosted[0]?.projectKey).toBe(desktop[0]?.projectKey);
+    expect(hosted[0]?.memberProjectRefs).toEqual(desktop[0]?.memberProjectRefs);
+    expect(hosted[0]?.memberProjects).toEqual(desktop[0]?.memberProjects);
+  });
+
+  it("keeps desktop local projects local and ungrouped keys stable without a primary", () => {
+    const primary = makeProject();
+    const remote = makeProject({
+      id: ProjectId.make("remote"),
+      environmentId: remoteEnvironmentId,
+    });
+    const build = (primaryId: EnvironmentId | null) =>
+      buildSidebarProjectSnapshots({
+        projects: [primary, remote],
+        settings: defaultGroupingSettings,
+        primaryEnvironmentId: primaryId,
+        resolveEnvironmentLabel: (id) => (id === primaryEnvironmentId ? "Desktop" : "Remote"),
+      });
+    const desktop = build(primaryEnvironmentId);
+    const hosted = build(null);
+    expect(desktop.map((project) => project.environmentPresence)).toEqual([
+      "local-only",
+      "remote-only",
+    ]);
+    expect(desktop[0]?.remoteEnvironmentLabels).toEqual([]);
+    expect(hosted.map((project) => project.environmentPresence)).toEqual([
+      "remote-only",
+      "remote-only",
+    ]);
+    expect(hosted.map((project) => project.remoteEnvironmentLabels)).toEqual([
+      ["Desktop"],
+      ["Remote"],
+    ]);
+    expect(hosted.map((project) => project.projectKey)).toEqual(
+      desktop.map((project) => project.projectKey),
+    );
+    expect(desktop[0]?.projectKey).toBe(derivePhysicalProjectKey(primary));
+  });
+
   it("groups matching repository identities across environments", () => {
     const primary = makeProject({ repositoryIdentity });
     const remote = makeProject({

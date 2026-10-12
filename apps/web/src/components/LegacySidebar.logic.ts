@@ -1,5 +1,71 @@
-import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type {
+  ConnectionCatalogEntry,
+  EnvironmentConnectionPhase,
+  EnvironmentPresentation,
+} from "@t3tools/client-runtime/connection";
+import type { EnvironmentId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import { Atom } from "effect/reactivity";
+import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
+import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
 import type { SidebarThreadSummary } from "../types";
+
+interface ProjectEnvironmentMetadata {
+  readonly label: string;
+  readonly desktopLocal: boolean;
+  readonly wsl: boolean;
+}
+
+/** Project identity must not change with transport progress or provider/config refreshes. */
+export function createProjectsViewEnvironmentAtoms(input: {
+  catalogAtom: Atom.Atom<{
+    readonly entries: ReadonlyMap<EnvironmentId, Pick<ConnectionCatalogEntry, "target">>;
+  }>;
+  presentationsAtom: Atom.Atom<
+    ReadonlyMap<EnvironmentId, Pick<EnvironmentPresentation, "connection">>
+  >;
+}) {
+  const metadataAtom = Atom.make((get) => {
+    const next = new Map<EnvironmentId, ProjectEnvironmentMetadata>();
+    for (const [environmentId, entry] of get(input.catalogAtom).entries) {
+      next.set(environmentId, {
+        label: entry.target.label,
+        desktopLocal: isDesktopLocalConnectionTarget(entry.target),
+        wsl: isWslConnectionTarget(entry.target),
+      });
+    }
+    const previous = Option.getOrNull(
+      get.self<ReadonlyMap<EnvironmentId, ProjectEnvironmentMetadata>>(),
+    );
+    return previous !== null &&
+      previous.size === next.size &&
+      [...next].every(([id, value]) => {
+        const old = previous.get(id);
+        return (
+          old?.label === value.label &&
+          old.desktopLocal === value.desktopLocal &&
+          old.wsl === value.wsl
+        );
+      })
+      ? previous
+      : next;
+  });
+  const connectionPhasesAtom = Atom.make((get) => {
+    const next = new Map<EnvironmentId, EnvironmentConnectionPhase>();
+    for (const [id, environment] of get(input.presentationsAtom)) {
+      next.set(id, environment.connection.phase);
+    }
+    const previous = Option.getOrNull(
+      get.self<ReadonlyMap<EnvironmentId, EnvironmentConnectionPhase>>(),
+    );
+    return previous !== null &&
+      previous.size === next.size &&
+      [...next].every(([id, phase]) => previous.get(id) === phase)
+      ? previous
+      : next;
+  });
+  return { metadataAtom, connectionPhasesAtom };
+}
 
 /** Forks are standalone chats; subagents belong to their parent's Agents surface. */
 export function isProjectsViewPinnedThread(
@@ -13,7 +79,7 @@ export function isProjectsViewPinnedThread(
   );
 }
 
-/** Keyboard jumps and traversal follow the displayed order, with pins appearing once. */
+/** Keyboard jumps, traversal and range selection share the displayed order, with pins once. */
 export function resolveProjectsViewThreadOrder(
   pinnedKeys: readonly string[],
   projectKeys: readonly string[],
@@ -30,4 +96,24 @@ export function resolveProjectConnectionStatus(phases: readonly EnvironmentConne
     return "disconnected";
   if (phases.some((phase) => phase !== "connected")) return "connecting";
   return "connected";
+}
+
+/** Local rows receive a stable null prop through remote connection churn. */
+export function resolveProjectsViewProjectConnectionStatus(
+  project: {
+    readonly memberProjects: ReadonlyArray<
+      Pick<SidebarProjectSnapshot["memberProjects"][number], "environmentId">
+    >;
+  },
+  primaryEnvironmentId: EnvironmentId | null,
+  phaseByEnvironmentId: ReadonlyMap<EnvironmentId, EnvironmentConnectionPhase>,
+) {
+  const remoteMembers = project.memberProjects.filter(
+    (member) => member.environmentId !== primaryEnvironmentId,
+  );
+  return remoteMembers.length === 0
+    ? null
+    : resolveProjectConnectionStatus(
+        remoteMembers.map((member) => phaseByEnvironmentId.get(member.environmentId) ?? "offline"),
+      );
 }

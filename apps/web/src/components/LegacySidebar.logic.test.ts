@@ -1,9 +1,17 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { sortPinnedThreadsByOrderKey } from "@t3tools/client-runtime/state/thread-sort";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { Atom, AtomRegistry } from "effect/reactivity";
 import {
+  PrimaryConnectionTarget,
+  type EnvironmentConnectionPresentation,
+} from "@t3tools/client-runtime/connection";
+import { useThreadSelectionStore } from "../threadSelectionStore";
+import {
+  createProjectsViewEnvironmentAtoms,
   isProjectsViewPinnedThread,
   resolveProjectConnectionStatus,
+  resolveProjectsViewProjectConnectionStatus,
   resolveProjectsViewThreadOrder,
 } from "./LegacySidebar.logic";
 
@@ -66,6 +74,137 @@ describe("Projects view pins", () => {
       "remote:last",
     ]);
     expect(resolveProjectsViewThreadOrder(orderedPins, [])).toEqual(orderedPins);
+  });
+});
+
+describe("Projects view shared range selection", () => {
+  it.each([
+    { anchor: "local:pin", target: "local:last" },
+    { anchor: "local:last", target: "local:pin" },
+  ])("selects across sections from $anchor to $target", ({ anchor, target }) => {
+    const order = resolveProjectsViewThreadOrder(
+      ["local:pin", "remote:pin"],
+      ["local:first", "local:pin", "local:last"],
+    );
+    const selection = useThreadSelectionStore.getState();
+    selection.clearSelection();
+    try {
+      selection.setAnchor(anchor);
+      selection.rangeSelectTo(target, order);
+      expect([...useThreadSelectionStore.getState().selectedThreadKeys]).toEqual([
+        "local:pin",
+        "remote:pin",
+        "local:first",
+        "local:last",
+      ]);
+      expect(useThreadSelectionStore.getState().anchorThreadKey).toBe(anchor);
+    } finally {
+      selection.clearSelection();
+    }
+  });
+});
+
+describe("Projects view environment subscriptions", () => {
+  const local = EnvironmentId.make("local");
+  const remote = EnvironmentId.make("remote");
+  function entry(id: EnvironmentId, label: string) {
+    return {
+      target: new PrimaryConnectionTarget({
+        environmentId: id,
+        label,
+        httpBaseUrl: "https://example.test",
+        wsBaseUrl: "wss://example.test",
+      }),
+    };
+  }
+  function connection(
+    phase: EnvironmentConnectionPresentation["phase"],
+    error: string | null = null,
+  ): EnvironmentConnectionPresentation {
+    return { phase, error, traceId: null };
+  }
+  it("ignores presentation/config refreshes and keeps local row props stable on remote phase changes", () => {
+    const catalogAtom = Atom.make({
+      entries: new Map([
+        [local, entry(local, "Desktop")],
+        [remote, entry(remote, "Remote")],
+      ]),
+    });
+    const presentationsAtom = Atom.make(
+      new Map([
+        [local, { connection: connection("connected"), configRevision: 0 }],
+        [remote, { connection: connection("connecting"), configRevision: 0 }],
+      ]),
+    );
+    const atoms = createProjectsViewEnvironmentAtoms({ catalogAtom, presentationsAtom });
+    const registry = AtomRegistry.make();
+    const metadata = registry.get(atoms.metadataAtom);
+    const phases = registry.get(atoms.connectionPhasesAtom);
+    const metadataChanged = vi.fn();
+    const phaseChanged = vi.fn();
+    const stops = [
+      registry.subscribe(atoms.metadataAtom, metadataChanged),
+      registry.subscribe(atoms.connectionPhasesAtom, phaseChanged),
+    ];
+    try {
+      const localProject = { memberProjects: [{ environmentId: local }] };
+      const remoteProject = { memberProjects: [{ environmentId: remote }] };
+      registry.set(
+        presentationsAtom,
+        new Map([
+          [local, { connection: connection("connected"), configRevision: 1 }],
+          [
+            remote,
+            { connection: connection("connecting", "new transport detail"), configRevision: 1 },
+          ],
+        ]),
+      );
+      expect(registry.get(atoms.connectionPhasesAtom)).toBe(phases);
+      expect(registry.get(atoms.metadataAtom)).toBe(metadata);
+      expect(phaseChanged).not.toHaveBeenCalled();
+      expect(metadataChanged).not.toHaveBeenCalled();
+      registry.set(
+        presentationsAtom,
+        new Map([
+          [local, { connection: connection("connected"), configRevision: 1 }],
+          [remote, { connection: connection("connected"), configRevision: 1 }],
+        ]),
+      );
+      const connected = registry.get(atoms.connectionPhasesAtom);
+      expect(phaseChanged).toHaveBeenCalledTimes(1);
+      expect(metadataChanged).not.toHaveBeenCalled();
+      expect(registry.get(atoms.metadataAtom)).toBe(metadata);
+      expect(resolveProjectsViewProjectConnectionStatus(localProject, local, phases)).toBeNull();
+      expect(resolveProjectsViewProjectConnectionStatus(localProject, local, connected)).toBeNull();
+      expect(resolveProjectsViewProjectConnectionStatus(remoteProject, local, phases)).toBe(
+        "connecting",
+      );
+      expect(resolveProjectsViewProjectConnectionStatus(remoteProject, local, connected)).toBe(
+        "connected",
+      );
+      expect(resolveProjectsViewProjectConnectionStatus(localProject, null, connected)).toBe(
+        "connected",
+      );
+      registry.set(catalogAtom, {
+        entries: new Map([
+          [local, entry(local, "Desktop")],
+          [remote, entry(remote, "Remote")],
+        ]),
+      });
+      expect(registry.get(atoms.metadataAtom)).toBe(metadata);
+      expect(metadataChanged).not.toHaveBeenCalled();
+      registry.set(catalogAtom, {
+        entries: new Map([
+          [local, entry(local, "Desktop")],
+          [remote, entry(remote, "Renamed")],
+        ]),
+      });
+      expect(registry.get(atoms.metadataAtom).get(remote)?.label).toBe("Renamed");
+      expect(metadataChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      stops.forEach((stop) => stop());
+      registry.dispose();
+    }
   });
 });
 

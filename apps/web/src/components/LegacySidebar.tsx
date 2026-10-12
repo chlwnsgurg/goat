@@ -77,7 +77,7 @@ import {
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
 } from "@t3tools/contracts/settings";
-import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "../connection/desktopLocal";
+import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { isElectron } from "../env";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
@@ -89,6 +89,7 @@ import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
   readThreadShell,
+  readEnvironmentSupportsPinning,
   useProjects,
   useThreadShells,
   useThreadShellsForProjectRefs,
@@ -208,14 +209,17 @@ import {
 import {
   isProjectsViewPinnedThread,
   resolveProjectsViewThreadOrder,
-  resolveProjectConnectionStatus,
+  createProjectsViewEnvironmentAtoms,
+  resolveProjectsViewProjectConnectionStatus,
 } from "./LegacySidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
-import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
+import { primaryServerKeybindingsAtom } from "../state/server";
+import { environmentCatalog } from "../connection/catalog";
+import { environmentPresentations } from "../state/presentation";
 import {
   derivePhysicalProjectKey,
   deriveProjectGroupingOverrideKey,
@@ -230,6 +234,10 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+const projectsViewEnvironments = createProjectsViewEnvironmentAtoms({
+  catalogAtom: environmentCatalog.catalogValueAtom,
+  presentationsAtom: environmentPresentations.presentationsAtom,
+});
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: "Last user message",
   created_at: "Created at",
@@ -328,7 +336,7 @@ function buildThreadJumpLabelMap(input: {
 
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
-  orderedProjectThreadKeys: readonly string[];
+  displayedThreadKeys: readonly string[];
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
   jumpLabel: string | null;
@@ -345,7 +353,7 @@ interface SidebarThreadRowProps {
   handleThreadClick: (
     event: React.MouseEvent,
     threadRef: ScopedThreadRef,
-    orderedProjectThreadKeys: readonly string[],
+    displayedThreadKeys: readonly string[],
   ) => void;
   navigateToThread: (threadRef: ScopedThreadRef) => Promise<void>;
   handleMultiSelectContextMenu: (position: { x: number; y: number }) => Promise<void>;
@@ -383,7 +391,7 @@ function checkTaskPermission(environmentId: EnvironmentId): boolean {
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
-    orderedProjectThreadKeys,
+    displayedThreadKeys,
     isActive,
     openPullRequestsInRightPanel,
     jumpLabel,
@@ -538,9 +546,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const handleRowClick = useCallback(
     (event: React.MouseEvent) => {
-      handleThreadClick(event, threadRef, orderedProjectThreadKeys);
+      handleThreadClick(event, threadRef, displayedThreadKeys);
     },
-    [handleThreadClick, orderedProjectThreadKeys, threadRef],
+    [handleThreadClick, displayedThreadKeys, threadRef],
   );
   const handleRowDoubleClick = useCallback(
     (event: React.MouseEvent) => {
@@ -987,7 +995,7 @@ interface SidebarProjectThreadListProps {
   projectExpanded: boolean;
   hasOverflowingThreads: boolean;
   hiddenThreadStatus: ThreadStatusPill | null;
-  orderedProjectThreadKeys: readonly string[];
+  displayedThreadKeys: readonly string[];
   renderedThreads: readonly SidebarThreadSummary[];
   showEmptyThreadState: boolean;
   shouldShowThreadPanel: boolean;
@@ -1009,7 +1017,7 @@ interface SidebarProjectThreadListProps {
   handleThreadClick: (
     event: React.MouseEvent,
     threadRef: ScopedThreadRef,
-    orderedProjectThreadKeys: readonly string[],
+    displayedThreadKeys: readonly string[],
   ) => void;
   navigateToThread: (threadRef: ScopedThreadRef) => Promise<void>;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
@@ -1043,7 +1051,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     projectExpanded,
     hasOverflowingThreads,
     hiddenThreadStatus,
-    orderedProjectThreadKeys,
+    displayedThreadKeys,
     renderedThreads,
     showEmptyThreadState,
     shouldShowThreadPanel,
@@ -1100,7 +1108,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
             <SidebarThreadRow
               key={threadKey}
               thread={thread}
-              orderedProjectThreadKeys={orderedProjectThreadKeys}
+              displayedThreadKeys={displayedThreadKeys}
               isActive={activeRouteThreadKey === threadKey}
               openPullRequestsInRightPanel={openPullRequestsInRightPanel}
               jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
@@ -1164,6 +1172,8 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 });
 
 interface SidebarProjectItemProps {
+  displayedThreadKeys: readonly string[];
+  remoteConnectionStatus: ReturnType<typeof resolveProjectsViewProjectConnectionStatus>;
   pinnedThreads?: readonly SidebarThreadSummary[];
   projectKeyByScopedRef?: ReadonlyMap<string, string>;
   project: SidebarProjectSnapshot;
@@ -1190,6 +1200,8 @@ interface SidebarProjectItemProps {
 
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
+    displayedThreadKeys,
+    remoteConnectionStatus,
     pinnedThreads,
     projectKeyByScopedRef,
     project,
@@ -1213,17 +1225,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     isManualProjectSorting,
     dragHandleProps,
   } = props;
-  const serverConfigs = useAtomValue(environmentServerConfigsAtom);
-  const { environments } = useEnvironments();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const remoteConnectionPhases = project.memberProjects
-    .filter((member) => member.environmentId !== primaryEnvironmentId)
-    .map(
-      (member) =>
-        environments.find((environment) => environment.environmentId === member.environmentId)
-          ?.connection.phase ?? "offline",
-    );
-  const remoteConnectionStatus = resolveProjectConnectionStatus(remoteConnectionPhases);
   const environmentMachine = project.allRemoteMembersAreWsl
     ? "linux"
     : project.allRemoteMembersAreDesktopLocal
@@ -1381,7 +1382,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     return counts;
   }, [memberProjectByScopedKey, project.memberProjects, projectThreads]);
 
-  const { projectStatus, visibleProjectThreads, orderedProjectThreadKeys } = useMemo(() => {
+  const { projectStatus, visibleProjectThreads } = useMemo(() => {
     const lastVisitedAtByThreadKey = new Map(
       projectThreads.map((thread, index) => [
         scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
@@ -1414,9 +1415,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       visibleProjectThreads.map((thread) => resolveProjectThreadStatus(thread)),
     );
     return {
-      orderedProjectThreadKeys: visibleProjectThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
       projectStatus,
       visibleProjectThreads,
     };
@@ -1912,7 +1910,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     (
       event: React.MouseEvent,
       threadRef: ScopedThreadRef,
-      orderedProjectThreadKeys: readonly string[],
+      displayedThreadKeys: readonly string[],
     ) => {
       if (isSidebarNestedLinkClick(event.target)) return;
       const isMac = isMacPlatform(navigator.platform);
@@ -1929,7 +1927,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       if (isShiftClick) {
         event.preventDefault();
-        rangeSelectTo(threadKey, orderedProjectThreadKeys);
+        rangeSelectTo(threadKey, displayedThreadKeys);
         return;
       }
 
@@ -2358,8 +2356,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         thread.environmentId,
         AuthOrchestrationOperateScope,
       );
-      const supportsPinning =
-        serverConfigs.get(thread.environmentId)?.environment.capabilities.threadPinning === true;
+      const supportsPinning = readEnvironmentSupportsPinning(thread.environmentId);
       const clicked = await api.contextMenu.show(
         [
           ...(supportsPinning
@@ -2509,7 +2506,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       isMobile,
       markThreadUnread,
       memberProjectByScopedKey,
-      serverConfigs,
       pinThread,
       confirmAndUnpinThread,
       projectKeyByScopedRef,
@@ -2655,7 +2651,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         projectExpanded={projectExpanded}
         hasOverflowingThreads={hasOverflowingThreads}
         hiddenThreadStatus={hiddenThreadStatus}
-        orderedProjectThreadKeys={orderedProjectThreadKeys}
+        displayedThreadKeys={displayedThreadKeys}
         renderedThreads={renderedThreads}
         showEmptyThreadState={showEmptyThreadState}
         shouldShowThreadPanel={shouldShowThreadPanel}
@@ -3041,6 +3037,10 @@ function SortableProjectItem({
     isDragging,
     isOver,
   } = useSortable({ id: projectId, disabled });
+  const dragHandleProps = useMemo(
+    () => ({ attributes, listeners, setActivatorNodeRef }),
+    [attributes, listeners, setActivatorNodeRef],
+  );
   return (
     <li
       ref={setNodeRef}
@@ -3054,7 +3054,7 @@ function SortableProjectItem({
       data-sidebar="menu-item"
       data-slot="sidebar-menu-item"
     >
-      {children({ attributes, listeners, setActivatorNodeRef })}
+      {children(dragHandleProps)}
     </li>
   );
 }
@@ -3084,6 +3084,11 @@ interface SidebarProjectsContentProps {
   pinThread: ReturnType<typeof useThreadActions>["pinThread"];
   confirmAndUnpinThread: ReturnType<typeof useThreadActions>["confirmAndUnpinThread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
+  displayedThreadKeys: readonly string[];
+  projectConnectionStatusByKey: ReadonlyMap<
+    string,
+    ReturnType<typeof resolveProjectsViewProjectConnectionStatus>
+  >;
   pinnedThreads: readonly SidebarThreadSummary[];
   pinnedProject: SidebarProjectSnapshot | null;
   projectKeyByScopedRef: ReadonlyMap<string, string>;
@@ -3131,6 +3136,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     pinThread,
     confirmAndUnpinThread,
     sortedProjects,
+    displayedThreadKeys,
+    projectConnectionStatusByKey,
     pinnedThreads,
     pinnedProject,
     projectKeyByScopedRef,
@@ -3204,6 +3211,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             <SidebarMenuItem>
               <SidebarProjectItem
                 project={pinnedProject}
+                displayedThreadKeys={displayedThreadKeys}
+                remoteConnectionStatus={null}
                 pinnedThreads={pinnedThreads}
                 projectKeyByScopedRef={projectKeyByScopedRef}
                 isThreadListExpanded
@@ -3280,6 +3289,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     {(dragHandleProps) => (
                       <SidebarProjectItem
                         project={project}
+                        displayedThreadKeys={displayedThreadKeys}
+                        remoteConnectionStatus={
+                          projectConnectionStatusByKey.get(project.projectKey) ?? null
+                        }
                         projectKeyByScopedRef={projectKeyByScopedRef}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
@@ -3317,6 +3330,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarProjectListRow
                 key={project.projectKey}
                 project={project}
+                displayedThreadKeys={displayedThreadKeys}
+                remoteConnectionStatus={
+                  projectConnectionStatusByKey.get(project.projectKey) ?? null
+                }
                 projectKeyByScopedRef={projectKeyByScopedRef}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
@@ -3410,32 +3427,24 @@ export default function LegacySidebar() {
   const platform = navigator.platform;
   const shortcutModifiers = useShortcutModifierState();
   const terminalFocused = useTerminalFocus();
-  const { environments } = useEnvironments();
+  const environmentMetadata = useAtomValue(projectsViewEnvironments.metadataAtom);
+  const environmentConnectionPhases = useAtomValue(projectsViewEnvironments.connectionPhasesAtom);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentLabelById = useMemo(
-    () =>
-      new Map(
-        environments.map((environment) => [environment.environmentId, environment.label] as const),
-      ),
-    [environments],
+    () => new Map([...environmentMetadata].map(([id, metadata]) => [id, metadata.label] as const)),
+    [environmentMetadata],
   );
   const desktopLocalEnvironmentIds = useMemo(
     () =>
       new Set(
-        environments
-          .filter((environment) => isDesktopLocalConnectionTarget(environment.entry.target))
-          .map((environment) => environment.environmentId),
+        [...environmentMetadata].filter(([, metadata]) => metadata.desktopLocal).map(([id]) => id),
       ),
-    [environments],
+    [environmentMetadata],
   );
   const wslEnvironmentIds = useMemo(
     () =>
-      new Set(
-        environments
-          .filter((environment) => isWslConnectionTarget(environment.entry.target))
-          .map((environment) => environment.environmentId),
-      ),
-    [environments],
+      new Set([...environmentMetadata].filter(([, metadata]) => metadata.wsl).map(([id]) => id)),
+    [environmentMetadata],
   );
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
@@ -3678,6 +3687,23 @@ export default function LegacySidebar() {
     sidebarProjects,
     visibleThreads,
   ]);
+  const projectConnectionStatusByKey = useMemo(
+    () =>
+      new Map(
+        sortedProjects.map(
+          (project) =>
+            [
+              project.projectKey,
+              resolveProjectsViewProjectConnectionStatus(
+                project,
+                primaryEnvironmentId,
+                environmentConnectionPhases,
+              ),
+            ] as const,
+        ),
+      ),
+    [sortedProjects, primaryEnvironmentId, environmentConnectionPhases],
+  );
   const projectKeyByScopedRef = useMemo(
     () =>
       new Map(
@@ -4078,6 +4104,8 @@ export default function LegacySidebar() {
         pinThread={pinThread}
         confirmAndUnpinThread={confirmAndUnpinThread}
         sortedProjects={sortedProjects}
+        displayedThreadKeys={visibleSidebarThreadKeys}
+        projectConnectionStatusByKey={projectConnectionStatusByKey}
         pinnedThreads={pinnedThreads}
         pinnedProject={pinnedProject}
         projectKeyByScopedRef={projectKeyByScopedRef}
