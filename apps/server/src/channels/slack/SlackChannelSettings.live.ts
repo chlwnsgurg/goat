@@ -132,6 +132,10 @@ export const make = Effect.gen(function* () {
   );
   const settingsPath = path.join(config.stateDir, SETTINGS_FILE_NAME);
   const lock = yield* Semaphore.make(1);
+  // The home role the runtime fully reflects, or null when unknown: after a partial apply, or once
+  // configure has applied a connection against a home read that may since have changed. Null makes
+  // the next settings change apply again; leaving home always stops every connection.
+  let appliedHome: boolean | null = null;
 
   const loaded = yield* Effect.gen(function* () {
     if (!(yield* fs.exists(settingsPath))) return { loadFailed: false, connections: [] };
@@ -208,7 +212,14 @@ export const make = Effect.gen(function* () {
       : stopRuntime(connection);
 
   const applyToRuntime = (connection: StoredConnection) =>
-    Effect.flatMap(readHome, (isHome) => applyForHome(connection, isHome));
+    Effect.flatMap(readHome, (isHome) => applyForHome(connection, isHome)).pipe(
+      // Configure applied one connection on its own read of the home; the cache no longer covers it.
+      Effect.ensuring(
+        Effect.sync(() => {
+          appliedHome = null;
+        }),
+      ),
+    );
 
   /** Stops a connection without touching its credentials, so stopping cannot fail on them. */
   const stopRuntime = (connection: StoredConnection) =>
@@ -512,9 +523,7 @@ export const make = Effect.gen(function* () {
       (results) => results.every(Boolean),
     );
 
-  // The home role the runtime fully reflects, or null after a partial apply so the next settings
-  // change applies again; leaving home always stops every connection.
-  let appliedHome: boolean | null = yield* lock.withPermits(1)(
+  appliedHome = yield* lock.withPermits(1)(
     Effect.gen(function* () {
       const isHome = yield* readHome;
       // Bring saved connections back up. Unreadable secrets leave that connection in error.
