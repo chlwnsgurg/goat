@@ -1,5 +1,5 @@
 import { CircleAlertIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { type UIEvent, useCallback, useLayoutEffect, useRef } from "react";
+import { type UIEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
@@ -13,27 +13,37 @@ import type { GoatBotDelivery, GoatBotRow } from "./goatBotRows";
 /** How close to the bottom still counts as "following" new messages. */
 const FOLLOW_THRESHOLD_PX = 48;
 
+/**
+ * Reception gives up after 45 seconds and then sends a failure note, so a reply that has not
+ * come by this point is not coming. The indicator stops instead of spinning forever.
+ */
+const REPLYING_LIMIT_MS = 90_000;
+
 export function GoatBotTimeline({
   rows,
+  replyingSince = null,
   onRetry,
 }: {
   readonly rows: ReadonlyArray<GoatBotRow>;
+  readonly replyingSince?: string | null;
   readonly onRetry: (clientKey: string) => void;
 }) {
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
+  const replying = useReplying(replyingSince);
   const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
     followingRef.current =
       element.scrollHeight - element.scrollTop - element.clientHeight < FOLLOW_THRESHOLD_PX;
   }, []);
-  // New rows keep the view pinned to the latest message unless the reader scrolled up.
+  // New rows and the replying bubble keep the view pinned to the latest message unless the
+  // reader scrolled up.
   useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (rows.length === 0 || element === null || !followingRef.current) return;
+    if ((rows.length === 0 && !replying) || element === null || !followingRef.current) return;
     element.scrollTop = element.scrollHeight;
-  }, [rows]);
+  }, [rows, replying]);
 
   const time = (iso: string) => formatShortTimestamp(iso, timestampFormat);
 
@@ -109,9 +119,36 @@ export function GoatBotTimeline({
               );
           }
         })}
+        {replying ? (
+          <li className={cn("flex items-end gap-2", rows.at(-1)?.kind === "user" && "mt-2")}>
+            <BotSlot first={rows.at(-1)?.kind === "user"} />
+            <div
+              role="status"
+              aria-label="GOAT Bot is replying"
+              className="rounded-2xl bg-secondary px-3 py-2 text-sm text-muted-foreground"
+            >
+              <span aria-hidden className="tracking-widest">
+                •••
+              </span>
+            </div>
+          </li>
+        ) : null}
       </ol>
     </div>
   );
+}
+
+/** True from when GOAT Bot starts reading until its reply lands or the limit passes. */
+function useReplying(since: string | null): boolean {
+  const startedMs = since === null ? Number.NaN : Date.parse(since);
+  const [expiredFor, setExpiredFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (since === null || Number.isNaN(startedMs)) return;
+    const remaining = Math.max(0, startedMs + REPLYING_LIMIT_MS - Date.now());
+    const timer = setTimeout(() => setExpiredFor(since), remaining);
+    return () => clearTimeout(timer);
+  }, [since, startedMs]);
+  return since !== null && !Number.isNaN(startedMs) && expiredFor !== since;
 }
 
 function BotSlot({ first }: { readonly first: boolean }) {

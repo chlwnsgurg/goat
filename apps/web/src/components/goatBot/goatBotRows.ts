@@ -126,6 +126,31 @@ function side(row: UngroupedRow): "user" | "bot" {
   return row.kind === "user" ? "user" : "bot";
 }
 
+/**
+ * When GOAT Bot started reading the newest message it has not answered yet, or null.
+ * Reception replies to every input it reads, even when it fails, so an input stays
+ * unanswered only while its reply is being written.
+ */
+export function goatBotReplyingSince(input: {
+  readonly visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
+  readonly readers: GoatBotItemReaders;
+}): string | null {
+  const answered = new Set<string>();
+  for (const { item } of input.visibleTurnItems) {
+    if (item.type !== "assistant_message") continue;
+    const replyTo = input.readers.message(item)?.replyToKey;
+    if (replyTo) answered.add(replyTo);
+  }
+  for (let index = input.visibleTurnItems.length - 1; index >= 0; index -= 1) {
+    const item = input.visibleTurnItems[index]?.item;
+    if (item?.type !== "user_message") continue;
+    const presentation = input.readers.message(item);
+    if (!presentation?.readAt || !presentation.requestKey) continue;
+    return answered.has(presentation.requestKey) ? null : presentation.readAt;
+  }
+  return null;
+}
+
 export function buildGoatBotTimeline(input: {
   readonly visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
   readonly pendingInputs: ReadonlyArray<GoatBotPendingInput>;

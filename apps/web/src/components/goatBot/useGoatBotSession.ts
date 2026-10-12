@@ -26,7 +26,7 @@ import {
 } from "./goatBotEnsure";
 import { useGoatBotEnvironments } from "./goatBotHooks";
 import { goatBotItemReaders } from "./goatBotReaders";
-import { buildGoatBotTimeline } from "./goatBotRows";
+import { buildGoatBotTimeline, goatBotReplyingSince } from "./goatBotRows";
 import { createGoatBotSendQueue, type GoatBotSendQueue } from "./goatBotSendQueue";
 
 interface Session {
@@ -288,6 +288,7 @@ export function useGoatBotSession(visibleTurnItems = EMPTY_ITEMS) {
     availability,
     canOperate,
     rows,
+    replyingSince: goatBotReplyingSince({ visibleTurnItems, readers: goatBotItemReaders }),
     onSend: (text: string) => {
       if (availability.kind === "ready" && canOperate) queue?.submit(text, availability.bot);
     },

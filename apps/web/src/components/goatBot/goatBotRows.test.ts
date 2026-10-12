@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildGoatBotTimeline,
+  goatBotReplyingSince,
   type GoatBotItemReaders,
   type GoatBotMessagePresentation,
   type GoatBotPendingInput,
@@ -287,5 +288,52 @@ describe("buildGoatBotTimeline", () => {
       readers: readers({ b1: { tone: "failure", readAt: null, requestKey: null } }),
     });
     expect(content(rows)).toMatchObject([{ id: "b1", kind: "bot", tone: "failure" }]);
+  });
+});
+
+describe("goatBotReplyingSince", () => {
+  const read = (requestKey: string, readAt: string): GoatBotMessagePresentation => ({
+    tone: "reply",
+    readAt,
+    requestKey,
+  });
+  const reply = (replyToKey: string): GoatBotMessagePresentation => ({
+    tone: "reply",
+    readAt: null,
+    requestKey: null,
+    replyToKey,
+  });
+
+  it("is replying from when the newest message was read until its reply lands", () => {
+    const items = [
+      user("u1", "2026-10-12T12:00:00Z", "hi"),
+      bot("b1", "2026-10-12T12:00:02Z", "Hello!"),
+      // A finished task reports in while the next message is still being read.
+      bot("b2", "2026-10-12T12:00:05Z", "Done: earlier work"),
+      user("u2", "2026-10-12T12:00:04Z", "how is opencodex going?"),
+    ];
+    const messages = {
+      u1: read("in-1", "2026-10-12T12:00:01Z"),
+      b1: reply("in-1"),
+      u2: read("in-2", "2026-10-12T12:00:04Z"),
+    };
+    expect(
+      goatBotReplyingSince({ visibleTurnItems: rowsOf(items), readers: readers(messages) }),
+    ).toBe("2026-10-12T12:00:04Z");
+    expect(
+      goatBotReplyingSince({
+        visibleTurnItems: rowsOf([...items, bot("b3", "2026-10-12T12:00:09Z", "Starting.")]),
+        readers: readers({ ...messages, b3: reply("in-2") }),
+      }),
+    ).toBeNull();
+  });
+
+  it("is not replying before GOAT Bot reads the message", () => {
+    expect(
+      goatBotReplyingSince({
+        visibleTurnItems: rowsOf([user("u1", "2026-10-12T12:00:00Z", "hi")]),
+        readers: readers(),
+      }),
+    ).toBeNull();
   });
 });

@@ -24,6 +24,8 @@ export interface GoatBotChatViewProps {
   readonly availability: GoatBotAvailability;
   readonly canOperate: boolean;
   readonly rows: ReadonlyArray<GoatBotRow>;
+  /** When GOAT Bot started reading a message it is still answering. */
+  readonly replyingSince?: string | null | undefined;
   readonly onSend: (text: string) => void;
   readonly onRetryInput: (clientKey: string) => void;
   /** Asks the server for its bot again, after a failure or a busy global agent. */
@@ -45,6 +47,7 @@ export function GoatBotChatView({
   availability,
   canOperate,
   rows,
+  replyingSince = null,
   onSend,
   onRetryInput,
   onRetryAvailability,
@@ -100,7 +103,11 @@ export function GoatBotChatView({
       ) : null}
       {rows.length > 0 ? (
         // History stays readable while the bot is unavailable; only sending stops.
-        <GoatBotTimeline rows={rows} onRetry={onRetryInput} />
+        <GoatBotTimeline
+          rows={rows}
+          replyingSince={removed ? null : replyingSince}
+          onRetry={onRetryInput}
+        />
       ) : removal !== null ? (
         <GoatBotRemovedNotice
           removal={removal}
