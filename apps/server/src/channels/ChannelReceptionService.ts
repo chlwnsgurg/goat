@@ -37,6 +37,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ChannelBotTimeline from "./ChannelBotTimeline.ts";
 import { lowerRuntimeMode, mayAnswerFor } from "./ChannelGateway.ts";
+import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import * as ChannelWake from "./ChannelWake.ts";
@@ -123,6 +124,7 @@ const boundTail = (
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
+  const home = yield* ChannelBotHome.ChannelBotHome;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -183,6 +185,20 @@ const make = Effect.gen(function* () {
 
   const receive: ChannelReceptionService["Service"]["receive"] = (inputId, owner) =>
     Effect.gen(function* () {
+      const isHome = yield* home.requireHome.pipe(
+        Effect.as(true),
+        Effect.catchTags({
+          ChannelGatewayError: (error) =>
+            error.reason === "not_home"
+              ? Effect.succeed(false)
+              : Effect.fail(
+                  new ChannelLedger.ChannelLedgerError({
+                    reason: "persistence",
+                    detail: "GOAT Bot home settings could not be read.",
+                  }),
+                ),
+        }),
+      );
       const receptionId = ChannelReceptionId.make("channel-reception:" + NodeCrypto.randomUUID());
       const readAt = DateTime.formatIso(yield* DateTime.now);
       const stored = yield* ledger.beginReception({ owner, inputId, receptionId, readAt });
@@ -192,6 +208,28 @@ const make = Effect.gen(function* () {
       const conversationId = stored.snapshot.conversationId;
       const origin = message.replyAddress;
       const mention = mentionFor(origin, message.actor.externalActorId);
+
+      if (!isHome) {
+        yield* ledger.failReception({
+          owner,
+          inputId,
+          receptionId,
+          failure: { reason: "reception_failed", message: CHANNEL_COPY.botMoved },
+          deliveries: [
+            replyDelivery({
+              causeKey: "reply:" + inputId,
+              destination: origin,
+              kind: "failure",
+              text: CHANNEL_COPY.botMoved,
+              inputId,
+              mentionActorId: mention,
+            }),
+          ],
+          now: readAt,
+        });
+        yield* wake.wake;
+        return;
+      }
 
       // The bot's copy of the message shows when reception started reading it.
       if (origin.kind === "goat") {

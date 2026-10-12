@@ -17,15 +17,23 @@ import { ChannelToolkit } from "./tools.ts";
 const failureFor = (error: ChannelGatewayError | ChannelLedger.ChannelLedgerError) =>
   new OrchestratorMcpFailure({
     code:
-      error._tag === "ChannelGatewayError" && error.reason === "not_found"
-        ? "task_not_found"
-        : error._tag === "ChannelGatewayError" &&
-            (error.reason === "invalid_input" || error.reason === "idempotency_conflict")
-          ? "invalid_request"
-          : error._tag === "ChannelGatewayError" && error.reason === "forbidden"
-            ? "capability_denied"
-            : "orchestration_error",
-    message: error.message,
+      error._tag === "ChannelGatewayError" && error.reason === "not_home"
+        ? "not_home"
+        : error._tag === "ChannelGatewayError" && error.reason === "not_found"
+          ? "task_not_found"
+          : error._tag === "ChannelGatewayError" &&
+              (error.reason === "invalid_input" || error.reason === "idempotency_conflict")
+            ? "invalid_request"
+            : error._tag === "ChannelGatewayError" && error.reason === "forbidden"
+              ? "capability_denied"
+              : "orchestration_error",
+    message:
+      error._tag === "ChannelGatewayError" && error.reason === "not_home"
+        ? error.message +
+          (error.homeEnvironmentId === undefined
+            ? ""
+            : " Home environment: " + error.homeEnvironmentId)
+        : error.message,
   });
 
 const ownerIdOf = McpInvocationContext.McpInvocationContext.pipe(

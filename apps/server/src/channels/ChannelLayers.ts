@@ -13,6 +13,7 @@
  */
 import * as Layer from "effect/Layer";
 
+import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelBotDirectory from "./ChannelBotDirectory.ts";
 import * as ChannelBotRegistry from "./ChannelBotRegistry.ts";
 import * as ChannelBotTimeline from "./ChannelBotTimeline.ts";
@@ -34,6 +35,7 @@ import * as SlackSdk from "./slack/SlackSdk.ts";
 
 const layerFoundation = Layer.mergeAll(
   ChannelLedger.layer,
+  ChannelBotHome.layer,
   ChannelBotDirectory.layer,
   ChannelWake.layer,
   ChannelTransport.layer,

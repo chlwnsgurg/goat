@@ -10,6 +10,7 @@ export const CHANNEL_COPY = {
   linked: "You're linked. Send me what you need.",
   unlinkedInput:
     'I can\'t take work from this account yet. Open GOAT, create a link code under Settings → Integrations → Slack, and send me "link <code>".',
+  botMoved: "GOAT Bot moved to another machine. Please resend your message there.",
   receptionFailed: "I couldn't read that just now. Please send it again.",
   agentCannotCreateWork:
     "Only people can start new work. I can tell you how existing work is going.",

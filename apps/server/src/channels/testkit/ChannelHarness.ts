@@ -190,6 +190,8 @@ export const layerNoSshHosts = Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
 export function makeHarness(
   options: {
     readonly projects?: number;
+    /** Settings overrides, including a publisher for live home changes. */
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>;
     /** The channel services under test; defaults to the assembled core without background loops. */
     readonly channelsLayer?: ChannelServicesLayer;
     /** Register the fake Slack transport behind `slackSent` and `slackFailures` (default true). */
@@ -320,10 +322,11 @@ export function makeHarness(
       ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
       folderForThread: () => Effect.succeed(Option.none()),
     }),
-    ServerSettings.layerTest({
-      textGenerationModelSelection: modelSelection,
-      defaultRuntimeMode: "full-access",
-    }),
+    options.settingsLayer ??
+      ServerSettings.layerTest({
+        textGenerationModelSelection: modelSelection,
+        defaultRuntimeMode: "full-access",
+      }),
   ).pipe(
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-channel-scenarios-" })),
     Layer.provideMerge(NodeServices.layer),

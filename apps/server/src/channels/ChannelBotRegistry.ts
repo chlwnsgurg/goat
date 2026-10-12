@@ -27,6 +27,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ChannelConnectionOwner } from "./ChannelIngressContext.ts";
+import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import { botLaunchIdsFor } from "./channelIds.ts";
 
@@ -48,6 +49,7 @@ const persistence = () => new ChannelGatewayError({ reason: "persistence_failed"
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
+  const home = yield* ChannelBotHome.ChannelBotHome;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const launches = yield* ThreadLaunch.ThreadLaunchService;
   const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
@@ -125,6 +127,7 @@ const make = Effect.gen(function* () {
 
   const ensure: ChannelBotRegistry["Service"]["ensure"] = (input, owner) =>
     Effect.gen(function* () {
+      yield* home.requireHome;
       const existing = yield* ledger.getBot(owner.ownerId).pipe(Effect.mapError(persistence));
       const now = DateTime.formatIso(yield* DateTime.now);
       if (existing !== undefined) {

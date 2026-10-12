@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   ChannelDeliveryId,
+  EnvironmentId,
   ProjectId,
   SlackChannelConnectionId,
   type SlackChannelSettingsError,
@@ -18,6 +19,9 @@ import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
+import * as ServerSettings from "../../serverSettings.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as PublishingServerSettings from "../testkit/PublishingServerSettings.ts";
 import * as ServerConfig from "../../config.ts";
 import * as SlackChannelSettings from "../SlackChannelSettings.ts";
 import * as SlackChannelRuntime from "./SlackChannelRuntime.ts";
@@ -47,6 +51,7 @@ const serverLayer = (
   onApply: (connection: SlackChannelRuntime.SlackRuntimeConnection) => Effect.Effect<void> = () =>
     Effect.void,
   fixtures = { gateway: makeFakeGateway(), registry: makeFakeTransportRegistry() },
+  settingsLayer = ServerSettings.layerTest(),
 ) => {
   const config = ServerConfig.layerTest(process.cwd(), baseDir);
   const secrets = Layer.effect(
@@ -75,10 +80,14 @@ const serverLayer = (
     Layer.provide(SlackChannelRuntime.layer),
     Layer.provideMerge(Layer.mergeAll(sdk.layer, fixtures.gateway.layer, fixtures.registry.layer)),
   );
-  return Layer.mergeAll(runtime, secrets).pipe(
-    Layer.provideMerge(config),
-    Layer.provideMerge(NodeServices.layer),
-  );
+  return Layer.mergeAll(
+    runtime,
+    secrets,
+    settingsLayer,
+    Layer.mock(ServerEnvironment.ServerEnvironment)({
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:slack-test")),
+    }),
+  ).pipe(Layer.provideMerge(config), Layer.provideMerge(NodeServices.layer));
 };
 
 /** Waits until some connection reports `connected`. */
@@ -101,6 +110,7 @@ const withServer = <A, E>(
     | Path.Path
     | ServerConfig.ServerConfig
     | SlackChannelRuntime.SlackChannelRuntime
+    | ServerSettings.ServerSettingsService
   >,
   secretOverrides?: { current: SecretStoreOverrides },
   onApply?: (connection: SlackChannelRuntime.SlackRuntimeConnection) => Effect.Effect<void>,
@@ -108,10 +118,11 @@ const withServer = <A, E>(
     gateway: ReturnType<typeof makeFakeGateway>;
     registry: ReturnType<typeof makeFakeTransportRegistry>;
   },
+  settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>,
 ) =>
   Effect.scoped(
     Effect.flatMap(SlackChannelSettingsLive.make, body).pipe(
-      Effect.provide(serverLayer(baseDir, sdk, secretOverrides, onApply, fixtures)),
+      Effect.provide(serverLayer(baseDir, sdk, secretOverrides, onApply, fixtures, settingsLayer)),
     ),
   );
 
@@ -513,6 +524,10 @@ describe("live layer assembly", () => {
             makeFakeGateway().layer,
             makeFakeTransportRegistry().layer,
             ServerSecretStore.layer,
+            ServerSettings.layerTest(),
+            Layer.mock(ServerEnvironment.ServerEnvironment)({
+              getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:slack-test")),
+            }),
           ),
         ),
         Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -1421,5 +1436,79 @@ describe("Slack bot tombstone recovery", () => {
           }),
         );
       }),
+  );
+});
+
+describe("Slack home ownership", () => {
+  it.effect("saves on a non-home server and opens and stops sockets only on home flips", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* tempBaseDir;
+      const sdk = makeFakeSlackSdk();
+      const self = EnvironmentId.make("environment:slack-test");
+      const other = EnvironmentId.make("environment:other-home");
+      const claim = (environmentId: EnvironmentId, claimedAt: number) => ({
+        environmentId,
+        claimedAt,
+        claimId: "home-" + claimedAt,
+      });
+      const layer = PublishingServerSettings.layer({ goatBotHome: claim(other, 1) });
+      yield* withServer(
+        baseDir,
+        sdk,
+        (settings) =>
+          Effect.gen(function* () {
+            const serverSettings = yield* ServerSettings.ServerSettingsService;
+            const created = yield* settings.configure(
+              { enabled: true, appToken: APP_TOKEN, botToken: BOT_TOKEN },
+              owner,
+            );
+            assert.isTrue(created.enabled);
+            assert.strictEqual(sdk.sessions.length, 0);
+            yield* serverSettings.updateSettings({ goatBotHome: claim(self, 2) });
+            yield* Effect.promise(() => sdk.waitForCall("start:0"));
+            yield* awaitConnected(settings);
+            assert.strictEqual(sdk.sessions.length, 1);
+            // A change with the same eligibility must not reopen a socket.
+            yield* serverSettings.updateSettings({ goatBotHome: claim(self, 3) });
+            yield* serverSettings.updateSettings({ goatBotHome: claim(other, 4) });
+            yield* Effect.promise(() => sdk.waitForCall("disconnect:0"));
+            const [saved] = yield* settings.get();
+            assert.isTrue(saved?.enabled);
+            const files = yield* fileState(baseDir);
+            assert.isTrue(JSON.parse(files.settings!).connections[0].enabled);
+            yield* settings.configure(
+              {
+                connectionId: created.connectionId,
+                enabled: true,
+                allowedChannelIds: ["C0ALLOWED"],
+              },
+              owner,
+            );
+            assert.strictEqual(sdk.sessions.length, 1);
+            yield* serverSettings.updateSettings({ goatBotHome: claim(self, 5) });
+            yield* Effect.promise(() => sdk.waitForCall("start:1"));
+            yield* awaitConnected(settings);
+            assert.strictEqual(sdk.sessions.length, 2);
+          }),
+        undefined,
+        undefined,
+        undefined,
+        layer,
+      );
+      // A restart off-home retains enabled but does not recreate the socket.
+      yield* withServer(
+        baseDir,
+        sdk,
+        (settings) =>
+          Effect.gen(function* () {
+            assert.isTrue((yield* settings.get())[0]?.enabled);
+            assert.strictEqual(sdk.sessions.length, 2);
+          }),
+        undefined,
+        undefined,
+        undefined,
+        PublishingServerSettings.layer({ goatBotHome: claim(other, 6) }),
+      );
+    }),
   );
 });

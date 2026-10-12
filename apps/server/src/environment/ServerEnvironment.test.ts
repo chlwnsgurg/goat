@@ -89,6 +89,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         (environment) => environment.getDescriptor,
       ).pipe(Effect.provide(layerServerEnvironment(baseDir)));
       expect(descriptor.capabilities.slackChannel).toBe(true);
+      expect(descriptor.capabilities.goatBotHome).toBe(true);
     }),
   );
   it.effect("publishes proven install ownership only for manually updated servers", () =>

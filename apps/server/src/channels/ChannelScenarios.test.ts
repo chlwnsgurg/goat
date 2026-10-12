@@ -3,6 +3,7 @@ import {
   type ChannelIngestInput,
   ChannelGatewayError,
   CommandId,
+  EnvironmentId,
   ChannelReceptionId,
   ChannelTaskEventId,
   MessageId,
@@ -19,6 +20,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
@@ -41,6 +43,7 @@ import {
   answerForwardIdsFor,
   botLaunchIdsFor,
   deliveryIdFor,
+  inputIdFor,
   taskEventIdFor,
   workerLaunchIdsFor,
 } from "./channelIds.ts";
@@ -1846,6 +1849,193 @@ describe("completion (scenario 5)", () => {
       assert.strictEqual(done.worker?.runId, answerRun.id);
       yield* runtime.drain;
       assert.strictEqual(resultsTo(harness.slackSent, "result").length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+const otherHomeId = EnvironmentId.make("environment:other-home");
+const homeClaim = (environmentId: EnvironmentId, claimedAt = 1) => ({
+  environmentId,
+  claimedAt,
+  claimId: "home-" + claimedAt,
+});
+const homeMcpContext = {
+  ...rpcContext,
+  principalId: "mcp:home-test",
+  caller: { type: "mcp" as const, requestNamespace: "home-test" },
+};
+const homeMcpInput = (key: string): ChannelIngestInput => ({
+  kind: "mcp",
+  connectionId: "mcp",
+  conversationKey: "default",
+  externalMessageId: key,
+  idempotencyKey: key,
+  actor: {},
+  replyAddress: {
+    kind: "mcp",
+    connectionId: "mcp",
+    requestNamespace: "home-test",
+    conversationKey: "default",
+  },
+  text: "How is work going?",
+  attachments: [],
+  receivedAt: "2026-10-13T00:00:00.000Z",
+  intent: "message",
+});
+
+describe("GOAT Bot home", () => {
+  it.effect.each(["unset", "self", "other"] as const)(
+    "gates ensure, GOAT and MCP input when home is %s",
+    (home) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        yield* setupBot;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const gateway = yield* ChannelGateway.ChannelGateway;
+        const bots = yield* ChannelBotRegistry.ChannelBotRegistry;
+        const ledger = yield* ChannelLedger.ChannelLedger;
+        const previous = yield* gateway.ingest(homeMcpInput("previous"), homeMcpContext);
+        if (home !== "unset")
+          yield* settings.updateSettings({
+            goatBotHome: homeClaim(home === "self" ? environmentId : otherHomeId),
+          });
+        if (home === "other") {
+          const pending = yield* ledger.listPendingInputs(100);
+          for (const effect of [
+            bots.ensure({}, owner).pipe(Effect.asVoid),
+            gateway.ingest(goatInput("hello", "home-goat"), rpcContext).pipe(Effect.asVoid),
+            gateway.ingest(homeMcpInput("home-mcp"), homeMcpContext).pipe(Effect.asVoid),
+          ]) {
+            const error = yield* Effect.flip(effect);
+            assert.strictEqual(error.reason, "not_home");
+            assert.strictEqual(error.homeEnvironmentId, otherHomeId);
+          }
+          assert.deepStrictEqual(yield* ledger.listPendingInputs(100), pending);
+          for (const input of [
+            { kind: "goat" as const, connectionId: "goat", idempotencyKey: "home-goat" },
+            {
+              kind: "mcp" as const,
+              connectionId: "mcp",
+              idempotencyKey: JSON.stringify(["home-test", "home-mcp"]),
+            },
+          ]) {
+            assert.isUndefined(yield* ledger.getInput(inputIdFor({ ...input, ownerId })));
+          }
+          assert.strictEqual(
+            (yield* gateway.getInput(previous.inputId, homeMcpContext)).inputId,
+            previous.inputId,
+          );
+          // Moving back makes the same service eligible without rebuilding it.
+          yield* settings.updateSettings({ goatBotHome: homeClaim(environmentId, 2) });
+        }
+        assert.strictEqual((yield* bots.ensure({}, owner)).environmentId, environmentId);
+        assert.strictEqual(
+          (yield* gateway.ingest(goatInput("hello", "home-goat"), rpcContext)).state,
+          "accepted",
+        );
+        assert.strictEqual(
+          (yield* gateway.ingest(homeMcpInput("home-mcp"), homeMcpContext)).state,
+          "accepted",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("closes pending inputs with a fenced failure reply after moving home", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      yield* linkSlackUser();
+      let receptionCalls = 0;
+      harness.script.current = (input) => {
+        receptionCalls++;
+        return defaultScript(input);
+      };
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const ledger = yield* ChannelLedger.ChannelLedger;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const goat = yield* gateway.ingest(goatInput("do: pending", "pending-home"), rpcContext);
+      const mcp = yield* gateway.ingest(homeMcpInput("pending-home"), homeMcpContext);
+      yield* settings.updateSettings({ goatBotHome: homeClaim(otherHomeId) });
+      // Slack ingress is unaffected; reception still closes its pending message.
+      const slack = yield* gateway.ingest(slackInput("pending", "pending-home"), slackContext);
+      yield* runtime.drain;
+      assert.strictEqual(receptionCalls, 0);
+      for (const receipt of [goat, mcp, slack]) {
+        const stored = (yield* ledger.getInput(receipt.inputId))!;
+        assert.strictEqual(stored.snapshot.state, "replied");
+        assert.strictEqual(stored.snapshot.failure?.message, CHANNEL_COPY.botMoved);
+        assert.isDefined(stored.snapshot.readAt);
+      }
+      const messages = (yield* botMessages).messages.filter(
+        (message) => message.channel?.inReplyToInputId === goat.inputId,
+      );
+      assert.strictEqual(messages.length, 1);
+      assert.strictEqual(messages[0]?.channel?.kind, "failure");
+      assert.strictEqual(messages[0]?.text, CHANNEL_COPY.botMoved);
+      const slackFailures = resultsTo(harness.slackSent, "failure");
+      assert.strictEqual(slackFailures.length, 1);
+      assert.strictEqual(slackFailures[0]?.message.inReplyToInputId, slack.inputId);
+      yield* runtime.drain;
+      assert.strictEqual(resultsTo(harness.slackSent, "failure").length, 1);
+      assert.deepStrictEqual((yield* ledger.listTasks({ ownerId, limit: 10 })).tasks, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("lets reception and worker reports finish after home moves", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      yield* setupBot;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      harness.script.current = (input) =>
+        input.mode === "input"
+          ? Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(defaultScript(input)),
+            )
+          : defaultScript(input);
+      const gateway = yield* ChannelGateway.ChannelGateway;
+      const runtime = yield* ChannelRuntime.ChannelRuntime;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const reports = yield* ChannelWorkerReports.ChannelWorkerReports;
+      const receipt = yield* gateway.ingest(
+        goatInput("do: already started", "started-home"),
+        rpcContext,
+      );
+      const draining = yield* runtime.drain.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* settings.updateSettings({ goatBotHome: homeClaim(otherHomeId) });
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(draining);
+      const task = yield* onlyTask;
+      assert.strictEqual((yield* gateway.getInput(receipt.inputId, rpcContext)).state, "replied");
+      yield* reports.report(
+        {
+          taskId: task.taskId,
+          eventId: ChannelTaskEventId.make("report-after-home-move"),
+          generation: task.generation,
+          status: "completed",
+          summary: "Finished on the original machine.",
+        },
+        task.worker!.threadId,
+      );
+      yield* runtime.drain;
+      assert.isDefined((yield* onlyTask).proposedCompletion);
+      harness.world.setStatus(
+        task.worker!.threadId,
+        1,
+        "completed",
+        "Finished on the original machine.",
+      );
+      yield* runtime.drain;
+      assert.strictEqual((yield* onlyTask).status, "completed");
+      assert.isTrue(
+        (yield* botMessages).messages.some((message) =>
+          message.text.includes("Finished on the original machine."),
+        ),
+      );
     }).pipe(Effect.provide(harness.layer));
   });
 });

@@ -868,6 +868,8 @@ export const OrchestratorMcpFailureCode = Schema.Literals([
   "thread_credential_required",
   "target_required",
   "host_unavailable",
+  // GOAT Bot runs on another environment in this cluster; the message names it.
+  "not_home",
 ]);
 export type OrchestratorMcpFailureCode = typeof OrchestratorMcpFailureCode.Type;
 

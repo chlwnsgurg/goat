@@ -37,6 +37,7 @@ import * as Option from "effect/Option";
 
 import * as ChannelBotTimeline from "./ChannelBotTimeline.ts";
 import type { ChannelConnectionOwner, ChannelIngressContext } from "./ChannelIngressContext.ts";
+import * as ChannelBotHome from "./ChannelBotHome.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
 import * as ChannelTransport from "./ChannelTransport.ts";
 import * as ChannelWake from "./ChannelWake.ts";
@@ -209,6 +210,7 @@ const noticeDelivery = (
 
 const make = Effect.gen(function* () {
   const ledger = yield* ChannelLedger.ChannelLedger;
+  const home = yield* ChannelBotHome.ChannelBotHome;
   const registry = yield* ChannelTransport.ChannelTransportRegistry;
   const timeline = yield* ChannelBotTimeline.ChannelBotTimeline;
   const wake = yield* ChannelWake.ChannelWake;
@@ -321,6 +323,7 @@ const make = Effect.gen(function* () {
         // Workers report through channel_task_report, which checks their assignment.
         return yield* new ChannelGatewayError({ reason: "invalid_input" });
       }
+      if (input.kind === "goat" || input.kind === "mcp") yield* home.requireHome;
       yield* checkCaller(input, context);
       const requester = yield* resolveRequester(input, context);
       const stored = scopedForCaller(input, context);

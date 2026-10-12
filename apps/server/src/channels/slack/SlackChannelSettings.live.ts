@@ -37,6 +37,9 @@ import * as Stream from "effect/Stream";
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as ServerSettings from "../../serverSettings.ts";
+import { isGoatBotHome } from "../ChannelBotHome.ts";
 import * as SlackChannelSettings from "../SlackChannelSettings.ts";
 import type { ChannelConnectionOwner } from "../ChannelIngressContext.ts";
 import * as SlackChannelRuntime from "./SlackChannelRuntime.ts";
@@ -118,6 +121,15 @@ export const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const sdk = yield* SlackSdk.SlackSdk;
   const runtime = yield* SlackChannelRuntime.SlackChannelRuntime;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const environment = yield* ServerEnvironment.ServerEnvironment;
+  const environmentId = yield* environment.getEnvironmentId;
+  // Subscribe before reading startup state so a home move during acquisition is replayed.
+  const settingsChanges = yield* serverSettings.subscribeChanges;
+  const readHome = serverSettings.getSettings.pipe(
+    Effect.map((settings) => isGoatBotHome(settings.goatBotHome, environmentId)),
+    Effect.catch(persistenceFailed("read-bot-home")),
+  );
   const settingsPath = path.join(config.stateDir, SETTINGS_FILE_NAME);
   const lock = yield* Semaphore.make(1);
 
@@ -190,10 +202,13 @@ export const make = Effect.gen(function* () {
       } satisfies SlackChannelRuntime.SlackRuntimeConnection;
     });
 
-  const applyToRuntime = (connection: StoredConnection) =>
-    connection.enabled
+  const applyForHome = (connection: StoredConnection, isHome: boolean) =>
+    connection.enabled && isHome
       ? Effect.flatMap(runtimeConnection(connection), runtime.apply)
       : stopRuntime(connection);
+
+  const applyToRuntime = (connection: StoredConnection) =>
+    Effect.flatMap(readHome, (isHome) => applyForHome(connection, isHome));
 
   /** Stops a connection without touching its credentials, so stopping cannot fail on them. */
   const stopRuntime = (connection: StoredConnection) =>
@@ -472,18 +487,43 @@ export const make = Effect.gen(function* () {
       ),
   });
 
-  // Bring saved connections back up. A connection whose secrets cannot be read starts in error.
-  if (!loaded.loadFailed) {
-    yield* Effect.forEach(loaded.connections, (connection) =>
-      deleteRevokedSecrets(connection).pipe(
-        Effect.catch(() =>
-          Effect.logWarning("Slack startup revocation cleanup failed; delivery stays blocked."),
-        ),
-        Effect.andThen(applyToRuntime(connection)),
-        Effect.ignore({ log: true }),
-      ),
-    );
-  }
+  let appliedHome = yield* lock.withPermits(1)(
+    Effect.gen(function* () {
+      const isHome = yield* readHome;
+      // Bring saved connections back up. Unreadable secrets leave that connection in error.
+      if (!loaded.loadFailed) {
+        const connections = yield* readConnections;
+        yield* Effect.forEach(connections, (connection) =>
+          deleteRevokedSecrets(connection).pipe(
+            Effect.catch(() =>
+              Effect.logWarning("Slack startup revocation cleanup failed; delivery stays blocked."),
+            ),
+            Effect.andThen(applyForHome(connection, isHome)),
+            Effect.ignore({ log: true }),
+          ),
+        );
+      }
+      return isHome;
+    }),
+  );
+
+  yield* settingsChanges.pipe(
+    Stream.runForEach(() =>
+      lock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            // Queued snapshots can be stale; only the current home decides socket ownership.
+            const isHome = yield* readHome;
+            if (isHome === appliedHome) return;
+            const connections = yield* readConnections;
+            yield* Effect.forEach(connections, (connection) => applyForHome(connection, isHome));
+            appliedHome = isHome;
+          }),
+        )
+        .pipe(Effect.ignore({ log: true })),
+    ),
+    Effect.forkScoped,
+  );
 
   return { ...service, configure };
 });
