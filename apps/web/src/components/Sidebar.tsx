@@ -1955,6 +1955,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           {accessibleTitle}
           <div className="relative z-10 h-[3.375rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
+              {providerEntry ? (
+                <ProviderInstanceIcon
+                  driverKind={providerEntry.driverKind}
+                  displayName={providerEntry.displayName}
+                  accentColor={providerEntry.accentColor}
+                  acpRegistryAgentId={providerEntry.acpRegistryAgentId}
+                  acpRegistryIconUrl={providerEntry.acpRegistryIconUrl}
+                  showBadge={showInstanceBadge}
+                  badgeContent="none"
+                  badgeClassName="h-2 min-w-2 px-0"
+                  iconClassName="size-3.5 shrink-0 opacity-60"
+                />
+              ) : null}
               {draftIndicator}
               {title}
               {pinIndicator}
