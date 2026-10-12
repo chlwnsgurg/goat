@@ -32,6 +32,7 @@ import {
   DispatchModeLimit,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -39,6 +40,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { lowerRuntimeMode } from "./ChannelGateway.ts";
 import * as ChannelLedger from "./ChannelLedger.ts";
+import * as ChannelRemoteWorkers from "./ChannelRemoteWorkers.ts";
 import { answerForwardIdsFor, questionIdFor, workerLaunchIdsFor } from "./channelIds.ts";
 import { commitTransition } from "./channelTaskWrites.ts";
 
@@ -90,6 +92,7 @@ const make = Effect.gen(function* () {
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const remoteWorkers = yield* ChannelRemoteWorkers.ChannelRemoteWorkers;
 
   const askRequester = (
     stored: ChannelLedger.ChannelStoredTask,
@@ -252,12 +255,74 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * What a task on another machine falls back to from this one: the named project's model and
+   * runtime mode, and its title and repository key to find the same project there.
+   */
+  const remoteHints = (stored: ChannelLedger.ChannelStoredTask) =>
+    Effect.gen(function* () {
+      const task = stored.task;
+      const shells = yield* projects.listShells().pipe(Effect.orElseSucceed(() => []));
+      const named = shells.find((shell) => shell.id === task.projectId);
+      const identities = yield* Effect.serviceOption(
+        RepositoryIdentityResolver.RepositoryIdentityResolver,
+      );
+      const identity =
+        named === undefined || identities._tag === "None"
+          ? null
+          : yield* identities.value.resolve(named.workspaceRoot);
+      const settings = resolveProjectSettings(
+        yield* serverSettings.getSettings.pipe(Effect.orDie),
+        named?.id ?? null,
+      ).settings;
+      return {
+        modelSelection:
+          named?.defaultModelSelection ??
+          settings.defaultModelSelection ??
+          settings.textGenerationModelSelection,
+        runtimeMode: lowerRuntimeMode(
+          task.requester.runtimeModeCeiling,
+          settings.defaultRuntimeMode,
+        ),
+        ...(named === undefined ? {} : { title: named.title }),
+        ...(identity === null ? {} : { canonicalKey: identity.canonicalKey }),
+      };
+    });
+
   const dispatch: ChannelDispatcher["Service"]["dispatch"] = (taskId, owner) =>
     Effect.gen(function* () {
       const stored = yield* ledger.getTask(taskId);
       if (stored === undefined) return;
-      if (stored.task.status === "dispatching") return yield* launch(stored, owner);
+      // A generation that may already run on another machine never starts anywhere else.
+      if (stored.task.status === "received" || stored.task.status === "dispatching") {
+        const elsewhere = yield* remoteWorkers.attemptedElsewhere(stored);
+        if (elsewhere !== undefined) {
+          yield* commitTransition(
+            ledger,
+            stored,
+            {
+              type: "task.failed",
+              payload: {
+                generation: stored.task.generation,
+                reason: "launch_uncertain",
+                summary: ChannelRemoteWorkers.REMOTE_COPY.launchUncertain(elsewhere),
+              },
+            },
+            { owner, narrate: true },
+          );
+          return;
+        }
+      }
+      if (stored.task.status === "dispatching") {
+        if (stored.task.target?.remote !== undefined) {
+          return yield* remoteWorkers.launch(taskId, owner);
+        }
+        return yield* launch(stored, owner);
+      }
       if (stored.task.status !== "received") return;
+      if (stored.task.host !== undefined) {
+        return yield* remoteWorkers.dispatch(taskId, owner, yield* remoteHints(stored));
+      }
       const resolved = yield* resolveTarget(stored);
       if (resolved.type === "question") return yield* askRequester(stored, resolved.text, owner);
       const claimedAt = DateTime.formatIso(yield* DateTime.now);
@@ -284,6 +349,7 @@ const make = Effect.gen(function* () {
       const event = pending.event;
       const stored = yield* ledger.getTask(event.taskId);
       const worker = stored?.task.worker;
+      if (worker?.host !== undefined) return yield* remoteWorkers.forward(pending, owner);
       const projectId = stored?.task.target?.projectId;
       if (
         event.type !== "task.question.answered" ||
