@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./goatBot/home": {
+      "types": "./src/goatBot/home.ts",
+      "default": "./src/goatBot/home.ts"
+    },
     "./composerThreadItems": {
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"

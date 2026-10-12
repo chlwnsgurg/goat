@@ -31,3 +31,6 @@ GOAT Bot screen shows only a chip for the work and its final report.
   doesn't name a project. Without it, GOAT asks when there is more than one.
 - Work you start from Slack is capped at the access level chosen when you
   created the link code.
+- When you connect to several machines, Slack runs only on the machine GOAT
+  Bot lives on. Change it in **Settings → Integrations → GOAT Bot**; set up
+  Slack on that machine.

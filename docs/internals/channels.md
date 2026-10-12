@@ -22,6 +22,29 @@ records it in its place. The conversation, its open questions, and outstanding w
 deliveries addressed to the old thread go to the current bot, and timeline ids include the thread
 so a replayed record lands in the replacement without colliding with the old one.
 
+## One home per cluster
+
+A client connected to several GOAT servers would otherwise get one bot per server, and two servers
+holding the same Slack app would both open its socket. The `goatBotHome` server setting names the
+one environment the bot runs on. Clients write the same claim to every connected server that
+advertises `capabilities.goatBotHome`, and a server whose claim names another environment refuses
+`ensureBot` and GOAT and MCP front-desk input with `not_home`, closes input it had already stored
+with a reply saying the bot moved, and keeps Slack closed. Worker reports and reads still work
+there, and work started before a move finishes and reports where it started.
+
+Claims only move forward. A claim is `{ environmentId, claimedAt, claimId }`, ordered by time and
+then id, and a server keeps the larger of its claim and a written one, so a resync that arrives late
+cannot undo a newer choice. A client that sees no claim picks a server, claims it, and calls
+`ensureBot` only after the claim reads back as the winner; a client that sees servers disagree
+rewrites the winner to them with backoff. There is no way back to "no home": a null without a time
+would lose to any old claim still on an offline server. Changing the home is a new claim, timed
+after every claim the client has seen so a client with a slow clock can still move it.
+
+This is convergence, not a lock. A server that was offline keeps its old value until a client
+connects to it, and two clients claiming at once can both see their own claim for a moment. The
+guarantee covers settings RPC writes only: restoring an older `settings.json` by hand is taken as
+the operator's choice and can make another server the home again until a client resyncs.
+
 ## Slack
 
 The server layer assembles the live Slack runtime between the gateway and the workers
