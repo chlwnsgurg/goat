@@ -11,6 +11,8 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
+  EnvironmentId,
+  NonNegativeInt,
   OmittedWhenNull,
   ProjectId,
   ThreadId,
@@ -1080,6 +1082,35 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/**
+ * Which machine GOAT Bot runs on in a cluster of connected environments. Clients write the same
+ * claim to every environment that supports it; a server whose claim names another environment
+ * refuses the bot and keeps Slack closed. Claims only move forward: a server keeps the larger of
+ * its claim and a written one under `compareGoatBotHomeClaims`, so a delayed resync cannot undo a
+ * newer change. `claimedAt` is epoch milliseconds; `claimId` breaks ties.
+ */
+export const GoatBotHomeClaim = Schema.Struct({
+  environmentId: EnvironmentId,
+  claimedAt: NonNegativeInt,
+  claimId: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+});
+export type GoatBotHomeClaim = typeof GoatBotHomeClaim.Type;
+
+/** Total order on claims: later `claimedAt` wins, then the larger `claimId`. */
+export function compareGoatBotHomeClaims(left: GoatBotHomeClaim, right: GoatBotHomeClaim): number {
+  if (left.claimedAt !== right.claimedAt) return left.claimedAt < right.claimedAt ? -1 : 1;
+  if (left.claimId === right.claimId) return 0;
+  return left.claimId < right.claimId ? -1 : 1;
+}
+
+/** Whether a written claim replaces the stored one. Equal claims change nothing. */
+export function goatBotHomeClaimSupersedes(
+  next: GoatBotHomeClaim,
+  current: GoatBotHomeClaim | null,
+): boolean {
+  return current === null || compareGoatBotHomeClaims(next, current) > 0;
+}
+
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
@@ -1296,6 +1327,10 @@ export const ServerSettings = Schema.Struct({
    */
   usageModelAliases: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /** Null until some client claims a home for GOAT Bot. There is no way back to null. */
+  goatBotHome: Schema.NullOr(GoatBotHomeClaim).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
   ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
@@ -1558,6 +1593,8 @@ export const ServerSettingsPatch = Schema.Struct({
   usageModelAliases: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
   ),
+  /** Kept only when it supersedes the stored claim (`goatBotHomeClaimSupersedes`). */
+  goatBotHome: Schema.optionalKey(GoatBotHomeClaim),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

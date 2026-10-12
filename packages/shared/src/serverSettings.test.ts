@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -24,6 +25,44 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("keeps the larger GOAT Bot home claim whatever order writes arrive in", () => {
+    const claim = (environmentId: string, claimedAt: number, claimId: string) => ({
+      environmentId: EnvironmentId.make(environmentId),
+      claimedAt,
+      claimId,
+    });
+    const older = claim("mac", 1_000, "b");
+    const newer = claim("mini", 2_000, "a");
+    const sameTimeLarger = claim("suji", 2_000, "c");
+
+    const forward = applyServerSettingsPatch(
+      applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { goatBotHome: older }),
+      { goatBotHome: newer },
+    );
+    const reversed = applyServerSettingsPatch(
+      applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { goatBotHome: newer }),
+      { goatBotHome: older },
+    );
+    expect(forward.goatBotHome).toEqual(newer);
+    expect(reversed.goatBotHome).toEqual(newer);
+
+    // Equal timestamps fall back to the claim id, again independent of order.
+    expect(applyServerSettingsPatch(forward, { goatBotHome: sameTimeLarger }).goatBotHome).toEqual(
+      sameTimeLarger,
+    );
+    expect(
+      applyServerSettingsPatch(
+        applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { goatBotHome: sameTimeLarger }),
+        { goatBotHome: newer },
+      ).goatBotHome,
+    ).toEqual(sameTimeLarger);
+
+    // Unrelated patches leave the claim alone.
+    expect(
+      applyServerSettingsPatch(forward, { sidebarAutoSettleOnMerge: true }).goatBotHome,
+    ).toEqual(newer);
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },

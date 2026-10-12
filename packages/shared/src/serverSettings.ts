@@ -1,4 +1,5 @@
 import {
+  goatBotHomeClaimSupersedes,
   isProviderAvailable,
   isUnconfiguredDefaultInstanceEnabled,
   resolveProviderInstanceEnabled,
@@ -276,6 +277,8 @@ export function applyServerSettingsPatch(
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
+    // Claims only move forward; a smaller one (a delayed resync) is ignored below.
+    goatBotHome: goatBotHomePatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -412,6 +415,10 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.sourceControlWriterModelSelection !== undefined
       ? { sourceControlWriterModelSelection: patch.sourceControlWriterModelSelection }
+      : {}),
+    ...(goatBotHomePatch !== undefined &&
+    goatBotHomeClaimSupersedes(goatBotHomePatch, current.goatBotHome)
+      ? { goatBotHome: goatBotHomePatch }
       : {}),
     ...(automaticGitFetchInterval !== undefined ? { automaticGitFetchInterval } : {}),
     ...(providerHealthRefreshInterval !== undefined ? { providerHealthRefreshInterval } : {}),

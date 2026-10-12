@@ -1,7 +1,13 @@
 import * as Schema from "effect/Schema";
 
 import { AuthEnvironmentScopes } from "./auth.ts";
-import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import {
   ChannelActorRef,
@@ -217,6 +223,7 @@ const CHANNEL_GATEWAY_FAILURE_MESSAGES = {
   persistence_failed: "Could not store the channel message.",
   delivery_failed: "Could not deliver the channel message.",
   not_found: "The requested channel record does not exist.",
+  not_home: "GOAT Bot runs on another machine in this cluster.",
 } as const;
 
 export const ChannelGatewayErrorReason = Schema.Literals(
@@ -243,6 +250,8 @@ export class ChannelGatewayError extends Schema.TaggedError<ChannelGatewayError>
      */
     deliveryOutcome: Schema.optionalKey(Schema.Literals(["not_sent", "unknown"])),
     deliveryErrorCode: Schema.optionalKey(ChannelDeliveryErrorCode),
+    /** For `not_home`: the environment the cluster's GOAT Bot home claim names. */
+    homeEnvironmentId: Schema.optionalKey(EnvironmentId),
   },
 ) {
   override get message(): string {
