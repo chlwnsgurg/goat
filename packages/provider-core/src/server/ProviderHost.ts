@@ -10,6 +10,7 @@
  * @module provider-core/server/host
  */
 import type {
+  EnvironmentId,
   BackgroundScope,
   ChatAttachment,
   ServerSettings,
@@ -48,6 +49,7 @@ export interface ProviderCredentials {
 export class ProviderHost extends Context.Service<
   ProviderHost,
   {
+    readonly environmentId?: EnvironmentId;
     readonly paths: ProviderHostPaths;
     readonly settings: {
       readonly get: Effect.Effect<ServerSettings, ServerSettingsError>;

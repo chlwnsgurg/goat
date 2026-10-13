@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./server/memoryGenerationPrompts": {
+      "types": "./src/server/memoryGenerationPrompts.ts",
+      "import": "./src/server/memoryGenerationPrompts.ts"
+    },
+    "./server/memoryGenerationRunner": {
+      "types": "./src/server/memoryGenerationRunner.ts",
+      "import": "./src/server/memoryGenerationRunner.ts"
+    },
     "./client": {
       "types": "./src/client.ts",
       "import": "./src/client.ts"
