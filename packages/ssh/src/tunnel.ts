@@ -2115,7 +2115,7 @@ export const prepareRemoteRuntime = (
     const version = runner?.archiveVersion?.trim() ?? "";
     yield* Effect.annotateCurrentSpan({
       "ssh.target": target.alias,
-      "t3.runtime.version": version,
+      "goat.runtime.version": version,
     });
     yield* Effect.try({
       try: () => buildRemoteGoatRunnerScript(runner),
@@ -2216,7 +2216,7 @@ export const prepareRemoteRuntime = (
         matchesSignals(probe.retainedSignals, version) &&
         probe.retainedRunnerSha256 !== undefined;
       return Effect.annotateCurrentSpan(
-        "t3.runtime.source",
+        "goat.runtime.source",
         retained ? "retained-runner" : "live-runtime",
       ).pipe(
         Effect.as({
@@ -2232,13 +2232,13 @@ export const prepareRemoteRuntime = (
     // Install the requested release: already present, bundled, cached, or downloaded.
     const acquireRequested = Effect.gen(function* () {
       if (probe.ready) {
-        yield* Effect.annotateCurrentSpan("t3.runtime.source", "ready");
+        yield* Effect.annotateCurrentSpan("goat.runtime.source", "ready");
         return { ...exact, requireInstalled: true };
       }
       const platformKey = cliArchivePlatformKey(probe.platform, probe.arch);
       if (platformKey === undefined) {
         if (mirror !== "") {
-          yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
+          yield* Effect.annotateCurrentSpan("goat.runtime.source", "download");
           return exact;
         }
         const asset =
@@ -2264,7 +2264,7 @@ export const prepareRemoteRuntime = (
               Effect.mapError(archiveSupplyError),
             );
       if (bundledArchive === null && localArchive === null && mirror !== "") {
-        yield* Effect.annotateCurrentSpan("t3.runtime.source", "download");
+        yield* Effect.annotateCurrentSpan("goat.runtime.source", "download");
         return exact;
       }
       if (bundledArchive === null && localArchive === null) {
@@ -2313,14 +2313,14 @@ export const prepareRemoteRuntime = (
           Effect.mapError(archiveSupplyError),
         ));
       yield* Effect.annotateCurrentSpan(
-        "t3.runtime.acquisition",
+        "goat.runtime.acquisition",
         bundledArchive !== null ? "bundle" : localArchive !== null ? "cache" : "https-or-gh",
       );
       yield* Effect.annotateCurrentSpan({
-        "t3.runtime.source": "upload",
-        "t3.runtime.upload.bytes": archive.bytes.byteLength,
-        "t3.runtime.upload.sha256": archive.sha256,
-        "t3.runtime.upload.installComplete": false,
+        "goat.runtime.source": "upload",
+        "goat.runtime.upload.bytes": archive.bytes.byteLength,
+        "goat.runtime.upload.sha256": archive.sha256,
+        "goat.runtime.upload.installComplete": false,
       });
       const script = yield* Effect.try({
         try: () => buildRemoteUploadScript({ ...runner, archiveVersion: version }, archive.sha256),
@@ -2348,7 +2348,7 @@ export const prepareRemoteRuntime = (
                 ),
         }),
       );
-      yield* Effect.annotateCurrentSpan("t3.runtime.upload.installComplete", true);
+      yield* Effect.annotateCurrentSpan("goat.runtime.upload.installComplete", true);
       return { ...exact, requireInstalled: true };
     });
     if (selectedVersion !== undefined) return yield* selectInstalled(selectedVersion);
@@ -2430,8 +2430,8 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       stateKey,
     });
     const selected = yield* prepareRemoteRuntime(target, input ?? {}, runner, stateKey, true);
-    yield* Effect.annotateCurrentSpan("t3.runtime.selectedVersion", selected.version);
-    yield* Effect.annotateCurrentSpan("t3.runtime.requestedVersion", selected.requestedVersion);
+    yield* Effect.annotateCurrentSpan("goat.runtime.selectedVersion", selected.version);
+    yield* Effect.annotateCurrentSpan("goat.runtime.requestedVersion", selected.requestedVersion);
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", stateKey],
       stdin: buildRemoteLaunchScript(selected.runner, selected),
