@@ -116,7 +116,7 @@ jobs:
         if: matrix.task == 'test'
         run: |
           vp run --filter @goat/provider-core test
-          vp test run --config vite.config.ts packages/provider-opencode/src/server/textGeneration.test.ts
+          vp test run --config vite.config.ts packages/provider-opencode/src/server/textGeneration.test.ts packages/provider-cursor/src/server/textGeneration.test.ts packages/provider-grok/src/server/acpSupport.test.ts
 
       - name: Test desktop
         if: matrix.task == 'test-desktop'
