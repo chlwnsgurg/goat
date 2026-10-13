@@ -1470,108 +1470,129 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       }),
   );
 
-  it.effect(
-    "drives long-history pending retention from indexed requests before scanning same-thread items",
-    () =>
-      Effect.gen(function* () {
-        const store = yield* ProjectionStore.ProjectionStoreV2;
-        const sql = yield* SqlClient.SqlClient;
-        const threadId = yield* createD10Thread("d10-long-history");
-        const otherThreadId = yield* createD10Thread("d10-long-other");
-        const { question, approval, requests } = d10DecisionFixture(threadId, "d10-long-history");
-        for (const request of requests)
-          yield* saveD10Request(threadId, { ...request, status: "resolved", resolvedAt: D10_NOW });
-        const unrelated = d10DecisionFixture(otherThreadId, "d10-long-other");
-        for (const request of unrelated.requests) yield* saveD10Request(otherThreadId, request);
-        const items = [
-          question,
-          approval,
-          ...Array.from({ length: 9_998 }, (_, index) =>
-            d10Command(threadId, "d10-long-history", index + 3),
-          ),
-          unrelated.question,
-          unrelated.approval,
-          ...Array.from({ length: 100 }, (_, index) =>
-            d10Command(otherThreadId, "d10-long-other", index + 3),
-          ),
-        ];
-        yield* sql.withTransaction(
-          Effect.gen(function* () {
-            for (let offset = 0; offset < items.length; offset += 50) {
-              const rows = items.slice(offset, offset + 50).map((item) => ({
-                turn_item_id: item.id,
-                thread_id: item.threadId,
-                run_id: item.runId,
-                node_id: item.nodeId,
-                provider_thread_id: item.providerThreadId,
-                provider_turn_id: item.providerTurnId,
-                parent_item_id: item.parentItemId,
-                ordinal: item.ordinal,
-                type: item.type,
-                status: item.status,
-                updated_at: DateTime.formatIso(item.updatedAt),
-                payload_json: encodeD10TurnItem(item),
-              }));
-              yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
-            }
-          }),
-        );
-        const explainRetention = () => sql<{ readonly detail: string }>`
-        EXPLAIN QUERY PLAN
-        SELECT request_item.rowid AS item_rowid, request_item.ordinal, request_item.turn_item_id
-        FROM orchestration_v2_projection_runtime_requests AS pending_request
-          INDEXED BY orchestration_v2_projection_runtime_requests_thread_status_idx
-        CROSS JOIN orchestration_v2_projection_turn_items AS request_item
-          INDEXED BY orchestration_v2_projection_turn_items_thread_ordinal_idx
-          ON request_item.thread_id = pending_request.thread_id
-            AND request_item.type IN ('user_input_request', 'approval_request')
-            AND json_extract(request_item.payload_json, '$.requestId') = pending_request.runtime_request_id
-        WHERE pending_request.thread_id = ${threadId}
-          AND pending_request.status = 'pending'
-          AND ${null} IS NULL AND ${1} = 1
-      `;
-        const assertPlan = (plan: ReadonlyArray<{ readonly detail: string }>) => {
-          assert.match(
-            plan[0]!.detail,
-            /SEARCH pending_request USING INDEX orchestration_v2_projection_runtime_requests_thread_status_idx/,
+  it.effect("seeks retained pending bodies by thread and request ID in long histories", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = yield* createD10Thread("d10-long-history");
+      const otherThreadId = yield* createD10Thread("d10-long-other");
+      const { question, approval, requests } = d10DecisionFixture(threadId, "d10-long-history");
+      for (const request of requests)
+        yield* saveD10Request(threadId, { ...request, status: "resolved", resolvedAt: D10_NOW });
+      const unrelated = d10DecisionFixture(otherThreadId, "d10-long-other");
+      for (const request of unrelated.requests) yield* saveD10Request(otherThreadId, request);
+      const items = [
+        question,
+        approval,
+        ...Array.from({ length: 9_998 }, (_, index) =>
+          d10Command(threadId, "d10-long-history", index + 3),
+        ),
+        unrelated.question,
+        unrelated.approval,
+        ...Array.from({ length: 100 }, (_, index) =>
+          d10Command(otherThreadId, "d10-long-other", index + 3),
+        ),
+      ];
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          for (let offset = 0; offset < items.length; offset += 50) {
+            const rows = items.slice(offset, offset + 50).map((item) => ({
+              turn_item_id: item.id,
+              thread_id: item.threadId,
+              run_id: item.runId,
+              node_id: item.nodeId,
+              provider_thread_id: item.providerThreadId,
+              provider_turn_id: item.providerTurnId,
+              parent_item_id: item.parentItemId,
+              ordinal: item.ordinal,
+              type: item.type,
+              status: item.status,
+              updated_at: DateTime.formatIso(item.updatedAt),
+              payload_json: encodeD10TurnItem(item),
+            }));
+            yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
+          }
+        }),
+      );
+      const { statements, tracer } = traceSqlStatements();
+      const explainRetention = () =>
+        Effect.gen(function* () {
+          const statement = statements.findLast((query) =>
+            query.includes("retained AS MATERIALIZED"),
           );
-          assert.match(
-            plan[1]!.detail,
-            /SEARCH request_item USING INDEX orchestration_v2_projection_turn_items_thread_ordinal_idx/,
-          );
-          assert.isFalse(plan.some((row) => /SCAN request_item/.test(row.detail)));
-        };
-        const empty = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 2 });
-        assert.deepEqual(
-          empty.projection.turnItems.map((item) => item.id),
-          ["d10-long-history:item:9999", "d10-long-history:item:10000"],
+          assert.isDefined(statement);
+          return yield* sql.unsafe<{ readonly detail: string }>(`EXPLAIN QUERY PLAN ${statement}`);
+        });
+      const assertPlan = (plan: ReadonlyArray<{ readonly detail: string }>) => {
+        const retentionPlan = plan.filter((row) =>
+          /(?:pending_request|request_item)\b/.test(row.detail),
         );
-        assert.deepEqual(
-          empty.projection.visibleTurnItems.map((row) => row.item.ordinal),
-          [9_999, 10_000],
+        assert.lengthOf(retentionPlan, 2);
+        assert.match(
+          retentionPlan[0]!.detail,
+          /SEARCH pending_request USING INDEX orchestration_v2_projection_runtime_requests_thread_status_idx \(thread_id=\? AND status=\?\)/,
         );
-        assertPlan(yield* explainRetention());
-        // CROSS JOIN's empty indexed outer loop cannot visit historical item rows.
-        // One pending request still scans its thread prefix for JSON request IDs;
-        // the fixture proves scope/query shape, not an unmeasured latency claim.
-        yield* saveD10Request(threadId, requests[0]!);
-        const pending = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 2 });
-        assert.deepEqual(
-          pending.projection.turnItems.map((item) => item.id),
-          [
-            "d10-long-history:question-item",
-            "d10-long-history:item:9999",
-            "d10-long-history:item:10000",
-          ],
+        assert.match(
+          retentionPlan[1]!.detail,
+          /SEARCH request_item USING INDEX orchestration_v2_projection_turn_items_thread_request_idx \(thread_id=\? AND <expr>=\?\)/,
         );
-        assert.deepEqual(pending.projection.turnItems[0], question);
-        assert.deepEqual(
-          pending.projection.visibleTurnItems.map((row) => row.item.ordinal),
-          [9_999, 10_000],
+        assert.isFalse(retentionPlan.some((row) => /SCAN request_item/.test(row.detail)));
+        assert.isFalse(
+          retentionPlan.some((row) => row.detail.includes("turn_items_thread_ordinal_idx")),
         );
-        assert.isTrue(pending.projection.turnItems.every((item) => item.threadId === threadId));
-        assertPlan(yield* explainRetention());
-      }),
+      };
+      const empty = yield* store
+        .getThreadSnapshotWindow(threadId, { rowLimit: 2 })
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(
+        empty.projection.turnItems.map((item) => item.id),
+        ["d10-long-history:item:9999", "d10-long-history:item:10000"],
+      );
+      assert.deepEqual(
+        empty.projection.visibleTurnItems.map((row) => row.item.ordinal),
+        [9_999, 10_000],
+      );
+      assertPlan(yield* explainRetention());
+      // Each pending request seeks its own body without walking the thread's history.
+      yield* saveD10Request(threadId, requests[0]!);
+      const pending = yield* store
+        .getThreadSnapshotWindow(threadId, { rowLimit: 2 })
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(
+        pending.projection.turnItems.map((item) => item.id),
+        [
+          "d10-long-history:question-item",
+          "d10-long-history:item:9999",
+          "d10-long-history:item:10000",
+        ],
+      );
+      assert.deepEqual(pending.projection.turnItems[0], question);
+      assert.deepEqual(
+        pending.projection.visibleTurnItems.map((row) => row.item.ordinal),
+        [9_999, 10_000],
+      );
+      assert.isTrue(pending.projection.turnItems.every((item) => item.threadId === threadId));
+      assertPlan(yield* explainRetention());
+      yield* saveD10Request(threadId, requests[1]!);
+      const bothPending = yield* store
+        .getThreadSnapshotWindow(threadId, { rowLimit: 2 })
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(
+        bothPending.projection.turnItems.map((item) => item.id),
+        [
+          "d10-long-history:question-item",
+          "d10-long-history:approval-item",
+          "d10-long-history:item:9999",
+          "d10-long-history:item:10000",
+        ],
+      );
+      assert.deepEqual(bothPending.projection.turnItems.slice(0, 2), [question, approval]);
+      assert.deepEqual(
+        bothPending.projection.visibleTurnItems.map((row) => row.item.ordinal),
+        [9_999, 10_000],
+      );
+      assertPlan(yield* explainRetention());
+    }),
   );
 
   it.effect("does not import pending request bodies after a parent's fork boundary", () =>

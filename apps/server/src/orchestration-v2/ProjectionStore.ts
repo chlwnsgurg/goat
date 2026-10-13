@@ -2912,11 +2912,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   FROM orchestration_v2_projection_runtime_requests AS pending_request
                     INDEXED BY orchestration_v2_projection_runtime_requests_thread_status_idx
                   CROSS JOIN orchestration_v2_projection_turn_items AS request_item
-                    INDEXED BY orchestration_v2_projection_turn_items_thread_ordinal_idx
+                    INDEXED BY orchestration_v2_projection_turn_items_thread_request_idx
                     ON request_item.thread_id = pending_request.thread_id
                       AND request_item.type IN ('user_input_request', 'approval_request')
+                      -- Remove column affinity so the JSON expression index can
+                      -- seek by request ID as well as thread ID. IDs are strings.
                       AND json_extract(request_item.payload_json, '$.requestId') =
-                        pending_request.runtime_request_id
+                        +pending_request.runtime_request_id
                   WHERE pending_request.thread_id = ${threadId}
                     AND pending_request.status = 'pending'
                     AND ${window.requiredRunId ?? null} IS NULL
