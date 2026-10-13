@@ -19,6 +19,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 type Snapshot = {
   items: readonly DecisionItem[];
+  authoritativeRefs: readonly ScopedThreadRef[];
   loadingRefs: readonly ScopedThreadRef[];
   errors: readonly { ref: ScopedThreadRef; message: string }[];
   isLoading: boolean;
@@ -42,6 +43,7 @@ vi.mock("../../state/threads", async () => {
   const { Atom } = await import("effect/reactivity");
   state.snapshot = Atom.make<Snapshot>({
     items: [],
+    authoritativeRefs: [],
     loadingRefs: [],
     errors: [],
     isLoading: false,
@@ -158,8 +160,20 @@ let root: Root;
 let router: ReturnType<typeof makeRouter>;
 let container: HTMLDivElement;
 function write(items: readonly DecisionItem[], diagnostics: Partial<Omit<Snapshot, "items">> = {}) {
+  // Every fixture thread is live unless the test marks it loading or failed, so a
+  // request missing from items counts as answered.
+  const unresolved = [
+    ...(diagnostics.loadingRefs ?? []),
+    ...(diagnostics.errors ?? []).map(({ ref }) => ref),
+  ];
   state.registry!.set(state.snapshot!, {
     items,
+    authoritativeRefs: [a.ref, b.ref, ...items.map((item) => item.ref)].filter(
+      (ref) =>
+        !unresolved.some(
+          (other) => other.environmentId === ref.environmentId && other.threadId === ref.threadId,
+        ),
+    ),
     loadingRefs: [],
     errors: [],
     isLoading: false,
