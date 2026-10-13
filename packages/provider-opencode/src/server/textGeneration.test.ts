@@ -609,3 +609,62 @@ it.layer(layerOpenCodeTextGenerationExistingServerTest)(
     );
   },
 );
+
+it("decodes all existing and memory generation error operation literals", () => {
+  const operations = [
+    "generateCommitMessage",
+    "generatePrContent",
+    "generateBranchName",
+    "generateThreadTitle",
+    "generateChannelReception",
+    "generateReviewGuide",
+    "resolveMemoryConflict",
+    "generateMemorySummary",
+  ];
+  const errors = [
+    [
+      OpenCodeTextGeneration.OpenCodeTextGenerationSessionRequestError,
+      "OpenCodeTextGenerationSessionRequestError",
+    ] as const,
+    [
+      OpenCodeTextGeneration.OpenCodeTextGenerationSessionPayloadError,
+      "OpenCodeTextGenerationSessionPayloadError",
+    ] as const,
+    [
+      OpenCodeTextGeneration.OpenCodeTextGenerationPromptRequestError,
+      "OpenCodeTextGenerationPromptRequestError",
+    ] as const,
+    [
+      OpenCodeTextGeneration.OpenCodeTextGenerationPromptResponseError,
+      "OpenCodeTextGenerationPromptResponseError",
+    ] as const,
+    [
+      OpenCodeTextGeneration.OpenCodeTextGenerationEmptyOutputError,
+      "OpenCodeTextGenerationEmptyOutputError",
+    ] as const,
+  ];
+  for (const [schema, tag] of errors) {
+    const codec = Schema.fromJsonString(schema);
+    const decode = Schema.decodeUnknownSync(codec);
+    const encode = Schema.encodeSync(codec);
+    for (const operation of operations) {
+      const json = JSON.stringify({
+        _tag: tag,
+        operation,
+        cwd: "scratch",
+        cause: "synthetic",
+        sessionId: "session",
+        providerId: "provider",
+        modelId: "model",
+        providerMessage: "Synthetic failure",
+        responsePartCount: 0,
+        textPartCount: 0,
+      });
+      const value = decode(json);
+      expect(decode(encode(value)).operation).toBe(operation);
+    }
+    expect(() =>
+      decode(JSON.stringify({ _tag: tag, operation: "unknown", cwd: "scratch" })),
+    ).toThrow();
+  }
+});

@@ -11,6 +11,8 @@ import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
 import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
 
 const OpenCodeTextGenerationOperation = Schema.Literals([
+  "resolveMemoryConflict",
+  "generateMemorySummary",
   "generateCommitMessage",
   "generatePrContent",
   "generateBranchName",

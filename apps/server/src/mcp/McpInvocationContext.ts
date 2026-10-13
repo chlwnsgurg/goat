@@ -1,5 +1,7 @@
 import {
   type AuthMcpClientAccess,
+  type AuthEnvironmentScope,
+  type EnvironmentAuthorizationError,
   type EnvironmentId,
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
@@ -12,6 +14,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 const ALL_MCP_CAPABILITIES = [
+  "memory",
   "preview",
   "orchestration",
   "worktree",
@@ -53,6 +56,11 @@ export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): R
  * need `thread`.
  */
 export interface McpInvocationScope {
+  /** Missing scopes or live reauthorization never imply memory access. */
+  readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
+  readonly reauthorize?: (
+    required: ReadonlyArray<AuthEnvironmentScope>,
+  ) => Effect.Effect<void, EnvironmentAuthorizationError>;
   readonly environmentId: EnvironmentId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;

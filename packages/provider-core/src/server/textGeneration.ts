@@ -1,4 +1,8 @@
 import type {
+  ResolveMemoryConflictInput,
+  ResolveMemoryConflictExecutionResult,
+  GenerateMemorySummaryInput,
+  GenerateMemorySummaryExecutionResult,
   BranchNamingOptions,
   ChannelReceptionInput,
   ChannelReceptionResult,
@@ -127,6 +131,12 @@ export type ReviewGuideGenerationResult = Omit<
 
 /** Commit, change request, branch, title, review guide, and channel reception generation backed by one provider instance. */
 export interface ProviderTextGeneration {
+  readonly resolveMemoryConflict?: (
+    input: ResolveMemoryConflictInput,
+  ) => Effect.Effect<ResolveMemoryConflictExecutionResult, TextGenerationError>;
+  readonly generateMemorySummary?: (
+    input: GenerateMemorySummaryInput,
+  ) => Effect.Effect<GenerateMemorySummaryExecutionResult, TextGenerationError>;
   /**
    * Generate a commit message from staged change context.
    */
@@ -166,3 +176,13 @@ export interface ProviderTextGeneration {
     input: ReviewGuideGenerationInput,
   ) => Effect.Effect<ReviewGuideGenerationResult, TextGenerationError>;
 }
+
+export type {
+  ResolveMemoryConflictInput,
+  ResolveMemoryConflictResult,
+  ResolveMemoryConflictExecutionResult,
+  GenerateMemorySummaryInput,
+  GenerateMemorySummaryResult,
+  GenerateMemorySummaryExecutionResult,
+  MemoryGenerationExecution,
+} from "@goat/contracts";
