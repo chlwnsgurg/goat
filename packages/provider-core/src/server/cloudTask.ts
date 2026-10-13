@@ -49,12 +49,13 @@ export function cloudTaskResultText(task: OrchestrationV2CloudTask) {
     task.tracking === "link-only" && task.status === "running"
       ? "Running in the cloud"
       : `Cloud task ${task.status}`;
-  return [
-    task.summary ?? title,
-    task.prUrl ? `Pull request: ${task.prUrl}` : undefined,
-    task.branch ? `Branch: ${task.branch}` : undefined,
-    task.url ? `Task: ${task.url}` : undefined,
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join("\n");
+  const summary = task.summary?.trim() || title;
+  // Rendered as markdown: one link per list item so URLs never run into the next label,
+  // and the pull request is not repeated when the summary already links it.
+  const links = [
+    task.prUrl && !summary.includes(task.prUrl) ? `- Pull request: ${task.prUrl}` : undefined,
+    task.branch ? `- Branch: \`${task.branch}\`` : undefined,
+    task.url ? `- Cloud task: ${task.url}` : undefined,
+  ].filter((line): line is string => line !== undefined);
+  return links.length === 0 ? summary : `${summary}\n\n${links.join("\n")}`;
 }

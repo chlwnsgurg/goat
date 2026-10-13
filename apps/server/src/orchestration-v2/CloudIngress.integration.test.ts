@@ -167,7 +167,7 @@ it.effect.each(["same", "different"] as const)(
         const itemId = TurnItemId.make("turn-item:provider-result");
         const now = yield* DateTime.now;
         const finalText =
-          "Completed fake task\nPull request: https://github.com/acme/repo/pull/1\nBranch: agent/fix\nTask: https://example.com/tasks/1";
+          "Completed fake task\n\n- Pull request: https://github.com/acme/repo/pull/1\n- Branch: `agent/fix`\n- Cloud task: https://example.com/tasks/1";
         const providerItem = {
           id: itemId,
           type: "assistant_message" as const,
@@ -995,7 +995,7 @@ it.effect.each([
             resultItemBefore.text,
             "Pull request: https://github.com/acme/repo/pull/1",
           );
-          assert.include(resultItemBefore.text, "Branch: agent/fix");
+          assert.include(resultItemBefore.text, "Branch: `agent/fix`");
         }
         const metadata = {
           url: "https://example.com/tasks/refreshed",
@@ -1464,7 +1464,7 @@ it.effect.each([
           const result = assertCloudResultItem(after, run.id);
           assert.equal(
             result.text,
-            "Cloud tracking could not be reattached. Open the task link; remote work may continue.\nTask: https://example.com/tasks/saved",
+            "Cloud tracking could not be reattached. Open the task link; remote work may continue.\n\n- Cloud task: https://example.com/tasks/saved",
           );
           assert.equal(result.providerThreadId, providerThread.id);
           assert.equal(result.providerTurnId, savedTurnId);
@@ -2006,7 +2006,7 @@ it.effect.each([
         assert.equal(finished.runs[0]?.status, "completed");
         const result = assertCloudResultItem(finished, run.id);
         assert.include(result.text, "Completed fake task");
-        assert.include(result.text, "Task: https://example.com/tasks/1");
+        assert.include(result.text, "Cloud task: https://example.com/tasks/1");
         // A replayed recovery effect after settlement cannot attach or emit a second result.
         yield* outbox.enqueue([
           {
