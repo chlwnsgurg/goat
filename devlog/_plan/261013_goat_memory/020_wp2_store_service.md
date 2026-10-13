@@ -816,7 +816,8 @@ This revision specifies future tests; none were run.
 
 ### Transactional admission and SQL amendments
 
-Extend the WP2 migration/MemoryStore codecs, not transport handlers, with:
+Extend the WP2 migration/MemoryStore SQL mappings, not transport handlers, with:
+Wire fields and validation are owned by [WP1 permanent checkpoint wire records](010_wp1_contracts.md#permanent-checkpoint-wire-records-rev-12); map `MemoryIdentityRecord`, `MemoryCompactReceipt`, `MemoryFenceRecord` and `MemorySuppressionRecord` losslessly. This phase defines SQL representation and execution, not a second wire codec.
 
 | Table / change                | Bounded persisted state and atomic owner                                                                                                                                                                                                                           |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

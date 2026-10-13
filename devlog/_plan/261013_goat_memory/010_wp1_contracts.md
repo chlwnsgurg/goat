@@ -1,13 +1,18 @@
-# 010 — WP1: memory contracts and compatibility
+# 010 — WP1: memory contracts and compatibility (rev 12)
 
 Enforcement limits and claim wording: [000 Enforcement inventory](000_plan.md#enforcement-inventory). Audit r1 rev 4 amendments supersede incompatible rev 2/3 recipes.
 
 ## Purpose and inputs
 
 Define the memory protocol before any environment persists, syncs, imports, or injects memory.
-This is an implementation PRD, not an implementation record. Baseline inspected on 2026-10-13:
-HEAD and local `origin/dev` both `1e2418fafb625604de1eb89250a10d971bcfd0fe`, branch
-`goat/goat-cross-device-provider-memory`. Line references below describe that baseline.
+This is an implementation PRD, not an implementation record. Citation baseline refreshed on
+2026-10-14 after `git fetch origin dev`: `origin/dev` and remote `refs/heads/dev` both
+`b5f9d53cbc29eddf7bad5518bb7d46c4f97173f5`. All current source citations below use this SHA.
+The authoring branch is `goat/memory-wp1-contracts`, HEAD
+`fea6178b36d11e0a446323344a2db67fb76c5d03` (WP0 plans); source evidence is read with
+`git show origin/dev:<path>` / `git grep … origin/dev`, not assumed from this older checkout.
+The previous citation baseline was `1e2418fafb625604de1eb89250a10d971bcfd0fe`.
+No checkout, merge or rebase is performed by this stale-check lane.
 
 Consumes [000_plan.md](000_plan.md), especially its decision dispositions, Shared names and
 work-phase map, and [001_architect_proposal.md](001_architect_proposal.md), M1–M18. WP0 names
@@ -37,7 +42,7 @@ future WP1 implementation changes, not files edited while writing the plan.
 | ------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | NEW    | `packages/contracts/src/memory.ts`                                  | Eight ids (including transient source request id), schemas, payload/metadata separation, RPC/MCP/hub shapes, generation inputs/results and execution envelopes, import/admin/report schemas, protocol constants, pure validation and explicit wire encoders. |
 | NEW    | `packages/contracts/src/memory.test.ts`                             | Round-trip, rejection, byte/character limits, metadata-only deletion, DAG structural checks and endpoint shapes.                                                                                                                                             |
-| MODIFY | `packages/contracts/src/index.ts`                                   | Export `./memory.ts`; root export is the existing public convention at `index.ts:1–9,34–35`.                                                                                                                                                                 |
+| MODIFY | `packages/contracts/src/index.ts`                                   | Export `./memory.ts` from the root; preserve existing subpath exports and use `@goat/contracts` imports, not an undeclared `@goat/contracts/memory`; root export is the existing public convention at `index.ts:1–9,34–35`.                                  |
 | MODIFY | `packages/contracts/src/auth.ts`                                    | Three scopes and standard client read/write grants; leave legacy parents frozen and sync out of client/admin default grants.                                                                                                                                 |
 | MODIFY | `packages/contracts/src/auth.test.ts`                               | Permission compatibility and default grant assertions.                                                                                                                                                                                                       |
 | MODIFY | `packages/contracts/src/environment.ts`                             | Optional memory protocol advertisement in `ExecutionEnvironmentCapabilities`.                                                                                                                                                                                |
@@ -57,7 +62,7 @@ future WP1 implementation changes, not files edited while writing the plan.
 | NEW    | `packages/provider-core/src/server/textGenerationContracts.test.ts` | Validate generation input/result schemas imported from contracts, preserving requested selection and refusing forged outputs.                                                                                                                                |
 | MODIFY | `apps/server/src/mcp/McpInvocationContext.ts`                       | Add `memory` capability and optional authenticated grants carrier, whose absence means no memory access.                                                                                                                                                     |
 | MODIFY | `apps/server/src/mcp/McpInvocationContext.test.ts`                  | Neutral missing-capability error and capability/grant independence.                                                                                                                                                                                          |
-| MODIFY | `packages/provider-opencode/src/server/textGeneration.ts`           | Widen OpenCodeTextGenerationOperation with both optional method names; generation bodies remain WP2.                                                                                                                                                         |
+| MODIFY | `packages/provider-opencode/src/server/textGeneration.ts`           | Widen OpenCodeTextGenerationOperation with both optional method names in the same commit as the core interface; generation bodies remain WP2.                                                                                                                |
 | MODIFY | `packages/provider-opencode/src/server/textGeneration.test.ts`      | Decode all existing and new error operation literals, and preserve old operations.                                                                                                                                                                           |
 | MODIFY | `.github/workflows/goat-ci.yml`                                     | Add a provider-core test step under existing `matrix.task == 'test'`; that package currently has no explicit goat-ci test lane.                                                                                                                              |
 
@@ -66,7 +71,7 @@ DELETE: N/A, additive protocol. `baseSchemas.ts` is read but unchanged: its priv
 UUID validation belongs in `memory.ts`. `packages/contracts/package.json` is unchanged:
 root imports resolve to `src/index.ts` (`package.json:9–13`); no new subpath is needed.
 `textGenerationOperations.ts` is read but unchanged in WP1: `Operation = keyof
-ProviderTextGeneration` expands immediately with optional keys (`textGenerationOperations.ts:32`), so WP1 also widens OpenCode’s closed error operation enum and checks every consumer below.
+ProviderTextGeneration` expands immediately with optional keys (`textGenerationOperations.ts:32`), so WP1 also widens OpenCode’s closed error operation enum and checks every consumer below, including Pi and Muse. Neither has a closed operation enum to widen.
 Prompt building and `fromRunner` bodies belong to [WP2](020_wp2_store_service.md).
 
 ## Schema implementation recipe
@@ -87,7 +92,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ScopedThreadRef } from "./environment.ts";
-import { ModelSelection } from "./modelSelection.ts";
+import { ProviderOptionSelection } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 export const MEMORY_PROTOCOL_VERSION = 1;
@@ -151,6 +156,64 @@ already used in `packages/contracts/src/orchestratorMcp.test.ts:39`. Known malfo
 do not use `ForwardCompatibleArray` to silently drop mutation or sync operations. Its dropping
 behavior (`baseSchemas.ts:128–156`) is appropriate for permission advertisement, not a durable log.
 
+### Strict memory model selection (rev 12)
+
+`MemoryModelSelection` is the sole model selection schema in memory provenance, resolution,
+lease/claim (`frozenDefaultModelSelection`), generation input (`modelSelection`) and trusted
+execution (`requestedModelSelection`), including their nested operation/checkpoint forms.
+Do not import `ModelSelection` or `ProviderOptionSelections` into these codecs: both accept
+legacy input and the latter silently drops invalid legacy option values.
+
+```ts
+// Non-transforming: rejects leading/trailing whitespace instead of trimming it.
+// TrimmedNonEmptyString, ProviderInstanceId and ProviderOptionSelection all trim on
+// decode/encode (baseSchemas.ts:7-27, model.ts:46-52, providerInstance.ts:53-55), so the
+// memory boundary does not reuse them.
+const MemoryCanonicalString = Schema.String.pipe(
+  Schema.check(Schema.makeFilter((s: string) => s.length > 0 && s === s.trim())),
+);
+const MemoryOptionSelection = Schema.Struct({
+  id: MemoryCanonicalString,
+  value: Schema.Union([MemoryCanonicalString, Schema.Boolean]),
+});
+export const MemoryModelSelection = Schema.Struct({
+  instanceId: MemoryCanonicalString.pipe(Schema.brand("ProviderInstanceId")),
+  model: MemoryCanonicalString,
+  options: Schema.optionalKey(Schema.Array(MemoryOptionSelection)),
+});
+export type MemoryModelSelection = typeof MemoryModelSelection.Type;
+```
+
+Add filters: <=100 options, unique option ids, and canonical nonempty strings (already trimmed,
+not silently rewritten). Each option is exactly `{id:string,value:string|boolean}`; numeric,
+null, object/array values, empty ids/values, duplicate ids and unknown nested keys fail.
+Decode every memory envelope with `onExcessProperty: "error"`, recursively including this
+schema and option structs. No fallback, legacy union or coercion at decode/encode/`.make`.
+Preserve option order, ids and values, including false, empty-array versus omitted options,
+and the requested model alias; effective model resolution cannot overwrite requested selection.
+
+WP2 explicitly converts settings `defaultModelSelection` to `MemoryModelSelection` before
+pinning generation or claiming a lease; the runner converts the validated canonical value to
+its existing provider input type without re-normalizing options. Validate raw persisted option
+values before the permissive settings decoder can discard them. Valid legacy `{provider,model}`
+and legacy option objects remain readable in existing settings/storage through existing codecs;
+the memory boundary accepts their explicit server conversion only when every original option
+has a valid string/boolean value and the provider maps to one configured instance. Ambiguous
+routing, discarded/rewritten values or unconvertible options yield typed `MemoryRpcError`
+`code:'invalid_output'` (safe message; no raw option data), no lease/generation dispatch.
+Already-normalized settings cannot prove preservation of discarded raw values: reload/validate
+raw source or fail the conversion, never treat the normalized empty options as proof of validity.
+WP1 does not alter the existing stored-data decoder or migrate legacy settings/rows.
+
+Commit 1 fixtures in `memory.test.ts`: `rejects legacy and malformed memory model options`
+(object `{effort:123}`, numeric/null/object array values, provider-only input, unknown keys,
+duplicate ids and noncanonical strings such as `{id:" effort ",value:" max "}` or a padded
+instanceId/model, each rejected by decode, encode and `.make` without being trimmed); `preserves canonical memory model options round-trip`
+(string plus true/false values, omitted/empty options and aliases). Commit 2 embeds these cases
+in claim/lease, generation, resolution and provenance checkpoint round-trips. WP2 owns conversion
+behavior fixtures proving invalid raw settings fail before execution and valid legacy conversion
+preserves every option; these are planned tests, not results from this documentation lane.
+
 ### Complete field inventory
 
 An unmarked field below is required. `?` means `Schema.optionalKey`; `| null` means
@@ -162,12 +225,12 @@ unless explicitly stated otherwise. Additive helper names do not replace Shared 
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MemorySourceWatermark`   | `fromEventId: EventId`, `toEventId: EventId`, `throughSequence: NonNegativeInt`; sequence is the owning environment's committed thread watermark, not a hub cursor.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `MemoryEvidence`          | `origin: 'user'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 'thread'                                                                                                                        | 'import'                                                                                                                                                                                                                                                                    | 'model'`, `sourceThread?: ScopedThreadRef`, `watermark?: MemorySourceWatermark`, `messageIds: MessageId[]`, `importSourceId?: MemoryImportSourceId`; thread origin requires thread+watermark, import origin requires source id. No transcript excerpt here. |
-| `MemoryProvenance`        | `environmentId: EnvironmentId`, `providerInstanceId?: ProviderInstanceId`, `provider?: ProviderDriverKind`, `requestedModelSelection?: ModelSelection`, `effectiveModel?: string`, `sourceThread?: ScopedThreadRef`, `sourceWatermark?: MemorySourceWatermark`, `importSource?: MemoryImportSourceMetadata`; model output requires requested/effective model and instance, thread source requires watermark. Fingerprint is opaque, not credential or filesystem path.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `MemoryProvenance`        | `environmentId: EnvironmentId`, `providerInstanceId?: ProviderInstanceId`, `provider?: ProviderDriverKind`, `requestedModelSelection?: MemoryModelSelection`, `effectiveModel?: string`, `sourceThread?: ScopedThreadRef`, `sourceWatermark?: MemorySourceWatermark`, `importSource?: MemoryImportSourceMetadata`; model output requires requested/effective model and instance, thread source requires watermark. Fingerprint is opaque, not credential or filesystem path.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `MemoryPayload`           | `text: string`, `evidence: MemoryEvidence[]`, `derivedFromMemoryRevisions: MemoryRevisionId[]`; nonblank text bounded by MEMORY_BODY_MAX_UTF8_BYTES, serialized UTF-8 payload bounded separately by MEMORY_PAYLOAD_MAX_UTF8_BYTES; `fact` needs at least one non-model evidence record. `inference` may have model evidence only, but never upgrades to fact by default.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `MemoryRevision`          | `memorySpaceId`, `memoryId`, `revisionId`, `operationId`, `parents: MemoryRevisionId[]`, `scope: MemoryScope`, `payloadRef: MemoryRevisionId`, `assertionKind`, `provenance`, `createdAtUtc`; payloadRef equals revisionId. Contains no text, evidence excerpts or judgment.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `MemoryTombstone`         | `memorySpaceId`, `memoryId`, `deleteOperationId: MemoryOperationId`, `deletingEnvironmentId: EnvironmentId`, `deletedAtUtc`, `suppressedSourceKeys: MemorySourceKey[]`, `suppressedContent: MemoryContentSuppression[]`, `sourceExclusions: MemorySourceExclusion[]`; no body or fingerprint-dependent suppression. Keys suppress changed versions of the same source too. The three arrays are bounded fragments; receivers retain their permanent union.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `MemoryConflict`          | `conflictId`, `memorySpaceId`, `memoryId`, `heads: MemoryRevisionId[]`, `status: 'quarantined'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 'resolving'                                                                                                                     | 'failed'                                                                                                                                                                                                                                                                    | 'resolved'`, `failureCode?: MemoryFailureCode`; at least two unique sorted heads, failureCode required iff failed. No variant bodies.                                                                                                                       |
-| `MemoryResolution`        | `resolutionId`, `memorySpaceId`, `memoryId`, `inputRevisionIds: MemoryRevisionId[]`, `inputPayloadRefs: MemoryRevisionId[]`, `judgmentRef: MemoryResolutionId`, `requestedModelSelection: ModelSelection`, `effectiveProvider: ProviderDriverKind`, `effectiveModel: string`, `resolvingEnvironmentId: EnvironmentId`, `fencingToken: PositiveInt`, `resultRevisionId`, `appliedAtUtc`, `revertsResolutionId?: MemoryResolutionId`; at least two input ids, refs align by index, judgmentRef equals resolutionId. Judgment text stored separately and purged on forget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `MemoryResolution`        | `resolutionId`, `memorySpaceId`, `memoryId`, `inputRevisionIds: MemoryRevisionId[]`, `inputPayloadRefs: MemoryRevisionId[]`, `judgmentRef: MemoryResolutionId`, `requestedModelSelection: MemoryModelSelection`, `effectiveProvider: ProviderDriverKind`, `effectiveModel: string`, `resolvingEnvironmentId: EnvironmentId`, `fencingToken: PositiveInt`, `resultRevisionId`, `appliedAtUtc`, `revertsResolutionId?: MemoryResolutionId`; at least two input ids, refs align by index, judgmentRef equals resolutionId. Judgment text stored separately and purged on forget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `MemoryResolutionPayload` | `resolutionId`, `judgment: string`; concise decision explanation, never chain of thought, tools or raw variants. At most 64 KiB encoded.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `MemoryItem`              | Union: active `{ status:'active', memorySpaceId, memoryId, scope, revision:MemoryRevision, payload:MemoryPayload, pendingSync:boolean, localAvailability:MemoryLocalAvailability }`; quarantined `{ status:'quarantined', memorySpaceId, memoryId, scope, conflict:MemoryConflict, pendingSync:boolean, localAvailability }`; forgotten `{ status:'forgotten', memorySpaceId, memoryId, tombstone:MemoryTombstone, pendingSync:boolean, localAvailability }`; blocked `{ status:'blocked', memorySpaceId, memoryId, scope, failureCode:MemoryFailureCode, pendingSync:boolean, localAvailability }`. Matching nested ids; no payload in quarantined/forgotten/blocked arms. Blocked permits scanner_pending, secret_detected, source_invalidated or missing_parent; scanner_pending means the replica-local scan of an approved revision has not finished yet (never a hub rejection or a secret finding) and clears automatically when the first scan allows it, while secret_detected clears only after a scanner-policy change triggers a rescan (no per-item explicit rescan). It is a local exposure view, not evidence that approved canonical payload is absent or that hub admission failed. No fabricated shared conflict from scanner hold. |
 | `MemoryContextSnapshot`   | `protocolVersion: 1`, `memorySpaceId`, `projectionWatermark: NonNegativeInt`, `items: { memoryId, revisionId, scope, provenance, assertionKind, text: string }[]`, `renderedText: string`; ids unique; text contains complete selected items. Cap the delivered block by Unicode code points AND UTF-8 bytes, including wrapper/locators and `MEMORY_CONTEXT_OUTER_FRAME`; the schema reserves that outer-frame cost even when the adapter uses no outer frame. No grants, secrets, local paths, or quarantined/forgotten items.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -194,7 +257,7 @@ WP1 owns these schemas; SQL codecs are defined only in WP2. No private source ro
 | `MemoryContentSuppression`             | `scope: MemoryScope`, `assertionKind: MemoryAssertionKind`, `contentFingerprint: string` (lowercase SHA256). Exact-copy matching is space + scope + assertion; no semantic or cross-scope match.                                                                                                                                                                                                                                   |
 | `MemorySourceExclusion`                | `sourceThread: ScopedThreadRef`, `sourceWatermark: MemorySourceWatermark`, `messageIds: MessageId[]`; nonempty selected committed message IDs, owner checked against watermark. Prevents re-extraction of forgotten source passages without deleting transcripts.                                                                                                                                                                  |
 | `MemoryImportSourceMetadata`           | `sourceId`, `format: MemoryImportFormat`, `parserVersion: string`, `sourceLocator: string` (opaque owner-local selector), `sourceItemKey`, `sourceFingerprint: string`, `contentFingerprint: string`, `sourceAliases: MemorySourceKey[]`, `acceptedContentFingerprints: string[]`; optional `commitOid: string`. Never absolute paths or provider settings. Optional importSource preserves old records without import provenance. |
-| `MemoryGenerationExecution`            | `requestedModelSelection: ModelSelection`, `effectiveProvider: ProviderDriverKind`, `effectiveModel: string`, `providerInstanceId: ProviderInstanceId`, `environmentId: EnvironmentId`. Runner stamps this after actual alias/instance resolution using its bound instance/environment context; instance must equal requestedModelSelection.instanceId. Requested options remain intact. Model JSON cannot supply execution.       |
+| `MemoryGenerationExecution`            | `requestedModelSelection: MemoryModelSelection`, `effectiveProvider: ProviderDriverKind`, `effectiveModel: string`, `providerInstanceId: ProviderInstanceId`, `environmentId: EnvironmentId`. Runner stamps this after actual alias/instance resolution using its bound instance/environment context; instance must equal requestedModelSelection.instanceId. Requested options remain intact. Model JSON cannot supply execution. |
 | `ResolveMemoryConflictExecutionResult` | `{ result: ResolveMemoryConflictResult, execution: MemoryGenerationExecution }`; validated model result plus trusted runner metadata.                                                                                                                                                                                                                                                                                              |
 | `GenerateMemorySummaryExecutionResult` | `{ result: GenerateMemorySummaryResult, execution: MemoryGenerationExecution }`; same separation.                                                                                                                                                                                                                                                                                                                                  |
 
@@ -429,7 +492,7 @@ WP6 only instantiates the WP4 factory; it does not create commands or wire contr
    // existing fields unchanged
  });
  export const ServerSettingsPatch = Schema.Struct({
-+  // Do not add memoryHub here; explicitly reject this reserved key on generic patches.
++  // Add neither memoryHub nor memoryHubVersion; reject both on raw generic patches.
    // existing fields unchanged
  });
 --- packages/provider-core/src/server/ProviderAdapter.ts (ProviderAdapter.ts:405–425)
@@ -473,7 +536,9 @@ server-principal credentials may actually authorize hub HTTP. Being in an admin 
 list must never make an ordinary browser/MCP token a hub principal.
 
 Settings authorization already treats every non-provider field as settings
-(`settings.ts:1757–1773`). Whole `memoryHub` replacement makes disabled mode clear the stale
+(`settings.ts:1757–1773`). Reserve both `memoryHub` and `memoryHubVersion` on raw generic
+patch input before Struct excess-field stripping; neither field is a generic patch member.
+Whole `memoryHub` replacement makes disabled mode clear the stale
 endpoint/handle on wire. Do not include it in `ProjectSettingsOverrides`
 (`settings.ts:1057–1087`) or local `ClientSettingsSchema` (`settings.ts:323`). Generic settings
 persistence must not be used to bypass WP3 join/bootstrap/secret rotation: activation is owned
@@ -489,9 +554,13 @@ Guard-map body additions, using the exact new WS_METHODS keys:
 [WS_METHODS.memoryImportProvider]: AuthMemoryWriteScope,
 [WS_METHODS.memoryHubSettingsUpdate]: AuthSettingsWriteScope,
 [WS_METHODS.memoryHubSettingsGet]: AuthSettingsWriteScope,
+// Include readSource in guarded membership for compound permission availability.
+[WS_METHODS.memoryReadSource]: AuthMemoryReadScope,
 // clientRpcRequiredScopes, before generic return at clientRpcPermissions.ts:77
 if (method === WS_METHODS.memoryImportProvider)
   return [AuthMemoryWriteScope, AuthFilesystemReadScope];
+if (method === WS_METHODS.memoryReadSource)
+  return [AuthMemoryReadScope, AuthOrchestrationReadScope];
 ```
 
 Search/list/history/readSource limits decode with default 20, range 1..100; schema output
@@ -517,13 +586,127 @@ HTTP/credentials; browser/MCP settings authority does not confer hub principal a
 | `MemoryHubJoinInput` / `MemoryHubJoinResult`    | Input environmentId, memorySpaceId:null or bound id. Result protocolVersion:1, hubEnvironmentId, memorySpaceId, checkpointSequence:NonNegativeInt, snapshotToken:string. Join creates a fixed checkpoint; it does not return operation/tombstone pages.                                                                                                                                   |
 | `MemoryHubPushInput` / `MemoryHubPushResult`    | Input memorySpaceId, environmentId, operations:MemoryOperation[]; result receipts:MemoryHubReceipt[]. Upsert/forget/revert only; an already-accepted resolve retry can replay its receipt, a new resolve yields lease_required.                                                                                                                                                           |
 | `MemoryHubPullInput` / `MemoryHubPullResult`    | Input memorySpaceId, environmentId, afterSequence:NonNegativeInt, limit:1..100, optional highWatermark:NonNegativeInt, snapshotToken:string, cursor:string. Result highWatermark, throughSequence, hasMore:boolean, entries:MemoryHubEntry[], checkpoint?:MemoryHubCheckpointPage.                                                                                                        |
-| `MemoryHubClaimInput`                           | memorySpaceId, memoryId, conflictId, conflictHeadSet:MemoryRevisionId[] (sorted, distinct >=2), holderEnvironmentId, attemptId:MemoryOperationId, frozenDefaultModelSelection:ModelSelection; returns MemoryResolutionLease.                                                                                                                                                              |
+| `MemoryHubClaimInput`                           | memorySpaceId, memoryId, conflictId, conflictHeadSet:MemoryRevisionId[] (sorted, distinct >=2), holderEnvironmentId, attemptId:MemoryOperationId, frozenDefaultModelSelection:MemoryModelSelection; returns MemoryResolutionLease.                                                                                                                                                        |
 | `MemoryHubRenewInput` / `MemoryHubReleaseInput` | memorySpaceId, memoryId, conflictId, holderEnvironmentId, attemptId, fencingToken:PositiveInt; renew returns MemoryResolutionLease; MemoryHubReleaseResult is {released:boolean}.                                                                                                                                                                                                         |
 | `MemoryHubApplyResolutionInput`                 | memorySpaceId, holderEnvironmentId, attemptId, operation:MemoryOperation resolve arm only; returns MemoryHubReceipt.                                                                                                                                                                                                                                                                      |
-| `MemoryResolutionLease`                         | memorySpaceId, memoryId, conflictId, conflictHeadSet, holderEnvironmentId, attemptId, frozenDefaultModelSelection, fencingToken, claimedAtHubTime, expiresAtHubTime, attemptDeadlineHubTime. All three times are canonical UTC timestamp strings on wire, SQL/clock use integer milliseconds.                                                                                             |
+| `MemoryResolutionLease`                         | memorySpaceId, memoryId, conflictId, conflictHeadSet, holderEnvironmentId, attemptId, frozenDefaultModelSelection:MemoryModelSelection, fencingToken:PositiveInt, claimedAtHubTime, expiresAtHubTime, attemptDeadlineHubTime. All three times are canonical UTC timestamp strings on wire, SQL/clock use integer milliseconds.                                                            |
 | `MemoryHubReceipt`                              | operationId, memoryId, operationDigest (canonical digest), outcome:accepted/conflicted/deleted/rejected, hubSequence:PositiveInt                                                                                                                                                                                                                                                          | null, failureCode?:MemoryFailureCode. Hub creates outcome/digest once; replica preserves both. Rejected requires code; null sequence is pre-admission request rejection. Durable hub rejection has a sequence and metadata-only entry. Local hold never creates a rejected hub receipt. Duplicate returns original receipt. |
 | `MemoryHubEntry`                                | operation {kind:'operation',hubSequence:PositiveInt,receipt:MemoryHubReceipt,operation:MemoryOperation}; metadata {kind:'metadata',hubSequence:PositiveInt,receipt:MemoryHubReceipt,memoryId,revision?:MemoryRevision,tombstone?:MemoryTombstone}. Receipt ids/sequence/digest match envelope. Metadata is hub rejection or purged content, never replica rescanning of an approved body. |
-| `MemoryHubCheckpointPage`                       | checkpointSequence, items:MemoryItem[], revisions:{revision:MemoryRevision,payload:MemoryPayload                                                                                                                                                                                                                                                                                          | null}[], tombstones, conflicts, resolutions:{resolution:MemoryResolution,payload:MemoryResolutionPayload                                                                                                                                                                                                                    | null}[], nextCursor:string | null, bootstrapComplete:boolean; causalBoundary, compactReceipts including original digest/outcome and bounded identity/fence/suppression records. Only checkpoint-required ancestry/revert records. nextCursor=null means last page. Hub-local availability is not replica admission; body-bearing approved revisions remain present even if the hub's own display is held. Null payload means canonical purge, never replica scanner hold. |
+| `MemoryHubCheckpointPage`                       | Exact required fields and schemas are defined in [Permanent checkpoint wire records](#permanent-checkpoint-wire-records-rev-12) below; no opaque ledger objects or downstream wire definitions.                                                                                                                                                                                           |
+
+### Permanent checkpoint wire records (rev 12)
+
+WP1 exports the following strict `Schema.Struct` / discriminated `Schema.Union` schemas and
+inferred types in `memory.ts`. Unmarked fields are required; nullable fields must be present.
+`timestamp` is the canonical UTC schema above, `digest` is exactly 64 lowercase SHA256 hex
+characters, counters are safe integers. No bodies, settings, SQL reserve counters or local
+report delivery state enter permanent ledgers. A body-free stable report guard is retained even
+when original resolution detail is later reclaimed.
+
+| Schema                        | Exact fields / identifier                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MemoryCompactReceipt`        | `memorySpaceId:MemorySpaceId`, `originEnvironmentId:EnvironmentId`, `operationKind:'upsert'                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 'forget'                                                                                                                                                                                                                                          | 'resolve' | 'revert'`, `receipt:MemoryHubReceipt`, `revisionId:MemoryRevisionId | null`, `resolutionId:MemoryResolutionId | null`, `revertsResolutionId:MemoryResolutionId | null`, `attemptId:MemoryOperationId | null`, `fencingToken:PositiveInt | null`, `reportGuard:MemoryCheckpointReportGuard | null`. Key `(memorySpaceId,receipt.operationId)`; receipt digest uses `digest`, receipt.hubSequence is positive (pre-admission null-sequence rejection is not checkpoint state). |
+| `MemoryCheckpointReportGuard` | `reportId:digest`, `resolvingEnvironmentId:EnvironmentId`, `resolutionId:MemoryResolutionId`, `outcome:'resolved'                                                                                                                                                                                                                                                                                                                                                                                                                              | 'reverted'`. Stable reportId is SHA256 of canonical `[memorySpaceId,resolvingEnvironmentId,resolutionId,receipt.operationId,outcome]`; this is the same reportId used by resolver-local repair/delivery (not a new wire delivery state).          |
+| `MemoryIdentityRecord`        | `memorySpaceId:MemorySpaceId`, `memoryId:MemoryId`, `scope:MemoryScope`, `creatingEnvironmentId:EnvironmentId`, `createOperationId:MemoryOperationId`, `createdAtUtc:timestamp`. Key `(memorySpaceId,memoryId)`; immutable first-creation identity survives forget, no growing alias array.                                                                                                                                                                                                                                                    |
+| `MemoryFenceRecord`           | `memorySpaceId:MemorySpaceId`, `memoryId:MemoryId`, `highestFencingToken:NonNegativeInt`, `activeLease:MemoryResolutionLease                                                                                                                                                                                                                                                                                                                                                                                                                   | null`. Key `(memorySpaceId,memoryId)`; zero means no token allocated. Maximum never decreases or disappears on release/expiry/forget. Live lease retains pinned selection/holder/attempt/heads/deadlines; no active lease for a deleted identity. |
+| `MemorySuppressionRecord`     | Union of common `{memorySpaceId:MemorySpaceId,memoryId:MemoryId,deleteOperationId:MemoryOperationId}` plus `{kind:'sourceKey',sourceKey:MemorySourceKey}`, `{kind:'content',content:MemoryContentSuppression}`, or `{kind:'sourceExclusion',exclusion:MemorySourceExclusion}`. Each exclusion row has exactly one messageId; expand/union selected messages by watermark. Key is common space/id + kind + canonical source key / scope+assertion+fingerprint / scoped thread+watermark+messageId respectively. No arbitrary string id or body. |
+
+`MemoryHubCheckpointPage` has exactly these required fields:
+
+```ts
+// Each name below denotes its WP1 schema, not a SQL or downstream codec.
+{
+  memorySpaceId: MemorySpaceId,
+  checkpointSequence: NonNegativeInt,
+  retentionFloor: NonNegativeInt,
+  causalBoundary: MemoryCausalBoundary,
+  pageOrdinal: NonNegativeInt, // zero based, consecutive for one snapshotToken
+  items: MemoryItem[],
+  revisions: { revision: MemoryRevision, payload: MemoryPayload | null }[],
+  tombstones: MemoryTombstone[],
+  conflicts: MemoryConflict[],
+  resolutions: { resolution: MemoryResolution, payload: MemoryResolutionPayload | null }[],
+  compactReceipts: MemoryCompactReceipt[],
+  identities: MemoryIdentityRecord[],
+  fences: MemoryFenceRecord[],
+  suppressions: MemorySuppressionRecord[],
+  nextCursor: string | null,
+  bootstrapComplete: boolean,
+}
+```
+
+All arrays are required even when empty; use `Schema.Array` of the named schema, never
+`Unknown`, record bags or optional ledger arrays. Tombstones here carry canonical first-delete
+space/id/operation/environment/time with all three suppression arrays empty; the complete
+permanent union is streamed through `suppressions`, not a single ever-growing tombstone JSON.
+Operation/pull tombstone fragments retain their existing arrays; checkpoint install reconstructs
+the same union from rows. Revisions/resolutions retain only checkpoint-required ancestry and
+valid revert inputs. Null payload is canonical purge, not a replica scanner hold; approved
+body-bearing revisions remain present even if the hub's local display is held. A post-S forget
+redacts staged bodies using blocked/source_invalidated metadata as specified by WP3, without
+rewriting the original receipt or first-creation identity.
+
+WP1 filters validate each page; the exported pure `validateMemoryCheckpointRecords(pages)`
+validates the complete staged snapshot before WP3 installs it (state/SQL work remains WP2/WP3):
+
+- All page space/S/floor/boundary values agree; boundary.checkpointSequence equals S and
+  `0 <= retentionFloor <= S`. Ordinals start at zero with no gaps; `bootstrapComplete` iff
+  nextCursor is null, only the last page is complete. Tokens/cursors are bounded opaque strings
+  (<=1,024 code points); authenticated token/member binding remains WP3.
+- Unique keys across ALL pages for identities, receipts, fences, suppression rows and canonical
+  item/revision/conflict/resolution/tombstone ids. No overwrite/last-row-wins merging. Each
+  referenced memoryId has exactly one identity and fence. Item/revision scope equals its identity;
+  create operation/environment/time remain the original values, including after forget.
+- Compact receipts retain the original operation digest, outcome, failureCode and sequence,
+  never recomputed from purged payload or changed by replica hold. Sequence <= S; rejected iff
+  failureCode is present. Non-rejected upsert/resolve/revert requires revisionId; forget and
+  rejected operations have null revisionId. Resolve requires resolutionId/attemptId/fencingToken;
+  other arms have null attemptId/fencingToken, and null resolutionId except revert, which uses
+  the original target resolutionId and equal revertsResolutionId. Non-revert has null
+  revertsResolutionId. Rejected resolve/revert retains these request identities for retry guards.
+- reportGuard is required (non-null) exactly for accepted/conflicted resolve or revert receipts;
+  it is null for other kinds/outcomes. Resolve guard resolutionId equals receipt resolutionId
+  and resolver equals originEnvironmentId; revert guard identifies the original resolver and
+  target resolution, not the environment requesting revert. Its reportId must match the formula
+  above. Original resolver identity is copied before resolution-detail compaction; install can
+  reconstruct the same repair marker without retaining a judgment or delivery pointer.
+- Retained revision operationId/space/id/revisionId and retained resolution result/input refs
+  match their receipt/identity. Every retained creation/revision/deletion operation has its
+  original compact receipt. Deleted identities have one first-delete tombstone whose receipt
+  is outcome deleted; all suppression rows match that deleteOperationId. Empty suppression
+  sets remain valid. First deletion is permanent; later extension receipts cannot replace it.
+- Fence maximum covers every retained resolve token and active lease token. An active lease's
+  space/id matches, token equals maximum, heads match the retained unresolved conflict, and
+  claimedAt <= expiresAt <= attemptDeadline with the existing 120s/600s bounds. Expired leases
+  may be absent but maximum stays. Receivers restore maxima before reopening claim/apply;
+  checkpoint maximum is merged with a newer local maximum, never reset to zero.
+- Required parents/originals are retained or covered by causalBoundary; incomplete linkage
+  cannot invent an identity or silently discard an approved receipt. Determining historical
+  boundary coverage is WP2/WP3 stateful validation. Accepted resolve/revert receipt identities
+  and their permanent reportGuard reconstruct the same resolver-local stable report repair
+  key; delivery threads/state and failed local generation attempts are local, not shared wire.
+
+The sum of lengths of ALL nine record arrays above (items, revisions, tombstones, conflicts,
+resolutions, compactReceipts, identities, fences, suppressions) is <=100 per page, and the whole
+UTF-8 encoded page including envelope/arrays/cursors is <=256 KiB. Count nested revision/payload
+pairs as one record; their payload/judgment caps remain 64 KiB each. No record splits except
+suppression expansion described above; page producers stop before either bound and never emit
+an empty non-final page. Equality is accepted, +1 rejected; do not separately allow 100 rows
+in each array. The entire checkpoint can span more than 100 records: permanent unions have no
+100-total truncation or page-count ceiling. Staging and SQL accounting use existing space quotas;
+approvedReplica install cannot refuse an approved union under local admission quotas. The 256-B
+`MEMORY_COMPACT_RECEIPT_MAX_BYTES` is the compact SQL binary row budget, not JSON wire size;
+WP2 maps these exact fields losslessly (including original receipt and retry/report identities),
+never truncates to fit. Overall permanent metadata/lifetime-id/receipt limits remain M19 limits.
+
+Commit 2 `memory.test.ts` fixtures: `round-trips permanent checkpoint ledger records after purge`,
+`preserves original digest outcome and report retry identities`, `restores deletion suppression
+and released lease fencing across pages`, `rejects mismatched duplicate or missing checkpoint
+ledger identities`, `enforces combined checkpoint record and UTF8 bounds at equality and overflow`,
+`rejects incomplete ordinals and boundary mismatches`. Include 101 suppression rows on multiple
+pages and a released lease with nonzero maximum; prove generation→wire encode→decode preserves
+exact records. WP2 SQL round-trip and WP3 staged atomic install/restart fixtures consume these
+WP1 schemas; runtime production/installation is not implemented or tested by this lane.
 
 Checkpoint pull requires snapshotToken, afterSequence=checkpointSequence and optional cursor;
 normal pull forbids cursor/snapshotToken/checkpoint result, uses a frozen highWatermark ceiling.
@@ -549,9 +732,10 @@ composition, so WP2 never imports MemorySyncService. Absence yields unavailable,
 
 ## Text generation contracts and provider seam
 
-Existing inputs carry the entire `ModelSelection` (`textGeneration.ts:64–86`), whose wire form
-includes instanceId, model and optional provider options (`modelSelection.ts:16–20,34–58`).
-Do not flatten it to a model string. Define these runtime schemas in `memory.ts`:
+Existing provider inputs carry `ModelSelection` (`textGeneration.ts:64–86`); memory inputs
+use the strict `MemoryModelSelection` above and the explicit server conversion boundary.
+Do not flatten selection to a model string or decode it through the legacy codec. Define these
+runtime schemas in `memory.ts`:
 
 ```ts
 export const ResolveMemoryConflictInput = Schema.Struct({
@@ -560,7 +744,7 @@ export const ResolveMemoryConflictInput = Schema.Struct({
   memoryId: MemoryId,
   conflictId: MemoryConflictId,
   heads: Schema.Array(Schema.Struct({ revision: MemoryRevision, payload: MemoryPayload })),
-  modelSelection: ModelSelection,
+  modelSelection: MemoryModelSelection,
 });
 export const ResolveMemoryConflictResult = Schema.Struct({
   text: TrimmedNonEmptyString,
@@ -575,7 +759,7 @@ export const GenerateMemorySummaryInput = Schema.Struct({
   messages: Schema.Array(
     Schema.Struct({ messageId: MessageId, text: Schema.String, completed: Schema.Boolean }),
   ),
-  modelSelection: ModelSelection,
+  modelSelection: MemoryModelSelection,
 });
 export const GenerateMemorySummaryResult = Schema.Struct({
   text: TrimmedNonEmptyString,
@@ -606,7 +790,7 @@ provider provenance or operation kinds. The worker stamps those from pinned inpu
  }
 ```
 
-Optional preserves returned factory object compatibility only; it does not preserve closed enums accepting `keyof ProviderTextGeneration`. WP1 widens the OpenCode enum before declaring independent completion. Optional is deliberate during WP1: required additions would break today's `fromRunner` return
+Optional preserves returned factory object compatibility only; it does not preserve closed enums accepting `keyof ProviderTextGeneration`. WP1 widens the OpenCode enum in the same commit as the interface before declaring independent completion. Optional is deliberate during WP1: required additions would break today's `fromRunner` return
 (`textGenerationOperations.ts:224–231`), server TextGeneration factory
 (`apps/server/src/textGeneration/TextGeneration.ts:63–95`) and Muse's independently assembled
 provider implementation (`packages/provider-muse/src/server/textGeneration.ts:299–354`).
@@ -707,7 +891,8 @@ Delivered requires thread+sequence; pending/failed have no pointer; failed requi
 History reports are resolver-local metadata, bounded with other history records (<=100/64 KiB).
 Foreign history returns an empty report list and resolution.resolvingEnvironmentId for explicit
 routing. No transcript/body/judgment enters bot metadata or report rows. IDs are stable per
-resolver + resolution/attempt/revert operation + outcome; the report recordKey uses reportId.
+resolver + resolution/attempt/revert operation + outcome; accepted resolve/revert uses the
+MemoryCheckpointReportGuard SHA256 formula so checkpoint repair yields the identical reportId; the report recordKey uses reportId.
 On accepted revert, only the original resolver records a stable body-free report repair marker
 with canonical receive, using revertsResolutionId and retained resolution metadata, also in catch-up.
 Delivery/report quota is deferred and cannot roll back receive or cursor. WP2 pendingReports/
@@ -794,7 +979,7 @@ No field is presumed active merely because it typechecks.
 | settings mode/endpoint/secretName/space                                                                                                                    | Future settings command/service; ServerSettings and dedicated RPC codecs                                                                                          | memoryHub in ServerSettings only, dedicated admin input; future WP3 startup/secret store/join/bootstrap, WP6 settings. Secret bytes N/A: handled only by ServerSecretStore/transport.                                        |
 | permissions memory:read/write/sync                                                                                                                         | New standard pairing arrays generate read/write; `authScopeResponse` → permissions; stored SessionStore scopes (`SessionStore.ts:446,715`)                        | AuthEnvironmentScope/forward-compatible permissions; sessionGrantsScope, future RPC_REQUIRED_SCOPES, client guards, MCP authenticated context/service checks, server-principal hub checks. Legacy scope output stays frozen. |
 | invocation grantedScopes/reauthorize; capability memory                                                                                                    | WP1 optional type/reauthorize port only; future registry (`McpSessionRegistry.ts:131–146`) and OAuth auth context issuer                                          | In-process McpInvocationScope, requireMcpCapability and future explicit/revocation-aware grant checks. No serialization of ReadonlySet; token/claims encoding is owned by issuers. Absence denies.                           |
-| environment memory.protocolVersion; provider snapshot/mcp/generation flags                                                                                 | WP1 schemas only; future descriptor/capability producer                                                                                                           | environment descriptor (`environment.ts:259–272`) and provider event (`orchestrationV2.ts:880`); future client runtime gating and adapter/worker eligibility. Missing/unsupported => disabled, external OpenCode mcp false.  |
+| environment memory.protocolVersion; provider snapshot/mcp/generation flags                                                                                 | WP1 schemas only; future descriptor/capability producer                                                                                                           | environment descriptor (`environment.ts:259–272`) and provider event (`orchestrationV2.ts:894`); future client runtime gating and adapter/worker eligibility. Missing/unsupported => disabled, external OpenCode mcp false.  |
 | RPC/MCP names; cursor/limits/pages/receipts and all result fields                                                                                          | WP1 Rpc.make declarations/fixtures; future service results, explicit schema JSON                                                                                  | WsMemoryRpcGroup and tool input/output schemas; future WP4 handlers/shared commands/queries and WP6 surfaces. Cursor validates scope/space/watermark at service.                                                             |
 | hub sequences/highWatermark/throughSequence/hasMore/bootstrapComplete/lease clock and attempt fields                                                       | Future hub atomic receipt/lease/join code; HTTP shape encoders                                                                                                    | hub schemas; future MemorySyncService bootstrap/paging/outbox, holder renew/apply/release and receiver transactions. No UI/MCP lease authority.                                                                              |
 | generation messages/completed/heads/modelSelection/results                                                                                                 | Future owner worker/resolution holder; shared prompt encoder then structured model JSON                                                                           | input/result schema plus validateMemoryGenerationResult; future six runners, worker scanner/commit, provenance stamping. No tools or silent fallback.                                                                        |
@@ -862,23 +1047,28 @@ vp exec tsc --noEmit -p packages/contracts/tsconfig.json
 vp exec tsc --noEmit -p packages/provider-core/tsconfig.json
 vp exec tsc --noEmit -p packages/provider-opencode/tsconfig.json
 vp exec tsc --noEmit -p packages/provider-muse/tsconfig.json
+vp exec tsc --noEmit -p packages/provider-cursor/tsconfig.json
+vp exec tsc --noEmit -p packages/provider-grok/tsconfig.json
+vp exec tsc --noEmit -p packages/provider-pi/tsconfig.json
+vp exec tsc --noEmit -p packages/provider-acp-registry/tsconfig.json
 vp exec tsc --noEmit -p apps/server/tsconfig.json
 vp lint packages/contracts/src/channelCommon.ts packages/contracts/src/channelCommon.test.ts packages/contracts/src/memory.ts packages/contracts/src/memory.test.ts packages/contracts/src/index.ts packages/contracts/src/auth.ts packages/contracts/src/auth.test.ts packages/contracts/src/environment.ts packages/contracts/src/environment.test.ts packages/contracts/src/orchestrationV2.ts packages/contracts/src/orchestrationV2.test.ts packages/contracts/src/settings.ts packages/contracts/src/settings.test.ts packages/contracts/src/rpc.ts packages/contracts/src/rpc.test.ts packages/contracts/src/clientRpcPermissions.ts packages/contracts/src/clientRpcPermissions.test.ts packages/provider-core/src/server/ProviderAdapter.ts packages/provider-core/src/server/textGeneration.ts packages/provider-core/src/server/textGenerationContracts.test.ts apps/server/src/mcp/McpInvocationContext.ts apps/server/src/mcp/McpInvocationContext.test.ts packages/provider-opencode/src/server/textGeneration.ts packages/provider-opencode/src/server/textGeneration.test.ts
 ```
 
-| Command           | Why it reads the actual change                                                                                                                                                                                                      |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| contracts tsc     | `-p packages/contracts/tsconfig.json`; include `src` at `tsconfig.json:4`, including new memory and focused test files. It checks code/types, not this Markdown.                                                                    |
-| provider-core tsc | explicit config; include `src` at `packages/provider-core/tsconfig.json:6`; reaches turn input, generation interface and test imports.                                                                                              |
-| server tsc        | explicit config; include `src` at `apps/server/tsconfig.json:7`; reaches invocation context and its tests, plus dependent compile seams. Package-wide server typecheck is the targeted package, not recursive repository typecheck. |
-| targeted lint     | every changed TS path is a positional argument; root lint config `vite.config.ts:109–125` excludes vendored/generated/native files, not these paths. No unscoped lint invocation.                                                   |
+| Command               | Why it reads the actual change                                                                                                                                                                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| contracts tsc         | `-p packages/contracts/tsconfig.json`; include `src` at `tsconfig.json:4`, including new memory and focused test files. It checks code/types, not this Markdown.                                                                                                                                                          |
+| provider-core tsc     | explicit config; include `src` at `packages/provider-core/tsconfig.json:6`; reaches turn input, generation interface and test imports.                                                                                                                                                                                    |
+| provider consumer tsc | Explicit `-p packages/provider-{opencode,muse,cursor,grok,pi,acp-registry}/tsconfig.json` (run individually as above); each config includes `src`. OpenCode v1/v2 share one package. Server's `src` includes Codex/Claude/Antigravity runners. These are read-only compile consumers except the OpenCode enum/test delta. |
+| server tsc            | explicit config; include `src` at `apps/server/tsconfig.json:7`; reaches invocation context and its tests, plus dependent compile seams. Package-wide server typecheck is the targeted package, not recursive repository typecheck.                                                                                       |
+| targeted lint         | every changed TS path is a positional argument; root lint config `vite.config.ts:109–125` excludes vendored/generated/native files, not these paths. No unscoped lint invocation.                                                                                                                                         |
 
 The package scripts use `tsc-rs --noEmit` (`packages/contracts/package.json:32`,
 `packages/provider-core/package.json:188`, `apps/server/package.json:23`); explicit tsc `-p`
 is permitted by WP0 and avoids root `typecheck`, which is recursive. YAML/Markdown are not
 covered by these TypeScript commands; inspect their diff and use goat-ci to validate the
 workflow. This docs-only authoring run needs no package typecheck or lint: those would inspect
-unchanged source and give no evidence about this plan.
+unchanged source and give no evidence about this plan. The commands above are future implementation verifiers, NOT RUN in rev 11; the target implementation must first be based on the recorded dev SHA and have its actual diff/config collection checked.
 
 Tests run in PR CI (goat-ci), not this Mac. Existing coverage: contracts step
 `.github/workflows/goat-ci.yml:108–110`, server shards `:130–132`; package scripts select
@@ -915,6 +1105,33 @@ goat-ci contract/provider-core/server results; end with `Model: gpt-6.1-sol. Har
 No UI files change, so screenshots are N/A for WP1. This document author does not create a PR,
 commit or push; the title/body are the requested future implementation specification.
 
+## WP1 commit plan
+
+One implementation PR on the recorded latest-dev source, consuming WP0's decisions; these are
+small dependency-ordered commits inside that PR, not separate PRs. Each commit includes its
+focused schema tests. No commits are made by this documentation lane.
+
+| Order / proposed title                                               | Exact change slice                                                                                                                                                                                                                                                                                                                                                     | Reviewable completion and later verifier                                                                                                                                                                                                                |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — `feat(contracts): define memory identities and canonical codecs` | NEW `packages/contracts/src/memory.ts` / `memory.test.ts`; root export in `index.ts`. Define ids, constants (including rev 10 sweep limits), payload/metadata, DAG, suppression, strict MemoryModelSelection and its rejection/preservation fixtures, bounded operation/event encoders and pure relational checks. Define every helper referenced here in this commit. | Root-import fixtures, strict decode/encode/make and UTF-8 equality/+1; metadata never carries bodies. Contracts tsc + scoped lint; tests in CI.                                                                                                         |
+| 2 — `feat(contracts): define memory sync and local status views`     | Extend only `memory.ts` / `memory.test.ts`: hub/lease/checkpoint/source-relay, exact permanent ledger schemas and validateMemoryCheckpointRecords with multi-page/purge/limit fixtures, availability/deferred/coverage, storage/growth/capacity, revert, binding, import/admin/report and snapshot/generation schemas; derived candidate types.                        | M19/M20 codec fixtures preserve original receipts and distinguish accepted from locally visible. No SQL, compactor, quota admission or local runtime closure. Contracts static checks + CI.                                                             |
+| 3 — `feat(contracts): add memory scopes and settings compatibility`  | `auth.ts` / `auth.test.ts`, `settings.ts` / `settings.test.ts`, `environment.ts` / `environment.test.ts`, `orchestrationV2.ts` / `orchestrationV2.test.ts`, `channelCommon.ts` / `channelCommon.test.ts`.                                                                                                                                                              | Old decisions/settings/events decode; absent consent denies; no legacy parent or sync default; both generic reserved keys fail before stripping. No capability producer enabled. Contracts/server static checks + CI.                                   |
+| 4 — `feat(contracts): declare staged memory RPC and client guards`   | `rpc.ts` / `rpc.test.ts`, `clientRpcPermissions.ts` / NEW `clientRpcPermissions.test.ts`. Declare 14 core + 1 import, middleware, guard map, both compound-scope branches.                                                                                                                                                                                             | Live WsRpcGroup unchanged; exact tags/results/error arms, stream flag and guard membership checked. No server handler/scope-map activation. Contracts/server static checks + CI.                                                                        |
+| 5 — `feat(provider-core): add compatible memory generation seams`    | `ProviderAdapter.ts`, core `textGeneration.ts` / NEW `textGenerationContracts.test.ts`; OpenCode `textGeneration.ts` / `textGeneration.test.ts`; server `McpInvocationContext.ts` / its test.                                                                                                                                                                          | Core optional keys and OpenCode enum land together. All old factories compile, model output cannot forge execution metadata, absent capability/grants remain disabled. All nine targeted package configs in the verification section; scoped lint + CI. |
+| 6 — `test(ci): run memory provider contract compatibility`           | `.github/workflows/goat-ci.yml` adds the existing-test-task provider-core and focused OpenCode commands in the verification section.                                                                                                                                                                                                                                   | Exact final-head contracts, provider-core, OpenCode and applicable server CI cases execute. YAML review + hosted result, not a local test run.                                                                                                          |
+
+Commits 1–2 may grow the same new module in two coherent pieces; do not import a helper from
+commit 2 in commit 1. Specifically, commit 1 defines MemoryModelSelection, MemoryLocalAvailability
+(and its deferred helpers used by MemoryItem), MemoryImportSourceMetadata/MemoryImportFormat,
+MemorySourceKey/MemoryContentSuppression/MemorySourceExclusion and every safe failure literal used
+by its operations. Split their definitions out of commit 2 views; operation validators in commit 1
+do not call checkpoint/generation/view validators introduced in commit 2. Commit 2 adds hub receipt,
+lease, ledger/page and cross-page helpers together, consuming only commit 1 definitions.
+Commits 3–5 consume the complete wire definitions. An implementation
+finding that requires a live tool/route, required runner method or a source edit outside this map
+returns to P; do not conceal it with a dummy success implementation. Before final A/C, repeat
+consumer searches on the actual head and verify every mapped TS path is collected by its config.
+
 ## Boundaries and assigned phase handoffs
 
 - [WP2 store/service](020_wp2_store_service.md): consume metadata-only event encoding and
@@ -931,7 +1148,10 @@ commit or push; the title/body are the requested future implementation specifica
   thin handlers and exhaustive RPC_REQUIRED_SCOPES; WP5 installs the import group. Add import's extra filesystem
   read check and source-owner grants. Carry authenticated permissions into registry/OAuth
   contexts, recheck revoked grants at commit, use writesWithCapability plus explicit scope
-  checks. Produce and advertise separate snapshot/MCP/generation capabilities only with runtime
+  checks. Build declarations through `McpToolAccess.toLayer` and register through
+  `McpHttpServer.toolkitRegistration`; do not call raw Effect toolkit registration or borrow
+  `removesCheckouts` for memory operations. Read declarations still require explicit memory
+  authorization in the handler/service. Produce and advertise separate snapshot/MCP/generation capabilities only with runtime
   evidence; implement all six deliveries and bounded snapshot consistency/compaction purge.
 - [WP5 imports](050_wp5_provider_import.md): accept format+scope, never arbitrary paths; receipts
   use stable sourceId/sourceItemKey independent of changing fingerprint, so deletion suppression
@@ -980,7 +1200,7 @@ wire owner. The definitions below extend the inventory, RPC table, guards and li
 
 | Action              | Exact path                                            | Diff to implement                                                                                                                                        |
 | ------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MODIFY              | `packages/contracts/src/memory.ts`                    | Add binding, change stream and transient source relay schemas/constants below; extend MEMORY_HUB_PATHS to eleven paths.                                  |
+| MODIFY (NEW in WP1) | `packages/contracts/src/memory.ts`                    | Add binding, change stream and transient source relay schemas/constants below; extend MEMORY_HUB_PATHS to eleven paths.                                  |
 | MODIFY              | `packages/contracts/src/auth.ts`                      | Add AuthMcpMemoryScope; extend both approving decision arms and approval details, preserving absent-field decoding.                                      |
 | MODIFY              | `packages/contracts/src/rpc.ts`                       | Add memoryProjectBindingGet/Update and memoryChanges keys; declare fourteen core RPCs, with stream:true only on memory.changes.                          |
 | MODIFY              | `packages/contracts/src/clientRpcPermissions.ts`      | Guard binding get/update with memory:write; readSource requires memory:read AND orchestration:read at requester; changes requires memory:read on server. |
@@ -1098,9 +1318,9 @@ summary still readable. WP2–WP6 own stateful tests; these schemas alone prove 
 
 Read-only source search `rg -n 'keyof ProviderTextGeneration' packages apps` finds exactly
 `packages/provider-core/src/server/textGenerationOperations.ts:32` and
-`packages/provider-muse/src/server/textGeneration.ts:73` on baseline 1e2418faf. Follow the exported
-Operation/Request/Runner consumers: Codex, Claude, Antigravity, Cursor, Grok, OpenCode v1/v2 and
-Muse. OpenCode v1's error schemas alone constrain this operation to six literals; Muse's
+`packages/provider-muse/src/server/textGeneration.ts:73` on citation baseline b5f9d53cb. Follow the exported
+Operation/Request/Runner consumers: Codex, Claude, Antigravity, Cursor, Grok, OpenCode v1/v2,
+Pi and Muse (complete source inventory in the rev 11 stale check). OpenCode v1's error schemas alone constrain this operation to six literals; Muse's
 operation parameter flows to TextGenerationError's string field, with no exhaustive switch or
 closed operation schema. No Muse source change is needed; its package typecheck is a WP1 gate.
 Core Runner/fromRunner retain their old behavior until WP2. Search again at each phase P.
@@ -1116,18 +1336,18 @@ Core Runner/fromRunner retain their old behavior until WP2. Search again at each
 
 WP1 CI adds `OpenCode error contexts round-trip both memory operation names` to the existing
 textGeneration.test.ts; decode/encode each exported error class's operation field, retain all
-old literals and reject unknown names. WP1 typechecks contracts/core/server/OpenCode/Muse;
+old literals and reject unknown names. WP1 typechecks contracts/core/server/OpenCode/Muse/Cursor/Grok/Pi/ACP Registry;
 optional object compatibility alone is not an independent completion criterion.
 
 ### B5/B6 — owning contracts
 
 ServerSettings retains memoryHub and memoryHubVersion; ServerSettingsPatch never accepts
-memoryHub. Add an explicit reserved-key filter on raw generic patches so unknown-key stripping
+memoryHub or memoryHubVersion. Add an explicit reserved-key check on raw generic patches before Struct decoding so unknown-key stripping
 cannot turn a forbidden patch into success. `server.updateSettings` rejects raw input during schema decode before mutation;
 typed runtime rejection uses its existing ServerSettingsError with operation="normalize". Dedicated memory.hubSettings.update retains
 requestId/expectedVersion and MemoryHubSettingsUpdateResult; this contract is never reconstructed
-from a generic patch. settings.test.ts covers raw JSON containing memoryHub alone and alongside
-another valid setting (both fail atomically).
+from a generic patch. settings.test.ts covers raw JSON containing either reserved key alone and alongside
+another valid setting (all fail atomically); do not place this check only on an already-stripped Struct.
 
 MemoryGenerationExecution adds required providerInstanceId and environmentId as specified in
 the field table. Both execution result codecs serialize result and execution separately;
@@ -1144,7 +1364,7 @@ Final NEW/MODIFY map (including rev 2/3/4 additions): **24 TS/TSX paths**.
 Compared path equality/explicit-directory ancestry against every `vp lint` argument and
 package ownership against explicit `-p` / exact package-filter typecheck commands: **0 uncovered
 lint targets, 0 uncovered typecheck targets** after declared generated-file exclusions.
-Typecheck owners: `apps/server/tsconfig.json`, `packages/contracts/tsconfig.json`, `packages/provider-core/tsconfig.json`, `packages/provider-muse/tsconfig.json`, `packages/provider-opencode/tsconfig.json`.
+Typecheck owners: `apps/server/tsconfig.json`, `packages/contracts/tsconfig.json`, `packages/provider-core/tsconfig.json`, `packages/provider-muse/tsconfig.json`, `packages/provider-opencode/tsconfig.json`; rev 11 also checks read-only Cursor/Grok/Pi/ACP Registry consumers with their explicit package configs.
 This is path/config reconciliation, not successful compiler/linter execution. Workflow YAML,
 package manifests and prose are outside TS lint; review their diffs and validate in CI. At phase P
 repeat with the actual diff, compiler file collection and lint ignores; an exit 0 without target
@@ -1340,8 +1560,9 @@ but compact per-item outcomes plus batch guard reconstruct the original receipt 
 checkpoint identifier bounded by MEMORY_CAUSAL_BOUNDARY_ID_MAX_UTF8_BYTES, not an unbounded revision-id list. Join/checkpoint result
 includes `causalBoundary` and `retentionFloor`; checkpoint pages include compact receipts,
 identity/tombstone/suppression/fence records and only the ancestry needed for current heads,
-unresolved conflicts and still-valid revert inputs. WP2/WP3 supply bounded codecs for these
-records; permanent unions stream as pages. Completion installs canonical state, boundary, original
+unresolved conflicts and still-valid revert inputs. WP1 defines the exact wire schemas and
+combined page limits in Permanent checkpoint wire records above; WP2 maps SQL rows and WP3
+produces/installs those schemas without defining another wire codec. Permanent unions stream as pages. Completion installs canonical state, boundary, original
 receipts, deferred flags and cursor atomically; derived projections/FTS/export drain separately.
 Pending edit/MemoryUpsertInput carries observed baseBoundary (nullable before first checkpoint).
 Only unapproved local intent with known compacted parent requires base_compacted review. Approved
@@ -1390,3 +1611,137 @@ completion is claimed.
 
 - R6: new constants MEMORY_DEFERRED_SWEEP_MAX_ITEMS = 256 and MEMORY_DEFERRED_SWEEP_MAX_BYTES = 8 MiB (defined here once; consumed by WP2 deferred drain and WP3 fairness CI). Backoff min(2^attempt * 5 s, 1 h) is a WP2 algorithm detail, not a wire contract.
 - R7: no explicit rescan RPC/MCP method is added. secret_detected holds are released only by a policy-version rescan scheduled by MemoryWorker; the Shared names list gains no new method.
+
+## WP1 P stale check (rev 11)
+
+### Baseline and citation receipt
+
+2026-10-14, juns-macbook-pro. `git fetch origin dev` exited 0; `git rev-parse origin/dev`
+and `git ls-remote origin refs/heads/dev` both returned
+`b5f9d53cbc29eddf7bad5518bb7d46c4f97173f5`. Authoring HEAD is
+`fea6178b36d11e0a446323344a2db67fb76c5d03`, branch `goat/memory-wp1-contracts`.
+WP0 D direction, Shared names and Enforcement inventory remain authoritative; 000 is unchanged.
+This lane refreshes the existing audited design, not a new architect proposal or independent A.
+Rev 11 still needs the owning cycle's reflection/A against these deltas before B.
+
+Checked all **60 explicit source path:line occurrences** in rev 10 against old and new git
+blobs, plus context-inherited goat-ci line fragments. Basename references resolve to the exact
+file in the surrounding change map (textGeneration.ts means provider-core unless qualified;
+package.json/tsconfig.json mean contracts unless qualified). Compared cited content and named
+symbols, not merely whether a line exists. **One existing citation changes; 59 retain their
+line anchors. No cited path or symbol was renamed, moved to another file, or deleted.**
+
+| Cited owner / reason                                                         | rev 10 anchor at 1e2418faf | rev 11 anchor at b5f9d53cb | Disposition                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------- | -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider capability event field, `packages/contracts/src/orchestrationV2.ts` | `880` (`capabilities`)     | `894` (`capabilities`)     | `/side` adds SideChatOf and sideChatOf earlier in the file. The capability schema itself remains at 366–383; keep its additive optional memory field and replay defaults. Field-chain citation updated. |
+
+Stable citation families checked: overview/effect-services; contracts index/package/baseSchemas;
+strict orchestratorMcp test decoder; git error; RPC groups/middleware and RpcAuthorization;
+auth scopes/defaults/legacy/consent; environment advertisements/descriptors/grouping;
+settings/defaults/patch/scope; client guards; model selection; provider-core turn/generation/
+operations/factory; server TextGeneration; Muse alias/factory; SessionStore/McpSessionRegistry;
+orchestration schema/test; all cited tsconfigs, manifests, vite lint/test config and goat-ci.
+No old line number is asserted as a new insertion site merely because the file is unchanged.
+
+### Structural deltas and independent-PR decision
+
+**WP1 remains a self-contained additive contracts PR, conditional on the static and hosted
+verification below.** No runtime feature readiness or compiler success is claimed here.
+
+| Area / latest source evidence                                                                                                                                             | Before → after / ownership decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public contracts export: `packages/contracts/src/index.ts:1–9,34–35`; `packages/contracts/package.json:9–29`                                                              | Existing root + settings/relay/legacyT3Names/adoptLegacyEnv subpaths → add root memory export only. No memory subpath exists; use root imports. Keep memory → environment scope imports one-way; environment memory advertisement stays inline, auth memory grants use literals, and memory does not import orchestration/settings back.                                                                                                                                                                                                                                                                                    |
+| MCP composition: `apps/server/src/mcp/McpHttpServer.ts:867–880,921–936,1019–1045`                                                                                         | Nominal toolkit registration plus newly composed thread-search/worktree-inventory services → WP1 adds no toolkit/service registration. WP4 registers a memory toolkit through the existing application composition, without dropping those services or creating a feature runtime.                                                                                                                                                                                                                                                                                                                                          |
+| Tool access: `apps/server/src/mcp/McpToolAccess.ts:136–137,181–182,297–317,341–375`                                                                                       | reads/writesWithCapability/toLayer and new removesCheckouts → memory read/write declarations stay on their corresponding paths with live explicit scopes. removesCheckouts is checkout deletion policy, not memory-forget authorization. reads alone does not grant memory access. All registration remains WP4.                                                                                                                                                                                                                                                                                                            |
+| Claude runner: `apps/server/src/textGeneration/ClaudeTextGeneration.ts:43–59,207–225`; core `textGenerationOperations.ts:35–49,68–76`                                     | Investigation uses tools/allowlist/denylist; absent investigate uses empty tools + strict MCP → WP1 introduces only optional signatures. WP2 memory requests omit investigate and separately prove isolation/no-tool behavior; never copy investigation allowlists into memory generation. These existing policies are present at the new SHA; not all were introduced after the old citation baseline.                                                                                                                                                                                                                     |
+| Orchestration: `packages/contracts/src/orchestrationV2.ts:366–383,894`                                                                                                    | New side-chat contracts shift event field by 14 lines → memory capabilities remain optional, no orchestration protocol bump or turn/event memoryContext persistence. Preserve side-chat fields, runtimePolicy decoding default and all live thread contracts.                                                                                                                                                                                                                                                                                                                                                               |
+| Client permissions: `packages/contracts/src/clientRpcPermissions.ts:15–79`                                                                                                | Existing map plus ssh/worktree compound branch → append the 9 guarded memory entries (upsert/forget/revert/import/settings get+update/binding get+update/readSource); import requires write+filesystem read, readSource requires memory read+orchestration read before generic return. Include readSource in guarded membership so typed raw-request exclusion tracks this protected method (`packages/client-runtime/src/rpc/client.ts:445–454`); runtime authorization resolves compound scopes at `client.ts:169,186–189`. Read queries/change stream remain server-authorized; no early RPC_REQUIRED_SCOPES activation. |
+| Auth vocabulary: `packages/contracts/src/auth.ts:109–236,575–615`; `apps/server/src/cli/authScopes.ts:4–5`                                                                | Granular enum and derived AuthGrantScope → add read/write/sync, standard adds read/write, administrative inherits read/write but never sync. Legacy sets/parents stay frozen. CLI derives literals, so sync is explicitly requestable but never proves a server principal; WP3 hub verifies principal independently. MCP consent accepts only optional explicit read/write on both approve arms. Old issued grants are not upgraded.                                                                                                                                                                                        |
+| Scope consumers: `apps/server/src/auth/SessionStore.ts:446,715`; `apps/server/src/auth/EnvironmentAuth.ts:1078,1184`; `apps/server/src/auth/PairingGrantStore.ts:441,476` | Stored schema + default arrays and issuance → future new default grants gain read/write by shared arrays; existing rows retain grants. No exhaustive scope switch or separate default list needs WP1 widening. OAuth grant propagation/reauthorize remains WP4; do not infer grants from client access or capability.                                                                                                                                                                                                                                                                                                       |
+| Settings: `packages/contracts/src/settings.ts:323,1057–1087,1176,1571,1757–1773`; settings public subpath `package.json:14–17`                                            | Server-only default-disabled memoryHub + version; project/client settings unchanged. Reject both reserved keys before generic Struct stripping, including alongside valid settings. Dedicated administration owns whole replacement/version/credential transition in WP3; no generic persistence or live settings writes in WP1.                                                                                                                                                                                                                                                                                            |
+
+The definitive NEW/MODIFY source map remains **24 TS paths plus one workflow**; the rev 3
+memory.ts row is clarified as NEW within WP1. Added compile commands inspect existing consumers,
+not extra source modifications. The before/after recipes, lifecycle event anchor, RPC guards,
+settings rejection recipe and verification section above incorporate these dispositions.
+
+### Complete keyof / operation consumer inventory
+
+`git grep -n 'keyof ProviderTextGeneration' origin/dev -- packages apps` returns exactly core
+operations and Muse. Following Operation/Request/Runner imports and all six existing operation
+literals finds the following complete generation paths; Pi was omitted in the earlier narrative.
+The broader interface-name search also covers driver factories/selectors and the unrelated legacy
+text-generation capability predicate below. No new required provider implementation is added in WP1 and no six-provider release exemption
+is inferred for WP2/WP4. Pi/Muse are additional compile consumers, not new WP1 delivery promises.
+
+| Consumer / current anchor                                                                                                                                                    | Operation chain and WP1 disposition                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/provider-core/src/server/textGenerationOperations.ts:32–49,61–95,224–231`                                                                                          | Optional interface key → Operation alias → Request.operation → Runner/error/string decoder. Return object still has old methods; no exhaustive operation dispatch. Read-only in WP1.                                                                                                                                         |
+| `apps/server/src/textGeneration/CodexTextGeneration.ts:171,222,402`                                                                                                          | Operation argument/Request → CLI runner → shared factory; string error field. No enum edit.                                                                                                                                                                                                                                  |
+| `apps/server/src/textGeneration/ClaudeTextGeneration.ts:106,132,320`                                                                                                         | Operation/Request → CLI runner and existing title/channel conditionals → factory. No exhaustive closed enum; memory methods not invoked in WP1.                                                                                                                                                                              |
+| `apps/server/src/textGeneration/AntigravityTextGeneration.ts:107,309–311`                                                                                                    | Request → ACP runner → withoutInvestigation/fromRunner. No enum edit.                                                                                                                                                                                                                                                        |
+| `packages/provider-cursor/src/server/textGeneration.ts:64,87,201–203`                                                                                                        | Operation/Runner → SDK/error → factory. No enum edit; explicit package compile added.                                                                                                                                                                                                                                        |
+| `packages/provider-grok/src/server/textGeneration.ts:33,132–134`                                                                                                             | Runner → ACP/error → factory. No enum edit; explicit package compile added.                                                                                                                                                                                                                                                  |
+| `packages/provider-opencode/src/server/textGeneration.ts:13–24,162,325–327`                                                                                                  | Request.operation → shared context for all exported OpenCode errors uses a closed six-literal schema. Add both memory names atomically with core interface; each exported error's encode/decode keeps old names and rejects unknown names. This is the only closed operation enum.                                           |
+| `packages/provider-opencode/src/server/v2/textGeneration.ts:42,188,204–206`                                                                                                  | Request/Runner → v2 request/error mapping → shared factory; no second operation enum. Same OpenCode package compile reaches v1/v2.                                                                                                                                                                                           |
+| `packages/provider-pi/src/server/textGeneration.ts:30,122–124`                                                                                                               | Runner → Pi/error → shared factory. No enum edit; explicit package compile added.                                                                                                                                                                                                                                            |
+| `packages/provider-muse/src/server/textGeneration.ts:73,299–354`                                                                                                             | Independent keyof alias → runMuseJson operation → TextGenerationError.operation (Schema.String); independent old-method factory remains valid with optional additions. No Muse enum exists to widen; read-only compile gate retained.                                                                                        |
+| `packages/provider-core/src/server/driver.ts:44,106`; `packages/provider-opencode/src/server/driver.ts:147–180`; `packages/provider-acp-registry/src/server/driver.ts:73–88` | Other interface consumers: driver property, OpenCode runtime selector's old-method object, ACP unsupported factory. Optional methods preserve compilation. WP2 must explicitly wire the OpenCode selector as well as v1/v2 runners; ACP Registry gets no new runtime support promise. Its explicit package compile is added. |
+| `packages/contracts/src/server.ts:343–344`; `packages/shared/src/serverSettings.ts:159,183`; `packages/provider-core/package.json:158–160`                                   | Capability predicate/default model selection and public operations subpath export, not keyof operation dispatch. Keep unchanged; memory eligibility must use independent memory flags/method availability in later phases, not supportsTextGeneration alone.                                                                 |
+| `apps/server/src/textGeneration/TextGeneration.ts:29,63–95`; `packages/contracts/src/git.ts:402–412`                                                                         | ProviderTextGeneration service/factory and shared string error. No live dispatch/body addition or git contract change. Server compile checks its callers.                                                                                                                                                                    |
+
+For both memory names: creation in WP1 is schema/test fixtures and optional method type only;
+Operation/Request are in-process (serialization N/A in WP1), model input/result JSON uses the
+strict memory codecs, and WP2 alone adds prompt construction/runner calls/execution stamping.
+Closed OpenCode error serialization/deserialization must accept the two names now even though
+no runtime call exists yet. MCP scope carrier is in-process too: WP1 optional fields → test
+fixture/requireMcpCapability; WP4 registry/OAuth issuer → stored scopes decoder → live reauthorize
+and memory service. Missing fields never create a grant. Snapshot turn input remains in-process,
+not an orchestration event or appContext overload.
+
+### Verification receipt and remaining obligations
+
+Executed only git reads/fetch and Python text/blob comparisons (exit 0), including source-path
+existence, citation mapping and file-map/lint/config consistency. All 24 mapped TS paths occur
+in the scoped lint command; 4 NEW TS paths are intentionally absent on dev and 20 MODIFY TS
+paths exist. All nine explicit package tsconfigs exist and include src. Latest dev and remote
+SHA matched at receipt time. `git diff --check` is the final document whitespace check.
+
+No installation, source edits, tests, full builds, typecheck, lint, server, user-data writes,
+commit or push. CI-only test commands remain text for the implementation PR. The added
+Cursor/Grok/Pi/ACP Registry targeted typechecks are NOT RUN, like the five existing package checks; no
+successful compiler/linter collection or exact-head hosted CI result is inferred.
+
+Remaining: owning-cycle reflection/A of rev 11; implement against the recorded latest dev
+(not the WP0 branch's older source); repeat stale check if dev moves; run the nine targeted
+package checks and actual-diff lint after implementation; execute the declared contract/core/
+OpenCode/server CI cases on the final implementation SHA. Runner capacity or CI failures from
+WP0 are historical, not refreshed infrastructure evidence. There is no identified structural
+blocker to an independent WP1 PR; runtime enforcement/activation and M19/M20 guarantees remain
+WP2–WP6 obligations.
+
+## WP1 audit r1 fixes (rev 12)
+
+All three accepted findings and architect G1 are folded into the owning sections:
+
+1. Strict `MemoryModelSelection` replaces every memory model selection use; raw-settings server
+   conversion fails typed before dispatch rather than losing requested options. Existing legacy
+   storage codecs remain compatible. Schema/rejection/preservation fixtures belong to commit 1;
+   nested lease/generation/checkpoint fixtures to commit 2; runtime conversion to WP2.
+2. WP1 now owns exact `MemoryCompactReceipt`, `MemoryIdentityRecord`, `MemoryFenceRecord`,
+   `MemorySuppressionRecord`, `MemoryCheckpointReportGuard` and `MemoryHubCheckpointPage`, with complete-snapshot identity,
+   original receipt, suppression and fence checks and combined page count/byte limits. Commit 2
+   owns these codecs/helpers/fixtures; WP2 owns SQL mapping and WP3 production/staged installation.
+   The commit 1→2 split above moves shared dependencies before their first reference.
+3. Corrected `McpToolAccess.ts:341–375`. WP2/WP3 handoffs reference WP1's wire definitions.
+
+This is a document-only disposition, not an implementation or runtime pass. Audit r1's nine
+existing-source typechecks and lint were reported green by that audit; they do not prove the
+six future commits or new schemas. This lane runs text consistency and `git diff --check` only;
+no source edit, installation, test, build, commit or push. Remaining: independent rev 12 review
+and future implementation/fixture execution, especially lossless raw-settings conversion and
+atomic checkpoint restore. No accepted finding is intentionally deferred as an undefined wire shape.
+
+## WP1 audit r2 fix (rev 12a)
+
+- The strict selection example no longer reuses trimming schemas. `MemoryCanonicalString` rejects leading/trailing whitespace instead of rewriting it, and instanceId, model, option id and string option value all use it; the ProviderInstanceId brand is applied on top so server code can pass the value to existing provider APIs after validation. The fixture names the padded-option and padded-id cases for decode, encode and `.make`. The exact Effect filter API is confirmed against the vendored Effect version during commit 1; the requirement is "reject, never trim".
