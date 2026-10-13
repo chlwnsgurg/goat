@@ -58,6 +58,7 @@ const makeOwner = Effect.gen(function* () {
     updatedAt: now,
     cloudTask: {
       taskId: "task-1",
+      acceptedAppRunId: RunId.make("run:cloud-metadata"),
       status: "succeeded",
       tracking: "live",
       source: { repository: "https://github.com/acme/repo", branch: "dev" },
@@ -168,6 +169,7 @@ it.effect.each(["completed", "failed", "interrupted", "cancelled"] as const)(
         ...owner.input.metadata,
         status: "running",
         taskId: "foreign",
+        acceptedAppRunId: RunId.make("run:foreign"),
         summary: "stale",
         source: { branch: "stale" },
         prUrl: "stale",

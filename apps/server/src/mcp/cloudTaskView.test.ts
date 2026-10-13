@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
-import { OrchestratorMcpCloudTask, type OrchestrationV2CloudTask } from "@goat/contracts";
+import { OrchestratorMcpCloudTask, RunId, type OrchestrationV2CloudTask } from "@goat/contracts";
 import { cloudTaskView } from "./cloudTaskView.ts";
 
 const decodeTask = Schema.decodeUnknownSync(OrchestratorMcpCloudTask);
@@ -8,6 +8,7 @@ const encodeTask = Schema.encodeSync(OrchestratorMcpCloudTask);
 
 const task: OrchestrationV2CloudTask = {
   taskId: "accepted-task",
+  acceptedAppRunId: RunId.make("run:accepted"),
   status: "running",
   tracking: "polled",
   url: "https://example.com/session/1",
@@ -27,6 +28,8 @@ describe("cloud MCP task output", () => {
     expect(view.tracking).toBe("polled");
     expect(view.prUrl).toBe(task.prUrl);
     expect(view.localChangesExcluded).toBe(true);
+    expect(Object.hasOwn(view, "acceptedAppRunId")).toBe(false);
+    expect(Object.values(view)).not.toContain(undefined);
     expect(cloudTaskView(undefined)).toBeUndefined();
   });
   it("bounds output without turning an unsafe or oversized URL into a link", () => {
@@ -43,6 +46,9 @@ describe("cloud MCP task output", () => {
     expect(view.branch).toHaveLength(512);
     expect(view.url).toBeUndefined();
     expect(view.prUrl).toBeUndefined();
+    expect(Object.hasOwn(view, "url")).toBe(false);
+    expect(Object.hasOwn(view, "prUrl")).toBe(false);
+    expect(Object.values(view)).not.toContain(undefined);
     expect(cloudTaskView({ ...task, url: "javascript:alert(1)" })!.url).toBeUndefined();
     expect(() => decodeTask({ ...view, status: "working" })).toThrow();
   });

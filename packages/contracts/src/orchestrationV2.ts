@@ -1050,6 +1050,8 @@ export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Typ
 
 export const OrchestrationV2CloudTask = Schema.Struct({
   taskId: TrimmedNonEmptyString,
+  // Providers persist the app run whose vendor submission was accepted.
+  acceptedAppRunId: Schema.optional(RunId),
   url: Schema.optional(Schema.String),
   title: Schema.optional(Schema.String),
   status: Schema.Literals(["submitting", "running", "succeeded", "failed", "cancelled", "unknown"]),

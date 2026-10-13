@@ -63,6 +63,7 @@ export const makeFakeCloudAdapter = Effect.fnUntraced(function* (
     const now = yield* DateTime.now;
     const task: OrchestrationV2CloudTask = {
       taskId: "remote-task-1",
+      acceptedAppRunId: input.runId,
       url: "https://example.com/tasks/1",
       status: "running",
       tracking: "live",
@@ -193,12 +194,12 @@ export const makeFakeCloudAdapter = Effect.fnUntraced(function* (
     const now = yield* DateTime.now;
     yield* input.commitCloudTask!({
       taskId: "remote-task-1",
+      acceptedAppRunId: input.runId,
       url: "https://example.com/tasks/1",
       status: linkOnly ? "running" : status,
       tracking: linkOnly ? "link-only" : "live",
       summary: linkOnly ? "Running in the cloud" : "Completed fake task",
-      prUrl: linkOnly ? undefined : "https://github.com/acme/repo/pull/1",
-      branch: linkOnly ? undefined : "agent/fix",
+      ...(linkOnly ? {} : { prUrl: "https://github.com/acme/repo/pull/1", branch: "agent/fix" }),
       source: input.cloudSource!,
       localChangesExcluded: input.providerThread.cloudTask?.localChangesExcluded ?? false,
       updatedAt: DateTime.formatIso(now),

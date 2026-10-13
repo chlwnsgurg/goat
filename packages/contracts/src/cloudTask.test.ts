@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
+import { RunId } from "./baseSchemas.ts";
 import { OrchestrationV2CloudTask, OrchestrationV2SessionCapabilities } from "./orchestrationV2.ts";
 
 const decodeCapabilities = Schema.decodeUnknownSync(OrchestrationV2SessionCapabilities);
@@ -19,9 +20,10 @@ describe("cloud foundation schemas", () => {
     expect(decoded.sourceRestriction).toBe("published-ref");
     expect(decoded.followUp).toEqual({ supported: true });
   });
-  it("round-trips the exact task/result/source wire value", () => {
+  it.each([false, true])("round-trips task ownership evidence (accepted=%s)", (accepted) => {
     const task = {
       taskId: "remote-1",
+      ...(accepted ? { acceptedAppRunId: RunId.make("run:accepted") } : {}),
       url: "https://example.com/tasks/1",
       title: "Fix task",
       status: "succeeded" as const,
@@ -35,7 +37,9 @@ describe("cloud foundation schemas", () => {
       updatedAt: "2026-10-13T00:00:00.000Z",
     };
     const encoded = encodeTask(task);
+    expect(encoded).toEqual(task);
     expect(decodeTask(encoded)).toEqual(task);
+    expect(Object.hasOwn(encoded, "acceptedAppRunId")).toBe(accepted);
     expect(() => decodeTask({ ...task, status: "completed" })).toThrow();
     expect(() => decodeTask({ ...task, tracking: "timer" })).toThrow();
   });

@@ -919,6 +919,7 @@ export const layer: Layer.Layer<
         previousUsage,
         knownModelWindow,
       });
+      // Retain accepted ownership evidence until the provider commits its next acceptance.
       const acceptedCloudTask = providerThread.nativeThreadRef?.nativeId
         ? providerThread.cloudTask
         : undefined;

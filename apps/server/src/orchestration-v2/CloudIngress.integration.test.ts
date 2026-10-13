@@ -721,6 +721,7 @@ it.effect.each([
         yield* Fiber.join(accepted);
         const childBeforeStop = yield* orchestrator.getThreadProjection(childId);
         const childRun = childBeforeStop.runs[0]!;
+        assert.equal(childBeforeStop.providerThreads[0]?.cloudTask?.acceptedAppRunId, childRun.id);
         const finishing = resultBeforeStop
           ? yield* fake
               .finish(
@@ -832,13 +833,18 @@ it.effect.each([
           progress: "Blocked after end_turn",
         };
         // This callback must wait for real ingestion cleanup, including the final full-thread write.
-        yield* captured.commitCloudTaskMetadata!("native-session-1", metadata);
+        const untrustedMetadata = {
+          ...metadata,
+          acceptedAppRunId: RunId.make("run:foreign-metadata"),
+        };
+        yield* captured.commitCloudTaskMetadata!("native-session-1", untrustedMetadata);
         const refreshed = yield* orchestrator.getThreadProjection(childId);
         const beforeProvider = finished.providerThreads[0]!;
         const afterProvider = refreshed.providerThreads[0]!;
         const { updatedAt: _beforeAt, ...beforeTask } = beforeProvider.cloudTask!;
         const { updatedAt: _afterAt, ...afterTask } = afterProvider.cloudTask!;
         assert.deepEqual(afterTask, { ...beforeTask, ...metadata });
+        assert.equal(afterTask.acceptedAppRunId, childRun.id);
         assert.equal(afterProvider.status, beforeProvider.status);
         assert.deepEqual(refreshed.runs, finished.runs);
         assert.deepEqual(refreshed.attempts, finished.attempts);
@@ -925,6 +931,8 @@ it.effect.each([
           assert.equal(view.cloudTask?.url, metadata.url);
           assert.equal(view.cloudTask?.progress, metadata.progress);
           assert.equal(view.cloudTask?.status, outcome);
+          assert.isFalse(Object.hasOwn(view.cloudTask!, "acceptedAppRunId"));
+          assert.isFalse(Object.values(view.cloudTask!).includes(undefined));
         }
         assert.isTrue(statusView.terminal);
         assert.equal(offers.length, 1);
@@ -970,9 +978,31 @@ it.effect.each([
             );
           yield* Fiber.join(successorAccepted);
           assert.notEqual(successorInput.runId, captured.runId);
+          // startTurn sees the submitting intent before the provider commits the new acceptance.
+          assert.equal(successorInput.providerThread.cloudTask?.status, "submitting");
+          assert.equal(successorInput.providerThread.cloudTask?.acceptedAppRunId, captured.runId);
+          assert.deepEqual(
+            successorInput.providerThread.nativeThreadRef,
+            afterProvider.nativeThreadRef,
+          );
+          const {
+            status: _status,
+            updatedAt: _updatedAt,
+            ...submittingTask
+          } = successorInput.providerThread.cloudTask!;
+          const {
+            status: _previousStatus,
+            updatedAt: _previousUpdatedAt,
+            ...previousTask
+          } = afterProvider.cloudTask!;
+          assert.deepEqual(submittingTask, previousTask);
           const successor = yield* orchestrator.getThreadProjection(childId);
           assert.equal(successor.providerThreads[0]!.nativeThreadRef?.nativeId, "native-session-1");
           assert.equal(successor.providerThreads[0]!.cloudTask?.status, "running");
+          assert.equal(
+            successor.providerThreads[0]!.cloudTask?.acceptedAppRunId,
+            successorInput.runId,
+          );
           const successorSequence = yield* sink.latestSequence();
           yield* Deferred.succeed(staleRelease, undefined);
           yield* Fiber.join(stale);

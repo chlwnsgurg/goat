@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   ProviderInstanceId,
+  RunId,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2CloudTask,
 } from "@goat/contracts";
@@ -68,6 +69,12 @@ describe("cloud task client state", () => {
     expect(
       presentCloudTask({ ...task, url: "https://user:secret@example.com/task" }).taskUrl,
     ).toBeNull();
+  });
+  it("omits accepted run ownership from presentation without emitting undefined", () => {
+    const view = presentCloudTask({ ...task, acceptedAppRunId: RunId.make("run:accepted") });
+    expect(view).toEqual({ label: "Running in the cloud", taskUrl: task.url, prUrl: null });
+    expect(Object.hasOwn(view, "acceptedAppRunId")).toBe(false);
+    expect(Object.values(view)).not.toContain(undefined);
   });
   it("blocks unknown acceptance with its persisted recovery reason", () => {
     const current = projection();
