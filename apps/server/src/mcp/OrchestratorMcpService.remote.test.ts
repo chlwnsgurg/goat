@@ -143,6 +143,8 @@ const fixture = Effect.gen(function* () {
   const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
   const subscribed = yield* Deferred.make<void>();
   const launches: Array<SshRemoteDispatch.SshLaunchInput> = [];
+  const metadataCalls: Array<SshRemoteDispatch.SshHostToolCall> = [];
+  let metadataPaused = false;
   let phase: "none" | "before" | "after" = "none";
   let launchRunId: string | null = remoteRunId;
   let launchFailure: SshRemoteDispatch.SshRemoteDispatchError | undefined;
@@ -265,6 +267,25 @@ const fixture = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* authorize;
           if (call.tool === "orchestrator_capabilities") return catalog;
+          // Optional task metadata is a separate read from the coordinator's
+          // report wait and interrupt calls, whose ordering these tests control.
+          if (call.tool === "goat_thread_status") {
+            metadataCalls.push(call);
+            if (metadataPaused) return yield* Effect.never;
+            return {
+              threadId: remoteThreadId,
+              title: "Remote task",
+              phase: "running",
+              terminal: false,
+              run: null,
+              queuedRunId: null,
+              pendingRequest: null,
+              lastActivityAt: now,
+              lastMessage: null,
+              lastError: null,
+              watch: { pendingRunIds: [], lastReportedRunId: null, webhook: false },
+            };
+          }
           const reply = yield* Deferred.make<unknown, SshRemoteDispatch.SshRemoteDispatchError>();
           yield* Queue.offer(calls, { input: call, reply });
           return yield* Deferred.await(reply);
@@ -323,6 +344,10 @@ const fixture = Effect.gen(function* () {
     commands,
     calls,
     launches,
+    metadataCalls,
+    pauseMetadata: () => {
+      metadataPaused = true;
+    },
     registered,
     subscribed,
     launchEntered,
@@ -358,6 +383,56 @@ const fixture = Effect.gen(function* () {
   };
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
+
+it.effect(
+  "remote async delegation, retries and cancellation do not await optional task metadata",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      f.pauseMetadata();
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const first = yield* service.delegateTask(scope, input);
+        const retry = yield* service.delegateTask(scope, input);
+        assert.equal(first.status, "running");
+        assert.equal(retry.taskId, first.taskId);
+        assert.equal(f.launches.length, 1);
+        yield* Queue.take(f.calls);
+        yield* f.sql`UPDATE remote_dispatches SET state = 'lost'`;
+        const cancelled = yield* service.cancelTask(scope, { taskId: first.taskId });
+        assert.equal(cancelled.status, "failed");
+        assert.equal(f.metadataCalls.length, 0);
+      }).pipe(Effect.provide(f.layer));
+    }).pipe(Effect.provide(database)),
+);
+
+it.effect("remote blocking delegation observes the result without optional task metadata", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.pauseMetadata();
+    yield* Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const waiting = yield* service
+        .delegateTask(scope, { ...input, mode: "wait" })
+        .pipe(Effect.forkChild);
+      const call = yield* Queue.take(f.calls);
+      assert.equal(call.input.tool, "goat_origin_reports_wait");
+      yield* Deferred.await(f.subscribed);
+      yield* Deferred.succeed(call.reply, {
+        threadId: remoteThreadId,
+        reports: [],
+        hasMore: false,
+        latestRunId: remoteRunId,
+        observedRun: { runId: remoteRunId, status: "completed", summary: "Saved result" },
+        timedOut: false,
+      });
+      const result = yield* Fiber.join(waiting);
+      assert.equal(result.status, "completed");
+      assert.equal(result.summary, "Saved result");
+      assert.equal(f.metadataCalls.length, 0);
+    }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(database)),
+);
 
 it.effect(
   "remote models are validated on the destination and status never loads a remote child locally",

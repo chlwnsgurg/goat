@@ -1668,18 +1668,7 @@ const make = Effect.gen(function* () {
                   failure("orchestration_error", "Unable to load the persisted remote dispatch."),
                 ),
               ))?.pendingRequestIds ?? []);
-        const remoteCloudTask =
-          task.remote.threadId === null
-            ? undefined
-            : yield* readRemoteCloudTask(scope, task.remote.host, task.remote.threadId).pipe(
-                // Live metadata is optional; persisted SSH results stay readable
-                // when the host is offline or the caller no longer owns a run.
-                Effect.catch(() => Effect.succeed(undefined)),
-                Effect.timeoutOption("5 seconds"),
-                Effect.map(Option.getOrUndefined),
-              );
         const response = {
-          ...(remoteCloudTask === undefined ? {} : { cloudTask: remoteCloudTask }),
           taskId: task.id,
           host: task.remote.host,
           childThreadId: task.remote.threadId,
@@ -2742,7 +2731,19 @@ const make = Effect.gen(function* () {
     taskStatus: (callerScope, taskId) =>
       Effect.gen(function* () {
         const scope = yield* requireThreadScope(callerScope, "task_status");
-        return yield* readTask(scope, taskId, false, true);
+        const status = yield* readTask(scope, taskId, false, true);
+        if (status.host === undefined || status.childThreadId === null) return status;
+        // Only explicit status reads enrich persisted SSH results. Launches,
+        // event-driven waits and cancellation must not wait for optional host I/O.
+        const cloudTask = yield* readRemoteCloudTask(scope, status.host, status.childThreadId).pipe(
+          Effect.catch(() => Effect.succeed(undefined)),
+          Effect.timeoutOption("5 seconds"),
+          Effect.map(Option.getOrUndefined),
+        );
+        return {
+          ...status,
+          ...(cloudTask === undefined ? {} : { cloudTask }),
+        };
       }),
     cancelTask: (callerScope, input) =>
       Effect.gen(function* () {
