@@ -654,10 +654,12 @@ function makeLinuxProcessTreeController(): AcpPosixProcessTreeController {
         return identity === undefined ? [] : [identity];
       }),
     identity: readLinuxProcessIdentity,
+    // Names only: Dirent types on procfs can make Node lstat each entry, which throws ENOENT
+    // for a process that exits mid-listing. readLinuxProcessIdentity already skips those.
     snapshot: () =>
-      NodeFS.readdirSync("/proc", { withFileTypes: true }).flatMap((entry) => {
-        if (!entry.isDirectory() || !/^[1-9][0-9]*$/.test(entry.name)) return [];
-        const identity = readLinuxProcessIdentity(Number(entry.name));
+      NodeFS.readdirSync("/proc").flatMap((name) => {
+        if (!/^[1-9][0-9]*$/.test(name)) return [];
+        const identity = readLinuxProcessIdentity(Number(name));
         return identity === undefined ? [] : [identity];
       }),
     signalProcess: (pid, signal) => process.kill(pid, signal),
