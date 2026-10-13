@@ -7,12 +7,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
+import { scanMemoryValue } from "./MemorySecretScanner.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
 const memory = M.MemoryId.make(id(2));
 const env = M.EnvironmentId.make("fixture");
 const now = "2026-10-14T00:00:00.000Z";
 const hash = "a".repeat(64);
+const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const operation = (n = 3) =>
   decodeOperation({
@@ -1131,7 +1133,7 @@ describe("MemoryStore", () => {
         );
       }).pipe(Effect.provide(live)),
   );
-  it.effect("counts each referenced canonical body once per deferred sweep", () =>
+  it.effect("charges index payloads independently of unrelated history", () =>
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
       yield* seedDeferred(
@@ -1139,17 +1141,69 @@ describe("MemoryStore", () => {
         [deferredWork("index"), deferredWork("scanner")],
         M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
       );
-      assert.strictEqual((yield* store.readDeferred(0, 10)).length, 2);
+      const rows = yield* store.readDeferred(0, 10);
+      assert.strictEqual(rows.length, 2);
+      assert.strictEqual(rows.find((row) => row.kind === "index")!.payloadBytes, 0);
+      assert.strictEqual(
+        rows.find((row) => row.kind === "scanner")!.payloadBytes,
+        Math.min(
+          M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+          M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS * M.MEMORY_PAYLOAD_MAX_UTF8_BYTES,
+        ),
+      );
     }).pipe(Effect.provide(live)),
   );
-  it.effect("skips an oversize deferred target without starving a smaller runnable target", () =>
+  it.effect("advances an approved scanner with over 8 MiB history across restart", () =>
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
-      yield* seedDeferred(80, [deferredWork("index")], M.MEMORY_DEFERRED_SWEEP_MAX_BYTES + 1);
-      yield* seedDeferred(81, [deferredWork("index")], 1);
-      assert.deepStrictEqual(
-        (yield* store.readDeferred(0, 10)).map((row) => row.memoryId),
-        [M.MemoryId.make(id(81))],
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(approved());
+      const payload = yield* encodePayload({
+        text: "x".repeat(65000),
+        evidence: [],
+        derivedFromMemoryRevisions: [],
+      });
+      for (let index = 0; index < 140; index++) {
+        yield* sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},${id(1000 + index)},${memory},${payload},'[]')`;
+      }
+      assert.isAbove(
+        (yield* store.usage(space, { kind: "user" })).historyBytes,
+        M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+      );
+      const first = (yield* store.readDeferred(0, 100)).find((row) => row.kind === "scanner")!;
+      assert.isDefined(first);
+      assert.isTrue(yield* store.claimDeferred(first, "owner", 0, 1000));
+      const chunk = yield* store.readScannerChunk(first);
+      assert.strictEqual(chunk.payloads.length, 100);
+      assert.isNotNull(chunk.nextCursor);
+      assert.strictEqual(scanMemoryValue({ payloads: chunk.payloads }).kind, "allowed");
+      assert.isTrue(
+        yield* store.finishOwnedDeferred(first, "owner", 1000, {
+          now: 0,
+          scannerCursor: chunk.nextCursor!,
+        }),
+      );
+      assert.include(
+        (yield* store.loadAggregate(space, memory)).item!.localAvailability.reasons,
+        "scanner_pending",
+      );
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      const second = (yield* fresh.readDeferred(0, 100)).find((row) => row.kind === "scanner")!;
+      assert.strictEqual(second.scannerCursor, chunk.nextCursor);
+      assert.isFalse(yield* fresh.claimDeferred(first, "stale", 0, 1000));
+      assert.isTrue(yield* fresh.claimDeferred(second, "owner", 0, 1000));
+      const rest = yield* fresh.readScannerChunk(second);
+      assert.strictEqual(rest.payloads.length, 41);
+      assert.isNull(rest.nextCursor);
+      assert.isTrue(
+        yield* fresh.finishOwnedDeferred(second, "owner", 1000, {
+          now: 0,
+          scannerPolicyVersion: 1,
+        }),
+      );
+      assert.notInclude(
+        (yield* fresh.loadAggregate(space, memory)).item!.localAvailability.reasons,
+        "scanner_pending",
       );
     }).pipe(Effect.provide(live)),
   );

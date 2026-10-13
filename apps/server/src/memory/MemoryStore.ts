@@ -183,6 +183,7 @@ export const MemoryWork = Schema.Struct({
 });
 export type MemoryWork = typeof MemoryWork.Type;
 const DeferredRow = Schema.Struct({
+  scannerCursor: Schema.optionalKey(Schema.String),
   kind: Schema.Literals(["index", "scanner", "parent", "projection", "cleanup", "report"]),
   state: Schema.Literals(["pending", "held", "ready"]),
   reason: Schema.NullOr(M.MemoryDeferredReason),
@@ -523,6 +524,13 @@ export class MemoryStore extends Context.Service<
       now: number,
       limit: number,
     ) => Effect.Effect<ReadonlyArray<MemoryDeferredWork>, MemoryStorageError>;
+    readonly readScannerChunk: (target: MemoryDeferredWork) => Effect.Effect<
+      {
+        readonly payloads: ReadonlyArray<M.MemoryPayload | M.MemoryResolutionPayload>;
+        readonly nextCursor: string | null;
+      },
+      MemoryStorageError
+    >;
     readonly claimDeferred: (
       target: MemoryDeferredWork,
       owner: string,
@@ -541,6 +549,7 @@ export class MemoryStore extends Context.Service<
         readonly now: number;
         readonly failure?: M.MemoryDeferredReason;
         readonly scannerPolicyVersion?: number;
+        readonly scannerCursor?: string;
         readonly ruleIds?: ReadonlyArray<string>;
       },
     ) => Effect.Effect<boolean, MemoryStorageError>;
@@ -551,6 +560,7 @@ export class MemoryStore extends Context.Service<
         readonly now: number;
         readonly failure?: M.MemoryDeferredReason;
         readonly scannerPolicyVersion?: number;
+        readonly scannerCursor?: string;
         readonly ruleIds?: ReadonlyArray<string>;
       },
     ) => Effect.Effect<boolean, MemoryStorageError>;
@@ -2078,7 +2088,10 @@ const make = Effect.gen(function* () {
         deferred_json: string;
         payload_bytes: number;
       }>`SELECT i.space,i.memory_id,d.value AS deferred_json,
-      coalesce((SELECT sum(length(CAST(body_json AS BLOB))) FROM memory_payloads p WHERE p.space=i.space AND p.memory_id=i.memory_id),0) AS payload_bytes
+      CASE WHEN json_extract(d.value,'$.kind')='scanner' THEN
+        min(coalesce((SELECT sum(payload_bytes) FROM (SELECT length(CAST(body_json AS BLOB)) AS payload_bytes FROM memory_payloads p WHERE p.space=i.space AND p.memory_id=i.memory_id AND p.payload_ref>coalesce(json_extract(d.value,'$.scannerCursor'),'') ORDER BY p.payload_ref LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS})),0),${Math.min(M.MEMORY_DEFERRED_SWEEP_MAX_BYTES, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS * M.MEMORY_PAYLOAD_MAX_UTF8_BYTES)})
+      WHEN json_extract(d.value,'$.kind')='index' THEN coalesce((SELECT length(CAST(p.body_json AS BLOB)) FROM memory_payloads p JOIN memory_revisions r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=i.space AND r.memory_id=i.memory_id AND r.revision_id=json_extract(d.value,'$.revisionId')),0)
+      ELSE 0 END AS payload_bytes
       FROM memory_items i JOIN json_each(i.deferred_json) d
       WHERE i.status!='forgotten' AND json_extract(d.value,'$.state')='pending'
       AND json_extract(d.value,'$.dueAt')<=${now}
@@ -2093,7 +2106,7 @@ const make = Effect.gen(function* () {
       const memorySpaceId = yield* stored("deferred-space", decodeMemorySpaceId(row.space));
       const memoryId = yield* stored("deferred-memory", decodeMemoryId(row.memory_id));
       const work = yield* deferredRowCodec.decode(row.deferred_json, strict);
-      const key = `${memorySpaceId}:${memoryId}`;
+      const key = `${memorySpaceId}:${memoryId}:${work.kind}`;
       const charge = charged.has(key) ? 0 : row.payload_bytes;
       if (bytes + charge > M.MEMORY_DEFERRED_SWEEP_MAX_BYTES) continue;
       bytes += charge;
@@ -2101,6 +2114,41 @@ const make = Effect.gen(function* () {
       selected.push({ ...work, memorySpaceId, memoryId, payloadBytes: row.payload_bytes });
     }
     return selected;
+  });
+  const scannerPayloadCodec = codec(Schema.Union([M.MemoryPayload, M.MemoryResolutionPayload]));
+  const readScannerChunk = Effect.fn("MemoryStore.readScannerChunk")(function* (
+    target: MemoryDeferredWork,
+  ) {
+    const rows = yield* stored(
+      "scanner-chunk",
+      sql<{ payload_ref: string; body_json: string; bytes: number }>`
+      SELECT p.payload_ref,p.body_json,length(CAST(p.body_json AS BLOB)) AS bytes FROM memory_payloads p
+      JOIN memory_items i ON i.space=p.space AND i.memory_id=p.memory_id
+      WHERE p.space=${target.memorySpaceId} AND p.memory_id=${target.memoryId} AND i.generation=${target.generation} AND i.status!='forgotten'
+      AND p.payload_ref>${target.scannerCursor ?? ""} ORDER BY p.payload_ref LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS + 1}`,
+    );
+    const selected = [];
+    let bytes = 0;
+    for (const row of rows) {
+      if (
+        selected.length === M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS ||
+        bytes + row.bytes > M.MEMORY_DEFERRED_SWEEP_MAX_BYTES
+      )
+        break;
+      selected.push(row);
+      bytes += row.bytes;
+    }
+    if (rows.length && !selected.length)
+      return yield* new MemoryStorageError({
+        stage: "scanner-chunk-oversized",
+        cause: new Error("Canonical payload exceeds scanner chunk budget"),
+      });
+    return {
+      payloads: yield* Effect.forEach(selected, (row) =>
+        scannerPayloadCodec.decode(row.body_json, strict),
+      ),
+      nextCursor: selected.length < rows.length ? selected.at(-1)!.payload_ref : null,
+    };
   });
   const claimDeferred = Effect.fn("MemoryStore.claimDeferred")(function* (
     target: MemoryDeferredWork,
@@ -2128,6 +2176,7 @@ const make = Effect.gen(function* () {
         const current = deferred.find((d) => d.kind === target.kind);
         if (
           !current ||
+          current.scannerCursor !== target.scannerCursor ||
           current.state !== "pending" ||
           current.dueAt > now ||
           (current.claimedUntil !== null && current.claimedUntil > now)
@@ -2152,6 +2201,7 @@ const make = Effect.gen(function* () {
       now: number;
       failure?: M.MemoryDeferredReason;
       scannerPolicyVersion?: number;
+      scannerCursor?: string;
       ruleIds?: ReadonlyArray<string>;
     },
   ) {
@@ -2176,12 +2226,15 @@ const make = Effect.gen(function* () {
           d.kind === target.kind
             ? {
                 ...d,
+                ...(outcome.scannerCursor ? { scannerCursor: outcome.scannerCursor } : {}),
                 state:
-                  outcome.failure === "secret_detected"
-                    ? ("held" as const)
-                    : outcome.failure
-                      ? ("pending" as const)
-                      : ("ready" as const),
+                  outcome.scannerCursor && !outcome.failure
+                    ? ("pending" as const)
+                    : outcome.failure === "secret_detected"
+                      ? ("held" as const)
+                      : outcome.failure
+                        ? ("pending" as const)
+                        : ("ready" as const),
                 reason: outcome.failure ?? null,
                 sinceAtUtc: outcome.failure ? d.sinceAtUtc : null,
                 attempt: outcome.failure ? Math.min(d.attempt + 1, 2147483647) : d.attempt,
@@ -2195,8 +2248,9 @@ const make = Effect.gen(function* () {
         );
         yield* stored(
           "deferred-finish-write",
-          sql`UPDATE memory_items SET deferred_json=${yield* deferredCodec.encode(updated)},scanner_policy_version=coalesce(${outcome.scannerPolicyVersion ?? null},scanner_policy_version),scanned_at=CASE WHEN ${target.kind}='scanner' THEN ${outcome.now} ELSE scanned_at END WHERE space=${target.memorySpaceId} AND memory_id=${target.memoryId} AND generation=${target.generation}`,
+          sql`UPDATE memory_items SET deferred_json=${yield* deferredCodec.encode(updated)},scanner_policy_version=coalesce(${outcome.scannerCursor ? null : (outcome.scannerPolicyVersion ?? null)},scanner_policy_version),scanned_at=CASE WHEN ${target.kind}='scanner' AND ${outcome.scannerCursor ?? null} IS NULL THEN ${outcome.now} ELSE scanned_at END WHERE space=${target.memorySpaceId} AND memory_id=${target.memoryId} AND generation=${target.generation}`,
         );
+        if (outcome.scannerCursor && !outcome.failure) return true;
         const old = yield* readItem(target.memorySpaceId, target.memoryId);
         if (old && old.item.status !== "forgotten" && target.kind === "scanner") {
           const aggregate = yield* loadAggregate(target.memorySpaceId, target.memoryId);
@@ -2278,6 +2332,7 @@ const make = Effect.gen(function* () {
       now: number;
       failure?: M.MemoryDeferredReason;
       scannerPolicyVersion?: number;
+      scannerCursor?: string;
       ruleIds?: ReadonlyArray<string>;
     },
   ) {
@@ -2295,6 +2350,7 @@ const make = Effect.gen(function* () {
         );
         if (
           !current ||
+          current.scannerCursor !== target.scannerCursor ||
           current.claimedBy !== owner ||
           current.claimedUntil !== until ||
           current.revisionId !== target.revisionId ||
@@ -3868,6 +3924,7 @@ const make = Effect.gen(function* () {
     pendingForgetIntents,
     settleForgetIntent,
     readDeferred,
+    readScannerChunk,
     claimDeferred,
     finishDeferred,
     finishOwnedDeferred,

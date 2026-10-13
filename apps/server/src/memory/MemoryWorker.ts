@@ -519,27 +519,15 @@ const make = Effect.gen(function* () {
     for (const target of yield* store.readDeferred(now, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)) {
       if (!(yield* store.claimDeferred(target, runtime.instanceId, now, now + 600000))) continue;
       const process = Effect.gen(function* () {
-        const current = yield* store.loadAggregate(target.memorySpaceId, target.memoryId);
-        if (current.tombstone || current.generation !== target.generation) return;
         if (target.kind === "scanner") {
-          const resolutionPayloads = yield* Effect.forEach(current.resolutions, (resolution) =>
-            Effect.gen(function* () {
-              const revision = current.revisions.find(
-                (r) => r.revision.revisionId === resolution.resultRevisionId,
-              );
-              const op = revision
-                ? yield* store.readOperation(target.memorySpaceId, revision.revision.operationId)
-                : undefined;
-              return op?.kind === "resolve" ? op.resolutionPayload : null;
-            }),
-          );
-          const scan = scanMemoryValue({
-            payloads: current.revisions.map((r) => r.payload),
-            originals: resolutionPayloads,
-          });
+          const chunk = yield* store.readScannerChunk(target);
+          const scan = scanMemoryValue({ payloads: chunk.payloads });
           yield* store.finishOwnedDeferred(target, runtime.instanceId, now + 600000, {
             now,
             scannerPolicyVersion: MEMORY_SCANNER_POLICY_VERSION,
+            ...(scan.kind === "allowed" && chunk.nextCursor
+              ? { scannerCursor: chunk.nextCursor }
+              : {}),
             ...(scan.kind === "blocked"
               ? { failure: "secret_detected", ruleIds: scan.ruleIds }
               : {}),
