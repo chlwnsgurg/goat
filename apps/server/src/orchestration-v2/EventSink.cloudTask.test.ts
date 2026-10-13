@@ -10,6 +10,8 @@ import {
   RunId,
   ThreadId,
   MessageId,
+  TurnItemId,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
 } from "@goat/contracts";
@@ -146,6 +148,115 @@ const makeOwner = Effect.gen(function* () {
   const read = () => projections.getThreadProjection(threadId);
   return { sink, input, run, provider, writeOwner, read };
 });
+
+it.effect(
+  "cloud result items survive duplicate finalization and replay without changing history",
+  () =>
+    Effect.gen(function* () {
+      const owner = yield* makeOwner;
+      const threadId = owner.run.threadId;
+      const now = yield* DateTime.now;
+      const messageId = MessageId.make(`message:cloud-result:${owner.run.id}`);
+      const itemId = TurnItemId.make(`turn-item:cloud-result:${owner.run.id}`);
+      const text = "Final summary\nPull request: https://github.com/acme/repo/pull/1";
+      const events: ReadonlyArray<OrchestrationV2DomainEvent> = [
+        {
+          id: EventId.make("cloud-result:message"),
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: messageId,
+            threadId,
+            runId: owner.run.id,
+            nodeId: owner.run.rootNodeId,
+            createdBy: "agent",
+            creationSource: "provider",
+            role: "assistant",
+            text,
+            attachments: [],
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        {
+          id: EventId.make("cloud-result:item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: itemId,
+            type: "assistant_message",
+            threadId,
+            runId: owner.run.id,
+            nodeId: owner.run.rootNodeId,
+            providerThreadId: owner.provider.id,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            messageId,
+            text,
+            streaming: false,
+          },
+        },
+      ];
+      const rejected = yield* owner.sink.writeIfRunCurrent({
+        threadId,
+        runId: owner.run.id,
+        activeAttemptId: RunAttemptId.make("attempt:superseded"),
+        expectedStatus: "running",
+        events,
+      });
+      assert.isFalse(rejected.committed);
+      assert.equal((yield* owner.read()).turnItems.length, 0);
+      const writes = yield* Effect.all(
+        [
+          owner.sink.writeWithEffects({ events, effects: [] }),
+          owner.sink.writeWithEffects({
+            events: events.map((event) => ({
+              ...event,
+              id: EventId.make(`${event.id}:duplicate`),
+            })),
+            effects: [],
+          }),
+        ],
+        { concurrency: 2 },
+      );
+      assert.equal(writes.flat().length, 2);
+      const before = yield* owner.read();
+      assert.equal(before.turnItems.length, 1);
+      assert.equal(before.turnItems[0]!.id, itemId);
+      assert.equal(before.visibleTurnItems[0]!.sourceItemId, itemId);
+      const sequence = yield* owner.sink.latestSequence();
+      const replay = yield* owner.sink.writeWithEffects({
+        events: events.map((event) => {
+          // Changed replay text must not replace the original result message.
+          if (event.type === "message.updated")
+            return {
+              ...event,
+              id: EventId.make(`${event.id}:replay`),
+              payload: {
+                ...event.payload,
+                text: "Stale replay text",
+                updatedAt: DateTime.add(now, { seconds: 1 }),
+              },
+            };
+          return { ...event, id: EventId.make(`${event.id}:replay`) };
+        }),
+        effects: [],
+      });
+      assert.deepEqual(replay, []);
+      assert.equal(yield* owner.sink.latestSequence(), sequence);
+      assert.deepEqual(yield* owner.read(), before);
+    }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect.each(["completed", "failed", "interrupted", "cancelled"] as const)(
   "merges whitelisted metadata on a %s owner without changing terminal state",

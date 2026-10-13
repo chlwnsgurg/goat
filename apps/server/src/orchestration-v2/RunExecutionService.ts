@@ -7,6 +7,7 @@ import {
   CommandId,
   MessageId,
   RunId,
+  TurnItemId,
   type EventId,
   type ModelSelection,
   type NodeId,
@@ -26,7 +27,6 @@ import {
   type ProviderTurnId,
   type RunAttemptId,
   type ThreadId,
-  type TurnItemId,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
 import { cloudTaskResultText } from "@goat/provider-core/server/cloudTask";
@@ -717,6 +717,66 @@ export const layer: Layer.Layer<
         const checkpointCaptureCommandId = CommandId.make(
           `command:effect:checkpoint.capture:${input.run.id}`,
         );
+        const cloudResultEvents: OrchestrationV2DomainEvent[] = [];
+        if (finalizedProviderThread.cloudTask !== undefined) {
+          const text = cloudTaskResultText(finalizedProviderThread.cloudTask);
+          const messageId = MessageId.make(`message:cloud-result:${input.run.id}`);
+          const itemId = TurnItemId.make(`turn-item:cloud-result:${input.run.id}`);
+          cloudResultEvents.push({
+            id: yield* allocateEventId(),
+            type: "message.updated",
+            threadId: input.run.threadId,
+            runId: input.run.id,
+            nodeId: input.rootNode.id,
+            providerInstanceId: input.run.providerInstanceId,
+            occurredAt: completedAt,
+            payload: {
+              id: messageId,
+              threadId: input.run.threadId,
+              runId: input.run.id,
+              nodeId: input.rootNode.id,
+              createdBy: "agent",
+              creationSource: "provider",
+              role: "assistant",
+              text,
+              attachments: [],
+              streaming: false,
+              createdAt: completedAt,
+              updatedAt: completedAt,
+            },
+          });
+          cloudResultEvents.push({
+            id: yield* allocateEventId(),
+            type: "turn-item.updated",
+            threadId: input.run.threadId,
+            runId: input.run.id,
+            nodeId: input.rootNode.id,
+            providerInstanceId: input.run.providerInstanceId,
+            occurredAt: completedAt,
+            payload: {
+              id: itemId,
+              type: "assistant_message",
+              threadId: input.run.threadId,
+              runId: input.run.id,
+              nodeId: input.rootNode.id,
+              providerThreadId: input.providerThread.id,
+              providerTurnId: input.terminal.providerTurnId,
+              nativeItemRef: null,
+              parentItemId: null,
+              // EventSink assigns the durable position in the finalization transaction.
+              ordinal: 0,
+              status: "completed",
+              title: null,
+              startedAt: completedAt,
+              completedAt,
+              updatedAt: completedAt,
+              messageId,
+              text,
+              attachments: [],
+              streaming: false,
+            },
+          });
+        }
         // Stopped runs capture too: their checkpoint is the rollback point for
         // the next message. The capture is enqueued with these terminal events,
         // ahead of any later run's start on this thread's effect lane.
@@ -740,33 +800,7 @@ export const layer: Layer.Layer<
                 ]
               : [],
           events: [
-            ...(input.providerThread.cloudTask === undefined
-              ? []
-              : [
-                  {
-                    id: yield* allocateEventId(),
-                    type: "message.updated" as const,
-                    threadId: input.run.threadId,
-                    runId: input.run.id,
-                    nodeId: input.rootNode.id,
-                    providerInstanceId: input.run.providerInstanceId,
-                    occurredAt: completedAt,
-                    payload: {
-                      id: MessageId.make(`message:cloud-result:${input.run.id}`),
-                      threadId: input.run.threadId,
-                      runId: input.run.id,
-                      nodeId: input.rootNode.id,
-                      createdBy: "agent" as const,
-                      creationSource: "provider" as const,
-                      role: "assistant" as const,
-                      text: cloudTaskResultText(finalizedProviderThread.cloudTask!),
-                      attachments: [],
-                      streaming: false,
-                      createdAt: completedAt,
-                      updatedAt: completedAt,
-                    },
-                  },
-                ]),
+            ...cloudResultEvents,
             // Terminalize open run-owned subagent rows before the root run
             // settles so projections never keep a forever-running subagent card.
             ...cascadedSubagentEvents,

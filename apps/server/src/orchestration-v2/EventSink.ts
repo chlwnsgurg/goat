@@ -332,6 +332,47 @@ const layerBase: Layer.Layer<
         });
       });
 
+    // Cloud finalization writes a message and its ordinary assistant item together.
+    // Check persisted items inside the ownership-gated transaction: exact provider
+    // text from this run is reused; other text and prior runs never suppress a result.
+    // Replayed synthetic results keep their original message, position and timing.
+    const guardCloudResultItems = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Effect.gen(function* () {
+        const skippedItems = new Set<string>();
+        const skippedMessages = new Set<string>();
+        for (const event of events) {
+          if (
+            event.type !== "turn-item.updated" ||
+            event.payload.type !== "assistant_message" ||
+            event.payload.runId === null ||
+            event.payload.id !== `turn-item:cloud-result:${event.payload.runId}`
+          )
+            continue;
+          const item = event.payload;
+          const runId = event.payload.runId;
+          const { turnItems } = yield* projectionStore.getThreadRecords(
+            item.threadId,
+            ["turnItems"],
+            { turnItemRunId: runId, turnItemTypes: ["assistant_message"] },
+          );
+          if (turnItems.some((existing) => existing.id === item.id)) {
+            skippedItems.add(item.id);
+            skippedMessages.add(item.messageId);
+          } else if (
+            turnItems.some(
+              (existing) => existing.type === "assistant_message" && existing.text === item.text,
+            )
+          ) {
+            skippedItems.add(item.id);
+          }
+        }
+        return events.filter((event) =>
+          event.type === "turn-item.updated"
+            ? !skippedItems.has(event.payload.id)
+            : event.type !== "message.updated" || !skippedMessages.has(event.payload.id),
+        );
+      });
+
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
@@ -340,18 +381,24 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return Effect.forEach(
-        events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
-        { concurrency: 1 },
+      return guardCloudResultItems(events).pipe(
+        Effect.flatMap((guarded) =>
+          Effect.forEach(
+            guarded,
+            (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
+              event.type === "turn-item.updated"
+                ? turnItemPositions
+                    .normalize(
+                      event.payload,
+                      event.payload.runId === null
+                        ? undefined
+                        : runOrdinals.get(event.payload.runId),
+                    )
+                    .pipe(Effect.map((payload) => ({ ...event, payload })))
+                : Effect.succeed(event),
+            { concurrency: 1 },
+          ),
+        ),
       );
     };
 

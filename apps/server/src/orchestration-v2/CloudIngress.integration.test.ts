@@ -10,6 +10,7 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
+  TurnItemId,
   EnvironmentId,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpDelegateTaskResult,
@@ -17,6 +18,7 @@ import {
   OrchestratorMcpThreadStatusResult,
   type Project,
   type OrchestrationV2Command,
+  type OrchestrationV2ThreadProjection,
 } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -80,6 +82,167 @@ const decodeTaskCancelResult = Schema.decodeUnknownSync(OrchestratorMcpTaskCance
 const decodeThreadStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
 const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeTaskStatus = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
+
+function assertCloudResultItem(projection: OrchestrationV2ThreadProjection, runId: RunId) {
+  const results = projection.turnItems.filter(
+    (item) => item.runId === runId && item.type === "assistant_message",
+  );
+  assert.equal(results.length, 1);
+  const result = results[0]!;
+  assert.equal(result.type, "assistant_message");
+  if (result.type !== "assistant_message") throw new Error("Missing assistant result");
+  assert.equal(result.id, `turn-item:cloud-result:${runId}`);
+  assert.equal(result.messageId, `message:cloud-result:${runId}`);
+  assert.equal(result.status, "completed");
+  assert.isFalse(result.streaming);
+  assert.equal(
+    result.text,
+    projection.messages.find((message) => message.id === result.messageId)?.text,
+  );
+  assert.deepEqual(
+    projection.visibleTurnItems.find((row) => row.sourceItemId === result.id)?.item,
+    result,
+  );
+  const run = projection.runs.find((candidate) => candidate.id === runId)!;
+  assert.isAbove(result.ordinal, run.ordinal * 1_000_000);
+  return result;
+}
+
+it.effect.each(["same", "different"] as const)(
+  "cloud finalization reuses only $0 provider assistant text from the same run",
+  (providerText) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeCloudAdapter();
+      const projectId = ProjectId.make("project:cloud-result");
+      const runtime = layerWithRegistry(
+        { name: `cloud-result-${providerText}` },
+        Registry.layerFromAdapters([fake.adapter]),
+        {
+          runEffectWorker: false,
+          projects: Layer.mock(Projects.ProjectService)({
+            getById: () =>
+              Effect.succeed(Option.some({ id: projectId, workspaceRoot: "/repo" } as Project)),
+          }),
+          cloudSources: Layer.succeed(CloudSource.CloudTaskSourceService, {
+            resolve: (input) =>
+              Effect.succeed({
+                source: { repository: "https://github.com/acme/repo", branch: "dev" },
+                launchSource: { cwd: input.cwd, restriction: "published-ref" },
+                localChangesExcluded: true,
+              }),
+          }),
+        },
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = ThreadId.make("thread:cloud-result");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:cloud-result-thread"),
+          threadId,
+          projectId,
+          title: "Cloud result",
+          modelSelection: { instanceId: fake.adapter.instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "dev",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:cloud-result-run"),
+          threadId,
+          messageId: MessageId.make("message:cloud-result-user"),
+          text: "Run in the cloud",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        const input = (yield* Ref.get(fake.current))!;
+        const itemId = TurnItemId.make("turn-item:provider-result");
+        const now = yield* DateTime.now;
+        const finalText =
+          "Completed fake task\nPull request: https://github.com/acme/repo/pull/1\nBranch: agent/fix\nTask: https://example.com/tasks/1";
+        const providerItem = {
+          id: itemId,
+          type: "assistant_message" as const,
+          threadId,
+          runId: input.runId,
+          nodeId: input.rootNodeId,
+          providerThreadId: input.providerThread.id,
+          providerTurnId: ProviderTurnId.make(`provider-turn:fake-cloud:${input.attemptId}`),
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 101,
+          status: "completed" as const,
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          messageId: MessageId.make("message:provider-result"),
+          text: providerText === "same" ? finalText : "I started working on the task.",
+          attachments: [],
+          streaming: false,
+        };
+        const itemPersisted = yield* sink.stream({ threadId, eventType: "turn-item.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" && stored.event.payload.id === itemId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* fake.publish({
+          type: "turn_item.updated",
+          driver: fake.adapter.driver,
+          turnItem: providerItem,
+        });
+        yield* Fiber.join(itemPersisted);
+        const completed = yield* sink.stream({ threadId, eventType: "run.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "run.updated" &&
+              stored.event.payload.id === input.runId &&
+              stored.event.payload.status === "completed",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* fake.finish();
+        yield* Fiber.join(completed);
+        yield* worker.drain();
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const assistants = projection.turnItems.filter((item) => item.type === "assistant_message");
+        assert.equal(assistants.length, providerText === "same" ? 1 : 2);
+        const results = assistants.filter(
+          (item) => item.type === "assistant_message" && item.text === finalText,
+        );
+        assert.equal(results.length, 1);
+        assert.equal(
+          results[0]!.id,
+          providerText === "same" ? itemId : `turn-item:cloud-result:${input.runId}`,
+        );
+        assert.deepEqual(
+          projection.visibleTurnItems.find((row) => row.sourceItemId === results[0]!.id)?.item,
+          results[0],
+        );
+        assert.equal(
+          projection.messages.find(
+            (message) => message.id === `message:cloud-result:${input.runId}`,
+          )?.text,
+          finalText,
+        );
+      }).pipe(Effect.provide(runtime));
+    }).pipe(Effect.scoped),
+);
 
 it.effect("reattaches a fully running SQLite cloud crash snapshot once without resubmission", () =>
   Effect.gen(function* () {
@@ -827,6 +990,14 @@ it.effect.each([
             outcome === "unknown" ? "Last observed summary" : "Completed fake task",
           ),
         );
+        const resultItemBefore = assertCloudResultItem(finished, childRun.id);
+        if (outcome !== "unknown") {
+          assert.include(
+            resultItemBefore.text,
+            "Pull request: https://github.com/acme/repo/pull/1",
+          );
+          assert.include(resultItemBefore.text, "Branch: agent/fix");
+        }
         const metadata = {
           url: "https://example.com/tasks/refreshed",
           title: "Late title",
@@ -850,6 +1021,7 @@ it.effect.each([
         assert.deepEqual(refreshed.attempts, finished.attempts);
         assert.deepEqual(refreshed.nodes, finished.nodes);
         assert.deepEqual(refreshed.messages, finished.messages);
+        assert.deepEqual(refreshed.turnItems, finished.turnItems);
         assert.equal(refreshed.thread.settledAt, finished.thread.settledAt);
         const sequence = yield* sink.latestSequence();
         yield* captured.commitCloudTaskMetadata!("native-session-1", metadata);
@@ -876,6 +1048,10 @@ it.effect.each([
         assert.deepEqual(
           (yield* orchestrator.getThreadProjection(childId)).messages,
           finished.messages,
+        );
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(childId)).turnItems,
+          finished.turnItems,
         );
         assert.equal(offers.length, 1);
         const delivery = offers[0]!.delegatedCompletion!;
@@ -1012,6 +1188,15 @@ it.effect.each([
           yield* fake.finish();
           yield* successorInput.commitCloudTaskMetadata!("native-session-1", {});
           yield* worker.drain();
+          const followedUp = yield* orchestrator.getThreadProjection(childId);
+          assert.deepEqual(assertCloudResultItem(followedUp, childRun.id), resultItemBefore);
+          const successorResult = assertCloudResultItem(followedUp, successorInput.runId);
+          assert.include(successorResult.text, "Completed fake task");
+          assert.include(successorResult.text, "https://github.com/acme/repo/pull/1");
+          assert.equal(
+            followedUp.turnItems.filter((item) => item.type === "assistant_message").length,
+            2,
+          );
         }
         const beforeDisposal = yield* orchestrator.getThreadProjection(childId);
         // Runtime disposal interrupts the attached observer without a remote cancel or new terminal.
@@ -1705,6 +1890,7 @@ it.effect.each([
         yield* worker.drain();
         const finished = yield* orchestrator.getThreadProjection(childId);
         assert.equal(finished.runs[0]?.status, "completed");
+        assertCloudResultItem(finished, run.id);
         assert.equal(
           finished.messages.filter((message) => message.id === `message:cloud-result:${run.id}`)
             .length,
