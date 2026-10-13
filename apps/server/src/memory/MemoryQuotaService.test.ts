@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import reservationMigration from "../persistence/Migrations/071_MemoryForgetReservations.ts";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -16,6 +17,7 @@ const memory = M.MemoryId.make(id(2));
 const env = M.EnvironmentId.make("fixture");
 const now = "2026-10-14T00:00:00.000Z";
 const hash = "a".repeat(64);
+const encodeSuppression = Schema.encodeEffect(Schema.fromJsonString(M.MemorySuppressionRecord));
 const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const operation = (n = 3) =>
   decodeOperation({
@@ -180,6 +182,144 @@ describe("MemoryQuotaService", () => {
       const outcome = yield* quota.commit(decision(forget()), env, Effect.void);
       assert.strictEqual(outcome.receipt.outcome, "deleted");
       assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
+    }).pipe(Effect.provide(services)),
+  );
+  it.effect(
+    "reserves actual first-delete source keys before ordinary writers fill the budget",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const quota = yield* Quota.MemoryQuotaService;
+        const sql = yield* SqlClient.SqlClient;
+        const sourceThread = { environmentId: env, threadId: M.ThreadId.make("thread") };
+        const sourceWatermark = {
+          fromEventId: M.EventId.make(id(100)),
+          toEventId: M.EventId.make(id(101)),
+          throughSequence: 1,
+        };
+        const messageIds = Array.from({ length: 100 }, (_, n) => M.MessageId.make(`message-${n}`));
+        const base = operation();
+        if (base.kind === "forget") throw new Error("Fixture kind");
+        const upsert = decodeOperation({
+          ...base,
+          revision: {
+            ...base.revision,
+            provenance: { environmentId: env, sourceThread, sourceWatermark },
+          },
+          payload: {
+            ...base.payload,
+            evidence: [{ origin: "thread", sourceThread, watermark: sourceWatermark, messageIds }],
+          },
+        });
+        yield* quota.commit(decision(upsert), env, Effect.void);
+        assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 100);
+        const count = M.MEMORY_IMPORT_MAX_SOURCE_ITEMS - 100;
+        yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${count}) INSERT INTO memory_import_keys (space,key_kind,key,memory_id,record_json) SELECT ${space},'fixture',CAST(v AS TEXT),${id(900)},'{}' FROM n`;
+        const removal = forget();
+        if (removal.kind !== "forget") throw new Error("Fixture kind");
+        const op = decodeOperation({
+          ...removal,
+          tombstone: {
+            ...removal.tombstone,
+            sourceExclusions: [{ sourceThread, sourceWatermark, messageIds }],
+          },
+        });
+        yield* quota.commit(decision(op), env, Effect.void);
+        assert.strictEqual(
+          (yield* store.usage(space, { kind: "user" })).keys,
+          M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+        );
+        assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 100);
+      }).pipe(Effect.provide(services)),
+  );
+  it.effect("backfills first-delete slots when upgrading an existing memory ledger", () =>
+    Effect.gen(function* () {
+      const quota = yield* Quota.MemoryQuotaService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const base = operation();
+      if (base.kind === "forget") throw new Error("Fixture kind");
+      const sourceThread = { environmentId: env, threadId: "thread" };
+      const sourceWatermark = { fromEventId: id(100), toEventId: id(101), throughSequence: 1 };
+      const op = decodeOperation({
+        ...base,
+        revision: {
+          ...base.revision,
+          provenance: { environmentId: env, sourceThread, sourceWatermark },
+        },
+        payload: {
+          ...base.payload,
+          evidence: [
+            { origin: "thread", sourceThread, watermark: sourceWatermark, messageIds: ["a", "b"] },
+          ],
+        },
+      });
+      yield* quota.commit(decision(op), env, Effect.void);
+      yield* sql`ALTER TABLE memory_identity_ledger DROP COLUMN reserve_keys`;
+      yield* reservationMigration;
+      assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
+      yield* reservationMigration;
+      assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
+    }).pipe(Effect.provide(services)),
+  );
+  it.effect.each([
+    { dimension: "keys", extra: 0 },
+    { dimension: "keys", extra: 1 },
+    { dimension: "bytes", extra: 0 },
+    { dimension: "bytes", extra: 1 },
+  ] as const)("expanded first-forget boundary %s", ({ dimension, extra }) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* quota.commit(decision(), env, Effect.void);
+      const base = forget();
+      if (base.kind !== "forget") throw new Error("Fixture kind");
+      const op = decodeOperation({
+        ...base,
+        tombstone: {
+          ...base.tombstone,
+          sourceExclusions: Array.from({ length: 3 }, (_, index) => ({
+            sourceThread: { environmentId: env, threadId: `thread-${index}` },
+            sourceWatermark: { fromEventId: id(100), toEventId: id(101), throughSequence: 1 },
+            messageIds: Array.from({ length: 100 }, (_, message) => `message-${index}-${message}`),
+          })),
+        },
+      });
+      if (op.kind !== "forget") throw new Error("Fixture kind");
+      const records = op.tombstone.sourceExclusions.flatMap((exclusion) =>
+        exclusion.messageIds.map((messageId) => ({
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: op.operationId,
+          kind: "sourceExclusion" as const,
+          exclusion: { ...exclusion, messageIds: [messageId] },
+        })),
+      );
+      const encoded = yield* Effect.forEach(records, (record) => encodeSuppression(record));
+      const bytes = encoded.reduce((sum, text) => sum + new TextEncoder().encode(text).length, 0);
+      assert.isAbove(bytes, M.MEMORY_PAYLOAD_MAX_UTF8_BYTES);
+      if (dimension === "keys") {
+        const count = M.MEMORY_IMPORT_MAX_SOURCE_ITEMS - records.length + extra;
+        yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${count}) INSERT INTO memory_import_keys (space,key_kind,key,memory_id,record_json) SELECT ${space},'fixture',CAST(v AS TEXT),${id(900)},'{}' FROM n`;
+      } else {
+        yield* sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) VALUES (${space},${id(900)},'{}','{}',0)`;
+        const used = yield* store.usage(space, { kind: "user" });
+        const held = yield* store.readForgetReservation(space, memory);
+        const filler =
+          M.MEMORY_PERMANENT_METADATA_MAX_BYTES -
+          used.permanentBytes -
+          (bytes - held.bytes) +
+          extra;
+        yield* sql`UPDATE memory_identity_ledger SET reserve_bytes=${filler} WHERE memory_id=${id(900)}`;
+      }
+      const result = yield* Effect.exit(quota.commit(decision(op), env, Effect.void));
+      assert.strictEqual(result._tag, extra ? "Failure" : "Success");
+      assert.strictEqual((yield* store.readSuppressions(space, memory)).length, extra ? 0 : 300);
+      assert.strictEqual(
+        (yield* store.loadAggregate(space, memory)).item?.status,
+        extra ? "active" : "forgotten",
+      );
     }).pipe(Effect.provide(services)),
   );
   it.effect("unknown-ID forget reserves at lifetime equality but refuses plus one", () =>

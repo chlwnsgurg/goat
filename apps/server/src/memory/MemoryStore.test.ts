@@ -471,6 +471,52 @@ describe("MemoryStore", () => {
       assert.strictEqual((yield* store.loadAggregate(space, draft.memoryId)).revisions.length, 0);
     }).pipe(Effect.provide(live)),
   );
+  it.effect(
+    "reserves source exclusions when an identity arrives through checkpoint bootstrap",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const original = checkpoint();
+        const pair = original.revisions[0]!;
+        const item = original.items[0]!;
+        if (item.status !== "active" || !pair.payload) throw new Error("Fixture kind");
+        const sourceThread = { environmentId: env, threadId: M.ThreadId.make("thread") };
+        const sourceWatermark = {
+          fromEventId: M.EventId.make(id(900)),
+          toEventId: M.EventId.make(id(901)),
+          throughSequence: 1,
+        };
+        const revision = {
+          ...pair.revision,
+          provenance: { environmentId: env, sourceThread, sourceWatermark },
+        };
+        const payload = {
+          ...pair.payload,
+          evidence: [
+            {
+              origin: "thread" as const,
+              sourceThread,
+              watermark: sourceWatermark,
+              messageIds: [M.MessageId.make("a"), M.MessageId.make("b")],
+            },
+          ],
+        };
+        const page = {
+          ...original,
+          revisions: [{ revision, payload }],
+          items: [{ ...item, revision, payload }],
+        };
+        yield* store.installCheckpointPage({ checkpointId: "fixture", page });
+        yield* store.completeCheckpoint({
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          checkpointId: "fixture",
+          pageCount: 1,
+        });
+        assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
+        assert.strictEqual((yield* store.usage(space, { kind: "user" })).keys, 3);
+      }).pipe(Effect.provide(live)),
+  );
   it.effect("partial checkpoint stays invisible and forget purges staged bodies", () =>
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;

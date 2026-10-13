@@ -590,6 +590,13 @@ export class MemoryStore extends Context.Service<
     readonly operationMetadataBytes: (
       operation: M.MemoryOperation,
     ) => Effect.Effect<number, MemoryStorageError>;
+    readonly firstForgetReservation: (
+      operation: M.MemoryOperation,
+    ) => Effect.Effect<{ bytes: number; keys: number }, MemoryStorageError>;
+    readonly readForgetReservation: (
+      space: M.MemorySpaceId,
+      id: M.MemoryId,
+    ) => Effect.Effect<{ bytes: number; keys: number }, MemoryStorageError>;
     readonly usage: (
       space: M.MemorySpaceId,
       scope: M.MemoryScope,
@@ -1498,11 +1505,16 @@ const make = Effect.gen(function* () {
             }>`INSERT INTO memory_events (protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,${op.memorySpaceId},${op.memoryId},${op.operationId},${op.kind},${op.originEnvironmentId},${decision.operationDigest},${eventMetadata},${eventReceipt},${op.kind === "forget" ? Date.parse(op.tombstone.deletedAtUtc) : Date.parse(op.revision.createdAtUtc)}) RETURNING sequence`,
           );
         const watermark = yield* nextWatermark(op.memorySpaceId);
-        if (!reconnect && decision.identity)
+        if (!reconnect && decision.identity) {
+          const reservation =
+            accepted && !tombstones.length && op.kind !== "forget"
+              ? yield* firstForgetReservation(op)
+              : { bytes: M.MEMORY_PAYLOAD_MAX_UTF8_BYTES, keys: 0 };
           yield* stored(
             "identity",
-            sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) VALUES (${op.memorySpaceId},${op.memoryId},${yield* identityCodec.encode(decision.identity)},${yield* fenceCodec.encode(decision.fence ?? { memorySpaceId: op.memorySpaceId, memoryId: op.memoryId, highestFencingToken: 0, activeLease: null })},${M.MEMORY_IDENTITY_CORE_MAX_BYTES + M.MEMORY_PAYLOAD_MAX_UTF8_BYTES}) ON CONFLICT(space,memory_id) DO NOTHING`,
+            sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${op.memorySpaceId},${op.memoryId},${yield* identityCodec.encode(decision.identity)},${yield* fenceCodec.encode(decision.fence ?? { memorySpaceId: op.memorySpaceId, memoryId: op.memoryId, highestFencingToken: 0, activeLease: null })},${M.MEMORY_IDENTITY_CORE_MAX_BYTES + reservation.bytes},${reservation.keys}) ON CONFLICT(space,memory_id) DO UPDATE SET reserve_bytes=max(memory_identity_ledger.reserve_bytes,excluded.reserve_bytes),reserve_keys=max(memory_identity_ledger.reserve_keys,excluded.reserve_keys) WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=excluded.space AND t.memory_id=excluded.memory_id)`,
           );
+        }
         if (accepted && op.kind === "forget") {
           const t = op.tombstone;
           yield* stored(
@@ -1559,7 +1571,7 @@ const make = Effect.gen(function* () {
           yield* purge(op.memorySpaceId, op.memoryId, watermark);
           yield* stored(
             "forget-reserve-consumed",
-            sql`UPDATE memory_identity_ledger SET reserve_bytes=${M.MEMORY_IDENTITY_CORE_MAX_BYTES} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
+            sql`UPDATE memory_identity_ledger SET reserve_bytes=${M.MEMORY_IDENTITY_CORE_MAX_BYTES},reserve_keys=0 WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
           );
           yield* stored(
             "settle-forget",
@@ -3210,6 +3222,10 @@ const make = Effect.gen(function* () {
               sql`INSERT INTO memory_tombstones (space,memory_id,delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json) VALUES (${input.memorySpaceId},${tombstone.memoryId},${tombstone.deleteOperationId},${tombstone.deletingEnvironmentId},${Date.parse(tombstone.deletedAtUtc)},'[]','[]','[]') ON CONFLICT(space,memory_id) DO NOTHING`,
             );
             yield* purge(input.memorySpaceId, tombstone.memoryId, checkpointWatermark);
+            yield* stored(
+              "checkpoint-forget-reserve-consumed",
+              sql`UPDATE memory_identity_ledger SET reserve_bytes=${M.MEMORY_IDENTITY_CORE_MAX_BYTES},reserve_keys=0 WHERE space=${input.memorySpaceId} AND memory_id=${tombstone.memoryId}`,
+            );
           }
           for (const record of page.suppressions) {
             const json = yield* suppressionCodec.encode(record);
@@ -3241,6 +3257,22 @@ const make = Effect.gen(function* () {
                 .find((record) => record.memoryId === item.memoryId)?.heads ?? [];
             yield* putItem(item, heads, checkpointWatermark);
           }
+        }
+        for (const identity of pages.flatMap((page) => page.identities)) {
+          const current = yield* loadAggregate(input.memorySpaceId, identity.memoryId);
+          if (current.tombstone) continue;
+          const reservation = yield* reservationForRevisions(
+            {
+              memorySpaceId: input.memorySpaceId,
+              memoryId: identity.memoryId,
+              operationId: identity.createOperationId,
+            },
+            current.revisions,
+          );
+          yield* stored(
+            "checkpoint-forget-reservation",
+            sql`UPDATE memory_identity_ledger SET reserve_bytes=max(reserve_bytes,${M.MEMORY_IDENTITY_CORE_MAX_BYTES + reservation.bytes}),reserve_keys=max(reserve_keys,${reservation.keys}) WHERE space=${input.memorySpaceId} AND memory_id=${identity.memoryId}`,
+          );
         }
         yield* stored(
           "checkpoint-publish",
@@ -3424,6 +3456,53 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const readForgetReservation = Effect.fn("MemoryStore.readForgetReservation")(function* (
+    space: M.MemorySpaceId,
+    id: M.MemoryId,
+  ) {
+    const rows = yield* stored(
+      "forget-reservation",
+      sql<{
+        bytes: number;
+        keys: number;
+      }>`SELECT max(0,reserve_bytes-${M.MEMORY_IDENTITY_CORE_MAX_BYTES}) AS bytes,reserve_keys AS keys FROM memory_identity_ledger WHERE space=${space} AND memory_id=${id}`,
+    );
+    return rows[0] ?? { bytes: 0, keys: 0 };
+  });
+  const reservationForRevisions = Effect.fn("MemoryStore.reservationForRevisions")(function* (
+    op: Pick<M.MemoryOperation, "memorySpaceId" | "memoryId" | "operationId">,
+    revisions: MemoryAggregate["revisions"],
+  ) {
+    const records = new Map<string, M.MemorySuppressionRecord>();
+    for (const { revision, payload } of revisions) {
+      const { sourceThread, sourceWatermark } = revision.provenance;
+      if (!sourceThread || !sourceWatermark) continue;
+      for (const messageId of new Set((payload?.evidence ?? []).flatMap((e) => e.messageIds))) {
+        const exclusion = { sourceThread, sourceWatermark, messageIds: [messageId] };
+        const key = yield* exclusionsCodec.encode([exclusion]);
+        records.set(key, {
+          memorySpaceId: op.memorySpaceId,
+          memoryId: op.memoryId,
+          deleteOperationId: op.operationId,
+          kind: "sourceExclusion",
+          exclusion,
+        });
+      }
+    }
+    let bytes = 0;
+    for (const record of records.values())
+      bytes += new TextEncoder().encode(yield* suppressionCodec.encode(record)).length;
+    return { bytes: Math.max(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES, bytes), keys: records.size };
+  });
+  const firstForgetReservation = Effect.fn("MemoryStore.firstForgetReservation")(function* (
+    op: M.MemoryOperation,
+  ) {
+    const current = yield* loadAggregate(op.memorySpaceId, op.memoryId);
+    return yield* reservationForRevisions(op, [
+      ...current.revisions,
+      ...(op.kind === "forget" ? [] : [{ revision: op.revision, payload: op.payload }]),
+    ]);
+  });
   const usage = Effect.fn("MemoryStore.usage")(function* (
     space: M.MemorySpaceId,
     scope: M.MemoryScope,
@@ -3456,7 +3535,8 @@ const make = Effect.gen(function* () {
         count: number;
         bytes: number;
         reserved_receipts: number;
-      }>`SELECT count(*) AS count,coalesce(sum(reserve_bytes),0) AS bytes,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_identity_ledger.space AND t.memory_id=memory_identity_ledger.memory_id) THEN 1 ELSE 0 END),0) AS reserved_receipts FROM memory_identity_ledger WHERE space=${space}`,
+        reserved_keys: number;
+      }>`SELECT count(*) AS count,coalesce(sum(reserve_bytes),0) AS bytes,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_identity_ledger.space AND t.memory_id=memory_identity_ledger.memory_id) THEN 1 ELSE 0 END),0) AS reserved_receipts,coalesce(sum(reserve_keys),0) AS reserved_keys FROM memory_identity_ledger WHERE space=${space}`,
     );
     const payloads = yield* stored(
       "usage-payloads",
@@ -3536,7 +3616,7 @@ const make = Effect.gen(function* () {
       liveBytes: payloads[0]!.live,
       historyBytes: payloads[0]!.history,
       logicalBytes: payloads[0]!.all_bytes + log[0]!.bytes + keys[0]!.bytes,
-      keys: keys[0]!.count,
+      keys: keys[0]!.count + identities[0]!.reserved_keys,
       workItems: work[0]!.count,
       workBytes: work[0]!.bytes,
       reportItems: reports[0]!.count,
@@ -3935,6 +4015,8 @@ const make = Effect.gen(function* () {
     changes,
     reserve,
     usage,
+    readForgetReservation,
+    firstForgetReservation,
     operationMetadataBytes: (operation) =>
       Effect.map(
         metadataCodec.encode(metadataOf(operation)),

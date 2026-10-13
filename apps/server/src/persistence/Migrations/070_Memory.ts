@@ -236,6 +236,7 @@ export default Effect.gen(function* () {
     identity_json TEXT NOT NULL,
     fence_json TEXT NOT NULL,
     reserve_bytes INTEGER NOT NULL CHECK(reserve_bytes>=0),
+    reserve_keys INTEGER NOT NULL DEFAULT 0 CHECK(reserve_keys>=0),
     PRIMARY KEY(space,memory_id)
   )`;
   yield* sql`CREATE TABLE IF NOT EXISTS memory_compact_receipts (

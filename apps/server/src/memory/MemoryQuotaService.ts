@@ -128,6 +128,11 @@ const make = Effect.gen(function* () {
         const identityNew = current.identity === undefined;
         const firstForget =
           op.kind === "forget" && current.tombstone === undefined && current.identity !== undefined;
+        const heldReservation = yield* store.readForgetReservation(op.memorySpaceId, op.memoryId);
+        const neededReservation =
+          op.kind !== "forget" && !current.tombstone
+            ? yield* store.firstForgetReservation(op)
+            : heldReservation;
         const oldLive = current.item !== undefined && current.item.status !== "forgotten";
         const addedLive =
           op.kind === "forget" ? -Number(oldLive) : Number(!oldLive && !current.tombstone);
@@ -170,11 +175,23 @@ const make = Effect.gen(function* () {
         charge(
           "permanent_metadata",
           usage.permanentBytes,
-          (identityNew ? M.MEMORY_IDENTITY_CORE_MAX_BYTES + M.MEMORY_PAYLOAD_MAX_UTF8_BYTES : 0) +
+          (identityNew ? M.MEMORY_IDENTITY_CORE_MAX_BYTES : 0) +
+            (op.kind !== "forget"
+              ? Math.max(0, neededReservation.bytes - heldReservation.bytes)
+              : identityNew
+                ? M.MEMORY_PAYLOAD_MAX_UTF8_BYTES
+                : 0) +
             (firstForget ? 0 : M.MEMORY_COMPACT_RECEIPT_MAX_BYTES) *
               (1 + Number(identityNew && op.kind !== "forget")),
           M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
         );
+        if (op.kind !== "forget")
+          charge(
+            "import_source_items",
+            usage.keys,
+            Math.max(0, neededReservation.keys - heldReservation.keys),
+            M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+          );
         if (op.kind === "forget") {
           const existing = yield* store.readSuppressions(op.memorySpaceId, op.memoryId);
           const keys = new Set(
@@ -218,16 +235,24 @@ const make = Effect.gen(function* () {
             newKeys++;
             newBytes += utf8(yield* suppressionJson(record).pipe(Effect.mapError(storageError)));
           }
-          // The bounded initial fragment uses the identity's reserve. Further fragments admit independently.
-          if (!firstForget) {
-            charge("import_source_items", usage.keys, newKeys, M.MEMORY_IMPORT_MAX_SOURCE_ITEMS);
-            charge(
-              "permanent_metadata",
-              usage.permanentBytes,
-              newBytes,
-              M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
-            );
-          }
+          // Consume only the reserved first fragment; expanded excess still needs admission.
+          charge(
+            "import_source_items",
+            usage.keys,
+            newKeys - (firstForget ? heldReservation.keys : 0),
+            M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+          );
+          charge(
+            "permanent_metadata",
+            usage.permanentBytes,
+            newBytes -
+              (firstForget
+                ? heldReservation.bytes
+                : identityNew
+                  ? M.MEMORY_PAYLOAD_MAX_UTF8_BYTES
+                  : 0),
+            M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
+          );
         } else {
           const scopeDimension =
             scope.kind === "user"
