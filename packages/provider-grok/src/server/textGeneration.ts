@@ -1,13 +1,18 @@
+import * as Deferred from "effect/Deferred";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { AcpRequestError } from "effect-acp/errors";
 import type * as EffectAcpErrors from "effect-acp/errors";
 
 import { ProviderDriverKind, TextGenerationError } from "@goat/contracts";
 import {
+  MemoryGenerationRunnerError,
   withMemoryExecution,
   type MemoryGenerationRunnerContext,
 } from "@goat/provider-core/server/memoryGenerationRunner";
@@ -33,25 +38,77 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
   environment: NodeJS.ProcessEnv = process.env,
   options: { readonly memoryRunnerContext?: MemoryGenerationRunnerContext } = {},
 ) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
-  const runGrokJson: TextGenerationOperations.Runner = (request) => {
+  const runGrokSelected = <S extends Schema.Top>(request: TextGenerationOperations.Request<S>) => {
     const { operation, cwd, prompt, modelSelection } = request;
     return Effect.gen(function* () {
+      const memory = TextGenerationOperations.isMemoryOperation(operation);
+      const isolated = memory
+        ? yield* requireGrokMemoryIsolation(operation, environment).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(Path.Path, path),
+          )
+        : { cwd, environment };
+      const rejected = yield* Deferred.make<never, TextGenerationError>();
+      const reject = () =>
+        Deferred.fail(
+          rejected,
+          new TextGenerationError({
+            operation,
+            detail: "Grok attempted a tool or permission request during memory generation.",
+          }),
+        ).pipe(Effect.asVoid);
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeGrokAcpRuntime({
         grokSettings,
-        environment,
-        cwd,
+        environment: isolated.environment,
+        cwd: isolated.cwd,
+        mcpServers: [],
+        ...(memory ? { runtimeMode: "approval-required" as const } : {}),
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
       }).pipe(
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
       );
 
+      if (memory) {
+        const deny = () =>
+          reject().pipe(
+            Effect.andThen(
+              Effect.fail(
+                new AcpRequestError({
+                  code: -32601,
+                  errorMessage: "Tools are disabled for memory generation.",
+                }),
+              ),
+            ),
+          );
+        yield* runtime.handleRequestPermission(() =>
+          reject().pipe(Effect.as({ outcome: { outcome: "cancelled" as const } })),
+        );
+        yield* runtime.handleElicitation(() =>
+          reject().pipe(Effect.as({ action: "decline" as const })),
+        );
+        yield* runtime.handleReadTextFile(deny);
+        yield* runtime.handleWriteTextFile(deny);
+        yield* runtime.handleCreateTerminal(deny);
+        yield* runtime.handleTerminalOutput(deny);
+        yield* runtime.handleTerminalWaitForExit(deny);
+        yield* runtime.handleTerminalKill(deny);
+        yield* runtime.handleTerminalRelease(deny);
+        yield* runtime.handleUnknownExtRequest(deny);
+      }
       yield* runtime.handleSessionUpdate((notification) => {
         const update = notification.update;
+        if (
+          memory &&
+          (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update")
+        )
+          return reject();
         if (update.sessionUpdate !== "agent_message_chunk") {
           return Effect.void;
         }
@@ -62,6 +119,8 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         return Ref.update(outputRef, (current) => current + content.text);
       });
 
+      let promptStarted = false;
+      let effectiveModel: string | undefined;
       const promptResult = yield* Effect.gen(function* () {
         const resolvedModel = resolveGrokAcpBaseModelId(modelSelection.model);
         const started = yield* runtime.start();
@@ -69,7 +128,22 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
           modelSelection,
           "reasoningEffort",
         );
-        yield* applyGrokAcpModelSelection({
+        const currentModel = currentGrokModelIdFromSessionSetup(started.sessionSetupResult);
+        if (
+          memory &&
+          (currentModel === undefined ||
+            (resolvedModel !== "grok-build" &&
+              !started.sessionSetupResult.models?.availableModels.some(
+                (model) => model.modelId === resolvedModel,
+              )))
+        ) {
+          return yield* new TextGenerationError({
+            operation,
+            detail: "Grok did not disclose or support the selected memory model.",
+            cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+          });
+        }
+        effectiveModel = yield* applyGrokAcpModelSelection({
           runtime,
           currentModelId: currentGrokModelIdFromSessionSetup(started.sessionSetupResult),
           currentReasoningEffort: currentGrokReasoningEffortFromSessionSetup(
@@ -84,10 +158,15 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
               cause,
             }),
         });
-        return yield* runtime.prompt({
+        promptStarted = true;
+        const result = yield* runtime.prompt({
           prompt: [{ type: "text", text: prompt }],
         });
+        if (memory && (yield* Deferred.isDone(rejected))) return yield* Deferred.await(rejected);
+        return result;
       }).pipe(
+        Effect.raceFirst(Deferred.await(rejected)),
+        Effect.onInterrupt(() => runtime.cancel.pipe(Effect.timeoutOption(2_000), Effect.ignore)),
         Effect.timeoutOption(GROK_TIMEOUT_MS),
         Effect.flatMap(
           Option.match({
@@ -103,12 +182,28 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
             ? cause
             : new TextGenerationError({
                 operation,
-                detail: "Grok ACP request failed.",
-                cause,
+                detail:
+                  memory && !promptStarted
+                    ? "Grok memory authentication or model selection is unavailable."
+                    : "Grok ACP request failed.",
+                cause:
+                  memory && !promptStarted
+                    ? new MemoryGenerationRunnerError({ code: "unavailable" })
+                    : cause,
               }),
         ),
       );
 
+      if (memory && promptResult.stopReason !== "end_turn")
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Grok memory generation did not complete normally.",
+        });
+      if (memory && (yield* fs.readDirectory(isolated.cwd)).length > 0)
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Grok wrote files during memory generation.",
+        });
       const trimmed = (yield* Ref.get(outputRef)).trim();
       if (!trimmed) {
         return yield* new TextGenerationError({
@@ -120,7 +215,12 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         });
       }
 
-      return yield* TextGenerationOperations.decodeJsonReply(request, "Grok Agent", trimmed);
+      const result = yield* TextGenerationOperations.decodeJsonReply(
+        request,
+        "Grok Agent",
+        trimmed,
+      );
+      return { result, effectiveModel: effectiveModel ?? modelSelection.model };
     }).pipe(
       Effect.mapError((cause) =>
         isTextGenerationError(cause)
@@ -132,17 +232,20 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
             }),
       ),
       Effect.scoped,
+      Effect.provideService(FileSystem.FileSystem, fs),
     );
   };
 
   return TextGenerationOperations.fromRunner(
     "GrokTextGeneration",
-    TextGenerationOperations.withoutInvestigation("Grok", runGrokJson),
+    TextGenerationOperations.withoutInvestigation("Grok", (request) =>
+      runGrokSelected(request).pipe(Effect.map((selected) => selected.result)),
+    ),
     {
       memoryRunner: withMemoryExecution(
         options.memoryRunnerContext,
         ProviderDriverKind.make("grok"),
-        (request) => requireGrokMemoryIsolation(request.operation),
+        runGrokSelected,
       ),
     },
   );

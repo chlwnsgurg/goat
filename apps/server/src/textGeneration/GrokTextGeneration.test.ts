@@ -6,6 +6,8 @@ import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -30,20 +32,42 @@ const layerGrokTextGenerationTest = ServerConfig.ServerConfig.layerTest(process.
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
+  const scriptPath = NodePath.join(dir, "mock.mjs");
+  const source = NodeFS.readFileSync(mockAgentPath, "utf8").replace(
+    'case "session/prompt":',
+    `case "session/prompt":
+      if (process.env.GOAT_MEMORY_STALL) { continue; }
+      if (process.env.GOAT_MEMORY_TOOL) {
+        write({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
+          sessionUpdate: "tool_call", toolCallId: "synthetic", title: "unsafe", status: "pending"
+        } } });
+      }
+      if (process.env.GOAT_MEMORY_PERMISSION) {
+        write({ jsonrpc: "2.0", id: "permission", method: "session/request_permission", params: {
+          sessionId, toolCall: { toolCallId: "synthetic", title: "unsafe" }, options: []
+        } });
+      }`,
+  );
+  NodeFS.writeFileSync(scriptPath, source);
   return writeFakeCli({
     directory: NodePath.join(dir, "bin"),
     name: "grok",
     env,
     source: execScriptSource({
-      scriptPath: mockAgentPath,
-      expectedArgs: ["agent", "stdio"],
+      scriptPath,
+      expectedArgs: env.GOAT_MEMORY_RUN
+        ? ["--permission-mode", "default", "agent", "stdio"]
+        : ["agent", "stdio"],
     }),
   });
 }
 
 function withFakeAcpGrok<A, E, R>(
   env: Record<string, string>,
-  effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
+  effectFn: (
+    textGeneration: TextGeneration.TextGeneration["Service"],
+    tempDir: string,
+  ) => Effect.Effect<A, E, R>,
   memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
   return Effect.gen(function* () {
@@ -53,14 +77,20 @@ function withFakeAcpGrok<A, E, R>(
         NodeFS.rmSync(tempDir, { recursive: true, force: true });
       }),
     );
-    const binaryPath = makeAcpGrokWrapper(tempDir, env);
+    const log = NodePath.join(tempDir, "requests.ndjson");
+    NodeFS.writeFileSync(log, "");
+    const binaryPath = makeAcpGrokWrapper(tempDir, {
+      GOAT_ACP_REQUEST_LOG_PATH: log,
+      ...(memoryRunnerContext === undefined ? {} : { GOAT_MEMORY_RUN: "1" }),
+      ...env,
+    });
     const config = decodeGrokSettings({ binaryPath });
     const textGeneration = yield* makeGrokTextGeneration(
       config,
-      {},
+      { HOME: tempDir, GROK_HOME: NodePath.join(tempDir, "profile") },
       memoryRunnerContext === undefined ? {} : { memoryRunnerContext },
     );
-    return yield* effectFn(textGeneration);
+    return yield* effectFn(textGeneration, tempDir);
   }).pipe(Effect.scoped);
 }
 
@@ -302,7 +332,6 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
   const cases = (["resolveMemoryConflict", "generateMemorySummary"] as const).flatMap((operation) =>
     (
       [
-        ["native tools and hooks cannot be certified", memoryContext, "unavailable"],
         ["missing identity", undefined, "unavailable"],
         ["missing environment", { providerInstanceId: memorySelection.instanceId }, "unavailable"],
         [
@@ -346,5 +375,111 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
           context,
         );
       }).pipe(Effect.scoped),
+  );
+  const operations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+  const output = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+  it.effect.each(operations)("%s returns result with runner-owned effective model", (operation) =>
+    withFakeAcpGrok(
+      {
+        GOAT_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify(
+          operation === "resolveMemoryConflict" ? { ...output, judgment: "Synthetic" } : output,
+        ),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const result = yield* operation === "resolveMemoryConflict"
+            ? generation.resolveMemoryConflict!(memoryConflict)
+            : generation.generateMemorySummary!(memorySummary);
+          expect(result.result.text).toBe(output.text);
+          expect(result.execution).toEqual({
+            requestedModelSelection: memorySelection,
+            effectiveModel: "grok-mock-default",
+            effectiveProvider: "grok",
+            ...memoryContext,
+          });
+        }),
+      memoryContext,
+    ),
+  );
+  it.effect.each(
+    operations.flatMap((operation) =>
+      ["tool", "permission", "authority", "model"].map((scenario) => ({ operation, scenario })),
+    ),
+  )("$operation rejects $scenario and discards apparent success", ({ operation, scenario }) =>
+    withFakeAcpGrok(
+      {
+        ...(scenario === "tool" ? { GOAT_MEMORY_TOOL: "1" } : {}),
+        ...(scenario === "permission" ? { GOAT_MEMORY_PERMISSION: "1" } : {}),
+        GOAT_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+          ...output,
+          ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+          ...(scenario === "authority" ? { execution: { effectiveModel: "forged" } } : {}),
+        }),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const selection =
+            scenario === "model"
+              ? { ...memorySelection, model: "unsupported-model" }
+              : memorySelection;
+          const failure = yield* (
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!({ ...memoryConflict, modelSelection: selection })
+              : generation.generateMemorySummary!({ ...memorySummary, modelSelection: selection })
+          ).pipe(Effect.flip);
+          expect(failure._tag).toBe("TextGenerationError");
+          if (scenario === "model") expect(failure.cause).toMatchObject({ code: "unavailable" });
+        }),
+      memoryContext,
+    ),
+  );
+
+  it.effect.each(operations)(
+    "%s times out, cancels ACP and removes its isolated workspace",
+    (operation) =>
+      withFakeAcpGrok(
+        { GOAT_MEMORY_STALL: "1" },
+        (generation, tempDir) =>
+          Effect.gen(function* () {
+            const log = NodePath.join(tempDir, "requests.ndjson");
+            const prompting = Effect.tryPromise({
+              try: (signal) =>
+                new Promise<void>((resolve) => {
+                  const watcher = NodeFS.watch(log, () => {
+                    if (
+                      readJsonRpcRequests(log).some(
+                        (request) => request.method === "session/prompt",
+                      )
+                    ) {
+                      watcher.close();
+                      resolve();
+                    }
+                  });
+                  signal.addEventListener("abort", () => watcher.close(), { once: true });
+                }),
+              catch: () =>
+                new M.TextGenerationError({
+                  operation,
+                  detail: "Synthetic ACP readiness watch failed.",
+                }),
+            });
+            const ready = yield* prompting.pipe(Effect.forkChild);
+            const fiber = yield* (
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary)
+            ).pipe(Effect.flip, Effect.forkChild);
+            yield* Fiber.join(ready);
+            yield* TestClock.adjust(180_000);
+            const failure = yield* Fiber.join(fiber);
+            expect(failure.detail).toContain("timed out");
+            const requests = readJsonRpcRequests(log);
+            const cwd = requests.find((request) => request.method === "session/new")?.params?.cwd;
+            expect(typeof cwd).toBe("string");
+            expect(NodeFS.existsSync(String(cwd))).toBe(false);
+            expect(requests.some((request) => request.method === "session/cancel")).toBe(true);
+          }),
+        memoryContext,
+      ).pipe(Effect.provide(TestClock.layer())),
   );
 });

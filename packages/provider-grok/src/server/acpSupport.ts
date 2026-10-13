@@ -12,6 +12,8 @@ import {
 } from "@goat/provider-core/server/memoryGenerationRunner";
 import type { GrokSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
@@ -30,16 +32,64 @@ const GROK_AUTH_METHOD_API_KEY = "xai.api_key";
 const GROK_AUTH_METHOD_CACHED_TOKEN = "cached_token";
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 
-/** ACP capability denial does not disable Grok's native tools or managed hooks. */
-export const requireGrokMemoryIsolation = (operation: MemoryOperationName) =>
-  Effect.fail(
-    new TextGenerationError({
-      operation,
-      detail:
-        "Grok ACP cannot certify that native tools, MCP and hooks are disabled for memory generation.",
-      cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
-    }),
-  );
+/** A fresh home excludes user/project hooks, plugins and MCP; policy tiers cannot be overridden. */
+export const requireGrokMemoryIsolation = Effect.fn("requireGrokMemoryIsolation")(function* (
+  operation: MemoryOperationName,
+  environment: NodeJS.ProcessEnv,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const unavailable = new TextGenerationError({
+    operation,
+    detail: "Grok memory generation cannot isolate managed configuration or copy authentication.",
+    cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+  });
+  return yield* Effect.gen(function* () {
+    for (const file of [
+      "/etc/grok/managed_config.toml",
+      "/etc/grok/requirements.toml",
+      "/etc/grok/config.toml",
+      "/Library/Application Support/ClaudeCode/managed-settings.json",
+      "/etc/claude-code/managed-settings.json",
+    ]) {
+      if (yield* fs.exists(file)) {
+        // Policy tiers may add mandatory hooks before any ACP callback exists.
+        const info = yield* fs.stat(file);
+        if (
+          info.type !== "File" ||
+          info.size > 64_000n ||
+          (yield* fs.readFileString(file)).trim().length > 0
+        )
+          return yield* unavailable;
+      }
+    }
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "goat-grok-memory-" });
+    const home = path.join(root, "profile");
+    const cwd = path.join(root, "workspace");
+    yield* fs.makeDirectory(home);
+    yield* fs.makeDirectory(cwd);
+    const sourceHome =
+      environment.GROK_HOME ?? path.join(environment.HOME ?? process.env.HOME ?? "", ".grok");
+    const auth = path.join(sourceHome, "auth.json");
+    if (yield* fs.exists(auth)) {
+      yield* fs.copyFile(auth, path.join(home, "auth.json"));
+      yield* fs.chmod(path.join(home, "auth.json"), 0o600);
+    }
+    yield* fs.writeFileString(
+      path.join(home, "config.toml"),
+      '[permissions]\ndefaultMode = "default"\n',
+    );
+    return {
+      cwd,
+      environment: {
+        ...environment,
+        HOME: root,
+        GROK_HOME: home,
+        CLAUDE_CONFIG_DIR: path.join(root, "claude"),
+      },
+    };
+  }).pipe(Effect.mapError(() => unavailable));
+});
 
 type GrokAcpRuntimeGrokSettings = Pick<GrokSettings, "binaryPath">;
 
