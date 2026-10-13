@@ -679,6 +679,7 @@ export const make = Effect.gen(function* () {
             acceptedAt: now,
             events,
             effects,
+            allowEffectOnly: true,
             cancelUnsettledEffects: {
               effectTypes: EffectOutbox.PROCESS_BOUND_EFFECT_TYPES,
               reason: detail,

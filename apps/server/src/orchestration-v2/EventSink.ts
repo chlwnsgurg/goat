@@ -148,6 +148,8 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    /** Recover runtime work without changing projections; requires at least one effect. */
+    readonly allowEffectOnly?: boolean;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -666,7 +668,16 @@ const layerBase: Layer.Layer<
             commandId: input.commandId,
             events: normalized,
           });
-          const sequence = storedEvents.at(-1)?.sequence;
+          let sequence = storedEvents.at(-1)?.sequence;
+          if (
+            sequence === undefined &&
+            input.allowEffectOnly === true &&
+            input.effects.length > 0
+          ) {
+            // Effect-only recovery observes the current thread high-water mark. The receipt
+            // and outbox still commit together, and retries reuse this receipt without enqueueing.
+            sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
+          }
           if (sequence === undefined) {
             return yield* Effect.die(
               new Error(`Command ${input.commandId} produced no orchestration events.`),

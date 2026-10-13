@@ -41,6 +41,8 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as CommandReceipts from "./CommandReceiptStore.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
+import * as RuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProviderContinuationRequests from "@goat/provider-core/server/ProviderContinuationRequests";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -78,6 +80,197 @@ const decodeTaskCancelResult = Schema.decodeUnknownSync(OrchestratorMcpTaskCance
 const decodeThreadStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
 const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeTaskStatus = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
+
+it.effect("reattaches a fully running SQLite cloud crash snapshot once without resubmission", () =>
+  Effect.gen(function* () {
+    const instanceId = ProviderInstanceId.make("codex");
+    const previous = yield* makeFakeCloudAdapter(true, instanceId);
+    const resumed = yield* makeFakeCloudAdapter(true, instanceId);
+    let opens = 0;
+    const adapter = {
+      ...resumed.adapter,
+      openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+        (++opens === 1 ? previous : resumed).adapter.openSession(input),
+    };
+    const runtime = layerWithRegistry(
+      { name: "cloud-crash-recovery" },
+      Registry.layerFromAdapters([adapter]),
+      { runEffectWorker: false },
+    );
+    const recovery = RuntimeRecovery.layer.pipe(
+      Layer.provideMerge(runtime),
+      Layer.provideMerge(CommandReceipts.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+      Layer.provide(IdAllocator.layer),
+      Layer.provide(ServerSettings.layerTest()),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const manager = yield* ProviderSessions.ProviderSessionManagerV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+      const threadId = ThreadId.make("thread:cloud-crash");
+      const modelSelection = { instanceId, model: "fake" };
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("command:cloud-crash-thread"),
+        threadId,
+        projectId: ProjectId.make("project:cloud-crash"),
+        title: "Recover accepted cloud work",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "dev",
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:cloud-crash-run"),
+        threadId,
+        messageId: MessageId.make("message:cloud-crash"),
+        text: "Already accepted remotely",
+        attachments: [],
+        dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root" } },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const run = initial.runs[0]!;
+      const attempt = initial.attempts[0]!;
+      const root = initial.nodes.find((node) => node.id === run.rootNodeId)!;
+      const providerThread = initial.providerThreads[0]!;
+      const providerTurnId = ProviderTurnId.make(`provider-turn:fake-cloud:${attempt.id}`);
+      const session = yield* manager.open({
+        threadId,
+        providerSessionId: providerThread.providerSessionId!,
+        modelSelection,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: null,
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        },
+      });
+      const now = yield* DateTime.now;
+      // Persist the crash boundary after remote acceptance, without executing a submission.
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:cloud-crash-run"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...run, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make("event:cloud-crash-attempt"),
+            type: "run-attempt.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...attempt, providerTurnId, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make("event:cloud-crash-root"),
+            type: "node.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...root, providerTurnId, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make("event:cloud-crash-turn"),
+            type: "provider-turn.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerTurnId,
+              providerThreadId: providerThread.id,
+              nodeId: root.id,
+              runAttemptId: attempt.id,
+              nativeTurnRef: {
+                driver: adapter.driver,
+                nativeId: "remote-task-1",
+                strength: "strong",
+              },
+              ordinal: 1,
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("event:cloud-crash-session"),
+            type: "provider-session.updated",
+            threadId,
+            occurredAt: now,
+            payload: session.providerSession,
+          },
+          {
+            id: EventId.make("event:cloud-crash-task"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...providerThread,
+              status: "active",
+              nativeThreadRef: {
+                driver: adapter.driver,
+                nativeId: "native-session-1",
+                strength: "strong",
+              },
+              cloudTask: {
+                taskId: "remote-task-1",
+                status: "running",
+                tracking: "live",
+                source: {
+                  repository: "https://github.com/acme/repo",
+                  branch: "dev",
+                  sha: "a".repeat(40),
+                },
+                localChangesExcluded: true,
+                updatedAt: DateTime.formatIso(now),
+              },
+            },
+          },
+        ],
+      });
+      yield* manager.shutdown;
+      assert.isTrue(Option.isNone(yield* manager.get(session.providerSessionId)));
+      assert.equal(yield* Ref.get(previous.detaches), 1);
+      const crash = yield* orchestrator.getThreadProjection(threadId);
+      const sequence = yield* sink.latestSequence({ threadId });
+      const summary = yield* (yield* RuntimeRecovery.ProviderRuntimeRecoveryService).reconcile(
+        "startup",
+      );
+      assert.equal(summary.terminalizedRuns, 0);
+      assert.equal(yield* sink.latestSequence({ threadId }), sequence);
+      assert.deepEqual(yield* orchestrator.getThreadProjection(threadId), crash);
+      const pending = yield* outbox.claimNext({ workerId: "inspect-recovery", leaseDurationMs: 1 });
+      const reattach = Option.getOrThrow(pending);
+      assert.deepEqual(reattach.request, { type: "provider-turn.reattach", runId: run.id });
+      const receipt = Option.getOrThrow(yield* receipts.getByCommandId(reattach.commandId));
+      assert.equal(receipt.status, "accepted");
+      assert.equal(receipt.resultSequence, sequence);
+      assert.equal((yield* outbox.listByCommandId(reattach.commandId)).length, 1);
+      assert.deepEqual(
+        yield* sink.readByCommandId({ commandId: reattach.commandId }).pipe(Stream.runCollect),
+        [],
+      );
+      yield* outbox.reconcileAfterProcessLoss;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* worker.drain();
+      yield* worker.drain();
+      assert.equal(yield* Ref.get(resumed.attachments), 1);
+      assert.equal(yield* Ref.get(resumed.submissions), 0);
+      assert.equal(yield* Ref.get(resumed.creations), 0);
+      assert.equal(yield* Ref.get(previous.submissions), 0);
+      assert.equal(yield* Ref.get(resumed.cancellations), 0);
+      assert.equal(Option.getOrThrow(yield* outbox.get(reattach.id)).status, "succeeded");
+    }).pipe(Effect.provide(recovery));
+  }).pipe(Effect.scoped),
+);
 
 it.effect(
   "serializes cloud direct, queued and MCP admission before durable second messages exist",
