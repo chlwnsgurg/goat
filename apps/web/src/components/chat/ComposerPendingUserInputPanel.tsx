@@ -5,10 +5,9 @@ import {
   derivePendingUserInputProgress,
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
-import { CheckIcon } from "~/components/solar";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
-import { cn } from "~/lib/utils";
 import { ComposerBanner } from "./ComposerBanner";
+import { PendingUserInputQuestionBody } from "./PendingUserInputQuestionBody";
 
 interface PendingUserInputPanelProps {
   pendingUserInputs: PendingUserInput[];
@@ -122,13 +121,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         autoAdvanceTimerRef.current = null;
       }
     };
-    if (disabled || activeQuestion?.id === undefined) clearAutoAdvance();
+    if (responseDisabled || activeQuestion?.id === undefined) clearAutoAdvance();
     return clearAutoAdvance;
-  }, [activeQuestion?.id, disabled]);
+  }, [activeQuestion?.id, responseDisabled]);
 
   const handleOptionSelection = useCallback(
     (questionId: string, optionValue: string) => {
-      if (disabled || isResponding) return;
+      if (responseDisabled) return;
       if (activeQuestion?.multiSelect) {
         onToggleOption(questionId, optionValue);
         return;
@@ -143,7 +142,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         onAdvanceRef.current();
       }, 200);
     },
-    [activeQuestion, disabled, isResponding, onToggleOption],
+    [activeQuestion, responseDisabled, onToggleOption],
   );
 
   // Keyboard shortcut: number keys 1-9 select corresponding options when focus is
@@ -242,64 +241,19 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       <CollapsiblePanel>
         <ComposerBanner.Scroll>
           <ComposerBanner.Body className="pe-1 pb-1 wrap-anywhere">
-            <p className="text-sm text-foreground/85">{activeQuestion.question}</p>
-            {activeQuestion.multiSelect ? (
-              <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
-            ) : null}
-            <div className="mt-2 space-y-0.5">
-              {activeQuestion.options.map((option, index) => {
-                const optionValue = option.value ?? option.label;
-                const isOptimisticallySelected =
-                  optimisticSingleSelect?.questionId === activeQuestion.id &&
-                  optimisticSingleSelect.optionValue === optionValue;
-                const isSelected =
-                  isOptimisticallySelected ||
-                  (!customAnswerActive && progress.selectedOptionValues.includes(optionValue));
-                const shortcutKey = index < 9 ? index + 1 : null;
-                const className = cn(
-                  "group flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25",
-                  isSelected
-                    ? "bg-muted/55 text-foreground"
-                    : "bg-transparent text-foreground/85 hover:bg-muted/30",
-                  (disabled || isResponding) && "opacity-50 cursor-not-allowed",
-                  !disabled && !isResponding && "cursor-pointer",
-                );
-                const content = (
-                  <>
-                    <div className="min-w-0 flex-1 flex flex-col gap-0.5">
-                      <span className="text-sm font-medium">{option.label}</span>
-                      {option.description && option.description !== option.label ? (
-                        <span className="text-secondary-label text-2xs">{option.description}</span>
-                      ) : null}
-                    </div>
-                    {isSelected ? (
-                      <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                    ) : shortcutKey !== null ? (
-                      <kbd
-                        className={cn(
-                          "flex size-5 shrink-0 items-center justify-center text-3xs font-medium text-muted-foreground tabular-nums",
-                        )}
-                      >
-                        {shortcutKey}
-                      </kbd>
-                    ) : null}
-                  </>
-                );
-                return (
-                  <button
-                    key={`${activeQuestion.id}:${optionValue}`}
-                    type="button"
-                    disabled={disabled || isResponding}
-                    onClick={() => {
-                      handleOptionSelection(activeQuestion.id, optionValue);
-                    }}
-                    className={className}
-                  >
-                    {content}
-                  </button>
-                );
-              })}
-            </div>
+            <PendingUserInputQuestionBody
+              question={activeQuestion}
+              selectedOptionValues={progress.selectedOptionValues}
+              customAnswerActive={customAnswerActive}
+              optimisticOptionValue={
+                optimisticSingleSelect?.questionId === activeQuestion.id
+                  ? optimisticSingleSelect.optionValue
+                  : undefined
+              }
+              disabled={responseDisabled}
+              showShortcuts
+              onSelect={handleOptionSelection}
+            />
           </ComposerBanner.Body>
         </ComposerBanner.Scroll>
       </CollapsiblePanel>
