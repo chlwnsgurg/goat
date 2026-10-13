@@ -1,3 +1,4 @@
+import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { ClaudeSettings, ProviderInstanceId } from "@goat/contracts";
@@ -53,6 +54,7 @@ function makeFakeClaudeBinary(dir: string) {
 
 function withFakeClaudeEnv<A, E, R>(
   input: {
+    memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
     output: string;
     exitCode?: number;
     stderr?: string;
@@ -181,17 +183,229 @@ function withFakeClaudeEnv<A, E, R>(
         }),
     );
 
-    const config = decodeClaudeSettings(input.claudeConfig ?? {});
+    const config = decodeClaudeSettings({
+      ...(input.memoryRunnerContext ? { homePath: tempDir } : {}),
+      ...input.claudeConfig,
+    });
     const textGeneration = yield* makeClaudeTextGeneration(
       config,
       undefined,
       Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
+      input.memoryRunnerContext,
     );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
 
+const memorySelection = M.MemoryModelSelection.make({
+  instanceId: M.ProviderInstanceId.make("claudeAgent"),
+  model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+  options: [],
+});
+const memoryContext = {
+  providerInstanceId: memorySelection.instanceId,
+  environmentId: M.EnvironmentId.make("memory-owner"),
+};
+const memoryId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const memoryRevision = M.MemoryRevision.make({
+  memorySpaceId: M.MemorySpaceId.make(memoryId(1)),
+  memoryId: M.MemoryId.make(memoryId(2)),
+  revisionId: M.MemoryRevisionId.make(memoryId(3)),
+  payloadRef: M.MemoryRevisionId.make(memoryId(3)),
+  operationId: M.MemoryOperationId.make(memoryId(4)),
+  parents: [],
+  scope: { kind: "user" },
+  assertionKind: "inference",
+  provenance: { environmentId: memoryContext.environmentId },
+  createdAtUtc: "2026-10-14T00:00:00.000Z",
+});
+const memoryPayload = M.MemoryPayload.make({
+  text: "Synthetic input",
+  evidence: [],
+  derivedFromMemoryRevisions: [],
+});
+const memorySummary = M.GenerateMemorySummaryInput.make({
+  cwd: process.cwd(),
+  sourceThread: {
+    environmentId: memoryContext.environmentId,
+    threadId: M.ThreadId.make("synthetic-thread"),
+  },
+  sourceWatermark: {
+    fromEventId: M.EventId.make("e1"),
+    toEventId: M.EventId.make("e2"),
+    throughSequence: 2,
+  },
+  messages: [{ messageId: M.MessageId.make("m1"), text: "Synthetic input", completed: true }],
+  modelSelection: memorySelection,
+});
+const memoryConflict = M.ResolveMemoryConflictInput.make({
+  cwd: memorySummary.cwd,
+  memorySpaceId: memoryRevision.memorySpaceId,
+  memoryId: memoryRevision.memoryId,
+  conflictId: M.MemoryConflictId.make(memoryId(8)),
+  heads: [
+    { revision: memoryRevision, payload: memoryPayload },
+    {
+      revision: {
+        ...memoryRevision,
+        revisionId: M.MemoryRevisionId.make(memoryId(5)),
+        payloadRef: M.MemoryRevisionId.make(memoryId(5)),
+      },
+      payload: memoryPayload,
+    },
+  ],
+  modelSelection: memorySelection,
+});
+const memoryOutput = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+const memoryOperations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+
 it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
+  it.effect.each(memoryOperations)(
+    "records the resolved Claude alias and option suffix for %s",
+    (operation) =>
+      withFakeClaudeEnv(
+        {
+          output: JSON.stringify({
+            structured_output:
+              operation === "resolveMemoryConflict"
+                ? { ...memoryOutput, judgment: "Synthetic" }
+                : memoryOutput,
+          }),
+          memoryRunnerContext: memoryContext,
+          argsMustContain: `--model ${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded] --effort high`,
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const selection = M.MemoryModelSelection.make({
+              ...memorySelection,
+              model: SYNTHETIC_CLAUDE_COLLIDING_ALIAS,
+              options: [
+                { id: "contextWindow", value: "expanded" },
+                { id: "effort", value: "high" },
+              ],
+            });
+            const generated =
+              operation === "resolveMemoryConflict"
+                ? yield* generation.resolveMemoryConflict!({
+                    ...memoryConflict,
+                    modelSelection: selection,
+                  })
+                : yield* generation.generateMemorySummary!({
+                    ...memorySummary,
+                    modelSelection: selection,
+                  });
+            expect(generated.execution.effectiveModel).toBe(
+              `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`,
+            );
+            expect(generated.execution.requestedModelSelection).toEqual(selection);
+          }),
+      ),
+  );
+
+  it.effect.each(memoryOperations)("runs %s with tools hooks and MCP disabled", (operation) =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic judgment" }
+              : memoryOutput,
+        }),
+        memoryRunnerContext: memoryContext,
+        cwdMustNotBe: memorySummary.cwd,
+        argsMustContain:
+          "--tools  --disable-slash-commands --strict-mcp-config --permission-mode dontAsk",
+        stdinMustContain: "<untrusted_memory_data>",
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(generated.result.text).toBe(memoryOutput.text);
+          expect(generated.execution).toEqual({
+            requestedModelSelection: memorySelection,
+            effectiveModel: `${SYNTHETIC_CLAUDE_STANDARD_MODEL}[expanded]`,
+            effectiveProvider: "claudeAgent",
+            providerInstanceId: memoryContext.providerInstanceId,
+            environmentId: memoryContext.environmentId,
+          });
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)("preserves frozen Claude options for %s", (operation) =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic judgment" }
+              : memoryOutput,
+        }),
+        memoryRunnerContext: memoryContext,
+        argsMustContain: '--settings {"disableAllHooks":true,"alwaysThinkingEnabled":false}',
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const selection = M.MemoryModelSelection.make({
+            ...memorySelection,
+            model: SYNTHETIC_CLAUDE_THINKING_MODEL,
+            options: [
+              { id: "thinking", value: false },
+              { id: "effort", value: "high" },
+            ],
+          });
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!({
+                  ...memoryConflict,
+                  modelSelection: selection,
+                })
+              : yield* generation.generateMemorySummary!({
+                  ...memorySummary,
+                  modelSelection: selection,
+                });
+          expect(generated.execution.requestedModelSelection).toEqual(selection);
+          expect(generated.execution.effectiveModel).toBe(SYNTHETIC_CLAUDE_THINKING_MODEL);
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)("rejects forged authority JSON for %s", (operation) =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output: { ...memoryOutput, judgment: "Forged", environmentId: "forged" },
+        }),
+        memoryRunnerContext: memoryContext,
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(exit._tag).toBe("Failure");
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)(
+    "rejects missing owner identity before Claude spawn for %s",
+    (operation) =>
+      withFakeClaudeEnv(
+        { output: "{}", memoryRunnerContext: { providerInstanceId: memorySelection.instanceId } },
+        (generation) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary),
+            );
+            expect(exit._tag).toBe("Failure");
+          }),
+      ),
+  );
   it.effect("forwards Claude thinking settings without passing unsupported effort", () =>
     withFakeClaudeEnv(
       {

@@ -1,3 +1,8 @@
+import { ProviderDriverKind } from "@goat/contracts";
+import {
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 /**
  * ClaudeTextGeneration – Text generation layer using the Claude CLI.
  *
@@ -79,6 +84,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   modelCatalog: Effect.Effect<ClaudeModelCatalog> = Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG),
+  memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -130,10 +136,15 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     modelSelection,
     investigate,
   }: TextGenerationOperations.Request<S>): Effect.fn.Return<
-    S["Type"],
+    { readonly result: S["Type"]; readonly effectiveModel: string },
     TextGenerationError,
     S["DecodingServices"]
   > {
+    if (TextGenerationOperations.isMemoryOperation(operation) && !claudeSettings.enabled)
+      return yield* new TextGenerationError({
+        operation,
+        detail: "Claude is disabled in GOAT settings.",
+      });
     const catalog = yield* scopedModelCatalog;
     const resolvedModelSelection = {
       ...modelSelection,
@@ -144,6 +155,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       toJsonSchemaObject(outputSchemaJson),
       "Failed to encode structured output schema.",
     );
+    const effectiveModel = resolveClaudeCatalogApiModelId(catalog, resolvedModelSelection);
     const caps = getClaudeCatalogModelCapabilities(catalog, resolvedModelSelection.model);
     const descriptors = getProviderOptionDescriptors({
       caps,
@@ -184,7 +196,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       // Titles and channel reception need only the supplied prompt, not configuration from
       // the checkout.
       const workingDirectory =
-        operation === "generateThreadTitle" || operation === "generateChannelReception"
+        operation === "generateThreadTitle" ||
+        operation === "generateChannelReception" ||
+        TextGenerationOperations.isMemoryOperation(operation)
           ? yield* fileSystem
               .makeTempDirectoryScoped({ prefix: "goat-claude-title-" })
               .pipe(
@@ -202,7 +216,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "--json-schema",
           jsonSchemaStr,
           "--model",
-          resolveClaudeCatalogApiModelId(catalog, resolvedModelSelection),
+          effectiveModel,
           ...(cliEffort ? ["--effort", cliEffort] : []),
           "--settings",
           settingsJson,
@@ -303,7 +317,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       : output.findLast((message) => message.type === "result");
 
     const decodeOutput = Schema.decodeEffect(outputSchemaJson);
-    return yield* decodeOutput(envelope?.structured_output).pipe(
+    const result = yield* decodeOutput(envelope?.structured_output).pipe(
       Effect.catchTags({
         SchemaError: (cause) =>
           Effect.fail(
@@ -315,9 +329,19 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ),
       }),
     );
+    return { result, effectiveModel };
   });
 
-  return TextGenerationOperations.fromRunner("ClaudeTextGeneration", runClaudeJson, {
-    channelReception: true,
-  });
+  return TextGenerationOperations.fromRunner(
+    "ClaudeTextGeneration",
+    (request) => runClaudeJson(request).pipe(Effect.map((selected) => selected.result)),
+    {
+      memoryRunner: withMemoryExecution(
+        memoryRunnerContext,
+        ProviderDriverKind.make("claudeAgent"),
+        runClaudeJson,
+      ),
+      channelReception: true,
+    },
+  );
 });
