@@ -43,7 +43,24 @@ const strictSchema = <S extends Schema.Constraint>(schema: S) =>
       toCodecJson: () => undefined,
     },
   );
-const struct = <F extends Schema.Struct.Fields>(fields: F) => strictSchema(Schema.Struct(fields));
+const struct = <F extends Schema.Struct.Fields>(fields: F) => {
+  const schema = Schema.Struct(fields);
+  // Effect's empty struct parser only rejects nullish values and preserves all others.
+  return strictSchema(
+    Object.keys(fields).length === 0
+      ? schema.check(
+          Schema.makeFilter(
+            (value) =>
+              typeof value === "object" &&
+              value !== null &&
+              !Array.isArray(value) &&
+              Reflect.ownKeys(value).length === 0,
+            { expected: "an object with no own keys" },
+          ),
+        )
+      : schema,
+  );
+};
 // TaggedError construction uses its internal struct rather than the overridden ast.
 const strictMakeOptions = (options?: Schema.MakeOptions): Schema.MakeOptions => ({
   ...options,

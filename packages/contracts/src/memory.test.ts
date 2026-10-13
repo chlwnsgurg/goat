@@ -182,6 +182,38 @@ describe("memory canonical contracts", () => {
       expect(() => Schema.decodeUnknownSync(schema, { onExcessProperty: "ignore" })(raw)).toThrow();
     }
   });
+  it("requires empty objects at every empty memory input boundary", () => {
+    for (const [schema, rpc] of [
+      [M.MemorySyncStatusInput, M.WsMemorySyncStatusRpc],
+      [M.MemoryHubSettingsGetInput, M.WsMemoryHubSettingsGetRpc],
+    ] as const) {
+      const encode = Schema.encodeUnknownSync(schema);
+      const rpcDecode = Schema.decodeUnknownSync(Schema.toCodecJson(rpc.payloadSchema));
+      const rpcEncode = Schema.encodeUnknownSync(Schema.toCodecJson(rpc.payloadSchema));
+      round(schema, {});
+      expect(schema.make({})).toEqual({});
+      expect(rpcDecode({})).toEqual({});
+      expect(rpcEncode({})).toEqual({});
+      for (const raw of [
+        { endpoint: "x" },
+        [],
+        ["x"],
+        "x",
+        1,
+        false,
+        null,
+        undefined,
+        { [Symbol("extra")]: true },
+        Object.defineProperty({}, "extra", { value: true }),
+      ]) {
+        rejects(schema, raw);
+        expect(() => encode(raw)).toThrow();
+        expect(() => schema.make(raw as never)).toThrow();
+        expect(() => rpcDecode(raw)).toThrow();
+        expect(() => rpcEncode(raw)).toThrow();
+      }
+    }
+  });
   it("encodes events without memory or judgment bodies", () => {
     const value = decode(M.MemoryOperation, operation);
     const json = M.encodeMemoryEventMetadata(value);
