@@ -40,6 +40,7 @@ export class MemoryQuotaService extends Context.Service<
 const receiptJson = Schema.encodeEffect(
   Schema.fromJsonString(Schema.Union([M.MemoryHubReceipt, M.MemoryMutationReceipt])),
 );
+const resolutionPayloadJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolutionPayload));
 const payloadJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const suppressionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemorySuppressionRecord));
 const sampleDecode = Schema.decodeUnknownEffect(M.MemoryStorageSample);
@@ -303,7 +304,14 @@ const make = Effect.gen(function* () {
           charge(
             "history",
             usage.historyBytes,
-            oldPayloadBytes,
+            oldPayloadBytes +
+              (op.kind === "resolve"
+                ? utf8(
+                    yield* resolutionPayloadJson(op.resolutionPayload).pipe(
+                      Effect.mapError(storageError),
+                    ),
+                  )
+                : 0),
             M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES,
           );
           charge(

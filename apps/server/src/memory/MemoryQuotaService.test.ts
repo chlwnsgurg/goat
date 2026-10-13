@@ -98,6 +98,39 @@ const forget = (n = 50) =>
       sourceExclusions: [],
     },
   });
+const resolutionOperation = () => {
+  const base = operation(5);
+  if (base.kind === "forget") throw new Error("Fixture kind");
+  const parents = [M.MemoryRevisionId.make(id(13)), M.MemoryRevisionId.make(id(14))];
+  return decodeOperation({
+    ...base,
+    kind: "resolve",
+    expectedHeads: parents,
+    revision: { ...base.revision, parents },
+    conflictId: id(600),
+    fencingToken: 7,
+    resolution: {
+      resolutionId: id(500),
+      memorySpaceId: space,
+      memoryId: memory,
+      inputRevisionIds: parents,
+      inputPayloadRefs: parents,
+      judgmentRef: id(500),
+      requestedModelSelection: { instanceId: "fixture", model: "fixture" },
+      effectiveProvider: "codex",
+      effectiveModel: "fixture",
+      resolvingEnvironmentId: env,
+      fencingToken: 7,
+      resultRevisionId: base.revision.revisionId,
+      appliedAtUtc: now,
+      revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+    },
+    resolutionPayload: { resolutionId: id(500), judgment: "한글 judgment" },
+  });
+};
+const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
+const encodeJudgment = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolutionPayload));
+const encodeHeads = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(M.MemoryRevisionId)));
 const sample = (day: number, value = day): M.MemoryStorageSample => {
   const instant = DateTime.add(DateTime.makeUnsafe(now), { days: day });
   return {
@@ -321,6 +354,63 @@ describe("MemoryQuotaService", () => {
         extra ? "active" : "forgotten",
       );
     }).pipe(Effect.provide(services)),
+  );
+  it.effect.each([0, 1])(
+    "includes encoded judgment at the actual resolve history boundary (+%s)",
+    (extra) =>
+      Effect.gen(function* () {
+        const quota = yield* Quota.MemoryQuotaService;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* quota.commit(decision(operation(3)), env, Effect.void);
+        yield* quota.commit(decision(operation(4)), env, Effect.void);
+        const op = resolutionOperation();
+        if (op.kind !== "resolve") throw new Error("Fixture kind");
+        yield* sql`UPDATE memory_items SET heads_json=${yield* encodeHeads(op.revision.parents)} WHERE space=${space} AND memory_id=${memory}`;
+        const usage = yield* store.usage(space, { kind: "user" });
+        const original = operation();
+        if (original.kind === "forget") throw new Error("Fixture kind");
+        const oldBytes =
+          2 * new TextEncoder().encode(yield* encodePayload(original.payload)).length;
+        const judgmentBytes = new TextEncoder().encode(
+          yield* encodeJudgment(op.resolutionPayload),
+        ).length;
+        const filler =
+          M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES -
+          usage.historyBytes -
+          oldBytes -
+          judgmentBytes +
+          extra;
+        yield* sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'history-budget',${id(900)},CAST(zeroblob(${filler}) AS TEXT),'[]')`;
+        const result = yield* Effect.exit(
+          quota.commit(
+            {
+              ...decision(op),
+              execution: {
+                requestedModelSelection: op.resolution.requestedModelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: "fixture",
+                providerInstanceId: op.resolution.requestedModelSelection.instanceId,
+                environmentId: env,
+              },
+            },
+            env,
+            Effect.void,
+          ),
+        );
+        assert.strictEqual(result._tag, extra ? "Failure" : "Success");
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)
+            .length,
+          extra ? 0 : 1,
+        );
+        assert.strictEqual(
+          (yield* store.usage(space, { kind: "user" })).historyBytes,
+          extra
+            ? M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES - oldBytes - judgmentBytes + 1
+            : M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES,
+        );
+      }).pipe(Effect.provide(services)),
   );
   it.effect("unknown-ID forget reserves at lifetime equality but refuses plus one", () =>
     Effect.gen(function* () {
