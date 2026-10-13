@@ -53,6 +53,7 @@ import { useMaterialFabScroll } from "../home/MaterialFabScrollContext";
 import { SidebarFilterButton } from "./sidebar-filter-button";
 import { createSidebarHeaderItems } from "./sidebar-native-header-items";
 import { SidebarNavigationShell } from "./sidebar-navigation-shell";
+import { DecisionInboxRow } from "../decisions/DecisionInboxRow";
 import {
   ThreadListV2PendingRow,
   ThreadListV2Row,
@@ -86,6 +87,7 @@ interface ThreadNavigationSidebarProps {
   readonly width: number;
   readonly visible: boolean;
   readonly selectedThreadKey: string | null;
+  readonly onOpenDecisions: () => void;
   readonly onOpenSettings: () => void;
   readonly onOpenEnvironmentSettings: () => void;
   readonly onNewThreadOnBranch: (thread: EnvironmentThreadShell) => void;
@@ -934,6 +936,7 @@ function ThreadNavigationSidebarPane(
             <GestureDetector gesture={sidebarScrollGesture}>
               <LegendList
                 data={listItems}
+                ListHeaderComponent={<DecisionInboxRow onPress={props.onOpenDecisions} />}
                 drawDistance={500}
                 estimatedItemSize={64}
                 extraData={listExtraData}
@@ -994,12 +997,16 @@ function ThreadNavigationSidebarPane(
         }
       >
         {Platform.OS === "android" && listItems.length === 0 ? (
-          <View className="flex-1 items-center justify-center">{listEmpty}</View>
+          <View className="flex-1">
+            <DecisionInboxRow onPress={props.onOpenDecisions} />
+            <View className="flex-1 items-center justify-center">{listEmpty}</View>
+          </View>
         ) : (
           <SwipeableScrollGateProvider enabled={swipeEnabled}>
             <GestureDetector gesture={sidebarScrollGesture}>
               <LegendList
                 data={listItems}
+                ListHeaderComponent={<DecisionInboxRow onPress={props.onOpenDecisions} />}
                 drawDistance={500}
                 estimatedItemSize={64}
                 extraData={listExtraData}
