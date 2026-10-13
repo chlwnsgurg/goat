@@ -1508,6 +1508,7 @@ export function threadShellFromProjection(
     ...(projection.thread.launchedBy === undefined
       ? {}
       : { launchedBy: projection.thread.launchedBy }),
+    ...(projection.thread.sideChatOf == null ? {} : { sideChatOf: projection.thread.sideChatOf }),
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
       : { linkedPullRequest: projection.thread.linkedPullRequest }),
@@ -1779,6 +1780,7 @@ function shellFromState(input: {
     ...(input.state.thread.launchedBy === undefined
       ? {}
       : { launchedBy: input.state.thread.launchedBy }),
+    ...(input.state.thread.sideChatOf == null ? {} : { sideChatOf: input.state.thread.sideChatOf }),
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
       : { linkedPullRequest: input.state.thread.linkedPullRequest }),
