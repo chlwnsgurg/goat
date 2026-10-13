@@ -20,6 +20,10 @@ once it is up: `$HOME/.goat`, not the local default.
 `packages/ssh/src/command.ts` builds the `ssh` argv and runs it. `packages/ssh/src/auth.ts` is the
 password-prompt and child-environment helper. `packages/ssh/src/errors.ts` is the tagged errors
 (`SshCommandError`, `SshLaunchError`, `SshPairingError`, and the rest).
+When ssh itself cannot connect (exit 255 with a connect, resolve, or banner timeout), the
+`SshCommandError` message names the alias and the address ssh dialled. `prepareRemoteRuntime`
+passes SSH errors through unchanged, so an unreachable host never reads as a runtime archive
+problem; only an `SshLaunchError` with reason `archive-unavailable` asks for an archive.
 
 ## Remote server
 
@@ -97,11 +101,15 @@ drains for the full window.
 After `drained`, the script runs `__ssh-helper supervise` under `nohup` so a dropped SSH
 session cannot strand the host. The supervisor:
 
-1. Waits for the old PID to exit, then backs up `statev2.sqlite`.
+1. Waits for the old PID to exit, then backs up `statev2.sqlite` while it holds the userdata's
+   `server-owner.lock`. If another server holds that lock, it starts nothing and fails.
 2. Starts the new runner on the same port and requires a handshake: a descriptor with the target
-   version, a new `instanceId`, and compatible ranges.
+   version, a new `instanceId`, and compatible ranges. The runner gets `GOAT_SSH_REPLACEMENT_ID`,
+   so the new server records itself in the lock's owner log as this replacement.
 3. On failure, stops only the child it started and restores the database and the previous
-   `run-t3.sh`. Then it starts the previous version (rollback).
+   `run-t3.sh`. Then it starts the previous version (rollback). The database is restored only
+   when the owner log since the backup names nobody but the supervisor and its replacement, so
+   another server's writes are never overwritten.
 
 After a rollback to a compatible version, the client attaches to it.
 
