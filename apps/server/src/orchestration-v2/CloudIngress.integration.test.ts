@@ -38,6 +38,7 @@ import {
 } from "@goat/provider-core/server/ProviderAdapter";
 import * as TestClock from "effect/testing/TestClock";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as CommandReceipts from "./CommandReceiptStore.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -1011,6 +1012,14 @@ it.effect.each([
     savedStart: true,
   },
   {
+    taskStatus: "unknown",
+    previousOrdinal: 0,
+    recordedOrdinal: 1,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: true,
+  },
+  {
     taskStatus: "succeeded",
     previousOrdinal: 4,
     recordedOrdinal: 5,
@@ -1142,11 +1151,41 @@ it.effect.each([
           ),
         },
       );
+      const mcp = McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(
+          Layer.merge(
+            runtime,
+            CommandReceipts.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        ),
+        Layer.provide(Registry.layerFromAdapters([adapter])),
+        Layer.provide(Layer.mock(Projects.ProjectService)({ getById: () => Effect.succeedNone })),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        ),
+        Layer.provide(Layer.mock(ScheduledTasks.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(Secrets.SecretRequests)({})),
+        Layer.provide(Layer.mock(RemoteDispatch.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatches.LaunchWatchService)({ find: () => Effect.succeed(null) }),
+        ),
+        Layer.provide(
+          ThreadResults.layer.pipe(
+            Layer.provide(runtime),
+            Layer.provide(SqlitePersistence.layerMemory),
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const sink = yield* EventSink.EventSinkV2;
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
         const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
         const parentId = ThreadId.make("thread:recovery-parent");
         yield* orchestrator.dispatch({
           type: "thread.create",
@@ -1300,6 +1339,65 @@ it.effect.each([
           assert.deepEqual(yield* orchestrator.getThreadProjection(childId), saved);
           assert.equal(yield* Ref.get(fake.cancellations), 0);
         }
+        // Both public Stop paths must refuse recorded cloud work before recovery attaches
+        // a runtime, including unknown status and results awaiting terminal ingestion.
+        const stopCommandId = CommandId.make("command:recovery-thread-stop-untracked");
+        const stopError = yield* orchestrator
+          .dispatch({ type: "thread.stop", commandId: stopCommandId, threadId: childId })
+          .pipe(Effect.flip);
+        assert.include(Cause.pretty(Cause.fail(stopError)), "Remote work may continue");
+        assert.equal(
+          Option.getOrThrow(yield* receipts.getByCommandId(stopCommandId)).status,
+          "rejected",
+        );
+        assert.deepEqual(yield* outbox.listByCommandId(stopCommandId), []);
+        const scope: McpInvocationContext.McpInvocationScope = {
+          environmentId: EnvironmentId.make("env:cloud-recovery"),
+          requestNamespace: "cloud-recovery",
+          thread: {
+            threadId: parentId,
+            providerSessionId: "ps:recovery-parent",
+            providerInstanceId: instanceId,
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 0,
+        };
+        const cancelled = yield* (yield* McpServer.McpServer)
+          .callTool({
+            name: "task_cancel",
+            arguments: { taskId: task.id, clientRequestId: "stop-untracked" },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+            Effect.provideService(McpSchema.McpServerClient, cloudMcpClient),
+          );
+        assert.isTrue(cancelled.isError);
+        assert.isUndefined(cancelled.structuredContent);
+        const failureText = cancelled.content[0];
+        assert.equal(failureText?.type, "text");
+        if (failureText?.type !== "text") return;
+        const failure = JSON.parse(failureText.text);
+        assert.equal(failure.code, "task_not_cancellable");
+        assert.include(failure.message, "Remote work may continue");
+        assert.include(failure.message, "retry");
+        const cancelCommandId = CommandId.make(
+          "command:mcp:cloud-recovery:cancel-task:stop-untracked",
+        );
+        assert.equal(
+          Option.getOrThrow(yield* receipts.getByCommandId(cancelCommandId)).status,
+          "rejected",
+        );
+        assert.deepEqual(yield* outbox.listByCommandId(cancelCommandId), []);
+        const afterStops = yield* orchestrator.getThreadProjection(childId);
+        assert.deepEqual(afterStops, saved);
+        assert.isFalse(afterStops.turnItems.some((item) => item.type === "run_interrupt_request"));
+        assert.equal(afterStops.runs[0]?.status, "running");
+        assert.equal(afterStops.attempts[0]?.status, "running");
+        assert.equal(afterStops.nodes.find((node) => node.id === root.id)?.status, "running");
+        const parentAfterStops = yield* orchestrator.getThreadProjection(parentId);
+        assert.deepEqual(parentAfterStops.subagents[0], task);
+        assert.equal(yield* Ref.get(fake.cancellations), 0);
         const commandId = CommandId.make("command:recovery-reattach");
         const effectId = "effect:recovery-reattach";
         const afterSequence = yield* orchestrator.getThreadEventSequence(childId);
@@ -1395,6 +1493,6 @@ it.effect.each([
             ?.state,
           "claimed",
         );
-      }).pipe(Effect.provide(runtime));
+      }).pipe(Effect.provide(mcp));
     }).pipe(Effect.scoped),
 );

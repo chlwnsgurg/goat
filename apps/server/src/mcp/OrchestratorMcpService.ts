@@ -2911,7 +2911,11 @@ const make = Effect.gen(function* () {
               Effect.mapError((error) =>
                 failure(
                   "task_not_cancellable",
-                  `Unable to stop delegated task ${input.taskId}: ${errorMessage(error)}`,
+                  `Unable to stop delegated task ${input.taskId}: ${errorMessage(error)}${
+                    current.cloudTask === undefined
+                      ? ""
+                      : " Remote work may continue; check cloud tracking and cancellation support before retrying."
+                  }`,
                 ),
               ),
             );

@@ -10555,6 +10555,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const activeCloudTask =
         cloudThread?.cloudTask?.status === "running" ||
         cloudThread?.cloudTask?.status === "submitting";
+      const hasRecordedCloudTask = cloudThread?.cloudTask !== undefined;
       if (activeCloudTask && cloudThread !== undefined) {
         const adapter = yield* providerAdapters
           .get(cloudThread.providerInstanceId)
@@ -10615,7 +10616,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           yield* Ref.update(effects, (existing) => [...existing, ...enqueued]);
           return interrupted.value;
         }
-        if (activeCloudTask) return yield* Effect.failCause(interrupted.cause);
+        // A recorded remote task can still run while its status is unknown or its result
+        // awaits terminal ingestion. Only local work may use the Stop fallback.
+        if (hasRecordedCloudTask) return yield* Effect.failCause(interrupted.cause);
         yield* Effect.logWarning("thread.stop could not interrupt the running turn", {
           threadId: command.threadId,
           runId: target.id,
