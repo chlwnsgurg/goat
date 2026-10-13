@@ -2424,7 +2424,12 @@ const make = Effect.gen(function* () {
             generation: number;
             scanner_policy_version: number;
             deferred_json: string;
-          }>`SELECT space,memory_id,generation,scanner_policy_version,deferred_json FROM memory_items WHERE status!='forgotten'`,
+          }>`SELECT i.space,i.memory_id,i.generation,i.scanner_policy_version,i.deferred_json FROM memory_items i
+          WHERE i.status!='forgotten' AND EXISTS (SELECT 1 FROM json_each(i.deferred_json) d
+            WHERE json_extract(d.value,'$.state')='held' AND (
+              (json_extract(d.value,'$.kind')='scanner' AND json_extract(d.value,'$.reason')='secret_detected' AND i.scanner_policy_version<${scannerPolicyVersion}) OR
+              (json_extract(d.value,'$.kind')='index' AND json_extract(d.value,'$.reason')='fts_braked' AND NOT EXISTS (SELECT 1 FROM memory_fts_maintenance_state WHERE state='braked'))))
+          ORDER BY i.space,i.memory_id LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS}`,
         );
         const brake = yield* stored(
           "deferred-brake",
@@ -2432,15 +2437,22 @@ const make = Effect.gen(function* () {
         );
         for (const row of rows) {
           const deferred = yield* deferredCodec.decode(row.deferred_json, strict);
-          const updated = deferred.map((d) =>
-            d.state === "held" &&
-            ((d.kind === "scanner" &&
-              d.reason === "secret_detected" &&
-              row.scanner_policy_version < scannerPolicyVersion) ||
-              (d.kind === "index" && d.reason === "fts_braked" && !brake.length))
-              ? { ...d, state: "pending" as const, dueAt: now, claimedBy: null, claimedUntil: null }
-              : d,
-          );
+          const updated = deferred.map((d) => {
+            const { scannerCursor: _cursor, ...reset } = d;
+            return d.state === "held" &&
+              ((d.kind === "scanner" &&
+                d.reason === "secret_detected" &&
+                row.scanner_policy_version < scannerPolicyVersion) ||
+                (d.kind === "index" && d.reason === "fts_braked" && !brake.length))
+              ? {
+                  ...(d.kind === "scanner" ? reset : d),
+                  state: "pending" as const,
+                  dueAt: now,
+                  claimedBy: null,
+                  claimedUntil: null,
+                }
+              : d;
+          });
           yield* stored(
             "deferred-release",
             sql`UPDATE memory_items SET deferred_json=${yield* deferredCodec.encode(updated)} WHERE space=${row.space} AND memory_id=${row.memory_id} AND generation=${row.generation}`,

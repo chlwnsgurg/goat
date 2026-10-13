@@ -1253,6 +1253,46 @@ describe("MemoryStore", () => {
       );
     }).pipe(Effect.provide(live)),
   );
+  it.effect(
+    "recovers only eligible held rows in bounded batches and leaves idle items untouched",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* seedDeferred(1000, [deferredWork("scanner")]);
+        yield* seedDeferred(2000, [deferredWork("index", { state: "held", reason: "fts_braked" })]);
+        yield* store.putFtsState({ ...(yield* store.ftsState(env)), state: "braked" });
+        for (let index = 1; index <= 101; index++) {
+          yield* seedDeferred(1000 + index, [
+            deferredWork("scanner", {
+              state: "held",
+              reason: "secret_detected",
+              scannerCursor: "old-policy-cursor",
+            }),
+          ]);
+        }
+        yield* sql`CREATE TABLE recovery_updates (memory_id TEXT)`;
+        yield* sql`CREATE TRIGGER count_recovery AFTER UPDATE ON memory_items BEGIN INSERT INTO recovery_updates VALUES (NEW.memory_id); END`;
+        yield* store.recoverDeferred(1, 0);
+        assert.strictEqual((yield* sql`SELECT * FROM recovery_updates`).length, 100);
+        yield* store.recoverDeferred(1, 0);
+        assert.strictEqual((yield* sql`SELECT * FROM recovery_updates`).length, 101);
+        yield* store.recoverDeferred(1, 0);
+        assert.strictEqual((yield* sql`SELECT * FROM recovery_updates`).length, 101);
+        assert.strictEqual(
+          (yield* sql`SELECT * FROM recovery_updates WHERE memory_id IN (${id(1000)},${id(2000)})`)
+            .length,
+          0,
+        );
+        const resumed = (yield* store.readDeferred(0, 100)).find(
+          (row) => row.memoryId === id(1001),
+        )!;
+        assert.isUndefined(resumed.scannerCursor);
+        yield* store.putFtsState({ ...(yield* store.ftsState(env)), state: "open" });
+        yield* store.recoverDeferred(1, 0);
+        assert.strictEqual((yield* sql`SELECT * FROM recovery_updates`).length, 102);
+      }).pipe(Effect.provide(live)),
+  );
   it.effect("recovers global parked work with bounded pages after event compaction", () =>
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
