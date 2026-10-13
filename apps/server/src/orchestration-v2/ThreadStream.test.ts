@@ -1,5 +1,9 @@
 import {
   EventId,
+  NodeId,
+  RuntimeRequestId,
+  ProviderSessionId,
+  type OrchestrationV2RuntimeRequest,
   OrchestrationV2ThreadStreamItem,
   ThreadId,
   TurnItemId,
@@ -14,6 +18,7 @@ import { boundedSnapshotProjection } from "@goat/shared/orchestrationV2BoundedSn
 
 import {
   buildBoundedThreadStreamSnapshot,
+  boundedSnapshotResponseFields,
   decideThreadResume,
   isThreadReplayRawPayloadSafe,
   threadReplayEncodedBytes,
@@ -21,6 +26,7 @@ import {
   THREAD_RESUME_MAX_REPLAY_ENCODED_BYTES,
   THREAD_RESUME_MAX_REPLAY_EVENTS,
 } from "./ThreadStream.ts";
+import { buildBoundedThreadProjection, decodeThreadHistoryCursor } from "./threadHistoryPaging.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
 
 const NOW = DateTime.makeUnsafe("2026-09-08T00:00:00.000Z");
@@ -109,6 +115,97 @@ function timelineProjection(itemCount: number): OrchestrationV2ThreadProjection 
     visibleTurnItems,
     updatedAt: NOW,
   } as unknown as OrchestrationV2ThreadProjection;
+}
+
+function pendingDecisionFixture() {
+  const base = {
+    threadId: THREAD_ID,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    status: "waiting" as const,
+    title: null,
+    startedAt: NOW,
+    completedAt: null,
+    updatedAt: NOW,
+  };
+  const question = {
+    ...base,
+    id: TurnItemId.make("d10-question-item"),
+    ordinal: 1,
+    type: "user_input_request",
+    requestId: RuntimeRequestId.make("d10-question"),
+    responseMode: "message",
+    questions: [
+      {
+        id: "q",
+        header: "Choice",
+        question: "Choose a destination",
+        options: [{ label: "One", description: "First destination", value: "  native\t" }],
+        multiSelect: false,
+        allowCustomAnswer: true,
+        initialAnswer: "  draft\n",
+      },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const approval = {
+    ...base,
+    id: TurnItemId.make("d10-approval-item"),
+    ordinal: 2,
+    type: "approval_request",
+    requestId: RuntimeRequestId.make("d10-approval"),
+    requestKind: "command",
+    prompt: "Run the requested command?",
+    appName: "D10 fixture",
+    options: [
+      { decision: "acceptForSession", label: "Allow this session", warning: "Fixture caution" },
+      { decision: "decline", label: "Decline" },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const requestBase = {
+    nodeId: NodeId.make("d10-node"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    status: "pending" as const,
+    createdAt: NOW,
+    resolvedAt: null,
+  };
+  const requests: OrchestrationV2RuntimeRequest[] = [
+    {
+      ...requestBase,
+      id: question.requestId,
+      kind: "user_input",
+      responseCapability: { type: "message" },
+    },
+    {
+      ...requestBase,
+      id: approval.requestId,
+      kind: "command",
+      responseCapability: {
+        type: "live",
+        providerSessionId: ProviderSessionId.make("d10-session"),
+      },
+    },
+  ];
+  return { question, approval, requests };
+}
+
+function pendingDecisionProjection() {
+  const base = timelineProjection(80);
+  const { question, approval, requests } = pendingDecisionFixture();
+  const commands = base.visibleTurnItems.map((entry) => ({
+    ...entry,
+    item: { ...entry.item, ordinal: entry.item.ordinal + 2 },
+  }));
+  return {
+    ...base,
+    runtimeRequests: requests,
+    turnItems: [question, approval, ...commands.map((entry) => entry.item)],
+    visibleTurnItems: commands,
+  };
 }
 
 describe("decideThreadResume", () => {
@@ -304,6 +401,7 @@ describe("compact bounded snapshots", () => {
   it.each([
     ["linear", () => timelineProjection(80)],
     ["fork with retained interrupt request", forkProjection],
+    ["pending question and approval dependencies", pendingDecisionProjection],
   ])("restores the exact opted-out snapshot for %s threads", (_, makeProjection) => {
     const base = makeProjection();
     // The shared fixture omits a model; the wire codec requires one.
@@ -331,7 +429,46 @@ describe("compact bounded snapshots", () => {
     if (decodedFull.kind !== "snapshot" || decodedCompact.kind !== "snapshot") {
       throw new Error("Expected snapshots");
     }
-    expect(boundedSnapshotProjection(decodedCompact)).toEqual(decodedFull.projection);
+    const restored = boundedSnapshotProjection(decodedCompact);
+    expect(restored).toEqual(decodedFull.projection);
+    if (base.runtimeRequests.length > 0) {
+      const { question, approval } = pendingDecisionFixture();
+      expect(compact.projection.turnItems).toEqual([question, approval]);
+      expect(restored.turnItems.filter((item) => item.type === "user_input_request")).toEqual([
+        question,
+      ]);
+      expect(restored.turnItems.filter((item) => item.type === "approval_request")).toEqual([
+        approval,
+      ]);
+      expect(new Set(restored.turnItems.map((item) => item.id)).size).toBe(
+        restored.turnItems.length,
+      );
+      expect(
+        restored.visibleTurnItems.every((entry) => entry.item.type === "command_execution"),
+      ).toBe(true);
+      expect(
+        restored.visibleTurnItems.some(
+          (entry) => entry.sourceItemId === question.id || entry.sourceItemId === approval.id,
+        ),
+      ).toBe(false);
+      expect(full.hasMoreHistory).toBe(true);
+      expect(compact.hasMoreHistory).toBe(true);
+      expect(compact.historyCursor).toBe(full.historyCursor);
+      expect(restored.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual(
+        Array.from({ length: 75 }, (_, index) => `item-${index + 5}`),
+      );
+      expect(decodeThreadHistoryCursor(full.historyCursor!).si).toBe("item-5");
+      const bounded = buildBoundedThreadProjection({ projection, snapshotSequence: 44 });
+      const fields = boundedSnapshotResponseFields({ bounded, compactTurnItems: true });
+      const fullFields = boundedSnapshotResponseFields({ bounded, compactTurnItems: false });
+      expect(fields.historyCursor).toBe(full.historyCursor);
+      expect(fullFields.historyCursor).toBe(full.historyCursor);
+      expect(fields.hasMoreHistory).toBe(true);
+      expect(fullFields.hasMoreHistory).toBe(true);
+      expect(fields.projection.turnItems).toEqual([question, approval]);
+      expect(boundedSnapshotProjection(fields)).toEqual(fullFields.projection);
+      expect(fields.projection.visibleTurnItems).toEqual(full.projection.visibleTurnItems);
+    }
   });
 
   it("keeps the retained interrupt request outside the visible window", () => {
