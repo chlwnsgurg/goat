@@ -311,6 +311,7 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { GoatBotSidebarRow } from "./goatBot/GoatBotSidebarRow";
+import { DecisionInboxSidebarRow } from "./decisions/DecisionInboxSidebarRow";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { subscribeSidebarSearchFocus } from "./sidebar/sidebarSearchFocus";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
@@ -5411,6 +5412,9 @@ export default function Sidebar() {
                 closeDelay={0}
                 timeout={400}
               >
+                <ul role="presentation">
+                  <DecisionInboxSidebarRow />
+                </ul>
                 <ul
                   id="sidebar-thread-search-results"
                   role="listbox"
@@ -5479,12 +5483,17 @@ export default function Sidebar() {
                 </ul>
               </TooltipProvider>
             ) : (
-              <p
-                role="status"
-                className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
-              >
-                {threadSearch.isPending ? "Searching thread messages…" : "No threads found"}
-              </p>
+              <>
+                <ul role="presentation">
+                  <DecisionInboxSidebarRow />
+                </ul>
+                <p
+                  role="status"
+                  className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
+                >
+                  {threadSearch.isPending ? "Searching thread messages…" : "No threads found"}
+                </p>
+              </>
             )
           ) : null}
           {!isSearchingThreads ? (
@@ -5684,7 +5693,7 @@ export default function Sidebar() {
                           onDraftContextMenu={handleDraftContextMenu}
                         />
                       );
-                      const items: ReactNode[] = [];
+                      const items: ReactNode[] = [<DecisionInboxSidebarRow key="decision-inbox" />];
                       if (sidebarListItems.length === 0) items.push(draftBlock);
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {

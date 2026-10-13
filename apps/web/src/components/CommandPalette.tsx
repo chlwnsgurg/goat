@@ -69,6 +69,7 @@ import {
   FolderGitIcon as FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
+  MessageCircleQuestionIcon,
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -2269,6 +2270,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:decisions",
+    searchTerms: ["decisions", "waiting", "approval", "questions", "inbox"],
+    title: "Open decisions",
+    icon: <MessageCircleQuestionIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/decisions" });
+    },
+  });
 
   actionItems.push({
     kind: "action",
