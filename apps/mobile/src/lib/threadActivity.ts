@@ -1,3 +1,9 @@
+import {
+  resolvePendingUserInputAnswer as resolveSharedAnswer,
+  setPendingUserInputCustomAnswer as setSharedCustomAnswer,
+  togglePendingUserInputOptionSelection as toggleSharedOption,
+  type PendingUserInputDraftAnswer,
+} from "@goat/client-runtime/state/user-input-draft";
 import type {
   ThreadPendingApproval,
   ThreadPendingUserInput,
@@ -70,15 +76,10 @@ import {
 } from "@goat/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
+export type { PendingUserInputDraftAnswer } from "@goat/client-runtime/state/user-input-draft";
+
 export type PendingApproval = ThreadPendingApproval;
 export type PendingUserInput = ThreadPendingUserInput;
-
-export interface PendingUserInputDraftAnswer {
-  readonly selectedOptionValues?: ReadonlyArray<string>;
-  readonly customAnswer?: string;
-  readonly attachmentCount?: number;
-  readonly attachmentsBlocked?: boolean;
-}
 
 export interface ThreadFeedActivity {
   readonly id: string;
@@ -397,28 +398,21 @@ function resolvePendingUserInputAnswer(
   question: ThreadUserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
 ): string | ReadonlyArray<string> | null {
-  if (draft?.attachmentsBlocked) return null;
-  const customAnswer =
-    question.allowCustomAnswer === false
-      ? null
-      : question.initialAnswer !== undefined
-        ? (draft?.customAnswer ?? null)
-        : normalizeDraftAnswer(draft?.customAnswer);
-  if (customAnswer !== null && customAnswer.length > 0) {
-    return customAnswer;
-  }
-
-  const selectedOptionValues = normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
-  if (question.multiSelect) {
-    return selectedOptionValues.length > 0
-      ? selectedOptionValues
-      : (customAnswer ??
-          (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null));
-  }
-  return (
-    selectedOptionValues[0] ??
-    customAnswer ??
-    (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null)
+  // Legacy label-only options use trimmed labels; native values remain exact.
+  const normalizedQuestion = {
+    ...question,
+    options: question.options.map((option) =>
+      option.value === undefined ? { ...option, label: option.label.trim() } : option,
+    ),
+  };
+  return resolveSharedAnswer(
+    normalizedQuestion,
+    draft === undefined
+      ? undefined
+      : {
+          ...draft,
+          selectedOptionValues: normalizeSelectedOptionValues(question, draft.selectedOptionValues),
+        },
   );
 }
 
@@ -1641,18 +1635,17 @@ export function setPendingUserInputCustomAnswer(
   draft: PendingUserInputDraftAnswer | undefined,
   customAnswer: string,
 ): PendingUserInputDraftAnswer {
-  if (question.allowCustomAnswer === false) {
-    return draft ?? {};
-  }
-
-  const selectedOptionValues =
-    question.initialAnswer !== undefined || customAnswer.trim().length > 0
+  if (question.allowCustomAnswer === false) return draft ?? {};
+  return setSharedCustomAnswer(
+    draft === undefined
       ? undefined
-      : normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
-  return {
+      : {
+          ...draft,
+          selectedOptionValues: normalizeSelectedOptionValues(question, draft.selectedOptionValues),
+        },
     customAnswer,
-    ...(selectedOptionValues && selectedOptionValues.length > 0 ? { selectedOptionValues } : {}),
-  };
+    question,
+  );
 }
 
 export function isPendingUserInputOptionSelected(
@@ -1678,32 +1671,18 @@ export function togglePendingUserInputOptionSelection(
   draft: PendingUserInputDraftAnswer | undefined,
   optionValue: string,
 ): PendingUserInputDraftAnswer {
-  const resolvedOptionValue = resolvePendingUserInputOptionValue(question, optionValue);
-  if (resolvedOptionValue === null) {
-    return draft ?? {};
-  }
-
-  if (question.multiSelect) {
-    const selectedOptionValues = normalizeSelectedOptionValues(
-      question,
-      draft?.selectedOptionValues,
-    );
-    const nextSelectedOptionValues = selectedOptionValues.includes(resolvedOptionValue)
-      ? selectedOptionValues.filter((value) => value !== resolvedOptionValue)
-      : [...selectedOptionValues, resolvedOptionValue];
-
-    return {
-      customAnswer: "",
-      ...(nextSelectedOptionValues.length > 0
-        ? { selectedOptionValues: nextSelectedOptionValues }
-        : {}),
-    };
-  }
-
-  return {
-    customAnswer: "",
-    selectedOptionValues: [resolvedOptionValue],
-  };
+  const resolved = resolvePendingUserInputOptionValue(question, optionValue);
+  if (resolved === null) return draft ?? {};
+  return toggleSharedOption(
+    question,
+    draft === undefined
+      ? undefined
+      : {
+          ...draft,
+          selectedOptionValues: normalizeSelectedOptionValues(question, draft.selectedOptionValues),
+        },
+    resolved,
+  );
 }
 
 export function buildPendingUserInputAnswers(

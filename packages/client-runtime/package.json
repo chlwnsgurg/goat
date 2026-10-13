@@ -299,6 +299,14 @@
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"
     },
+    "./state/decision-inbox": {
+      "types": "./src/state/decisionInbox.ts",
+      "default": "./src/state/decisionInbox.ts"
+    },
+    "./state/user-input-draft": {
+      "types": "./src/state/userInputDraft.ts",
+      "default": "./src/state/userInputDraft.ts"
+    },
     "./state/thread-inbox": {
       "types": "./src/state/threadInbox.ts",
       "default": "./src/state/threadInbox.ts"
