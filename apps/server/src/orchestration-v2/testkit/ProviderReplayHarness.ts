@@ -478,7 +478,29 @@ export function layerWithRegistry<Error>(
         getThreadEventSequence: orchestrator.getThreadEventSequence,
         streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
         getThreadRecords: orchestrator.getThreadRecords,
+        getProjectThreadRecords: (target, fields, options) =>
+          orchestrator.getThreadRecords(target.threadId, fields, options).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ThreadManagementService.ThreadManagementProjectionLoadError({
+                  projectId: target.projectId,
+                  threadId: target.threadId,
+                  cause,
+                }),
+            ),
+            Effect.flatMap((records) =>
+              records.thread.projectId === target.projectId && records.thread.deletedAt === null
+                ? Effect.succeed(records)
+                : Effect.fail(
+                    new ThreadManagementService.ThreadManagementThreadNotFoundError({
+                      projectId: target.projectId,
+                      threadId: target.threadId,
+                    }),
+                  ),
+            ),
+          ),
         getThreadProjection: orchestrator.getThreadProjection,
+        getTimelinePage: orchestrator.getTimelinePage,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
         delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
         stopDelegatedTasks: ThreadManagementService.makeStopDelegatedTasks(orchestrator),

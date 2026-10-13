@@ -410,6 +410,11 @@ export interface ProviderAdapterV2CloudLaunchSource {
   readonly restriction: OrchestrationV2CloudSourceRestriction;
 }
 
+export type ProviderAdapterV2CloudTaskMetadata = Pick<
+  OrchestrationV2CloudTask,
+  "url" | "title" | "progress"
+>;
+
 export interface ProviderAdapterV2TurnInput {
   /** Initial launch only. Follow-up and attach must not require this checkout. */
   readonly cloudLaunchSource?: ProviderAdapterV2CloudLaunchSource;
@@ -418,6 +423,11 @@ export interface ProviderAdapterV2TurnInput {
   readonly commitCloudTask?: (
     task: OrchestrationV2CloudTask,
     refs?: Pick<OrchestrationV2ProviderThread, "nativeThreadRef" | "nativeConversationHeadRef">,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Attached-runtime metadata after terminal; waits for run subscription cleanup. */
+  readonly commitCloudTaskMetadata?: (
+    nativeId: string,
+    metadata: ProviderAdapterV2CloudTaskMetadata,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
