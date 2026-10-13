@@ -1,3 +1,4 @@
+import * as Memory from "./memory.ts";
 import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
@@ -417,6 +418,22 @@ import {
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
+  memoryProjectBindingGet: "memory.projectBinding.get",
+  memoryProjectBindingUpdate: "memory.projectBinding.update",
+  memoryChanges: "memory.changes",
+  memorySearch: "memory.search",
+  memoryList: "memory.list",
+  memoryRead: "memory.read",
+  memoryHistory: "memory.history",
+  memorySyncStatus: "memory.syncStatus",
+  memoryUpsert: "memory.upsert",
+  memoryForget: "memory.forget",
+  memoryRevertResolution: "memory.revertResolution",
+  memoryReadSource: "memory.readSource",
+  memoryHubSettingsGet: "memory.hubSettings.get",
+  memoryHubSettingsUpdate: "memory.hubSettings.update",
+  memoryImportProvider: "memory.importProvider",
+
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -2275,3 +2292,105 @@ export const WsChannelRpcGroup = RpcGroup.make(
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = WsCoreRpcGroup.merge(WsChannelRpcGroup);
+
+const MemoryRpcErrors = Schema.Union([Memory.MemoryRpcError, EnvironmentAuthorizationError]);
+const MemoryImportRpcErrors = Schema.Union([
+  Memory.MemoryRpcError,
+  Memory.MemoryImportRpcError,
+  EnvironmentAuthorizationError,
+]);
+export const WsMemoryProjectBindingGetRpc = Rpc.make(WS_METHODS.memoryProjectBindingGet, {
+  payload: Memory.MemoryProjectBindingGetInput,
+  success: Memory.MemoryProjectBinding,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryProjectBindingUpdateRpc = Rpc.make(WS_METHODS.memoryProjectBindingUpdate, {
+  payload: Memory.MemoryProjectBindingUpdateInput,
+  success: Memory.MemoryProjectBindingUpdateResult,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryChangesRpc = Rpc.make(WS_METHODS.memoryChanges, {
+  payload: Memory.MemoryChangesInput,
+  success: Memory.MemoryChangeSignal,
+  error: MemoryRpcErrors,
+  stream: true,
+});
+export const WsMemorySearchRpc = Rpc.make(WS_METHODS.memorySearch, {
+  payload: Memory.MemorySearchInput,
+  success: Memory.MemoryPage,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryListRpc = Rpc.make(WS_METHODS.memoryList, {
+  payload: Memory.MemoryListInput,
+  success: Memory.MemoryPage,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryReadRpc = Rpc.make(WS_METHODS.memoryRead, {
+  payload: Memory.MemoryReadInput,
+  success: Memory.MemoryItem,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryHistoryRpc = Rpc.make(WS_METHODS.memoryHistory, {
+  payload: Memory.MemoryHistoryInput,
+  success: Memory.MemoryHistoryPage,
+  error: MemoryRpcErrors,
+});
+export const WsMemorySyncStatusRpc = Rpc.make(WS_METHODS.memorySyncStatus, {
+  payload: Memory.MemorySyncStatusInput,
+  success: Memory.MemorySyncStatus,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryUpsertRpc = Rpc.make(WS_METHODS.memoryUpsert, {
+  payload: Memory.MemoryUpsertInput,
+  success: Memory.MemoryMutationReceipt,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryForgetRpc = Rpc.make(WS_METHODS.memoryForget, {
+  payload: Memory.MemoryForgetInput,
+  success: Memory.MemoryMutationReceipt,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryRevertResolutionRpc = Rpc.make(WS_METHODS.memoryRevertResolution, {
+  payload: Memory.MemoryRevertResolutionInput,
+  success: Memory.MemoryRevertResult,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryReadSourceRpc = Rpc.make(WS_METHODS.memoryReadSource, {
+  payload: Memory.MemoryReadSourceInput,
+  success: Memory.MemorySourcePage,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryHubSettingsGetRpc = Rpc.make(WS_METHODS.memoryHubSettingsGet, {
+  payload: Memory.MemoryHubSettingsGetInput,
+  success: Memory.MemoryHubSettingsView,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryHubSettingsUpdateRpc = Rpc.make(WS_METHODS.memoryHubSettingsUpdate, {
+  payload: Memory.MemoryHubSettingsUpdateInput,
+  success: Memory.MemoryHubSettingsUpdateResult,
+  error: MemoryRpcErrors,
+});
+export const WsMemoryImportProviderRpc = Rpc.make(WS_METHODS.memoryImportProvider, {
+  payload: Memory.MemoryImportProviderInput,
+  success: Memory.MemoryImportProviderResult,
+  error: MemoryImportRpcErrors,
+});
+export const WsMemoryCoreRpcGroup = RpcGroup.make(
+  WsMemoryProjectBindingGetRpc,
+  WsMemoryProjectBindingUpdateRpc,
+  WsMemoryChangesRpc,
+  WsMemorySearchRpc,
+  WsMemoryListRpc,
+  WsMemoryReadRpc,
+  WsMemoryHistoryRpc,
+  WsMemorySyncStatusRpc,
+  WsMemoryUpsertRpc,
+  WsMemoryForgetRpc,
+  WsMemoryRevertResolutionRpc,
+  WsMemoryReadSourceRpc,
+  WsMemoryHubSettingsGetRpc,
+  WsMemoryHubSettingsUpdateRpc,
+).middleware(RpcScopeAuthorization);
+export const WsMemoryImportRpcGroup =
+  RpcGroup.make(WsMemoryImportProviderRpc).middleware(RpcScopeAuthorization);
+export const WsMemoryRpcGroup = WsMemoryCoreRpcGroup.merge(WsMemoryImportRpcGroup);

@@ -1,3 +1,6 @@
+import * as RpcSchema from "effect/rpc/RpcSchema";
+import * as Memory from "./memory.ts";
+import { WsMemoryRpcGroup, WsMemoryCoreRpcGroup, WsMemoryImportRpcGroup } from "./rpc.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
@@ -178,3 +181,107 @@ it.effect("applies scope middleware to SSH workspace RPCs", () =>
     expect(calls).toEqual([WS_METHODS.sshWorkspaceLaunch, WS_METHODS.sshWorkspaceFetchBack]);
   }),
 );
+
+describe("staged memory RPC", () => {
+  it("declares fifteen memory methods with typed inputs and authorization middleware", () => {
+    expect(WsMemoryRpcGroup.requests.size).toBe(15);
+    expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
+    expect(WsMemoryImportRpcGroup.requests.size).toBe(1);
+    for (const rpc of WsMemoryRpcGroup.requests.values()) {
+      expect(rpc.middlewares.has(RpcScopeAuthorization)).toBe(true);
+      expect(rpc.payloadSchema).toBeDefined();
+      expect(rpc.successSchema).toBeDefined();
+      expect(rpc.errorSchema).toBeDefined();
+    }
+    expect(WsMemoryRpcGroup.requests.has("memory.changes")).toBe(true);
+  });
+  it("keeps memory out of live group until handlers exist", () => {
+    expect([...WsRpcGroup.requests.keys()].filter((key) => key.startsWith("memory."))).toEqual([]);
+  });
+  it("rejects upsert provenance and arbitrary import paths", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(Memory.MemoryUpsertInput)({
+        memorySpaceId: "00000000-0000-4000-8000-000000000001",
+        provenance: { environmentId: "forged" },
+      }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(Memory.MemoryImportProviderInput)({
+        memorySpaceId: "00000000-0000-4000-8000-000000000001",
+        action: "discover",
+        format: "codex",
+        path: "/private",
+      }),
+    ).toThrow();
+  });
+  it("bounds source and history output", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(Memory.MemorySourcePage)({
+        sourceThread: { environmentId: "env", threadId: "thread" },
+        watermark: { fromEventId: "e1", toEventId: "e2", throughSequence: 1 },
+        messages: [{ messageId: "m1", text: "x".repeat(65536) }],
+        nextCursor: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(Memory.MemoryHistoryInput)({
+        memorySpaceId: "00000000-0000-4000-8000-000000000001",
+        memoryId: "00000000-0000-4000-8000-000000000002",
+        limit: 101,
+      }),
+    ).toThrow();
+  });
+});
+it("declares fourteen core methods and one staged import", () => {
+  expect([...WsMemoryCoreRpcGroup.requests.keys()]).not.toContain("memory.importProvider");
+  expect([...WsMemoryImportRpcGroup.requests.keys()]).toEqual(["memory.importProvider"]);
+  expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
+});
+it("memory changes is a typed authorized stream", () => {
+  const rpc = WsMemoryCoreRpcGroup.requests.get("memory.changes")!;
+  expect(rpc.middlewares.has(RpcScopeAuthorization)).toBe(true);
+  expect(RpcSchema.isStreamSchema(rpc.successSchema)).toBe(true);
+  if (RpcSchema.isStreamSchema(rpc.successSchema)) {
+    const element = rpc.successSchema.success;
+    expect(
+      Schema.decodeUnknownSync(element)({
+        kind: "reset",
+        memorySpaceId: "00000000-0000-4000-8000-000000000001",
+        projectionWatermark: 1,
+      }),
+    ).toHaveProperty("kind", "reset");
+    expect(() =>
+      Schema.decodeUnknownSync(element)({
+        kind: "reset",
+        memorySpaceId: "00000000-0000-4000-8000-000000000001",
+        projectionWatermark: 1,
+        text: "private",
+      }),
+    ).toThrow();
+  }
+});
+it("binding commands have exact input result and errors", () => {
+  for (const method of ["memory.projectBinding.get", "memory.projectBinding.update"]) {
+    const rpc = WsMemoryCoreRpcGroup.requests.get(method)!;
+    expect(() =>
+      Schema.decodeUnknownSync(rpc.payloadSchema)({
+        memorySpaceId: "00000000-0000-4000-8000-000000000001",
+      }),
+    ).toThrow();
+    expect(
+      Schema.decodeUnknownSync(rpc.errorSchema)({
+        _tag: "MemoryRpcError",
+        code: "revision_changed",
+      }),
+    ).toHaveProperty("code", "revision_changed");
+    expect(() =>
+      Schema.decodeUnknownSync(rpc.errorSchema)({ _tag: "MemoryRpcError", code: "unknown" }),
+    ).toThrow();
+  }
+  expect(() =>
+    Schema.decodeUnknownSync(Memory.MemoryProjectBindingUpdateResult)({
+      requestId: "00000000-0000-4000-8000-000000000001",
+      binding: {},
+    }),
+  ).toThrow();
+});
