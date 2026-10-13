@@ -627,7 +627,8 @@ const make = Effect.gen(function* () {
               commandId: CommandId.make(`${input.commandId}:branch-rename`),
               threadId,
               branch: renamed.branch,
-              worktreePath: worktreeCwd,
+              // A late rename must not restore a worktree removed by setup cancellation.
+              expectedWorktreePath: worktreeCwd,
             }),
           ),
           Effect.catchCause((cause) =>
