@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  supportsMemoryProtocol,
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -145,6 +146,33 @@ describe("GOAT orchestration protocol", () => {
       expect(
         acceptsHeaders({ [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT }),
       ).toBe(true);
+    }
+  });
+});
+
+describe("memory advertisement", () => {
+  it("decodes descriptor without memory advertisement", () => {
+    const c = decodeDescriptor(descriptor).capabilities;
+    expect(c.memory).toBeUndefined();
+    expect(supportsMemoryProtocol(c)).toBe(false);
+  });
+  it("decodes future memory protocol but disables support", () => {
+    const c = decodeDescriptor({
+      ...descriptor,
+      capabilities: { memory: { protocolVersion: 2 }, memoryHubProtocolVersion: 2 },
+    }).capabilities;
+    expect(c.memory?.protocolVersion).toBe(2);
+    expect(supportsMemoryProtocol(c)).toBe(false);
+  });
+  it("enables only protocol one", () => {
+    for (const protocolVersion of [0, 1, 2]) {
+      const c = decodeDescriptor({
+        ...descriptor,
+        capabilities: { memory: { protocolVersion } },
+      }).capabilities;
+      expect(supportsMemoryProtocol(c)).toBe(protocolVersion === 1);
+      expect(c.memory?.hub).toBeUndefined();
+      expect(c.memory?.importProvider).toBeUndefined();
     }
   });
 });

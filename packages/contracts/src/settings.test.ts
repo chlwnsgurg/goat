@@ -1,3 +1,4 @@
+import { MemoryHubSettings, MemoryHubSettingsUpdateInput } from "./memory.ts";
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
@@ -1184,6 +1185,74 @@ describe("server model preferences", () => {
     expect(decodeServerSettingsPatch(input)).toEqual(input);
     expect(decodeServerSettingsPatch({ migrateModelPreferences: input })).toEqual({
       migrateModelPreferences: input,
+    });
+  });
+});
+
+describe("memory hub settings", () => {
+  it("defaults old settings to disabled memory hub", () => {
+    expect(decodeServerSettings({}).memoryHub).toEqual({ mode: "disabled" });
+    expect(decodeServerSettings({}).memoryHubVersion).toBe(0);
+  });
+  it("round-trips hub and member without secret bytes", () => {
+    for (const memoryHub of [
+      { mode: "hub", memorySpaceId: null },
+      {
+        mode: "member",
+        hubEnvironmentId: "env",
+        endpoint: "https://hub.invalid",
+        secretName: "memory-hub-member",
+        memorySpaceId: null,
+      },
+    ])
+      expect(encodeServerSettings(decodeServerSettings({ memoryHub }))).toMatchObject({
+        memoryHub,
+      });
+  });
+  it("rejects credentials query and nonloopback plain HTTP in hub endpoint", () => {
+    for (const endpoint of [
+      "https://user:pass@hub.invalid",
+      "https://hub.invalid?x=y",
+      "http://hub.invalid",
+      "https://hub.invalid/path",
+      "https://hub.invalid#secret",
+    ])
+      expect(() =>
+        Schema.decodeUnknownSync(MemoryHubSettings)({
+          mode: "member",
+          hubEnvironmentId: "env",
+          endpoint,
+          secretName: "memory-hub-member",
+          memorySpaceId: null,
+        }),
+      ).toThrow();
+  });
+  it("replaces memory hub configuration as one dedicated admin field", () => {
+    expect(
+      Schema.decodeUnknownSync(MemoryHubSettingsUpdateInput)({
+        requestId: "00000000-0000-4000-8000-000000000001",
+        expectedVersion: 0,
+        action: "configure",
+        settings: { mode: "disabled" },
+      }),
+    ).toMatchObject({ settings: { mode: "disabled" } });
+    expect(() =>
+      Schema.decodeUnknownSync(MemoryHubSettings)({
+        mode: "disabled",
+        endpoint: "https://old.invalid",
+      }),
+    ).toThrow();
+  });
+  it("rejects reserved memoryHub in generic settings patch", () => {
+    for (const raw of [
+      { memoryHub: { mode: "disabled" } },
+      { memoryHubVersion: 1 },
+      { standingInstructions: "valid", memoryHub: { mode: "disabled" } },
+      { standingInstructions: "valid", memoryHubVersion: 1 },
+    ])
+      expect(() => decodeServerSettingsPatch(raw)).toThrow();
+    expect(decodeServerSettingsPatch({ standingInstructions: "valid", futureField: 1 })).toEqual({
+      standingInstructions: "valid",
     });
   });
 });
