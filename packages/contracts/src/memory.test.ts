@@ -52,9 +52,7 @@ const operation = {
   payload,
 };
 function decode<S extends Schema.Top>(schema: S, value: unknown): S["Type"] {
-  return Schema.decodeUnknownSync(schema as S & Schema.ConstraintDecoder<unknown>, {
-    onExcessProperty: "error",
-  })(value);
+  return Schema.decodeUnknownSync(schema as S & Schema.ConstraintDecoder<unknown>)(value);
 }
 function round<S extends Schema.Top>(schema: S, value: unknown) {
   const typed = decode(schema, value);
@@ -161,6 +159,28 @@ describe("memory canonical contracts", () => {
     rejects(M.MemoryOperation, { ...operation, protocolVersion: 2 });
     rejects(M.MemoryOperation, { ...operation, credential: "synthetic" });
     rejects(M.MemoryOperation, { ...operation, payload: { ...payload, credential: "synthetic" } });
+  });
+  it("rejects excess fields on default decode encode and make paths", () => {
+    for (const [schema, raw] of [
+      [M.MemoryModelSelection, { ...selection, extra: true }],
+      [M.MemoryModelSelection, { ...selection, options: [{ id: "x", value: false, extra: true }] }],
+      [
+        M.MemoryImportProviderInput,
+        { memorySpaceId: id(), action: "discover", format: "codex", path: "/private" },
+      ],
+      [M.MemoryHubSettings, { mode: "disabled", endpoint: "https://old.invalid" }],
+      [
+        M.MemoryChangeSignal,
+        { kind: "reset", memorySpaceId: id(), projectionWatermark: 1, text: "private" },
+      ],
+    ] as const) {
+      rejects(schema, raw);
+      expect(() => Schema.encodeUnknownSync(schema)(raw)).toThrow();
+      expect(() => Schema.decodeUnknownSync(Schema.toCodecJson(schema))(raw)).toThrow();
+      expect(() => Schema.encodeUnknownSync(Schema.toCodecJson(schema))(raw)).toThrow();
+      expect(() => schema.make(raw as never)).toThrow();
+      expect(() => Schema.decodeUnknownSync(schema, { onExcessProperty: "ignore" })(raw)).toThrow();
+    }
   });
   it("encodes events without memory or judgment bodies", () => {
     const value = decode(M.MemoryOperation, operation);

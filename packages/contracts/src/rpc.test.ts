@@ -199,14 +199,27 @@ describe("staged memory RPC", () => {
     expect([...WsRpcGroup.requests.keys()].filter((key) => key.startsWith("memory."))).toEqual([]);
   });
   it("rejects upsert provenance and arbitrary import paths", () => {
+    const upsert = WsMemoryCoreRpcGroup.requests.get("memory.upsert")!;
+    const importProvider = WsMemoryImportRpcGroup.requests.get("memory.importProvider")!;
     expect(() =>
-      Schema.decodeUnknownSync(Memory.MemoryUpsertInput)({
+      Schema.decodeUnknownSync(upsert.payloadSchema)({
         memorySpaceId: "00000000-0000-4000-8000-000000000001",
+        operationId: "00000000-0000-4000-8000-000000000004",
+        memoryId: "00000000-0000-4000-8000-000000000002",
+        expectedHeads: [],
+        scope: { kind: "user" },
+        assertionKind: "fact",
+        payload: {
+          text: "Synthetic memory",
+          evidence: [{ origin: "user", messageIds: [] }],
+          derivedFromMemoryRevisions: [],
+        },
+        baseBoundary: null,
         provenance: { environmentId: "forged" },
       }),
     ).toThrow();
     expect(() =>
-      Schema.decodeUnknownSync(Memory.MemoryImportProviderInput)({
+      Schema.decodeUnknownSync(Schema.toCodecJson(importProvider.payloadSchema))({
         memorySpaceId: "00000000-0000-4000-8000-000000000001",
         action: "discover",
         format: "codex",

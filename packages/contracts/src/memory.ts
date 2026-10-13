@@ -1,6 +1,9 @@
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import * as SchemaParser from "effect/SchemaParser";
+import * as SchemaAST from "effect/SchemaAST";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { EnvironmentId, EventId, MessageId, NonNegativeInt, PositiveInt } from "./baseSchemas.ts";
 import { ScopedThreadRef, ScopedProjectRef } from "./environment.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
@@ -24,8 +27,23 @@ const array = <S extends Schema.Top>(schema: S, max = 100, min = 0) =>
   );
 const distinct = <S extends Schema.Top>(schema: S, max = 100, min = 0) =>
   array(schema, max, min).check(Schema.makeFilter(unique));
-const struct = <F extends Schema.Struct.Fields>(fields: F) =>
-  Schema.Struct(fields).annotate({ parseOptions: { onExcessProperty: "error" } });
+// Effect 4 annotations cannot set parse options. A declaration keeps strict parsing
+// at the schema boundary, including flipped (encode) and type-only (.make) codecs.
+const strictSchema = <S extends Schema.Constraint>(schema: S) =>
+  Schema.declareConstructor<S["Type"], S["Encoded"]>()(
+    [schema],
+    ([codec]) => {
+      const decode = SchemaParser.decodeUnknownEffect(codec);
+      return (input, _ast, options) => decode(input, { ...options, onExcessProperty: "error" });
+    },
+    {
+      toCodec: ([codec]) => new SchemaAST.Link(codec.ast, SchemaTransformation.passthrough()),
+      // All memory Encoded values already use JSON. Do not insert a permissive
+      // struct parser ahead of this declaration when RPC derives its JSON codec.
+      toCodecJson: () => undefined,
+    },
+  );
+const struct = <F extends Schema.Struct.Fields>(fields: F) => strictSchema(Schema.Struct(fields));
 const canonical = Schema.String.check(
   Schema.makeFilter((s) => s.length > 0 && s === s.trim() && Array.from(s).length <= 1024),
 );
@@ -752,14 +770,16 @@ const safeErrorFields = {
   operationId: Schema.optionalKey(MemoryOperationId),
   capacity: Schema.optionalKey(MemoryCapacityExceeded),
 };
-const safeDomainError = struct(safeErrorFields).check(
+const safeDomainError = Schema.Struct(safeErrorFields).check(
   Schema.makeFilter((v) => (v.code === "capacity_exceeded") === (v.capacity !== undefined)),
 );
 export class MemoryRpcError extends Schema.TaggedError<MemoryRpcError>()(
   "MemoryRpcError",
   safeDomainError,
-  { parseOptions: { onExcessProperty: "error" } },
 ) {
+  static override get ast(): SchemaAST.Declaration {
+    return strictSchema(Schema.make(super.ast)).ast;
+  }
   override get message(): string {
     return `Memory request failed (${this.code}).`;
   }
@@ -767,8 +787,10 @@ export class MemoryRpcError extends Schema.TaggedError<MemoryRpcError>()(
 export class MemoryHubError extends Schema.TaggedError<MemoryHubError>()(
   "MemoryHubError",
   safeDomainError,
-  { parseOptions: { onExcessProperty: "error" } },
 ) {
+  static override get ast(): SchemaAST.Declaration {
+    return strictSchema(Schema.make(super.ast)).ast;
+  }
   override get message(): string {
     return `Memory request failed (${this.code}).`;
   }
@@ -1493,15 +1515,17 @@ export const MemoryImportIssue = Schema.Literals([
 export type MemoryImportIssue = typeof MemoryImportIssue.Type;
 export class MemoryImportRpcError extends Schema.TaggedError<MemoryImportRpcError>()(
   "MemoryImportRpcError",
-  struct({
+  Schema.Struct({
     issue: MemoryImportIssue,
     operationId: Schema.optionalKey(MemoryOperationId),
     capacity: Schema.optionalKey(MemoryCapacityExceeded),
   }).check(
     Schema.makeFilter((v) => (v.issue === "capacity_exceeded") === (v.capacity !== undefined)),
   ),
-  { parseOptions: { onExcessProperty: "error" } },
 ) {
+  static override get ast(): SchemaAST.Declaration {
+    return strictSchema(Schema.make(super.ast)).ast;
+  }
   override get message(): string {
     return `Memory import failed (${this.issue}).`;
   }
