@@ -87,11 +87,13 @@ export function mergeOlderHistoryIntoProjection(
       (row.visibility === "local" || row.sourceThreadId === projection.thread.id)
     ) {
       const currentItem = turnItemById.get(String(row.sourceItemId));
-      // Hidden live items stay hidden. Cold snapshots also retain interrupt
-      // requests outside the visible window; paging may reveal those requests.
+      // Hidden live items stay hidden. Paging may reveal retained interrupt
+      // requests and pending question/approval bodies outside the cold window.
       if (currentItem !== undefined) {
         if (
-          currentItem.type !== "run_interrupt_request" ||
+          (currentItem.type !== "run_interrupt_request" &&
+            currentItem.type !== "user_input_request" &&
+            currentItem.type !== "approval_request") ||
           !isOrchestrationV2TurnItemVisible({
             item: currentItem,
             runs: projection.runs,

@@ -12,6 +12,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2AppThread,
   type OrchestrationV2RuntimeRequest,
+  OrchestrationV2TurnItem,
   type OrchestrationV2ThreadShellSnapshot,
   NodeId,
   ProjectId,
@@ -56,6 +57,174 @@ const modelSelection = {
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = modelSelection.instanceId;
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+const D10_NOW = DateTime.makeUnsafe("2026-10-13T00:00:00.000Z");
+const encodeD10TurnItem = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2TurnItem));
+
+const createD10Thread = Effect.fn("createD10Thread")(function* (
+  suffix: string,
+  forkedFrom: OrchestrationV2AppThread["forkedFrom"] = null,
+) {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const threadId = ThreadId.make(`thread:${suffix}`);
+  yield* store.apply({
+    id: EventId.make(`event:${suffix}:thread`),
+    type: "thread.created",
+    threadId,
+    occurredAt: D10_NOW,
+    payload: {
+      createdBy: "user",
+      creationSource: "web",
+      id: threadId,
+      projectId: ProjectId.make(`project:${suffix}`),
+      title: "Pending window fixture",
+      providerInstanceId,
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      forkedFrom,
+      createdAt: D10_NOW,
+      updatedAt: D10_NOW,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    },
+  });
+  return threadId;
+});
+
+function d10DecisionFixture(threadId: ThreadId, suffix: string) {
+  const base = {
+    threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    status: "waiting" as const,
+    title: null,
+    startedAt: D10_NOW,
+    completedAt: null,
+    updatedAt: D10_NOW,
+  };
+  const question = {
+    ...base,
+    id: TurnItemId.make(`${suffix}:question-item`),
+    ordinal: 1,
+    type: "user_input_request",
+    requestId: RuntimeRequestId.make(`${suffix}:question`),
+    responseMode: "message",
+    questions: [
+      {
+        id: "q",
+        header: "Choice",
+        question: "Choose a destination",
+        options: [{ label: "One", description: "First destination", value: "  native\t" }],
+        multiSelect: false,
+        allowCustomAnswer: true,
+        initialAnswer: "  draft\n",
+      },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const approval = {
+    ...base,
+    id: TurnItemId.make(`${suffix}:approval-item`),
+    ordinal: 2,
+    type: "approval_request",
+    requestId: RuntimeRequestId.make(`${suffix}:approval`),
+    requestKind: "command",
+    prompt: "Run the requested command?",
+    appName: "D10 fixture",
+    options: [
+      { decision: "acceptForSession", label: "Allow this session", warning: "Fixture caution" },
+      { decision: "decline", label: "Decline" },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const requestBase = {
+    nodeId: NodeId.make(`${suffix}:node`),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    status: "pending" as const,
+    createdAt: D10_NOW,
+    resolvedAt: null,
+  };
+  const requests: OrchestrationV2RuntimeRequest[] = [
+    {
+      ...requestBase,
+      id: question.requestId,
+      kind: "user_input",
+      responseCapability: { type: "message" },
+    },
+    {
+      ...requestBase,
+      id: approval.requestId,
+      kind: "command",
+      responseCapability: {
+        type: "live",
+        providerSessionId: ProviderSessionId.make("d10-session"),
+      },
+    },
+  ];
+  return { question, approval, requests };
+}
+
+function d10Command(threadId: ThreadId, suffix: string, ordinal: number) {
+  return {
+    id: TurnItemId.make(`${suffix}:item:${ordinal}`),
+    threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal,
+    status: "completed",
+    title: null,
+    startedAt: D10_NOW,
+    completedAt: D10_NOW,
+    updatedAt: D10_NOW,
+    type: "command_execution",
+    input: "fixture",
+    output: "fixture output",
+    exitCode: 0,
+  } satisfies OrchestrationV2TurnItem;
+}
+
+const saveD10Request = Effect.fn("saveD10Request")(function* (
+  threadId: ThreadId,
+  request: OrchestrationV2RuntimeRequest,
+) {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  yield* store.apply({
+    id: EventId.make(`${request.id}:${request.status}`),
+    type: "runtime-request.updated",
+    threadId,
+    occurredAt: D10_NOW,
+    payload: request,
+  });
+});
+
+const saveD10Item = Effect.fn("saveD10Item")(function* (item: OrchestrationV2TurnItem) {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  yield* store.apply({
+    id: EventId.make(`${item.id}:updated`),
+    type: "turn-item.updated",
+    threadId: item.threadId,
+    ...(item.runId === null ? {} : { runId: item.runId }),
+    ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+    driver,
+    occurredAt: D10_NOW,
+    payload: item,
+  });
+});
 
 const traceSqlStatements = () => {
   const statements: Array<string> = [];
@@ -1123,6 +1292,373 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         assert.lengthOf(sharedNodeSnapshot.projection.visibleTurnItems, 76);
         assert.deepEqual(sharedNodeSnapshot.projection.nodes, snapshot.projection.nodes);
       }),
+  );
+
+  it.effect(
+    "retains pending decision bodies through SQL and bounded paging without exposing dependencies",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = yield* createD10Thread("d10-pending-window");
+        const { question, approval, requests } = d10DecisionFixture(threadId, "d10-pending-window");
+        for (const request of requests) yield* saveD10Request(threadId, request);
+        for (const item of [question, approval]) yield* saveD10Item(item);
+        for (let ordinal = 3; ordinal <= 10; ordinal += 1) {
+          yield* saveD10Item(d10Command(threadId, "d10-pending-window", ordinal));
+        }
+        const otherThreadId = yield* createD10Thread("d10-other-thread");
+        const unrelated = d10DecisionFixture(otherThreadId, "d10-other-thread");
+        for (const request of unrelated.requests) yield* saveD10Request(otherThreadId, request);
+        yield* saveD10Item(unrelated.question);
+        yield* saveD10Item(unrelated.approval);
+        const snapshot = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 2 });
+        assert.deepEqual(
+          snapshot.projection.turnItems.map((item) => item.id),
+          [
+            "d10-pending-window:question-item",
+            "d10-pending-window:approval-item",
+            "d10-pending-window:item:9",
+            "d10-pending-window:item:10",
+          ],
+        );
+        assert.deepEqual(snapshot.projection.turnItems[0], question);
+        assert.deepEqual(snapshot.projection.turnItems[1], approval);
+        assert.deepEqual(
+          snapshot.projection.visibleTurnItems.map((row) => row.item.ordinal),
+          [9, 10],
+        );
+        assert.isTrue(snapshot.projection.turnItems.every((item) => item.threadId === threadId));
+        const bounded = buildBoundedThreadProjection({
+          projection: snapshot.projection,
+          snapshotSequence: snapshot.snapshotSequence,
+          policy: { maxItems: 1, maxEncodedBytes: 10_000_000 },
+        });
+        assert.deepEqual(
+          bounded.projection.visibleTurnItems.map((row) => row.item.ordinal),
+          [10],
+        );
+        assert.deepEqual(
+          bounded.projection.turnItems.map((item) => item.id),
+          [
+            "d10-pending-window:item:10",
+            "d10-pending-window:question-item",
+            "d10-pending-window:approval-item",
+          ],
+        );
+        assert.deepEqual(bounded.projection.turnItems[1], question);
+        assert.deepEqual(bounded.projection.turnItems[2], approval);
+        assert.isTrue(bounded.hasMoreHistory);
+        assert.isNotNull(bounded.historyCursor);
+        assert.equal(
+          decodeThreadHistoryCursor(bounded.historyCursor!).si,
+          "d10-pending-window:item:10",
+        );
+        const all = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 10 });
+        const expectedIds = [
+          "d10-pending-window:question-item",
+          "d10-pending-window:approval-item",
+          "d10-pending-window:item:3",
+          "d10-pending-window:item:4",
+          "d10-pending-window:item:5",
+          "d10-pending-window:item:6",
+          "d10-pending-window:item:7",
+          "d10-pending-window:item:8",
+          "d10-pending-window:item:9",
+          "d10-pending-window:item:10",
+        ];
+        assert.deepEqual(
+          all.projection.turnItems.map((item) => item.id),
+          expectedIds,
+        );
+        assert.deepEqual(
+          all.projection.visibleTurnItems.map((row) => row.sourceItemId),
+          expectedIds,
+        );
+
+        const initial = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 4 });
+        const initialBounded = buildBoundedThreadProjection({
+          projection: initial.projection,
+          snapshotSequence: initial.snapshotSequence,
+          policy: { maxItems: 2, maxEncodedBytes: 10_000_000 },
+        });
+        assert.deepEqual(
+          initialBounded.projection.visibleTurnItems.map((row) => row.item.ordinal),
+          [9, 10],
+        );
+        assert.isTrue(initialBounded.hasMoreHistory);
+        assert.deepEqual(
+          initialBounded.projection.turnItems.filter(
+            (item) => item.type === "user_input_request" || item.type === "approval_request",
+          ),
+          [question, approval],
+        );
+        const loaded = [...initialBounded.projection.visibleTurnItems];
+        let cursor = initialBounded.historyCursor;
+        while (cursor !== null) {
+          const anchor = decodeThreadHistoryCursor(cursor);
+          const anchored = yield* store.getThreadSnapshotWindow(threadId, {
+            rowLimit: 4,
+            anchorItemId: TurnItemId.make(anchor.si),
+          });
+          const page = selectHistoryPageFromCursor({
+            items: anchored.projection.visibleTurnItems,
+            cursor,
+            snapshotSequence: anchored.snapshotSequence,
+            policy: { maxItems: 2, maxEncodedBytes: 10_000_000 },
+          });
+          const anchorOrdinal = all.projection.turnItems.find(
+            (item) => item.id === anchor.si,
+          )!.ordinal;
+          assert.isTrue(page.items.every((row) => row.item.ordinal < anchorOrdinal));
+          loaded.unshift(...page.items);
+          assert.isBelow(loaded.length, 11);
+          cursor = page.nextCursor;
+        }
+        assert.deepEqual(
+          loaded.map((row) => row.sourceItemId),
+          expectedIds,
+        );
+        assert.equal(new Set(loaded.map((row) => row.sourceItemId)).size, 10);
+
+        // A new pending body may ride in control state even when newer than the page anchor.
+        const third = {
+          ...approval,
+          id: TurnItemId.make("d10-pending-window:late-approval-item"),
+          requestId: RuntimeRequestId.make("d10-pending-window:late-approval"),
+          ordinal: 11,
+        };
+        yield* saveD10Item(third);
+        yield* saveD10Request(threadId, { ...requests[1]!, id: third.requestId });
+        const anchored = yield* store.getThreadSnapshotWindow(threadId, {
+          rowLimit: 4,
+          anchorItemId: TurnItemId.make("d10-pending-window:item:10"),
+        });
+        assert.deepEqual(
+          anchored.projection.turnItems.find((item) => item.id === third.id),
+          third,
+        );
+        const older = selectHistoryPageFromCursor({
+          items: anchored.projection.visibleTurnItems,
+          cursor: bounded.historyCursor!,
+          snapshotSequence: anchored.snapshotSequence,
+          policy: { maxItems: 2, maxEncodedBytes: 10_000_000 },
+        });
+        assert.deepEqual(
+          older.items.map((row) => row.item.ordinal),
+          [8, 9],
+        );
+        assert.isFalse(older.items.some((row) => row.sourceItemId === third.id));
+
+        yield* saveD10Request(threadId, {
+          ...requests[0]!,
+          status: "resolved",
+          resolvedAt: D10_NOW,
+        });
+        yield* saveD10Request(threadId, {
+          ...requests[1]!,
+          status: "expired",
+          resolvedAt: D10_NOW,
+        });
+        const resolved = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 2 });
+        assert.deepEqual(
+          resolved.projection.turnItems.map((item) => item.id),
+          ["d10-pending-window:item:10", "d10-pending-window:late-approval-item"],
+        );
+        assert.isFalse(
+          resolved.projection.turnItems.some((item) => item.threadId === otherThreadId),
+        );
+      }),
+  );
+
+  it.effect("seeks retained pending bodies by thread and request ID in long histories", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = yield* createD10Thread("d10-long-history");
+      const otherThreadId = yield* createD10Thread("d10-long-other");
+      const { question, approval, requests } = d10DecisionFixture(threadId, "d10-long-history");
+      for (const request of requests)
+        yield* saveD10Request(threadId, { ...request, status: "resolved", resolvedAt: D10_NOW });
+      const unrelated = d10DecisionFixture(otherThreadId, "d10-long-other");
+      for (const request of unrelated.requests) yield* saveD10Request(otherThreadId, request);
+      const items = [
+        question,
+        approval,
+        ...Array.from({ length: 9_998 }, (_, index) =>
+          d10Command(threadId, "d10-long-history", index + 3),
+        ),
+        unrelated.question,
+        unrelated.approval,
+        ...Array.from({ length: 100 }, (_, index) =>
+          d10Command(otherThreadId, "d10-long-other", index + 3),
+        ),
+      ];
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          for (let offset = 0; offset < items.length; offset += 50) {
+            const rows = items.slice(offset, offset + 50).map((item) => ({
+              turn_item_id: item.id,
+              thread_id: item.threadId,
+              run_id: item.runId,
+              node_id: item.nodeId,
+              provider_thread_id: item.providerThreadId,
+              provider_turn_id: item.providerTurnId,
+              parent_item_id: item.parentItemId,
+              ordinal: item.ordinal,
+              type: item.type,
+              status: item.status,
+              updated_at: DateTime.formatIso(item.updatedAt),
+              payload_json: encodeD10TurnItem(item),
+            }));
+            yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
+          }
+        }),
+      );
+      const { statements, tracer } = traceSqlStatements();
+      const explainRetention = () =>
+        Effect.gen(function* () {
+          const statement = statements.findLast((query) =>
+            query.includes("retained AS MATERIALIZED"),
+          );
+          assert.isDefined(statement);
+          return yield* sql.unsafe<{ readonly detail: string }>(`EXPLAIN QUERY PLAN ${statement}`);
+        });
+      const assertPlan = (plan: ReadonlyArray<{ readonly detail: string }>) => {
+        const retentionPlan = plan.filter((row) =>
+          /(?:pending_request|request_item)\b/.test(row.detail),
+        );
+        assert.lengthOf(retentionPlan, 2);
+        assert.match(
+          retentionPlan[0]!.detail,
+          /SEARCH pending_request USING INDEX orchestration_v2_projection_runtime_requests_thread_status_idx \(thread_id=\? AND status=\?\)/,
+        );
+        assert.match(
+          retentionPlan[1]!.detail,
+          /SEARCH request_item USING INDEX orchestration_v2_projection_turn_items_thread_request_idx \(thread_id=\? AND <expr>=\?\)/,
+        );
+        assert.isFalse(retentionPlan.some((row) => /SCAN request_item/.test(row.detail)));
+        assert.isFalse(
+          retentionPlan.some((row) => row.detail.includes("turn_items_thread_ordinal_idx")),
+        );
+      };
+      const empty = yield* store
+        .getThreadSnapshotWindow(threadId, { rowLimit: 2 })
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(
+        empty.projection.turnItems.map((item) => item.id),
+        ["d10-long-history:item:9999", "d10-long-history:item:10000"],
+      );
+      assert.deepEqual(
+        empty.projection.visibleTurnItems.map((row) => row.item.ordinal),
+        [9_999, 10_000],
+      );
+      assertPlan(yield* explainRetention());
+      // Each pending request seeks its own body without walking the thread's history.
+      yield* saveD10Request(threadId, requests[0]!);
+      const pending = yield* store
+        .getThreadSnapshotWindow(threadId, { rowLimit: 2 })
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(
+        pending.projection.turnItems.map((item) => item.id),
+        [
+          "d10-long-history:question-item",
+          "d10-long-history:item:9999",
+          "d10-long-history:item:10000",
+        ],
+      );
+      assert.deepEqual(pending.projection.turnItems[0], question);
+      assert.deepEqual(
+        pending.projection.visibleTurnItems.map((row) => row.item.ordinal),
+        [9_999, 10_000],
+      );
+      assert.isTrue(pending.projection.turnItems.every((item) => item.threadId === threadId));
+      assertPlan(yield* explainRetention());
+      yield* saveD10Request(threadId, requests[1]!);
+      const bothPending = yield* store
+        .getThreadSnapshotWindow(threadId, { rowLimit: 2 })
+        .pipe(Effect.withTracer(tracer));
+      assert.deepEqual(
+        bothPending.projection.turnItems.map((item) => item.id),
+        [
+          "d10-long-history:question-item",
+          "d10-long-history:approval-item",
+          "d10-long-history:item:9999",
+          "d10-long-history:item:10000",
+        ],
+      );
+      assert.deepEqual(bothPending.projection.turnItems.slice(0, 2), [question, approval]);
+      assert.deepEqual(
+        bothPending.projection.visibleTurnItems.map((row) => row.item.ordinal),
+        [9_999, 10_000],
+      );
+      assertPlan(yield* explainRetention());
+    }),
+  );
+
+  it.effect("does not import pending request bodies after a parent's fork boundary", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sourceThreadId = yield* createD10Thread("d10-fork-parent");
+      const sourceRunId = RunId.make("d10-fork-parent:run:1");
+      const laterRunId = RunId.make("d10-fork-parent:run:2");
+      for (const [runId, ordinal] of [
+        [sourceRunId, 1],
+        [laterRunId, 2],
+      ] as const) {
+        yield* store.apply({
+          id: EventId.make(`${runId}:created`),
+          type: "run.created",
+          threadId: sourceThreadId,
+          runId,
+          nodeId: NodeId.make(`${runId}:node`),
+          driver,
+          providerInstanceId,
+          occurredAt: D10_NOW,
+          payload: {
+            id: runId,
+            threadId: sourceThreadId,
+            ordinal,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`${runId}:message`),
+            rootNodeId: NodeId.make(`${runId}:node`),
+            activeAttemptId: null,
+            status: "completed",
+            requestedAt: D10_NOW,
+            startedAt: D10_NOW,
+            completedAt: D10_NOW,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+      }
+      const historical = {
+        ...d10Command(sourceThreadId, "d10-fork-parent", 1),
+        runId: sourceRunId,
+      };
+      yield* saveD10Item(historical);
+      const { approval, requests } = d10DecisionFixture(sourceThreadId, "d10-fork-parent");
+      const late = { ...approval, ordinal: 2, runId: laterRunId };
+      yield* saveD10Item(late);
+      yield* saveD10Request(sourceThreadId, requests[1]!);
+      const targetThreadId = yield* createD10Thread("d10-fork-child", {
+        type: "run",
+        threadId: sourceThreadId,
+        runId: sourceRunId,
+      });
+      const snapshot = yield* store.getThreadSnapshotWindow(targetThreadId, { rowLimit: 2 });
+      assert.deepEqual(
+        snapshot.projection.visibleTurnItems.map((row) => row.item.type),
+        ["command_execution", "fork"],
+      );
+      assert.equal(snapshot.projection.visibleTurnItems[0]?.sourceItemId, "d10-fork-parent:item:1");
+      assert.isFalse(
+        snapshot.projection.visibleTurnItems.some((row) => row.sourceItemId === late.id),
+      );
+      assert.deepEqual(snapshot.projection.turnItems, []);
+      assert.deepEqual(snapshot.projection.runtimeRequests, []);
+    }),
   );
 
   it.effect("reads a fixed SQL turn-item window for long histories and repeated clients", () =>
@@ -3567,6 +4103,116 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           .pipe(Effect.flip);
         assert.instanceOf(missing, ProjectionStore.ProjectionStoreThreadNotFoundError);
       }),
+  );
+
+  it.effect("prefers inbox requests in both shell paths and preserves fallback precedence", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const suffix = "decision-inbox-shell";
+      const threadId = yield* addRolledBackRecoveryCandidate(suffix);
+      const runId = RunId.make(`run:${suffix}:rolled-back`);
+      const nodeId = NodeId.make(`node:${suffix}:rolled-back`);
+      const now = DateTime.makeUnsafe("2026-10-13T00:00:00.000Z");
+      yield* sql`
+        UPDATE orchestration_v2_projection_runs
+        SET status = 'waiting', payload_json = json_set(payload_json, '$.status', 'waiting')
+        WHERE run_id = ${runId}
+      `;
+      yield* store.apply({
+        id: EventId.make("decision-inbox:secret"),
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        nodeId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make("decision-inbox:secret"),
+          threadId,
+          runId,
+          nodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 2,
+          status: "waiting",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "secret_request",
+          label: "Test credential",
+          reason: "Test pending input",
+          secretStatus: "pending",
+        },
+      });
+      const request = (
+        id: string,
+        kind: OrchestrationV2RuntimeRequest["kind"],
+        minute: number,
+      ): OrchestrationV2RuntimeRequest => ({
+        id: RuntimeRequestId.make(id),
+        nodeId,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind,
+        status: "pending",
+        responseCapability: { type: "message" },
+        createdAt: DateTime.add(now, { minutes: minute }),
+        resolvedAt: null,
+      });
+      const input = request("decision-inbox:input", "user_input", 1);
+      const commandA = request("decision-inbox:command:a", "command", 2);
+      const commandB = request("decision-inbox:command:b", "command", 2);
+      const auth = request("decision-inbox:auth", "auth_refresh", 3);
+      const tool = request("decision-inbox:tool", "dynamic_tool_call", 4);
+      const resolved = {
+        ...request("decision-inbox:resolved", "command", 5),
+        status: "resolved" as const,
+        resolvedAt: now,
+      };
+      const save = (value: OrchestrationV2RuntimeRequest) =>
+        store.apply({
+          id: EventId.make(`${value.id}:${value.status}`),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: value,
+        });
+      const assertSelected = (expected: string | null) =>
+        Effect.gen(function* () {
+          const projection = yield* store.getThreadProjection(threadId);
+          const snapshot = yield* store.getShellSnapshot();
+          const sqlShell = snapshot.threads.find((shell) => shell.id === threadId);
+          const liveShell = yield* store.getThreadShell(threadId);
+          const memoryShell = ProjectionStore.threadShellFromProjection(projection);
+          assert.equal(sqlShell?.pendingRuntimeRequest?.id ?? null, expected);
+          assert.equal(liveShell?.pendingRuntimeRequest?.id ?? null, expected);
+          assert.equal(memoryShell.pendingRuntimeRequest?.id ?? null, expected);
+        });
+      for (const value of [input, commandA, commandB, auth, tool, resolved]) yield* save(value);
+      yield* assertSelected("decision-inbox:command:b");
+      const resolve = (value: OrchestrationV2RuntimeRequest) =>
+        save({ ...value, status: "resolved", resolvedAt: now });
+      yield* resolve(commandB);
+      yield* assertSelected("decision-inbox:command:a");
+      yield* resolve(commandA);
+      yield* assertSelected("decision-inbox:input");
+      yield* resolve(input);
+      yield* assertSelected("decision-inbox:tool");
+      yield* resolve(tool);
+      yield* assertSelected("decision-inbox:auth");
+      yield* resolve(auth);
+      yield* assertSelected("decision-inbox:secret");
+      yield* sql`
+        UPDATE orchestration_v2_projection_runs
+        SET status = 'completed', payload_json = json_set(payload_json, '$.status', 'completed')
+        WHERE run_id = ${runId}
+      `;
+      yield* assertSelected(null);
+    }),
   );
 
   it.effect("selects the latest waiting secret only from active runs", () =>

@@ -45,6 +45,7 @@ import {
   type RenderFailureProps,
 } from "./components/RenderErrorBoundary";
 import { ArchivedThreadsRouteScreen } from "./features/archive/ArchivedThreadsRouteScreen";
+import { DecisionsRouteScreen } from "./features/decisions/DecisionsRouteScreen";
 import { useAgentNotificationNavigation } from "./features/agent-awareness/notificationNavigation";
 import { ConnectOnboardingRouteScreen } from "./features/cloud/ConnectOnboardingRouteScreen";
 import { useConnectOnboardingNavigation } from "./features/cloud/connectOnboardingNavigation";
@@ -733,6 +734,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
         headerBackVisible: false,
         ...getCompactBrandHeaderOptions(),
       },
+    }),
+    Decisions: createNativeStackScreen({
+      screen: DecisionsRouteScreen,
+      linking: "decisions",
+      options: { ...SOLID_HEADER_OPTIONS, title: "Decisions" },
     }),
     PullRequest: createNativeStackScreen({
       screen: PullRequestRouteScreen,

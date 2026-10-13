@@ -651,6 +651,8 @@ function AdaptiveWorkspaceLayoutContent(
     ],
   );
 
+  const handleOpenDecisions = useCallback(() => navigation.navigate("Decisions"), [navigation]);
+
   const contextValue = useMemo(
     () => ({
       layout,
@@ -750,6 +752,7 @@ function AdaptiveWorkspaceLayoutContent(
                         visible={panes.primarySidebarVisible}
                         onRequestVisibility={revealPrimarySidebar}
                         selectedThreadKey={selectedThreadKey}
+                        onOpenDecisions={handleOpenDecisions}
                         onOpenSettings={handleOpenSettings}
                         onOpenEnvironmentSettings={handleOpenEnvironmentSettings}
                         onNewThreadInProject={handleNewThreadInProject}

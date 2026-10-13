@@ -1,7 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off - runs once at test setup, outside any Effect runtime.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
-import * as HostProcess from "../HostProcess.ts";
+
+import { afterAll } from "vite-plus/test";
+
+import { describeLeaks, enterTestTempSandbox, GUARD_ENV } from "./testTempSandbox.ts";
 
 /**
  * Point the process temp directory at the path git and `realpath` report.
@@ -20,7 +23,8 @@ export const canonicalizeProcessTempDir = (): void => {
     // Leave the host's value alone if it cannot be resolved.
     return;
   }
-  if (HostProcess.Platform.defaultValue() === "win32") {
+  // oxlint-disable-next-line goat/no-global-process-runtime -- Every test config loads this setup, and HostProcess imports node:sea, which mobile tests cannot bundle.
+  if (NodeOS.platform() === "win32") {
     process.env.TEMP = canonical;
     process.env.TMP = canonical;
     return;
@@ -31,3 +35,15 @@ export const canonicalizeProcessTempDir = (): void => {
 };
 
 canonicalizeProcessTempDir();
+
+// Each test file gets its own temp directory, deleted after the file's own hooks run.
+const sandbox = enterTestTempSandbox();
+if (sandbox !== undefined) {
+  afterAll(() => {
+    const leaked = sandbox.close();
+    if (leaked.length === 0) return;
+    const message = describeLeaks(leaked);
+    if (process.env[GUARD_ENV] === "fail") throw new Error(message);
+    process.stderr.write(`${message}\n`);
+  });
+}
