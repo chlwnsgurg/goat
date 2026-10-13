@@ -1,5 +1,9 @@
 import * as NodeFS from "node:fs";
 
+if (process.env.GOAT_FAKE_CLAUDE_SPAWN_MARKER) {
+  NodeFS.writeFileSync(process.env.GOAT_FAKE_CLAUDE_SPAWN_MARKER, "spawned");
+}
+
 const argv = process.argv.slice(2);
 const args = argv.join(" ");
 

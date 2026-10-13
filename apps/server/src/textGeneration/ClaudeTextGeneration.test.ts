@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { expect } from "vite-plus/test";
+import * as PlatformError from "effect/PlatformError";
 
 import * as ServerConfig from "../config.ts";
 import {
@@ -56,6 +57,12 @@ function withFakeClaudeEnv<A, E, R>(
   input: {
     memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
     output: string;
+    managedSettings?: string;
+    managedDropin?: string;
+    managedUnreadable?: boolean;
+    subscription?: boolean;
+    expectNoSpawn?: boolean;
+    directApi?: boolean;
     exitCode?: number;
     stderr?: string;
     argsMustContain?: string;
@@ -189,11 +196,62 @@ function withFakeClaudeEnv<A, E, R>(
     });
     const textGeneration = yield* makeClaudeTextGeneration(
       config,
-      undefined,
+      input.memoryRunnerContext === undefined
+        ? undefined
+        : {
+            ...process.env,
+            ANTHROPIC_API_KEY: input.subscription ? "" : "synthetic-api-key",
+            ANTHROPIC_AUTH_TOKEN: "",
+            ANTHROPIC_BASE_URL: input.directApi
+              ? "https://api.anthropic.com"
+              : "https://synthetic-provider.invalid",
+            GOAT_FAKE_CLAUDE_SPAWN_MARKER: `${tempDir}/spawned`,
+            CLAUDE_CODE_OAUTH_TOKEN: "",
+            CLAUDE_CODE_USE_BEDROCK: "",
+            CLAUDE_CODE_USE_VERTEX: "",
+            CLAUDE_CODE_USE_FOUNDRY: "",
+            WSL_DISTRO_NAME: "",
+          },
       Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
       input.memoryRunnerContext,
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, {
+        ...fs,
+        exists: (file) =>
+          file.endsWith("managed-settings.json")
+            ? Effect.succeed(
+                input.managedSettings !== undefined || input.managedUnreadable === true,
+              )
+            : file.endsWith("managed-settings.d") || file.endsWith("10-hooks.json")
+              ? Effect.succeed(input.managedDropin !== undefined)
+              : file.startsWith("/Library/") || file.startsWith("/etc/claude-code")
+                ? Effect.succeed(false)
+                : fs.exists(file),
+        readDirectory: (file) =>
+          file.endsWith("managed-settings.d")
+            ? Effect.succeed(["10-hooks.json"])
+            : fs.readDirectory(file),
+        readFileString: (file, encoding) =>
+          file.endsWith("managed-settings.json")
+            ? input.managedUnreadable
+              ? Effect.fail(
+                  new PlatformError.SystemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "readFileString",
+                    pathOrDescriptor: file,
+                  }),
+                )
+              : Effect.succeed(input.managedSettings ?? "{}")
+            : file.endsWith("10-hooks.json")
+              ? Effect.succeed(input.managedDropin ?? "{}")
+              : fs.readFileString(file, encoding),
+      }),
+      Effect.provideService(HostProcess.Platform, "linux"),
     );
-    return yield* effectFn(textGeneration);
+    const result = yield* effectFn(textGeneration);
+    if (input.expectNoSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(false);
+    return result;
   }).pipe(Effect.scoped);
 }
 
@@ -298,6 +356,47 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
               `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`,
             );
             expect(generated.execution.requestedModelSelection).toEqual(selection);
+          }),
+      ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        {
+          scenario: "managed SessionStart hook",
+          managedSettings: JSON.stringify({
+            hooks: { SessionStart: [{ hooks: [{ type: "command", command: "synthetic" }] }] },
+          }),
+        },
+        {
+          scenario: "managed UserPromptSubmit drop-in",
+          managedDropin: JSON.stringify({ hooks: { UserPromptSubmit: [] } }),
+        },
+        { scenario: "unreadable policy", managedUnreadable: true },
+        { scenario: "invalid policy", managedSettings: "{invalid" },
+        { scenario: "subscription policy cannot be certified", subscription: true },
+        { scenario: "direct API remote policy cannot be certified", directApi: true },
+      ].map((scenario) => ({ operation, ...scenario })),
+    ),
+  )(
+    "$operation refuses $scenario before accepting apparent success",
+    ({ operation, ...scenario }) =>
+      withFakeClaudeEnv(
+        {
+          ...scenario,
+          expectNoSpawn: true,
+          memoryRunnerContext: memoryContext,
+          output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const failure = yield* Effect.flip(
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary),
+            );
+            expect(failure.cause).toMatchObject({ code: "unavailable" });
           }),
       ),
   );
