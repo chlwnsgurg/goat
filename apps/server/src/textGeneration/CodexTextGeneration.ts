@@ -1,3 +1,8 @@
+import { ProviderDriverKind } from "@goat/contracts";
+import {
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -67,6 +72,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     import("@goat/contracts").ProviderSetupError,
     Scope.Scope
   >,
+  memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -100,10 +106,10 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
    * rewrites auth.json in place, so a token refresh lands in the user's file through the link. If a
    * Codex build ever replaces the link with a file of its own, the finalizer copies that file back,
    * so the user never keeps a refresh token the refresh already rotated away. When the link cannot
-   * be made, reception falls back to the user's home.
+   * be made, reception falls back to the user's home; memory generation fails before spawning.
    */
   const makeReceptionCodexHome = Effect.fn("makeReceptionCodexHome")(function* (
-    operation: string,
+    operation: TextGenerationOperations.Operation,
     userHome: string,
   ) {
     const receptionHome = yield* fileSystem
@@ -122,7 +128,14 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       Effect.as(true),
       Effect.orElseSucceed(() => false),
     );
-    if (!linked) return userHome;
+    if (!linked) {
+      if (TextGenerationOperations.isMemoryOperation(operation))
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Codex memory generation could not isolate its authentication home.",
+        });
+      return userHome;
+    }
     yield* Effect.addFinalizer(() =>
       fileSystem.readLink(receptionAuth).pipe(
         Effect.matchEffect({
@@ -220,7 +233,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     attachments,
     investigate,
   }: TextGenerationOperations.Request<S>): Effect.fn.Return<
-    S["Type"],
+    { readonly result: S["Type"]; readonly effectiveModel: string },
     TextGenerationError,
     S["DecodingServices"]
   > {
@@ -243,6 +256,11 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           )
         : undefined;
       const effectiveConfig = resolved?.config ?? codexConfig;
+      if (TextGenerationOperations.isMemoryOperation(operation) && !effectiveConfig.enabled)
+        return yield* new TextGenerationError({
+          operation,
+          detail: "Codex is disabled in GOAT settings.",
+        });
       const effectiveEnvironment = resolved?.environment ?? resolvedEnvironment;
       const models = yield* getModels;
       const requestedModel = modelSelection.model;
@@ -252,7 +270,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           (candidate) => !candidate.isCustom && codexModelFamily(candidate.slug) === requestedModel,
         )?.slug ??
         requestedModel;
-      const isChannelReception = operation === "generateChannelReception";
+      const isChannelReception =
+        operation === "generateChannelReception" ||
+        TextGenerationOperations.isMemoryOperation(operation);
       // Reception runs in an empty directory so nothing in a checkout reaches the model.
       const workingDirectory = isChannelReception
         ? yield* fileSystem
@@ -351,6 +371,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
               : `Codex CLI command failed with code ${exitCode}.`,
         });
       }
+      return model;
     });
 
     const cleanup = Effect.all([removeTempFileDir(schemaPath), removeTempFileDir(outputPath)], {
@@ -358,7 +379,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     }).pipe(Effect.asVoid);
 
     return yield* Effect.gen(function* () {
-      yield* runCodexCommand().pipe(
+      const effectiveModel = yield* runCodexCommand().pipe(
         Effect.scoped,
         // The read-only sandbox already holds an investigation to reading; it only needs longer.
         Effect.timeoutOption(investigate?.timeoutMs ?? CODEX_TIMEOUT_MS),
@@ -368,14 +389,14 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
               Effect.fail(
                 new TextGenerationError({ operation, detail: "Codex CLI request timed out." }),
               ),
-            onSome: () => Effect.void,
+            onSome: Effect.succeed,
           }),
         ),
       );
 
       const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson));
 
-      return yield* fileSystem.readFileString(outputPath).pipe(
+      const result = yield* fileSystem.readFileString(outputPath).pipe(
         Effect.mapError(
           (cause) =>
             new TextGenerationError({
@@ -396,10 +417,20 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
             ),
         }),
       );
+      return { result, effectiveModel };
     }).pipe(Effect.ensuring(cleanup));
   });
 
-  return TextGenerationOperations.fromRunner("CodexTextGeneration", runCodexJson, {
-    channelReception: true,
-  });
+  return TextGenerationOperations.fromRunner(
+    "CodexTextGeneration",
+    (request) => runCodexJson(request).pipe(Effect.map((selected) => selected.result)),
+    {
+      memoryRunner: withMemoryExecution(
+        memoryRunnerContext,
+        ProviderDriverKind.make("codex"),
+        runCodexJson,
+      ),
+      channelReception: true,
+    },
+  );
 });
