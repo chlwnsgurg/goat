@@ -41,6 +41,10 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     revokeMcpCredential: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
+    type: Schema.Literal("provider-turn.reattach"),
+    runId: RunId,
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
     runId: RunId,
   }),
@@ -125,6 +129,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "provider-turn.reattach",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",

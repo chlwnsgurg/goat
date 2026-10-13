@@ -5,6 +5,8 @@ import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
   CommandId,
+  MessageId,
+  RunId,
   type EventId,
   type ModelSelection,
   type NodeId,
@@ -27,6 +29,7 @@ import {
   type TurnItemId,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
+import { cloudTaskResultText } from "@goat/provider-core/server/cloudTask";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -522,13 +525,16 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
  * SERVICE DEFINITION
  */
 export interface RunExecutionServiceV2StartRootRunInput {
+  readonly cloudSource?: import("@goat/contracts").OrchestrationV2CloudTask["source"];
+  readonly reattach?: boolean;
+  readonly cloudLaunchSource?: ProviderAdapter.ProviderAdapterV2CloudLaunchSource;
   readonly commandId: CommandId;
   readonly appThread: OrchestrationV2AppThread;
   readonly providerSessionId: ProviderSessionId;
   readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly run: OrchestrationV2Run;
   readonly rootNode: OrchestrationV2ExecutionNode;
-  readonly checkpointScope: OrchestrationV2CheckpointScope;
+  readonly checkpointScope: OrchestrationV2CheckpointScope | null;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly attempt: OrchestrationV2RunAttempt;
   readonly attemptId: RunAttemptId;
@@ -583,11 +589,12 @@ export const layer: Layer.Layer<
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const remoteReportInbox = yield* RemoteReportInbox.RemoteReportInbox;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
+    const cloudObservers = yield* Ref.make<ReadonlySet<RunId>>(new Set());
 
     const writeFinalRunEvents = (input: {
       readonly run: OrchestrationV2Run;
       readonly rootNode: OrchestrationV2ExecutionNode;
-      readonly checkpointScope: OrchestrationV2CheckpointScope;
+      readonly checkpointScope: OrchestrationV2CheckpointScope | null;
       readonly providerThread: OrchestrationV2ProviderThread;
       readonly attempt: OrchestrationV2RunAttempt;
       readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
@@ -664,7 +671,9 @@ export const layer: Layer.Layer<
               })
             : [];
         const persistedStatus =
-          input.terminal.status === "completed" ? "waiting" : input.terminal.status;
+          input.terminal.status === "completed" && input.checkpointScope !== null
+            ? "waiting"
+            : input.terminal.status;
         // Completion cohorts are advanced by Orchestrator while a provider
         // turn is in flight. Do not replay the run snapshot captured at start
         // over a newer acknowledgement, successor, or Stop barrier.
@@ -672,17 +681,32 @@ export const layer: Layer.Layer<
           input.run;
         const finalizedRun: OrchestrationV2Run = {
           ...runWithoutDelegatedCompletion,
+          checkpointId: input.checkpointScope === null ? null : input.run.checkpointId,
           status: persistedStatus,
-          completedAt: input.terminal.status === "completed" ? null : completedAt,
+          completedAt: persistedStatus === "waiting" ? null : completedAt,
         };
         const finalizedRootNode: OrchestrationV2ExecutionNode = {
           ...input.rootNode,
           status: persistedStatus,
-          completedAt: input.terminal.status === "completed" ? null : completedAt,
-          checkpointScopeId: input.checkpointScope.id,
+          completedAt: persistedStatus === "waiting" ? null : completedAt,
+          checkpointScopeId: input.checkpointScope?.id ?? null,
         };
+        const task = input.providerThread.cloudTask;
+        const uncertainTask =
+          input.terminal.status === "failed" &&
+          task !== undefined &&
+          (task.status === "running" || task.status === "submitting")
+            ? {
+                ...task,
+                status: "unknown" as const,
+                error:
+                  "Cloud tracking was interrupted. Open the task link; remote work may continue.",
+                updatedAt: DateTime.formatIso(completedAt),
+              }
+            : task;
         const finalizedProviderThread: OrchestrationV2ProviderThread = {
           ...input.providerThread,
+          ...(uncertainTask === undefined ? {} : { cloudTask: uncertainTask }),
           status: finalProviderThreadStatus(input.terminal.threadDisposition),
           updatedAt: completedAt,
         };
@@ -697,9 +721,10 @@ export const layer: Layer.Layer<
         // ahead of any later run's start on this thread's effect lane.
         const finalization = {
           effects:
-            input.terminal.status === "completed" ||
-            input.terminal.status === "interrupted" ||
-            input.terminal.status === "cancelled"
+            input.checkpointScope !== null &&
+            (input.terminal.status === "completed" ||
+              input.terminal.status === "interrupted" ||
+              input.terminal.status === "cancelled")
               ? [
                   {
                     id: `effect:checkpoint.capture:${input.run.id}`,
@@ -714,6 +739,33 @@ export const layer: Layer.Layer<
                 ]
               : [],
           events: [
+            ...(input.providerThread.cloudTask === undefined
+              ? []
+              : [
+                  {
+                    id: yield* allocateEventId(),
+                    type: "message.updated" as const,
+                    threadId: input.run.threadId,
+                    runId: input.run.id,
+                    nodeId: input.rootNode.id,
+                    providerInstanceId: input.run.providerInstanceId,
+                    occurredAt: completedAt,
+                    payload: {
+                      id: MessageId.make(`message:cloud-result:${input.run.id}`),
+                      threadId: input.run.threadId,
+                      runId: input.run.id,
+                      nodeId: input.rootNode.id,
+                      createdBy: "agent" as const,
+                      creationSource: "provider" as const,
+                      role: "assistant" as const,
+                      text: cloudTaskResultText(finalizedProviderThread.cloudTask!),
+                      attachments: [],
+                      streaming: false,
+                      createdAt: completedAt,
+                      updatedAt: completedAt,
+                    },
+                  },
+                ]),
             // Terminalize open run-owned subagent rows before the root run
             // settles so projections never keep a forever-running subagent card.
             ...cascadedSubagentEvents,
@@ -826,9 +878,15 @@ export const layer: Layer.Layer<
     return RunExecutionServiceV2.of({
       startRootRun: (input) =>
         Effect.gen(function* () {
+          const cloud =
+            input.cloudSource !== undefined || input.providerThread.cloudTask !== undefined;
+          if (cloud && (yield* Ref.get(cloudObservers)).has(input.run.id)) return;
           // Startup failure and stream shutdown can report the same attempt.
           const refreshAfterTurn = yield* Effect.cached(
-            finalizationObserver.refreshAfterTurn(input.appThread.projectId).pipe(
+            (cloud
+              ? Effect.void
+              : finalizationObserver.refreshAfterTurn(input.appThread.projectId)
+            ).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("failed to refresh pull requests after run termination", {
                   threadId: input.run.threadId,
@@ -865,21 +923,23 @@ export const layer: Layer.Layer<
                     .responseStreamingMode,
               ),
             );
-            yield* checkpointService
-              .captureBaseline({
-                scope: input.checkpointScope,
-                ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
-              })
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Cause.hasInterruptsOnly(cause)
-                    ? Effect.failCause(cause)
-                    : Effect.logWarning(
-                        "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                        { runId: input.run.id },
-                      ),
-                ),
-              );
+            if (input.checkpointScope !== null) {
+              yield* checkpointService
+                .captureBaseline({
+                  scope: input.checkpointScope,
+                  ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.failCause(cause)
+                      : Effect.logWarning(
+                          "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                          { runId: input.run.id },
+                        ),
+                  ),
+                );
+            }
             if (
               input.shouldStartProviderTurn !== undefined &&
               !(yield* input.shouldStartProviderTurn())
@@ -935,6 +995,14 @@ export const layer: Layer.Layer<
           if (responseStreamingMode === null) {
             return;
           }
+          if (cloud) {
+            const claimed = yield* Ref.modify(cloudObservers, (current) =>
+              current.has(input.run.id)
+                ? ([false, current] as const)
+                : ([true, new Set([...current, input.run.id])] as const),
+            );
+            if (!claimed) return;
+          }
           const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
           const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
           const latestProviderThread = yield* Ref.make(input.providerThread);
@@ -947,11 +1015,33 @@ export const layer: Layer.Layer<
           const eventSubscription =
             input.session.subscribeEvents === undefined
               ? { events: input.session.events, close: Effect.void }
-              : yield* input.session.subscribeEvents;
+              : yield* input.session.subscribeEvents.pipe(
+                  Effect.onError(() =>
+                    cloud
+                      ? Ref.update(cloudObservers, (current) => {
+                          const next = new Set(current);
+                          next.delete(input.run.id);
+                          return next;
+                        })
+                      : Effect.void,
+                  ),
+                );
           const inheritedBackgroundTurnItems = yield* (
             input.loadInheritedBackgroundTurnItems?.() ?? Effect.succeed([])
           ).pipe(
-            Effect.onError(() => eventSubscription.close),
+            Effect.onError(() =>
+              eventSubscription.close.pipe(
+                Effect.andThen(
+                  cloud
+                    ? Ref.update(cloudObservers, (current) => {
+                        const next = new Set(current);
+                        next.delete(input.run.id);
+                        return next;
+                      })
+                    : Effect.void,
+                ),
+              ),
+            ),
             Effect.mapError(
               (cause) =>
                 new RunExecutionStartError({
@@ -1382,7 +1472,18 @@ export const layer: Layer.Layer<
                 ),
               ),
             ),
-            Effect.ensuring(eventSubscription.close),
+            Effect.ensuring(
+              Effect.andThen(
+                eventSubscription.close,
+                cloud
+                  ? Ref.update(cloudObservers, (current) => {
+                      const next = new Set(current);
+                      next.delete(input.run.id);
+                      return next;
+                    })
+                  : Effect.void,
+              ),
+            ),
             Effect.forkDetach,
           );
 
@@ -1418,20 +1519,79 @@ export const layer: Layer.Layer<
             key: `mcp_app_${entry.itemId.replace(/[^\w.-]/g, "_")}`,
             text: entry.text,
           }));
-          const inbox = yield* remoteReportInbox.pending(input.run.threadId).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("Failed to read remote report inbox.", { cause }).pipe(
-                Effect.as({
-                  texts: [] as ReadonlyArray<string>,
-                  throughId: null as number | null,
-                }),
-              ),
-            ),
-          );
+          const inbox =
+            input.reattach === true
+              ? { texts: [] as ReadonlyArray<string>, throughId: null as number | null }
+              : yield* remoteReportInbox.pending(input.run.threadId).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Failed to read remote report inbox.", { cause }).pipe(
+                      Effect.as({
+                        texts: [] as ReadonlyArray<string>,
+                        throughId: null as number | null,
+                      }),
+                    ),
+                  ),
+                );
           const compact =
             input.message.attachments.length === 0 &&
             input.message.text.trim().toLowerCase() === "/compact";
           const turnInput = {
+            ...(input.cloudSource === undefined ? {} : { cloudSource: input.cloudSource }),
+            ...(input.cloudLaunchSource === undefined
+              ? {}
+              : { cloudLaunchSource: input.cloudLaunchSource }),
+            ...(cloud
+              ? {
+                  commitCloudTask: (
+                    task: import("@goat/contracts").OrchestrationV2CloudTask,
+                    refs?: Pick<
+                      OrchestrationV2ProviderThread,
+                      "nativeThreadRef" | "nativeConversationHeadRef"
+                    >,
+                  ) =>
+                    Effect.gen(function* () {
+                      const now = yield* DateTime.now;
+                      const latest = yield* Ref.get(latestProviderThread);
+                      const updated = { ...latest, ...refs, cloudTask: task, updatedAt: now };
+                      const result = yield* eventSink.writeIfRunCurrent({
+                        threadId: input.run.threadId,
+                        runId: input.run.id,
+                        activeAttemptId: input.attemptId,
+                        expectedStatus: "running",
+                        events: [
+                          {
+                            id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                            type: "provider-thread.updated",
+                            threadId: input.run.threadId,
+                            providerInstanceId: input.run.providerInstanceId,
+                            occurredAt: now,
+                            payload: updated,
+                          },
+                        ],
+                      });
+                      if (!result.committed)
+                        return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                          driver: input.session.driver,
+                          threadId: input.run.threadId,
+                          providerThreadId: latest.id,
+                          runId: input.run.id,
+                          cause: "Cloud task ownership changed before acceptance was persisted.",
+                        });
+                      yield* Ref.set(latestProviderThread, updated);
+                    }).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterTurnStartError({
+                            driver: input.session.driver,
+                            threadId: input.run.threadId,
+                            providerThreadId: input.providerThread.id,
+                            runId: input.run.id,
+                            cause,
+                          }),
+                      ),
+                    ),
+                }
+              : {}),
             appThread: input.appThread,
             threadId: input.run.threadId,
             runId: input.run.id,
@@ -1459,23 +1619,44 @@ export const layer: Layer.Layer<
             runtimePolicy: input.runtimePolicy,
             ...(appContext.length === 0 ? {} : { appContext }),
           };
-          const startTurn = compact
-            ? (input.session.compactThread?.(turnInput) ??
-              Effect.fail(
-                new ProviderAdapter.ProviderAdapterTurnStartError({
-                  driver: input.session.driver,
-                  threadId: input.run.threadId,
-                  providerThreadId: input.providerThread.id,
-                  runId: input.run.id,
-                  cause: "This provider does not support context compaction.",
-                }),
-              ))
-            : input.session.startTurn(turnInput);
+          const {
+            message: _savedPrompt,
+            cloudLaunchSource: _launchCheckout,
+            ...attachInput
+          } = turnInput;
+          const startTurn =
+            input.reattach === true
+              ? (input.session.resumeTurn?.({
+                  ...attachInput,
+                  cloudTask: input.providerThread.cloudTask!,
+                }) ??
+                Effect.fail(
+                  new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: input.session.driver,
+                    threadId: input.run.threadId,
+                    providerThreadId: input.providerThread.id,
+                    runId: input.run.id,
+                    cause:
+                      "This cloud provider cannot reattach observation. Open the saved task link.",
+                  }),
+                ))
+              : compact
+                ? (input.session.compactThread?.(turnInput) ??
+                  Effect.fail(
+                    new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver: input.session.driver,
+                      threadId: input.run.threadId,
+                      providerThreadId: input.providerThread.id,
+                      runId: input.run.id,
+                      cause: "This provider does not support context compaction.",
+                    }),
+                  ))
+                : input.session.startTurn(turnInput);
           yield* Effect.andThen(
             shouldStart,
             startTurn.pipe(
               Effect.tap(() =>
-                compact || inbox.throughId === null
+                input.reattach === true || compact || inbox.throughId === null
                   ? Effect.void
                   : remoteReportInbox
                       .consume(input.run.threadId, inbox.throughId)

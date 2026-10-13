@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/cloud-task": {
+      "types": "./src/state/cloudTask.ts",
+      "default": "./src/state/cloudTask.ts"
+    },
     "./storage-migration": {
       "types": "./src/storageMigration.ts",
       "default": "./src/storageMigration.ts"

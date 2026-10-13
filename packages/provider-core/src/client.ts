@@ -49,6 +49,7 @@ export interface ProviderIcon {
 export interface ProviderClientDefinition {
   readonly driverKind: ProviderDriverKind;
   readonly label: string;
+  readonly executionLocation?: "local" | "cloud";
   /** Omitted for drivers whose glyph a client still draws itself. */
   readonly icon?: ProviderIcon;
   readonly settingsSchema: ProviderSettingsSchema;

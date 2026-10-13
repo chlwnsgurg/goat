@@ -1,3 +1,4 @@
+import { fakeCloudCapabilities, fakeCloudDriver } from "./testkit/FakeCloudAdapter.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -98,6 +99,8 @@ const adapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly adapter?: ProviderAdapter.ProviderAdapterV2["Service"];
+  readonly prepared?: Deferred.Deferred<void>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
   readonly createWorktree?: GitWorkflow.GitWorkflowService["Service"]["createWorktree"];
   readonly fetchRemote?: GitWorkflow.GitWorkflowService["Service"]["fetchRemote"];
@@ -115,7 +118,7 @@ interface HarnessOptions {
 
 function makeHarness(options: HarnessOptions = {}) {
   const layerDatabase = SqlitePersistence.layerMemory;
-  const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([adapter]);
+  const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([options.adapter ?? adapter]);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "thread-launch" },
     layerRegistry,
@@ -217,8 +220,29 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerLaunch = ThreadLaunch.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerRegistry,
         layerExternalServices,
-        layerThreadManagement,
+        options.prepared === undefined
+          ? layerThreadManagement
+          : Layer.effect(
+              ThreadManagement.ThreadManagementService,
+              Effect.gen(function* () {
+                const service = yield* ThreadManagement.ThreadManagementService;
+                return ThreadManagement.ThreadManagementService.of({
+                  ...service,
+                  dispatch: (command) =>
+                    service
+                      .dispatch(command)
+                      .pipe(
+                        Effect.tap(() =>
+                          command.type === "prepared-run.release"
+                            ? Deferred.succeed(options.prepared!, undefined)
+                            : Effect.void,
+                        ),
+                      ),
+                });
+              }),
+            ).pipe(Layer.provide(layerThreadManagement)),
         layerReceipts,
         IdAllocator.layer,
       ),
@@ -3005,3 +3029,39 @@ it.effect("lets an agent launch into a Scratch project whose folder was deleted"
     assert.equal(launched.projection.thread.worktreePath, "/repo/2026-10-13-recover");
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect("cloud launch skips managed folders, worktree creation and setup scripts", () =>
+  Effect.gen(function* () {
+    const prepared = yield* Deferred.make<void>();
+    const folderForThread = vi.fn(() => Effect.succeed(Option.none()));
+    const cloudAdapter = {
+      ...adapter,
+      driver: fakeCloudDriver,
+      getCapabilities: () => Effect.succeed(fakeCloudCapabilities()),
+    };
+    const harness = makeHarness({
+      adapter: cloudAdapter,
+      prepared,
+      managedFolders: Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/projects",
+        folderForThread,
+      }),
+    });
+    yield* Effect.gen(function* () {
+      const launch = yield* ThreadLaunch.ThreadLaunchService;
+      yield* launch.launch(
+        launchInput({
+          command: "command:cloud-launch",
+          thread: "thread:cloud-launch",
+          workspace: { type: "worktree", baseRef: "dev" },
+          message: "Start a cloud task",
+        }),
+      );
+      yield* Deferred.await(prepared);
+      assert.equal(harness.createWorktree.mock.calls.length, 0);
+      assert.equal(harness.runSetup.mock.calls.length, 0);
+      assert.equal(harness.generateBranchName.mock.calls.length, 0);
+      assert.equal(folderForThread.mock.calls.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);

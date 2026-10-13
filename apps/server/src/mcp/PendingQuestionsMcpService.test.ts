@@ -24,6 +24,7 @@ import * as Ref from "effect/Ref";
 
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as ThreadResults from "../threadResults/ThreadResultService.ts";
 import * as HostThreads from "./HostThreadsMcpService.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -228,6 +229,7 @@ const runService = <A, E>(
       }),
   });
   const hostLayer = HostThreads.layer.pipe(
+    Layer.provide(Layer.mock(ThreadResults.ThreadResultService)({})),
     Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
     Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
     Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),

@@ -36,6 +36,7 @@ export class ProviderTurnControlError extends Schema.TaggedError<ProviderTurnCon
     operation: Schema.Literals(["interrupt", "restart", "steer"]),
     providerTurnId: ProviderTurnId,
     turnCompleted: Schema.optional(Schema.Boolean),
+    reason: Schema.optional(Schema.Literal("tracking-unavailable")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
@@ -139,6 +140,16 @@ export const layer: Layer.Layer<
         }
         const session = yield* sessions.get(input.providerSessionId);
         if (Option.isNone(session)) {
+          if (input.operation === "interrupt" && providerThread.cloudTask !== undefined) {
+            return yield* new ProviderTurnControlError({
+              threadId: input.threadId,
+              operation: "interrupt",
+              providerTurnId: input.providerTurnId,
+              reason: "tracking-unavailable",
+              cause:
+                "Cloud tracking is unavailable. Remote work may continue; retry after tracking attaches.",
+            });
+          }
           // Interrupt/restart against a already-released session must not fail
           // the durable effect (and retry 5x). The turn may still look running
           // in projection until recovery/finalization; there is no live adapter
@@ -178,7 +189,19 @@ export const layer: Layer.Layer<
           const session = Option.isSome(loaded.session)
             ? loaded.session
             : yield* sessions.get(input.providerSessionId);
-          if (Option.isNone(session)) return;
+          if (Option.isNone(session)) {
+            if (loaded.providerThread.cloudTask !== undefined) {
+              return yield* new ProviderTurnControlError({
+                threadId: input.threadId,
+                operation: "interrupt",
+                providerTurnId: input.providerTurnId,
+                reason: "tracking-unavailable",
+                cause:
+                  "Cloud tracking is unavailable. Remote work may continue; retry after tracking attaches.",
+              });
+            }
+            return;
+          }
           if (input.subagent !== undefined) {
             if (session.value.stopSubagent === undefined) {
               return yield* new ProviderTurnControlError({
@@ -203,6 +226,8 @@ export const layer: Layer.Layer<
             providerTurnId: loaded.providerTurn.id,
             requestRuntimeRestart: true,
           });
+          // Cloud acknowledgement requests cancellation; its observer owns terminal settlement.
+          if (loaded.providerThread.cloudTask !== undefined) return;
           // Give native terminal ingestion time to finish before the Stop
           // follow-up repairs a run whose provider no longer reports on it.
           // The wait is real time: ingestion runs on other fibers and never
