@@ -19,7 +19,7 @@ import { DecisionUserInputForm } from "./DecisionUserInputForm";
 import { useDecisionInbox } from "./useDecisionInbox";
 
 export function DecisionInbox() {
-  const { snapshot, ordered, current, drafts, submissions, skip, setAnswers, submit, position } =
+  const { snapshot, ordered, current, drafts, submissions, skip, setAnswers, submit } =
     useDecisionInbox();
   return (
     <SidebarInset>
@@ -48,7 +48,6 @@ export function DecisionInbox() {
                 item={current}
                 drafts={drafts[current.id] ?? {}}
                 submission={submissions[current.id]}
-                position={position}
                 total={ordered.length}
                 onChange={(next) => setAnswers(current.id, next)}
                 onSubmit={(response) => submit(current.id, response)}
@@ -96,7 +95,6 @@ function DecisionCard({
   onChange,
   onSubmit,
   onSkip,
-  position,
   total,
   partial,
   blockedBySync,
@@ -107,7 +105,6 @@ function DecisionCard({
   onChange: (drafts: Inbox["drafts"][string]) => void;
   onSubmit: (response: Parameters<Inbox["submit"]>[1]) => Promise<unknown>;
   onSkip: Inbox["skip"];
-  position: number;
   total: number;
   partial: boolean;
   blockedBySync: boolean;
@@ -138,8 +135,11 @@ function DecisionCard({
           <TooltipPopup>{item.createdAt}</TooltipPopup>
         </Tooltip>
         <p aria-live="polite" className="text-sm text-muted-foreground">
-          {position} of {total}
-          {partial ? " loaded so far" : ""}
+          {/* Skipped requests move to the end, so the current card is nearly always
+              first; the remaining count is the useful number. */}
+          {partial
+            ? `${total} loaded so far`
+            : `${total} ${total === 1 ? "decision" : "decisions"} waiting`}
         </p>
       </div>
       {!canOperate ? <p role="status">This connection cannot answer decisions.</p> : null}

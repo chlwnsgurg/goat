@@ -231,7 +231,7 @@ it("never calls partial loading or detail failures all caught up", async () => {
   expect(container.textContent).toContain("Loading decisions…");
   expect(container.textContent).not.toContain("All caught up");
   await act(async () => write([a], { isLoading: true, loadingRefs: [b.ref] }));
-  expect(container.textContent).toContain("1 of 1 loaded so far");
+  expect(container.textContent).toContain("1 loaded so far");
   expect(button("Approve").disabled).toBe(false);
   await act(async () => write([], { errors: [{ ref: b.ref, message: "Offline" }] }));
   expect(container.textContent).toContain("Some decisions could not be loaded.");
@@ -245,7 +245,7 @@ it("never calls partial loading or detail failures all caught up", async () => {
 
 it("counts actual requests rather than provisional flagged threads", async () => {
   await mount([a, approval("second", secondary, "a", "2026-10-01T01:00:00.000Z"), b]);
-  expect(container.textContent).toContain("1 of 3");
+  expect(container.textContent).toContain("3 decisions waiting");
   await click("Skip");
   expect(container.textContent).toContain("Run command second");
   expect(container.textContent).not.toContain("Run command a");
