@@ -1002,6 +1002,30 @@ describe("memory bounded transport", () => {
 });
 
 describe("memory additional boundary fixtures", () => {
+  it("rejects excess error fields on make and constructor paths", () => {
+    for (const [ErrorClass, props] of [
+      [M.MemoryRpcError, { code: "invalid_output" }],
+      [M.MemoryHubError, { code: "invalid_output" }],
+      [M.MemoryImportRpcError, { issue: "storage_failed" }],
+    ] as const) {
+      const made = ErrorClass.make(props as never);
+      const constructed = new ErrorClass(props as never);
+      expect(made).toBeInstanceOf(ErrorClass);
+      expect(constructed).toBeInstanceOf(ErrorClass);
+      expect(made).toMatchObject({ ...props, _tag: ErrorClass.identifier });
+      expect(constructed).toMatchObject({ ...props, _tag: ErrorClass.identifier });
+      expect(ErrorClass.make(made as never)).toBe(made);
+      for (const options of [
+        undefined,
+        { parseOptions: { onExcessProperty: "ignore" as const } },
+        { disableChecks: true, parseOptions: { disableChecks: true } },
+      ]) {
+        const raw = { ...props, cause: "private" };
+        expect(() => ErrorClass.make(raw as never, options)).toThrow();
+        expect(() => new ErrorClass(raw as never, options)).toThrow();
+      }
+    }
+  });
   it("validates capacity categories on safe errors", () => {
     const capacity = {
       code: "capacity_exceeded",

@@ -44,6 +44,12 @@ const strictSchema = <S extends Schema.Constraint>(schema: S) =>
     },
   );
 const struct = <F extends Schema.Struct.Fields>(fields: F) => strictSchema(Schema.Struct(fields));
+// TaggedError construction uses its internal struct rather than the overridden ast.
+const strictMakeOptions = (options?: Schema.MakeOptions): Schema.MakeOptions => ({
+  ...options,
+  disableChecks: false,
+  parseOptions: { ...options?.parseOptions, onExcessProperty: "error", disableChecks: false },
+});
 const canonical = Schema.String.check(
   Schema.makeFilter((s) => s.length > 0 && s === s.trim() && Array.from(s).length <= 1024),
 );
@@ -777,6 +783,17 @@ export class MemoryRpcError extends Schema.TaggedError<MemoryRpcError>()(
   "MemoryRpcError",
   safeDomainError,
 ) {
+  // Preserve the class shape and internal decode payload; only enforce parse options.
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: (typeof MemoryRpcError)["~type.make.in"], options?: Schema.MakeOptions) {
+    super(props, strictMakeOptions(options));
+  }
+  static override make(
+    props: (typeof MemoryRpcError)["~type.make.in"],
+    options?: Schema.MakeOptions,
+  ): MemoryRpcError {
+    return super.make(props, strictMakeOptions(options));
+  }
   static override get ast(): SchemaAST.Declaration {
     return strictSchema(Schema.make(super.ast)).ast;
   }
@@ -788,6 +805,17 @@ export class MemoryHubError extends Schema.TaggedError<MemoryHubError>()(
   "MemoryHubError",
   safeDomainError,
 ) {
+  // Preserve the class shape and internal decode payload; only enforce parse options.
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: (typeof MemoryHubError)["~type.make.in"], options?: Schema.MakeOptions) {
+    super(props, strictMakeOptions(options));
+  }
+  static override make(
+    props: (typeof MemoryHubError)["~type.make.in"],
+    options?: Schema.MakeOptions,
+  ): MemoryHubError {
+    return super.make(props, strictMakeOptions(options));
+  }
   static override get ast(): SchemaAST.Declaration {
     return strictSchema(Schema.make(super.ast)).ast;
   }
@@ -1523,6 +1551,17 @@ export class MemoryImportRpcError extends Schema.TaggedError<MemoryImportRpcErro
     Schema.makeFilter((v) => (v.issue === "capacity_exceeded") === (v.capacity !== undefined)),
   ),
 ) {
+  // Preserve the class shape and internal decode payload; only enforce parse options.
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: (typeof MemoryImportRpcError)["~type.make.in"], options?: Schema.MakeOptions) {
+    super(props, strictMakeOptions(options));
+  }
+  static override make(
+    props: (typeof MemoryImportRpcError)["~type.make.in"],
+    options?: Schema.MakeOptions,
+  ): MemoryImportRpcError {
+    return super.make(props, strictMakeOptions(options));
+  }
   static override get ast(): SchemaAST.Declaration {
     return strictSchema(Schema.make(super.ast)).ast;
   }
