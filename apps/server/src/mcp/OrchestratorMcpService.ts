@@ -1679,7 +1679,7 @@ const make = Effect.gen(function* () {
                 Effect.map(Option.getOrUndefined),
               );
         const response = {
-          cloudTask: remoteCloudTask,
+          ...(remoteCloudTask === undefined ? {} : { cloudTask: remoteCloudTask }),
           taskId: task.id,
           host: task.remote.host,
           childThreadId: task.remote.threadId,
@@ -1835,8 +1835,12 @@ const make = Effect.gen(function* () {
             null);
       const resultTransfer = taskResultTransfer(parentProjection, childProjection, task) ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
+      const cloudTask = cloudTaskForRun(
+        childControls.providerThreads ?? [],
+        taskResultRun ?? childRun,
+      );
       const response = {
-        cloudTask: cloudTaskForRun(childControls.providerThreads ?? [], taskResultRun ?? childRun),
+        ...(cloudTask === undefined ? {} : { cloudTask }),
         taskId: task.id,
         childThreadId: task.childThreadId,
         childRunId: childRun?.id ?? null,
@@ -3430,12 +3434,13 @@ const make = Effect.gen(function* () {
             turnItemTypes: ["user_message", "assistant_message"],
           })
           .pipe(Effect.mapError(threadManagementFailure));
+        const cloudTask = cloudTaskForRun(
+          records.providerThreads ?? [],
+          records.runs.find((run) => run.id === (shell.activeRunId ?? shell.latestRunId)),
+        );
         return {
           ...statusFromShell(shell, records.runs, records.turnItems),
-          cloudTask: cloudTaskForRun(
-            records.providerThreads ?? [],
-            records.runs.find((run) => run.id === (shell.activeRunId ?? shell.latestRunId)),
-          ),
+          ...(cloudTask === undefined ? {} : { cloudTask }),
         };
       }),
     interruptThread: (scope, input) =>

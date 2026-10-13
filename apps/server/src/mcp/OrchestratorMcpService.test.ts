@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 
 import {
   DispatchModeLimit,
@@ -56,6 +57,8 @@ import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapte
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { fakeCloudCapabilities } from "../orchestration-v2/testkit/FakeCloudAdapter.ts";
 import * as CloudSource from "../orchestration-v2/CloudTaskSourceService.ts";
+
+const isJson = Schema.is(Schema.Json);
 
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
@@ -1058,6 +1061,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           const status = yield* service.taskStatus(scope, taskId);
           assert.equal(status.status, "running");
           assert.equal(status.cloudTask?.taskId, cloud ? "remote-cloud-task" : undefined);
+          assert.equal(isJson(status), true);
         }).pipe(
           Effect.provide(
             OrchestratorMcpService.layer.pipe(

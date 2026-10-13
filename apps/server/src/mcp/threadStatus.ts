@@ -80,10 +80,12 @@ export function excerpt(text: string, max = LAST_MESSAGE_EXCERPT_CHARS): string 
  */
 export function boundedStatus<
   S extends Pick<OrchestratorMcpThreadStatusResult, "lastMessage" | "lastError" | "cloudTask">,
->(status: S): S {
+>(status: S) {
+  const { cloudTask: rawCloudTask, ...fields } = status;
+  const cloudTask = cloudTaskView(rawCloudTask);
   return {
-    ...status,
-    cloudTask: cloudTaskView(status.cloudTask),
+    ...fields,
+    ...(cloudTask === undefined ? {} : { cloudTask }),
     lastMessage:
       status.lastMessage === null
         ? null
@@ -181,7 +183,7 @@ export function statusFromRead(
   const pending = thread.pendingRequestCount > 0 && (status === "running" || status === "waiting");
   const phase = pending ? "waiting" : threadPhase(status, null);
   return {
-    cloudTask: read.cloudTask,
+    ...(read.cloudTask === undefined ? {} : { cloudTask: read.cloudTask }),
     ...(read.host === undefined ? {} : { host: read.host }),
     threadId: thread.threadId,
     title: thread.title,
