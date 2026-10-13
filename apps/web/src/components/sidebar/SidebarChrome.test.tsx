@@ -29,7 +29,7 @@ vi.mock("../goatBot/useGoatBotWaitingCount", () => ({
     ),
 }));
 
-import { SidebarCollapsedBrand } from "./SidebarChrome";
+import { SidebarBrandWidthProbe, SidebarCollapsedBrand } from "./SidebarChrome";
 
 let root: Root | undefined;
 let container: HTMLDivElement;
@@ -84,11 +84,35 @@ it("renders the no-drag global agent link while the sidebar is collapsed", async
   );
 });
 
-it("keeps the waiting badge in the measured brand as the count changes", async () => {
+it("keeps the waiting badge in both width probes, with the wordmark only in the collapsed one", async () => {
   await renderBrand(false);
+  await act(() =>
+    root?.render(
+      <>
+        <SidebarBrandWidthProbe onWidthChange={() => {}} />
+        <SidebarCollapsedBrand visible={false} onWidthChange={() => {}} />
+      </>,
+    ),
+  );
   expect(container.textContent?.trim()).toBe("GOAT");
   await act(() => setCount(101));
-  expect(container.textContent?.trim()).toBe("GOAT101");
+  await act(() =>
+    root?.render(
+      <>
+        <SidebarBrandWidthProbe onWidthChange={() => {}} />
+        <SidebarCollapsedBrand visible={false} onWidthChange={() => {}} />
+      </>,
+    ),
+  );
+  expect(container.textContent?.trim()).toBe("101GOAT101");
   await act(() => setCount(undefined));
+  await act(() =>
+    root?.render(
+      <>
+        <SidebarBrandWidthProbe onWidthChange={() => {}} />
+        <SidebarCollapsedBrand visible={false} onWidthChange={() => {}} />
+      </>,
+    ),
+  );
   expect(container.textContent?.trim()).toBe("GOAT");
 });
