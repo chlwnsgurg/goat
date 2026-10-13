@@ -384,7 +384,9 @@ export const make = Effect.gen(function* () {
       for (const [watchId, watch] of next) {
         if (dormantExpired(watch, now)) next.delete(watchId);
       }
-      return yield* persist(next);
+      // Deleting a watch and releasing its inline secret finish together, or a
+      // shutdown in between leaves a secret that no saved watch refers to.
+      return yield* Effect.uninterruptible(persist(next));
     });
 
   const loadFile = (filePath: string) =>
