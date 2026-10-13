@@ -1,3 +1,8 @@
+import * as MemoryStore from "./memory/MemoryStore.ts";
+import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
+import * as MemoryService from "./memory/MemoryService.ts";
+import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
+import * as MemoryWorker from "./memory/MemoryWorker.ts";
 import * as RuntimeAdmission from "./runtimeAdmission.ts";
 import * as RuntimeDrain from "./runtimeDrain.ts";
 import * as RuntimeControl from "./runtimeControl.ts";
@@ -275,7 +280,14 @@ const layerUsage = UsageService.layer.pipe(
       CursorUsageAccounts.layer.pipe(
         Layer.provide(CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer))),
       ),
-    ).pipe(Layer.provide(ProviderHostLive.layer.pipe(Layer.provide(ServerSecretStore.layer)))),
+    ).pipe(
+      Layer.provide(
+        ProviderHostLive.layer.pipe(
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(ServerEnvironment.layerIdentity),
+        ),
+      ),
+    ),
   ),
   Layer.provide(layerServerSettings),
 );
@@ -358,6 +370,10 @@ const layerPullRequestService = PullRequestService.layer.pipe(
   Layer.provide(SourceControlRateLimit.layer),
 );
 
+const layerTextGeneration = TextGeneration.layer.pipe(
+  Layer.provide(layerSourceControlProviderRegistry),
+);
+
 const layerGitManager = GitManager.layer.pipe(
   // Per-project git settings resolve the acting thread's project.
   Layer.provide(Layer.merge(ProjectionStoreV2.layer, ProjectStore.layer)),
@@ -365,7 +381,7 @@ const layerGitManager = GitManager.layer.pipe(
   Layer.provideMerge(WorktreeSetupTracker.layer),
   Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(layerSourceControlProviderRegistry),
-  Layer.provideMerge(TextGeneration.layer.pipe(Layer.provide(layerSourceControlProviderRegistry))),
+  Layer.provideMerge(layerTextGeneration),
 );
 
 const layerGit = Layer.empty.pipe(
@@ -568,7 +584,24 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
+const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
+const layerMemoryService = MemoryService.layer.pipe(Layer.provideMerge(layerMemoryQuota));
+const layerMemoryWorker = MemoryWorker.layer.pipe(
+  Layer.provideMerge(layerMemoryService),
+  Layer.provide(MemoryMaintenance.layer.pipe(Layer.provide(layerMemoryQuota))),
+  Layer.provide(RuntimeLayer.layerEventSink),
+  Layer.provide(layerTextGeneration),
+  Layer.provide(RuntimeIdentity.layer),
+);
+const layerMemoryStarted = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const worker = yield* MemoryWorker.MemoryWorker;
+    yield* worker.start();
+  }),
+).pipe(Layer.provideMerge(layerMemoryWorker));
+
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
+  layerMemoryStarted,
   AgentAwarenessRelay.layer,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,

@@ -1,6 +1,8 @@
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  EnvironmentId,
   ANTIGRAVITY_DEFAULT_MODEL,
   AntigravitySettings,
   ProviderDriverKind,
@@ -112,6 +114,11 @@ const expectedCommands = [
 ];
 
 const layerTest = ProviderHostLive.layer.pipe(
+  Layer.provide(
+    Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+      getEnvironmentId: Effect.succeed(EnvironmentId.make("memory-host-fixture")),
+    }),
+  ),
   Layer.provideMerge(
     Layer.mock(BackgroundPolicy.BackgroundPolicy)({
       shouldRunScopeWork: () => Effect.succeed(false),
