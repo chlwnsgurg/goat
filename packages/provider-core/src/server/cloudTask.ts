@@ -44,6 +44,18 @@ export function cloudFollowUpReason(
     : null;
 }
 
+// True when the text links exactly this URL (not a longer one such as /pull/70 for /pull/7).
+function linksUrl(text: string, url: string) {
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(url, from);
+    if (at === -1) return false;
+    const next = text.charAt(at + url.length);
+    if (next === "" || /[\s)\]>.,;:!?'"`]/.test(next)) return true;
+    from = at + 1;
+  }
+}
+
 export function cloudTaskResultText(task: OrchestrationV2CloudTask) {
   const title =
     task.tracking === "link-only" && task.status === "running"
@@ -53,7 +65,7 @@ export function cloudTaskResultText(task: OrchestrationV2CloudTask) {
   // Rendered as markdown: one link per list item so URLs never run into the next label,
   // and the pull request is not repeated when the summary already links it.
   const links = [
-    task.prUrl && !summary.includes(task.prUrl) ? `- Pull request: ${task.prUrl}` : undefined,
+    task.prUrl && !linksUrl(summary, task.prUrl) ? `- Pull request: ${task.prUrl}` : undefined,
     task.branch ? `- Branch: \`${task.branch}\`` : undefined,
     task.url ? `- Cloud task: ${task.url}` : undefined,
   ].filter((line): line is string => line !== undefined);

@@ -44,4 +44,24 @@ describe("cloudTaskResultText", () => {
   it("falls back to the task status when there is no summary or link", () => {
     assert.strictEqual(cloudTaskResultText(task({ status: "failed" })), "Cloud task failed");
   });
+
+  it("keeps the pull request link when the summary only links a longer URL", () => {
+    const text = cloudTaskResultText(
+      task({
+        summary: "Superseded https://github.com/acme/app/pull/70.",
+        prUrl: "https://github.com/acme/app/pull/7",
+      }),
+    );
+    assert.include(text, "- Pull request: https://github.com/acme/app/pull/7");
+  });
+
+  it("treats a linked pull request followed by punctuation as already present", () => {
+    const text = cloudTaskResultText(
+      task({
+        summary: "Opened (https://github.com/acme/app/pull/7).",
+        prUrl: "https://github.com/acme/app/pull/7",
+      }),
+    );
+    assert.notInclude(text, "- Pull request:");
+  });
 });
