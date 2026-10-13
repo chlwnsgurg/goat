@@ -135,6 +135,21 @@ Choose **Mark all as read** from Priority's menu to acknowledge unread completio
 unacknowledged wakes on connections you can change. Those rows leave Priority. Work in progress
 and pending requests stay. The activity bell shows the same count as Priority.
 
+### Answer waiting decisions
+
+Open **Decisions** at the top of the thread sidebar, or search for it in the command palette,
+to answer agent questions and approve or reject tool requests from every connected environment.
+Requests from subagent threads are included; archived threads are not. Threads keep their place
+in Priority.
+
+Decisions starts with the oldest request and moves to the next one after each answer. **Skip**
+sends a request to the end of the queue for this visit. The sidebar counts waiting threads, so a
+thread with two requests counts once until Decisions loads and shows the real total.
+
+Use **Go to thread** for more context or to
+[attach files to an answer](./question-attachments.md). A request whose provider session cannot
+resume stays listed with answering turned off.
+
 ### Fold working threads on mobile
 
 On iOS and Android, turn on **Settings → Thread behavior → Working section** to move threads
