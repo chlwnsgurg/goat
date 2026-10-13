@@ -464,15 +464,16 @@ it.layer(layer)("OpenCode v2 memory generation", (it) => {
           }),
       },
     } as unknown as OpenCode2Server.OpenCode2Connection["client"];
+    const connection = {
+      client,
+      events: Effect.succeed(Stream.fromQueue(events)),
+      url: "http://owned.invalid",
+      version: "2.0.23",
+      external: false,
+    };
     const server = OpenCode2Server.OpenCode2Server.of({
-      withConnection: (use) =>
-        use({
-          client,
-          events: Effect.succeed(Stream.fromQueue(events)),
-          url: "http://owned.invalid",
-          version: "2.0.23",
-          external: false,
-        }),
+      withMemoryConnection: (_operation, _providerId, use) => use(connection),
+      withConnection: () => Effect.die("Memory must never borrow the shared server."),
     });
     const generation = yield* OpenCode2TextGeneration.make({
       memoryRunnerContext: memoryContext,

@@ -398,6 +398,7 @@ export const OpenCodeDriver: ProviderDriver<
       const textGeneration = selectOpenCodeRuntimeTextGeneration(
         runtimeProbe,
         yield* makeOpenCodeTextGeneration(effectiveConfig, {
+          environment: processEnv,
           memoryRunnerContext: {
             providerInstanceId: instanceId,
             ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),

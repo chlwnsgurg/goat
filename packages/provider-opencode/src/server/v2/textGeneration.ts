@@ -79,7 +79,10 @@ const runOnServer = (
         config.some(
           (entry) =>
             entry.type === "document" &&
-            Object.values(entry.info.mcp?.servers ?? {}).some((server) => server.disabled !== true),
+            ((entry.info.plugins?.length ?? 0) > 0 ||
+              Object.values(entry.info.mcp?.servers ?? {}).some(
+                (server) => server.disabled !== true,
+              )),
         )
       ) {
         return yield* new TextGenerationError({
@@ -300,7 +303,15 @@ export const make = Effect.fn("OpenCode2TextGeneration.make")(function* (
   const runSelected = <S extends Schema.Top>(input: TextGenerationOperations.Request<S>) =>
     (TextGenerationOperations.isMemoryOperation(input.operation) && options.external
       ? requireOpenCodeMemoryIsolation(input.operation)
-      : server.withConnection((connection) => runOnServer(connection, input))
+      : TextGenerationOperations.isMemoryOperation(input.operation)
+        ? server.withMemoryConnection === undefined
+          ? requireOpenCodeMemoryIsolation(input.operation)
+          : server.withMemoryConnection(
+              input.operation,
+              input.modelSelection.model.split("/")[0] ?? "",
+              (connection) => runOnServer(connection, input),
+            )
+        : server.withConnection((connection) => runOnServer(connection, input))
     ).pipe(
       Effect.timeoutOrElse({
         duration: GENERATION_TIMEOUT,
