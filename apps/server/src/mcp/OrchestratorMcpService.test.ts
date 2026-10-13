@@ -1070,6 +1070,94 @@ describe("OrchestratorMcpService provider resolution", () => {
         );
       }),
   );
+  it.effect.each([
+    { status: "completed", unavailable: "offline" },
+    { status: "completed", unavailable: "settled" },
+    { status: "completed", unavailable: "read-only" },
+    { status: "running", unavailable: "offline" },
+    { status: "running", unavailable: "settled" },
+    { status: "completed", unavailable: "timeout" },
+  ] as const)(
+    "reads persisted SSH task $status with optional metadata $unavailable",
+    ({ status, unavailable }) =>
+      Effect.gen(function* () {
+        const metadataEntered = yield* Deferred.make<void>();
+        let hostReads = 0;
+        const task = {
+          id: taskId,
+          threadId: parentThreadId,
+          origin: "app_owned",
+          childThreadId: null,
+          status,
+          result: status === "completed" ? "Saved SSH result" : null,
+          providerInstanceId: codexInstanceId,
+          model: "gpt-5.4",
+          remote: { host: "build-box", threadId: "remote", correlationId: "rr-A" },
+          completionDelivery: { state: "acknowledged" },
+        };
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          ServerSettings.layerTest(),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.succeed(parentProjection([task])),
+            getThreadShell: () =>
+              Effect.succeed({
+                ...liveThreadShell(parentThreadId, {
+                  activeRunId: unavailable === "settled" ? null : parentRunId,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                }),
+                providerInstanceId: codexInstanceId,
+              }),
+          }),
+          Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({
+            get: () => Effect.succeed(null),
+          }),
+          Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({
+            callHostTool: (_call, authorize) =>
+              Effect.gen(function* () {
+                yield* authorize;
+                hostReads += 1;
+                yield* Deferred.succeed(metadataEntered, undefined);
+                if (unavailable === "timeout") return yield* Effect.never;
+                return yield* new SshRemoteDispatch.SshRemoteDispatchError({
+                  reason: "host_unavailable",
+                  message: "Host is offline",
+                });
+              }),
+          }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const result = yield* service
+            .taskStatus(
+              unavailable === "read-only"
+                ? {
+                    ...scope,
+                    client: { sessionId: "reader", label: "Reader", access: "read-only" },
+                  }
+                : scope,
+              taskId,
+            )
+            .pipe(Effect.forkChild);
+          if (unavailable === "timeout") {
+            yield* Deferred.await(metadataEntered);
+            yield* TestClock.adjust("5 seconds");
+          }
+          const view = yield* Fiber.join(result);
+          assert.equal(view.status, status);
+          assert.equal(view.summary, task.result);
+          assert.equal(view.cloudTask, undefined);
+          assert.equal(view.childThreadId, "remote");
+          assert.equal(hostReads, unavailable === "settled" || unavailable === "read-only" ? 0 : 1);
+        }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+      }),
+  );
   it.effect(
     "advertises orchestration capability from registered adapters rather than a driver allowlist",
     () =>

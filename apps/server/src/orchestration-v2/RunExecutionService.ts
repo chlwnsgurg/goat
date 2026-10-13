@@ -1320,6 +1320,20 @@ export const layer: Layer.Layer<
             return true;
           });
           const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode);
+          const closeEventSubscription = Effect.andThen(
+            eventSubscription.close,
+            cloud
+              ? Ref.update(cloudObservers, (current) => {
+                  const next = new Set(current);
+                  next.delete(input.run.id);
+                  return next;
+                })
+              : Effect.void,
+          ).pipe(
+            Effect.ensuring(
+              cloud ? Deferred.succeed(cloudRunSubscriptionClosed, undefined) : Effect.void,
+            ),
+          );
           const providerEventFiber = yield* eventSubscription.events.pipe(
             Stream.filterEffect((event) =>
               Ref.modify(eventRouting, (state) => routeProviderEvent(event, routeIdentity, state)),
@@ -1327,8 +1341,21 @@ export const layer: Layer.Layer<
             Stream.tap((event) =>
               Effect.gen(function* () {
                 let storedEventCount = 0;
+                const recoveredEvent =
+                  input.reattach === true &&
+                  event.type === "provider_turn.updated" &&
+                  event.providerTurn.providerThreadId === input.providerThread.id &&
+                  event.providerTurn.runAttemptId === input.attempt.id
+                    ? {
+                        ...event,
+                        providerTurn: {
+                          ...event.providerTurn,
+                          startedAt: input.run.startedAt ?? event.providerTurn.startedAt,
+                        },
+                      }
+                    : event;
                 const deliveredEvent = filterAssistantEvent(
-                  event,
+                  recoveredEvent,
                   DateTime.toEpochMillis(yield* DateTime.now),
                 );
                 if (deliveredEvent) {
@@ -1474,23 +1501,13 @@ export const layer: Layer.Layer<
                 ),
               ),
             ),
-            Effect.ensuring(
-              Effect.andThen(
-                eventSubscription.close,
-                cloud
-                  ? Ref.update(cloudObservers, (current) => {
-                      const next = new Set(current);
-                      next.delete(input.run.id);
-                      return next;
-                    })
-                  : Effect.void,
-              ).pipe(
-                Effect.ensuring(
-                  cloud ? Deferred.succeed(cloudRunSubscriptionClosed, undefined) : Effect.void,
-                ),
-              ),
-            ),
+            Effect.ensuring(closeEventSubscription),
             Effect.forkDetach,
+          );
+          // A failed start can interrupt the fork before it begins executing
+          // its finalizer. Close explicitly after joining it as well.
+          const interruptProviderEvents = Fiber.interrupt(providerEventFiber).pipe(
+            Effect.andThen(closeEventSubscription),
           );
 
           // A failed read fails the start below, so the run is recorded as
@@ -1500,7 +1517,7 @@ export const layer: Layer.Layer<
               ? Exit.succeed(true)
               : yield* Effect.exit(input.shouldStartProviderTurn());
           if (Exit.isSuccess(shouldStart) && !shouldStart.value) {
-            yield* Fiber.interrupt(providerEventFiber);
+            yield* interruptProviderEvents;
             return;
           }
 
@@ -1711,12 +1728,26 @@ export const layer: Layer.Layer<
               ),
             ),
           ).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError("orchestration V2 provider turn start failed", {
+            Effect.catchCause((cause) => {
+              // The start service owns reattach failure settlement and the
+              // outbox retry budget. Do not terminalize an attach here.
+              if (input.reattach === true)
+                return interruptProviderEvents.pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      new RunExecutionStartError({
+                        commandId: input.commandId,
+                        runId: input.run.id,
+                        cause,
+                      }),
+                    ),
+                  ),
+                );
+              return Effect.logError("orchestration V2 provider turn start failed", {
                 runId: input.run.id,
                 cause,
               }).pipe(
-                Effect.andThen(Fiber.interrupt(providerEventFiber)),
+                Effect.andThen(interruptProviderEvents),
                 Effect.andThen(Ref.get(latestProviderThread)),
                 Effect.flatMap((providerThread) =>
                   Ref.get(latestTurnItemOrdinal).pipe(
@@ -1760,8 +1791,8 @@ export const layer: Layer.Layer<
                       cause: { start: cause, write: writeCause },
                     }),
                 ),
-              ),
-            ),
+              );
+            }),
           );
         }),
     } satisfies RunExecutionServiceV2Shape);

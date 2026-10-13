@@ -1671,7 +1671,13 @@ const make = Effect.gen(function* () {
         const remoteCloudTask =
           task.remote.threadId === null
             ? undefined
-            : yield* readRemoteCloudTask(scope, task.remote.host, task.remote.threadId);
+            : yield* readRemoteCloudTask(scope, task.remote.host, task.remote.threadId).pipe(
+                // Live metadata is optional; persisted SSH results stay readable
+                // when the host is offline or the caller no longer owns a run.
+                Effect.catch(() => Effect.succeed(undefined)),
+                Effect.timeoutOption("5 seconds"),
+                Effect.map(Option.getOrUndefined),
+              );
         const response = {
           cloudTask: remoteCloudTask,
           taskId: task.id,
@@ -2855,7 +2861,15 @@ const make = Effect.gen(function* () {
           // Stop only requests cloud cancellation. Keep the promised parent
           // delivery until the observer records the actual result, including
           // a link-only task whose GOAT observation has already completed.
-          if (cloudTask?.status === "running" || cloudTask?.status === "submitting") return;
+          if (
+            cloudTask !== undefined &&
+            (latestRun?.status === "running" ||
+              cloudTask.status === "running" ||
+              cloudTask.status === "submitting" ||
+              parentTask?.completionDelivery?.state === "pending" ||
+              parentTask?.completionDelivery?.state === "claimed")
+          )
+            return;
           return yield* parentTask?.completionDelivery?.state === "disposed"
             ? Effect.void
             : threadManagement

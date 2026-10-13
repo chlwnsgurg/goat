@@ -32,7 +32,12 @@ import * as Scope from "effect/Scope";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { McpServer, McpSchema } from "effect/ai";
 import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
-import { ProviderAdapterOpenSessionError } from "@goat/provider-core/server/ProviderAdapter";
+import {
+  ProviderAdapterOpenSessionError,
+  ProviderAdapterTurnStartError,
+} from "@goat/provider-core/server/ProviderAdapter";
+import * as TestClock from "effect/testing/TestClock";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as ProviderSessions from "./ProviderSessionManager.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -326,9 +331,15 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
-it.effect.each(["succeeded", "cancelled", "unknown"] as const)(
-  "cloud %s settlement retains result and parent delivery across late metadata",
-  (outcome) =>
+it.effect.each([
+  { outcome: "succeeded", resultBeforeStop: false },
+  { outcome: "cancelled", resultBeforeStop: false },
+  { outcome: "unknown", resultBeforeStop: false },
+  { outcome: "succeeded", resultBeforeStop: true },
+  { outcome: "cancelled", resultBeforeStop: true },
+] as const)(
+  "cloud $outcome settlement retains parent delivery resultBeforeStop=$resultBeforeStop",
+  ({ outcome, resultBeforeStop }) =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("codex");
       const fake = yield* makeFakeCloudAdapter(true, instanceId);
@@ -338,6 +349,8 @@ it.effect.each(["succeeded", "cancelled", "unknown"] as const)(
       const observerReady = yield* Deferred.make<void>();
       const observerRelease = yield* Deferred.make<void>();
       const observerClosed = yield* Deferred.make<void>();
+      const resultPersisted = yield* Deferred.make<void>();
+      const releaseTerminal = yield* Deferred.make<void>();
       const lateCallbacks = yield* Ref.make(0);
       const offers: ProviderContinuationRequests.ProviderContinuationRequest[] = [];
       const adapter = {
@@ -514,7 +527,21 @@ it.effect.each(["succeeded", "cancelled", "unknown"] as const)(
         yield* Fiber.join(accepted);
         const childBeforeStop = yield* orchestrator.getThreadProjection(childId);
         const childRun = childBeforeStop.runs[0]!;
-        const savedTask = childBeforeStop.providerThreads[0]?.cloudTask;
+        const finishing = resultBeforeStop
+          ? yield* fake
+              .finish(
+                false,
+                outcome,
+                Deferred.succeed(resultPersisted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseTerminal)),
+                ),
+              )
+              .pipe(Effect.forkChild)
+          : null;
+        if (finishing !== null) yield* Deferred.await(resultPersisted);
+        const savedTask = (yield* orchestrator.getThreadProjection(childId)).providerThreads[0]
+          ?.cloudTask;
+        if (resultBeforeStop) assert.equal(savedTask?.status, outcome);
         const scope: McpInvocationContext.McpInvocationScope = {
           environmentId: EnvironmentId.make("env:cloud-cancel"),
           requestNamespace: `cloud-cancel-${outcome}`,
@@ -576,6 +603,9 @@ it.effect.each(["succeeded", "cancelled", "unknown"] as const)(
         if (outcome === "unknown") {
           yield* captured.commitCloudTask!({ ...savedTask!, summary: "Last observed summary" });
           yield* fake.publish(terminal);
+        } else if (finishing !== null) {
+          yield* Deferred.succeed(releaseTerminal, undefined);
+          yield* Fiber.join(finishing);
         } else {
           yield* fake.finish(false, outcome);
         }
@@ -778,9 +808,14 @@ it.effect.each(["succeeded", "cancelled", "unknown"] as const)(
     }).pipe(Effect.scoped),
 );
 
-it.effect.each([false, true])(
-  "final attach open failure settles only its original attempt ownershipLost=%s",
-  (ownershipLost) =>
+it.effect.each([
+  { ownershipLost: false, stage: "open" },
+  { ownershipLost: true, stage: "open" },
+  { ownershipLost: false, stage: "resume" },
+  { ownershipLost: true, stage: "resume" },
+] as const)(
+  "final attach $stage failure settles only its original attempt ownershipLost=$ownershipLost",
+  ({ ownershipLost, stage }) =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("codex");
       const fake = yield* makeFakeCloudAdapter(true, instanceId);
@@ -789,21 +824,26 @@ it.effect.each([false, true])(
       const adapter = {
         ...fake.adapter,
         openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
-          Deferred.succeed(opening, undefined).pipe(
-            Effect.andThen(Deferred.await(failOpen)),
-            Effect.andThen(
-              Effect.fail(
-                new ProviderAdapterOpenSessionError({
-                  driver: fake.adapter.driver,
-                  providerSessionId: input.providerSessionId,
-                  cause: "Tracking transport unavailable",
-                }),
+          Effect.gen(function* () {
+            const failure = Deferred.succeed(opening, undefined).pipe(
+              Effect.andThen(Deferred.await(failOpen)),
+              Effect.andThen(
+                Effect.fail(
+                  new ProviderAdapterOpenSessionError({
+                    driver: fake.adapter.driver,
+                    providerSessionId: input.providerSessionId,
+                    cause: "Tracking transport unavailable",
+                  }),
+                ),
               ),
-            ),
-          ),
+            );
+            if (stage === "open") return yield* failure;
+            const session = yield* fake.adapter.openSession(input);
+            return { ...session, resumeTurn: () => failure };
+          }),
       };
       const runtime = layerWithRegistry(
-        { name: `cloud-attach-open-failure-${ownershipLost}` },
+        { name: `cloud-attach-${stage}-failure-${ownershipLost}` },
         Registry.layerFromAdapters([adapter]),
         { runEffectWorker: false },
       );
@@ -957,6 +997,404 @@ it.effect.each([false, true])(
         }
         assert.equal(yield* Ref.get(fake.submissions), 0);
         assert.equal(yield* Ref.get(fake.creations), 0);
+      }).pipe(Effect.provide(runtime));
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  {
+    taskStatus: "unknown",
+    previousOrdinal: 0,
+    recordedOrdinal: null,
+    expectedOrdinal: 1,
+    failure: "open",
+    savedStart: true,
+  },
+  {
+    taskStatus: "succeeded",
+    previousOrdinal: 4,
+    recordedOrdinal: 5,
+    expectedOrdinal: 5,
+    failure: "resume",
+    savedStart: true,
+  },
+  {
+    taskStatus: "succeeded",
+    previousOrdinal: 4,
+    recordedOrdinal: null,
+    expectedOrdinal: 5,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "failed",
+    previousOrdinal: 0,
+    recordedOrdinal: null,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: false,
+  },
+  {
+    taskStatus: "cancelled",
+    previousOrdinal: 0,
+    recordedOrdinal: null,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "running",
+    previousOrdinal: 4,
+    recordedOrdinal: 2,
+    expectedOrdinal: 2,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "running",
+    previousOrdinal: 0,
+    recordedOrdinal: 1,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: true,
+  },
+] as const)(
+  "recovers accepted $taskStatus task ordinal=$expectedOrdinal after $failure failure savedStart=$savedStart",
+  (scenario) =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const fake = yield* makeFakeCloudAdapter(true, instanceId);
+      const delivered = yield* Deferred.make<void>();
+      const offers: ProviderContinuationRequests.ProviderContinuationRequest[] = [];
+      const originalStart = DateTime.makeUnsafe(1_000);
+      const adapterStart = DateTime.makeUnsafe(10_000);
+      let opens = 0;
+      let resumes = 0;
+      const adapter = {
+        ...fake.adapter,
+        openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+          Effect.gen(function* () {
+            opens += 1;
+            if (scenario.failure === "open" && opens === 1)
+              return yield* new ProviderAdapterOpenSessionError({
+                driver: fake.adapter.driver,
+                providerSessionId: input.providerSessionId,
+                cause: "Transient open failure",
+              });
+            const session = yield* fake.adapter.openSession(input);
+            return {
+              ...session,
+              resumeTurn: (
+                turn: Parameters<
+                  NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeTurn"]>
+                >[0],
+              ) =>
+                Effect.gen(function* () {
+                  resumes += 1;
+                  if (scenario.failure === "resume" && resumes === 1)
+                    return yield* new ProviderAdapterTurnStartError({
+                      driver: fake.adapter.driver,
+                      threadId: turn.threadId,
+                      providerThreadId: turn.providerThread.id,
+                      runId: turn.runId,
+                      cause: "Transient observer failure",
+                    });
+                  yield* session.resumeTurn!(turn);
+                  yield* fake.publish({
+                    type: "provider_turn.updated",
+                    driver: fake.adapter.driver,
+                    threadId: turn.threadId,
+                    providerTurn: {
+                      id: ProviderTurnId.make(`provider-turn:fake-cloud:${turn.attemptId}`),
+                      providerThreadId: turn.providerThread.id,
+                      nodeId: turn.rootNodeId,
+                      runAttemptId: turn.attemptId,
+                      nativeTurnRef: {
+                        driver: fake.adapter.driver,
+                        nativeId: turn.cloudTask.taskId,
+                        strength: "strong",
+                      },
+                      ordinal: turn.providerTurnOrdinal,
+                      status: "running",
+                      startedAt: scenario.taskStatus === "unknown" ? null : adapterStart,
+                      completedAt: null,
+                    },
+                  });
+                }),
+            };
+          }),
+      };
+      const runtime = layerWithRegistry(
+        { name: `cloud-recovery-regression-${scenario.taskStatus}` },
+        Registry.layerFromAdapters([adapter]),
+        {
+          runEffectWorker: false,
+          continuationRequests: Layer.succeed(
+            ProviderContinuationRequests.ProviderContinuationRequests,
+            {
+              offer: (request) =>
+                Effect.sync(() => offers.push(request)).pipe(
+                  Effect.andThen(Deferred.succeed(delivered, undefined)),
+                  Effect.asVoid,
+                ),
+              take: Effect.never,
+            },
+          ),
+        },
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const parentId = ThreadId.make("thread:recovery-parent");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:recovery-parent"),
+          threadId: parentId,
+          projectId: ProjectId.make("project:recovery"),
+          title: "Parent",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "dev",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:recovery-parent-run"),
+          threadId: parentId,
+          messageId: MessageId.make("message:recovery-parent"),
+          text: "Delegate",
+          attachments: [],
+          dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root", branch: "dev" } },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const parentRun = (yield* orchestrator.getThreadProjection(parentId)).runs[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:recovery-parent-running"),
+              type: "run.updated",
+              threadId: parentId,
+              occurredAt: now,
+              payload: { ...parentRun, status: "running", startedAt: now },
+            },
+          ],
+        });
+        yield* orchestrator.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make("command:recovery-delegate"),
+          parentThreadId: parentId,
+          parentRunId: parentRun.id,
+          parentNodeId: parentRun.rootNodeId!,
+          task: "Accepted cloud work",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          completionWake: "always",
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const task = (yield* orchestrator.getThreadProjection(parentId)).subagents[0]!;
+        const childId = task.childThreadId!;
+        const initial = yield* orchestrator.getThreadProjection(childId);
+        const run = initial.runs[0]!;
+        const attempt = initial.attempts[0]!;
+        const root = initial.nodes.find((node) => node.id === run.rootNodeId)!;
+        const thread = initial.providerThreads[0]!;
+        const cloudTask = {
+          taskId: "accepted-before-restart",
+          status: scenario.taskStatus,
+          tracking: "live" as const,
+          source: {
+            repository: "https://github.com/acme/repo",
+            branch: "dev",
+            sha: "a".repeat(40),
+          },
+          url: "https://example.com/tasks/saved",
+          localChangesExcluded: true,
+          updatedAt: DateTime.formatIso(now),
+        };
+        const startedAt = scenario.savedStart ? originalStart : null;
+        for (const event of [
+          { type: "run.updated", payload: { ...run, status: "running", startedAt } },
+          { type: "run-attempt.updated", payload: { ...attempt, status: "running", startedAt } },
+          { type: "node.updated", payload: { ...root, status: "running", startedAt } },
+          {
+            type: "provider-thread.updated",
+            payload: {
+              ...thread,
+              cloudTask,
+              nativeThreadRef: {
+                driver: fake.adapter.driver,
+                nativeId: "accepted-native-session",
+                strength: "strong",
+              },
+            },
+          },
+        ] as const)
+          yield* sink.write({
+            events: [
+              {
+                ...event,
+                id: EventId.make(`event:recovery:${event.type}`),
+                threadId: childId,
+                occurredAt: now,
+              },
+            ],
+          });
+        const turnId = ProviderTurnId.make(`provider-turn:fake-cloud:${attempt.id}`);
+        for (const savedTurn of [
+          ...(scenario.previousOrdinal === 0
+            ? []
+            : [
+                {
+                  id: ProviderTurnId.make("turn:earlier"),
+                  runAttemptId: RunAttemptId.make("attempt:earlier"),
+                  ordinal: scenario.previousOrdinal,
+                },
+              ]),
+          ...(scenario.recordedOrdinal === null
+            ? []
+            : [{ id: turnId, runAttemptId: attempt.id, ordinal: scenario.recordedOrdinal }]),
+        ])
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`event:${savedTurn.id}`),
+                type: "provider-turn.updated",
+                threadId: childId,
+                occurredAt: now,
+                payload: {
+                  ...savedTurn,
+                  providerThreadId: thread.id,
+                  nodeId: root.id,
+                  nativeTurnRef: {
+                    driver: fake.adapter.driver,
+                    nativeId: cloudTask.taskId,
+                    strength: "strong",
+                  },
+                  status: "running",
+                  startedAt: originalStart,
+                  completedAt: null,
+                },
+              },
+            ],
+          });
+        const saved = yield* orchestrator.getThreadProjection(childId);
+        if (scenario.recordedOrdinal === null) {
+          const stop = yield* orchestrator
+            .dispatch({
+              type: "run.interrupt",
+              commandId: CommandId.make("command:recovery-stop-untracked"),
+              threadId: childId,
+              runId: run.id,
+            })
+            .pipe(Effect.exit);
+          assert.equal(stop._tag, "Failure");
+          assert.deepEqual(yield* orchestrator.getThreadProjection(childId), saved);
+          assert.equal(yield* Ref.get(fake.cancellations), 0);
+        }
+        const commandId = CommandId.make("command:recovery-reattach");
+        const effectId = "effect:recovery-reattach";
+        const afterSequence = yield* orchestrator.getThreadEventSequence(childId);
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId,
+            threadId: childId,
+            request: { type: "provider-turn.reattach", runId: run.id },
+          },
+        ]);
+        // The original start effect sees the saved running run and does no work.
+        yield* worker.drain();
+        if (scenario.failure !== "none") {
+          const retry = Option.getOrThrow(yield* outbox.get(effectId));
+          assert.equal(retry.status, "pending");
+          assert.equal(retry.attemptCount, 1);
+          const afterFailure = yield* orchestrator.getThreadProjection(childId);
+          assert.equal(afterFailure.runs[0]?.status, "running");
+          assert.equal(afterFailure.attempts[0]?.status, "running");
+          assert.equal(afterFailure.nodes.find((node) => node.id === root.id)?.status, "running");
+          assert.deepEqual(afterFailure.providerThreads[0]?.cloudTask, cloudTask);
+          assert.equal(
+            afterFailure.messages.filter(
+              (message) => message.id === `message:cloud-result:${run.id}`,
+            ).length,
+            0,
+          );
+          yield* TestClock.adjust("100 millis");
+          yield* worker.drain();
+        }
+        assert.equal(Option.getOrThrow(yield* outbox.get(effectId)).status, "succeeded");
+        assert.equal((yield* Ref.get(fake.current))?.providerTurnOrdinal, scenario.expectedOrdinal);
+        const recovered = yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: childId,
+            eventType: "provider-turn.updated",
+            afterSequence,
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "provider-turn.updated" && stored.event.payload.id === turnId,
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkChild,
+          );
+        yield* Fiber.join(recovered);
+        const attached = yield* orchestrator.getThreadProjection(childId);
+        const turn = attached.providerTurns.find((candidate) => candidate.id === turnId)!;
+        assert.equal(turn.ordinal, scenario.expectedOrdinal);
+        assert.equal(
+          DateTime.toEpochMillis(turn.startedAt!),
+          DateTime.toEpochMillis(scenario.savedStart ? originalStart : adapterStart),
+        );
+        assert.equal(attached.runs[0]?.activeAttemptId, attempt.id);
+        for (const recoveredStart of [
+          attached.runs[0]!.startedAt,
+          attached.attempts[0]!.startedAt,
+          attached.nodes.find((node) => node.id === root.id)!.startedAt,
+        ])
+          assert.equal(
+            recoveredStart === null ? null : DateTime.toEpochMillis(recoveredStart),
+            startedAt === null ? null : DateTime.toEpochMillis(startedAt),
+          );
+        assert.equal(opens, scenario.failure === "open" ? 2 : 1);
+        assert.equal(resumes, scenario.failure === "resume" ? 2 : 1);
+        assert.equal(yield* Ref.get(fake.attachments), 1);
+        assert.equal(yield* Ref.get(fake.creations), 0);
+        assert.equal(yield* Ref.get(fake.submissions), 0);
+        assert.equal(
+          (yield* Ref.get(fake.current))?.providerThread.nativeThreadRef?.nativeId,
+          "accepted-native-session",
+        );
+        assert.equal(
+          (yield* Ref.get(fake.current))?.providerThread.cloudTask?.taskId,
+          cloudTask.taskId,
+        );
+        yield* fake.finish();
+        yield* Deferred.await(delivered);
+        yield* worker.drain();
+        const finished = yield* orchestrator.getThreadProjection(childId);
+        assert.equal(finished.runs[0]?.status, "completed");
+        assert.equal(
+          finished.messages.filter((message) => message.id === `message:cloud-result:${run.id}`)
+            .length,
+          1,
+        );
+        assert.equal(offers.length, 1);
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(parentId)).subagents[0]?.completionDelivery
+            ?.state,
+          "claimed",
+        );
       }).pipe(Effect.provide(runtime));
     }).pipe(Effect.scoped),
 );
