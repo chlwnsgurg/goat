@@ -300,6 +300,7 @@ export default Effect.gen(function* () {
     PRIMARY KEY(space,memory_id)
   )`;
   yield* sql`CREATE INDEX IF NOT EXISTS memory_events_memory_idx ON memory_events(memory_space_id,memory_id,sequence)`;
+  yield* sql`CREATE INDEX IF NOT EXISTS memory_compact_revision_idx ON memory_compact_receipts(space,json_extract(compact_json,'$.revisionId'))`;
   yield* sql`CREATE INDEX IF NOT EXISTS memory_revisions_memory_idx ON memory_revisions(space,memory_id)`;
   yield* sql`CREATE INDEX IF NOT EXISTS memory_payloads_memory_idx ON memory_payloads(space,memory_id)`;
   yield* sql`CREATE INDEX IF NOT EXISTS memory_items_scope_idx ON memory_items(space,scope_key,status,memory_id)`;

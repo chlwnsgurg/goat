@@ -123,6 +123,60 @@ const checkpoint = () => {
     bootstrapComplete: true,
   });
 };
+const approved = (op = operation()): Store.MemoryDecision => ({
+  ...decision(op),
+  admission: Store.approvedReplica,
+  receipt: {
+    operationId: op.operationId,
+    memoryId: op.memoryId,
+    operationDigest: hash,
+    outcome: "accepted",
+    hubSequence: 2,
+  },
+});
+const childOperation = () => {
+  const op = operation(4);
+  if (op.kind === "forget") throw new Error("Fixture kind");
+  const parent = M.MemoryRevisionId.make(id(13));
+  return decodeOperation({
+    ...op,
+    expectedHeads: [parent],
+    revision: { ...op.revision, parents: [parent] },
+  });
+};
+const parked = (): Store.MemoryDecision => {
+  const op = childOperation();
+  if (op.kind === "forget") throw new Error("Fixture kind");
+  return {
+    ...approved(op),
+    heads: [],
+    pending: { missingParents: op.revision.parents, reason: "missing_parent" },
+    item: {
+      memorySpaceId: space,
+      memoryId: memory,
+      scope: op.revision.scope,
+      status: "blocked",
+      failureCode: "missing_parent",
+      pendingSync: false,
+      localAvailability: {
+        exposure: "held",
+        reasons: ["missing_parent"],
+        cleanupPending: false,
+        deferred: [
+          {
+            kind: "parent",
+            state: "held",
+            reason: "missing_parent",
+            revisionId: op.revision.revisionId,
+            generation: 0,
+            sinceAtUtc: now,
+          },
+        ],
+      },
+    },
+  };
+};
+const reconnected = () => approved(childOperation());
 describe("MemoryStore", () => {
   it.effect("rolls back each pre-commit failure boundary", () =>
     Effect.gen(function* () {
@@ -563,6 +617,294 @@ describe("MemoryStore", () => {
         (yield* restored.loadAggregate(space, memory)).item?.localAvailability.cleanupPending,
         false,
       );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "reconnects after restart without changing receipt, event, cursor or canonical payload",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const original = yield* store.withReceivedCursor(
+          { memorySpaceId: space, hubEnvironmentId: env, expectedSequence: 0, afterSequence: 2 },
+          store.apply(parked()),
+        );
+        const replay = yield* store.apply(reconnected());
+        assert.deepStrictEqual(replay, original);
+        assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
+        yield* store.apply(approved());
+        const before = yield* sql`SELECT * FROM memory_events ORDER BY sequence`;
+        const bodies = yield* sql`SELECT * FROM memory_payloads ORDER BY payload_ref`;
+        const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+        const generation = (yield* fresh.loadAggregate(space, memory)).generation;
+        assert.deepStrictEqual(yield* fresh.reconnectParked(reconnected(), generation), original);
+        const after = yield* fresh.loadAggregate(space, memory);
+        assert.deepStrictEqual(after.heads, [M.MemoryRevisionId.make(id(14))]);
+        assert.strictEqual(after.generation, generation + 1);
+        assert.isFalse(after.item?.localAvailability.reasons.includes("missing_parent"));
+        assert.isTrue(after.item?.localAvailability.reasons.includes("scanner_pending"));
+        assert.strictEqual((yield* fresh.pendingReceived(space, 10)).length, 0);
+        assert.deepStrictEqual(yield* sql`SELECT * FROM memory_events ORDER BY sequence`, before);
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_payloads ORDER BY payload_ref`,
+          bodies,
+        );
+        assert.strictEqual(yield* fresh.readCursor(space, env), 2);
+        assert.deepStrictEqual(yield* fresh.reconnectParked(reconnected(), generation), original);
+        assert.strictEqual((yield* fresh.loadAggregate(space, memory)).generation, generation + 1);
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("rolls back reconnect projection and marker at each SQL failure", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(parked());
+      yield* store.apply(approved());
+      const before = yield* store.loadAggregate(space, memory);
+      for (const [table, action] of [
+        ["memory_items", "UPDATE"],
+        ["memory_inbox_pending", "DELETE"],
+      ]) {
+        yield* sql.unsafe(
+          `CREATE TRIGGER fail_reconnect BEFORE ${action} ON ${table} BEGIN SELECT RAISE(ABORT,'fixture'); END`,
+        );
+        assert.strictEqual(
+          (yield* Effect.exit(store.reconnectParked(reconnected(), before.generation)))._tag,
+          "Failure",
+        );
+        assert.deepStrictEqual(yield* store.loadAggregate(space, memory), before);
+        assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
+        yield* sql`DROP TRIGGER fail_reconnect`;
+      }
+      yield* store.reconnectParked(reconnected(), before.generation);
+      assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("fences stale reconnect decisions and missing parents", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(parked());
+      const generation = (yield* store.loadAggregate(space, memory)).generation;
+      assert.strictEqual(
+        (yield* Effect.exit(store.reconnectParked(reconnected(), generation)))._tag,
+        "Failure",
+      );
+      yield* store.apply(approved());
+      assert.strictEqual(
+        (yield* Effect.exit(store.reconnectParked(reconnected(), generation)))._tag,
+        "Failure",
+      );
+      assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rejects reconnect with changed operation, digest, receipt or admission", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(parked());
+      yield* store.apply(approved());
+      const generation = (yield* store.loadAggregate(space, memory)).generation;
+      const base = reconnected();
+      const op = base.operation;
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      for (const changed of [
+        { ...base, operationDigest: "b".repeat(64) },
+        { ...base, operation: { ...op, payload: { ...op.payload, text: "changed" } } },
+        { ...base, receipt: { ...base.receipt, hubSequence: 99 } },
+        { ...base, admission: Store.localIntent },
+      ])
+        assert.strictEqual(
+          (yield* Effect.exit(store.reconnectParked(changed, generation)))._tag,
+          "Failure",
+        );
+      assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("updates remaining missing parents atomically without rewriting receipt", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const original = yield* store.apply(parked());
+      const generation = (yield* store.loadAggregate(space, memory)).generation;
+      assert.deepStrictEqual(yield* store.reconnectParked(parked(), generation), original);
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).generation, generation + 1);
+      assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("reconstructs parked operations from pending metadata after event compaction", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(parked());
+      yield* sql`DELETE FROM memory_events`;
+      assert.deepStrictEqual(yield* store.pendingReceived(space, 10), [childOperation()]);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("returns retained ancestry and real missing parents without a boundary", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(approved());
+      const parent = M.MemoryRevisionId.make(id(13));
+      const absent = M.MemoryRevisionId.make(id(99));
+      assert.deepStrictEqual(yield* store.readAncestry(space, memory, [parent, absent]), {
+        causalBoundary: undefined,
+        retentionFloor: 0,
+        parents: [
+          { revisionId: parent, status: "retained", parents: [] },
+          { revisionId: absent, status: "missing" },
+        ],
+      });
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "distinguishes checkpoint-covered compacted ancestry from arbitrary unknown UUIDs",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const page = checkpoint();
+        yield* store.installCheckpointPage({ checkpointId: "fixture", page });
+        yield* store.completeCheckpoint({
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          checkpointId: "fixture",
+          pageCount: 1,
+        });
+        yield* sql`DELETE FROM memory_revisions`;
+        const parent = page.revisions[0]!.revision.revisionId;
+        const absent = M.MemoryRevisionId.make(id(99));
+        const result = yield* store.readAncestry(space, memory, [parent, absent]);
+        assert.deepStrictEqual(result.causalBoundary, page.causalBoundary);
+        assert.deepStrictEqual(result.parents, [
+          { revisionId: parent, status: "compacted", boundary: page.causalBoundary },
+          { revisionId: absent, status: "missing" },
+        ]);
+        const other = yield* store.readAncestry(space, M.MemoryId.make(id(88)), [parent]);
+        assert.deepStrictEqual(other.parents, [
+          { revisionId: parent, status: "crossMemory", memoryId: memory },
+        ]);
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("never treats a staged boundary or a newer compact receipt as covered ancestry", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const page = checkpoint();
+      yield* store.installCheckpointPage({ checkpointId: "fixture", page });
+      assert.isUndefined((yield* store.readAncestry(space, memory, [])).causalBoundary);
+      yield* store.persistCompactReceipt({
+        ...page.compactReceipts[0]!,
+        receipt: { ...page.compactReceipts[0]!.receipt, hubSequence: 2 },
+      });
+      yield* sql`INSERT INTO memory_compaction_state (space,boundary_json,published) VALUES (${space},${JSON.stringify(page.causalBoundary)},1)`;
+      assert.strictEqual(
+        (yield* store.readAncestry(space, memory, [page.revisions[0]!.revision.revisionId]))
+          .parents[0]?.status,
+        "missing",
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rejects a retained cross-memory parent before reconnect", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(parked());
+      yield* store.apply(approved());
+      const other = M.MemoryId.make(id(88));
+      yield* sql`UPDATE memory_revisions SET memory_id=${other} WHERE revision_id=${M.MemoryRevisionId.make(id(13))}`;
+      assert.strictEqual(
+        (yield* store.readAncestry(space, memory, [M.MemoryRevisionId.make(id(13))])).parents[0]
+          ?.status,
+        "crossMemory",
+      );
+      const generation = (yield* store.loadAggregate(space, memory)).generation;
+      assert.strictEqual(
+        (yield* Effect.exit(store.reconnectParked(reconnected(), generation)))._tag,
+        "Failure",
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("serializes concurrent reconnects into one projection update", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(parked());
+      yield* store.apply(approved());
+      const generation = (yield* store.loadAggregate(space, memory)).generation;
+      const results = yield* Effect.all(
+        [
+          store.reconnectParked(reconnected(), generation),
+          store.reconnectParked(reconnected(), generation),
+        ],
+        { concurrency: "unbounded" },
+      );
+      assert.deepStrictEqual(results[0], results[1]);
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).generation, generation + 1);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("reconnect preserves a pending forget exposure fence", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(parked());
+      yield* store.apply(approved());
+      yield* store.preserveForgetIntent({
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: M.MemoryOperationId.make(id(90)),
+        requestedAtUtc: now,
+        attempts: 0,
+        lastFailureCode: "capacity_exceeded",
+        operationDigest: null,
+        submissionState: "rejected",
+      });
+      yield* store.reconnectParked(
+        reconnected(),
+        (yield* store.loadAggregate(space, memory)).generation,
+      );
+      const item = (yield* store.loadAggregate(space, memory)).item;
+      assert.strictEqual(item?.status, "blocked");
+      assert.isTrue(item?.status === "blocked" && item.failureCode === "forget_pending");
+      assert.isFalse(item !== undefined && "payload" in item);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("forget wins over late reconnect without restoring a body", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const original = yield* store.apply(parked());
+      yield* store.apply(approved());
+      const generation = (yield* store.loadAggregate(space, memory)).generation;
+      const forget = decodeOperation({
+        protocolVersion: 1,
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: id(50),
+        originEnvironmentId: env,
+        expectedHeads: [],
+        kind: "forget",
+        tombstone: {
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: id(50),
+          deletingEnvironmentId: env,
+          deletedAtUtc: now,
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      });
+      yield* store.apply(decision(forget));
+      assert.deepStrictEqual(yield* store.reconnectParked(reconnected(), generation), original);
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
+      assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 0);
+      assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("reports an unlinked parked parent separately from a retained DAG ancestor", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(parked());
+      const revisionId = M.MemoryRevisionId.make(id(14));
+      assert.deepStrictEqual((yield* store.readAncestry(space, memory, [revisionId])).parents, [
+        { revisionId, status: "parked", missingParents: [M.MemoryRevisionId.make(id(13))] },
+      ]);
     }).pipe(Effect.provide(live)),
   );
 });

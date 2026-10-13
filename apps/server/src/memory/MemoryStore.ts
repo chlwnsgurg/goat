@@ -219,6 +219,34 @@ export type MemoryAggregate = {
   readonly pendingForget: PendingForgetIntent | undefined;
   readonly generation: number;
 };
+/** A published boundary is not proof that an arbitrary unknown UUID was compacted. */
+export type MemoryParentState =
+  | {
+      readonly revisionId: M.MemoryRevisionId;
+      readonly status: "retained";
+      readonly parents: ReadonlyArray<M.MemoryRevisionId>;
+    }
+  | {
+      readonly revisionId: M.MemoryRevisionId;
+      readonly status: "crossMemory";
+      readonly memoryId: M.MemoryId;
+    }
+  | {
+      readonly revisionId: M.MemoryRevisionId;
+      readonly status: "compacted";
+      readonly boundary: M.MemoryCausalBoundary;
+    }
+  | {
+      readonly revisionId: M.MemoryRevisionId;
+      readonly status: "parked";
+      readonly missingParents: ReadonlyArray<M.MemoryRevisionId>;
+    }
+  | { readonly revisionId: M.MemoryRevisionId; readonly status: "missing" };
+export type MemoryAncestry = {
+  readonly causalBoundary: M.MemoryCausalBoundary | undefined;
+  readonly retentionFloor: number;
+  readonly parents: ReadonlyArray<MemoryParentState>;
+};
 export type MemoryDecision = {
   readonly operation: M.MemoryOperation;
   readonly operationDigest: string;
@@ -371,6 +399,16 @@ export class MemoryStore extends Context.Service<
     ) => Effect.Effect<MemoryAggregate, MemoryStorageError>;
     readonly apply: (
       decision: MemoryDecision,
+    ) => Effect.Effect<StoredReceipt, MemoryStorageError | MemoryStoreConflict>;
+    readonly readAncestry: (
+      space: M.MemorySpaceId,
+      memoryId: M.MemoryId,
+      parents: ReadonlyArray<M.MemoryRevisionId>,
+    ) => Effect.Effect<MemoryAncestry, MemoryStorageError>;
+    /** Recompute under transact; expectedGeneration fences the projection used by the decider. */
+    readonly reconnectParked: (
+      decision: MemoryDecision,
+      expectedGeneration: number,
     ) => Effect.Effect<StoredReceipt, MemoryStorageError | MemoryStoreConflict>;
     readonly withReceivedCursor: <A, E, R>(
       input: {
@@ -699,7 +737,6 @@ const decodeConflict = Schema.decodeUnknownEffect(M.MemoryConflict);
 const decodeRevision = Schema.decodeUnknownEffect(M.MemoryRevision);
 const isSqlError = Schema.is(SqlError);
 const isStorageError = Schema.is(MemoryStorageError);
-const decodeOperationId = Schema.decodeUnknownEffect(M.MemoryOperationId);
 const decodeMemoryId = Schema.decodeUnknownEffect(M.MemoryId);
 const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
 const decodeReceipt = Schema.decodeUnknownEffect(Receipt);
@@ -778,6 +815,81 @@ const make = Effect.gen(function* () {
     return {
       operationDigest: row.operation_digest,
       receipt: yield* stored("receipt-codec", receiptCodec.decode(row.receipt_json, strict)),
+    };
+  });
+  const readAncestry = Effect.fn("MemoryStore.readAncestry")(function* (
+    space: M.MemorySpaceId,
+    memoryId: M.MemoryId,
+    parents: ReadonlyArray<M.MemoryRevisionId>,
+  ) {
+    const states = yield* stored(
+      "ancestry-boundary",
+      sql<{
+        boundary_json: string | null;
+        retained_revision_boundary: number;
+      }>`SELECT boundary_json,retained_revision_boundary FROM memory_compaction_state WHERE space=${space} AND published=1`,
+    );
+    const state = states[0];
+    const causalBoundary = state?.boundary_json
+      ? yield* boundaryCodec.decode(state.boundary_json, strict)
+      : undefined;
+    const result = yield* Effect.forEach(parents, (revisionId) =>
+      Effect.gen(function* () {
+        const rows = yield* stored(
+          "ancestry-revision",
+          sql<{
+            memory_id: string;
+            parents_json: string;
+            missing_parents_json: string | null;
+          }>`SELECT r.memory_id,r.parents_json,p.missing_parents_json FROM memory_revisions r LEFT JOIN memory_inbox_pending p ON p.space=r.space AND p.operation_id=r.operation_id AND p.record_kind='operation' WHERE r.space=${space} AND r.revision_id=${revisionId}`,
+        );
+        const row = rows[0];
+        if (row) {
+          const owner = yield* stored("ancestry-owner", decodeMemoryId(row.memory_id));
+          if (owner === memoryId && row.missing_parents_json !== null)
+            return {
+              revisionId,
+              status: "parked" as const,
+              missingParents: yield* headsCodec.decode(row.missing_parents_json, strict),
+            };
+          return owner !== memoryId
+            ? { revisionId, status: "crossMemory" as const, memoryId: owner }
+            : {
+                revisionId,
+                status: "retained" as const,
+                parents: yield* headsCodec.decode(row.parents_json, strict),
+              };
+        }
+        // Exact durable revision membership, rather than timestamps or the existence of a checkpoint.
+        const receipts = yield* stored(
+          "ancestry-compact",
+          sql<{
+            compact_json: string;
+          }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${space} AND json_extract(compact_json,'$.revisionId')=${revisionId}`,
+        );
+        for (const receipt of receipts) {
+          const record = yield* compactCodec.decode(receipt.compact_json, strict);
+          if (record.receipt.outcome === "rejected") continue;
+          if (record.receipt.memoryId !== memoryId)
+            return {
+              revisionId,
+              status: "crossMemory" as const,
+              memoryId: record.receipt.memoryId,
+            };
+          if (
+            causalBoundary &&
+            record.receipt.hubSequence !== null &&
+            record.receipt.hubSequence <= causalBoundary.checkpointSequence
+          )
+            return { revisionId, status: "compacted" as const, boundary: causalBoundary };
+        }
+        return { revisionId, status: "missing" as const };
+      }),
+    );
+    return {
+      causalBoundary,
+      retentionFloor: state?.retained_revision_boundary ?? 0,
+      parents: result,
     };
   });
   const readPending = Effect.fnUntraced(function* (space: M.MemorySpaceId, id: M.MemoryId) {
@@ -1156,7 +1268,10 @@ const make = Effect.gen(function* () {
       );
     }
   });
-  const apply = Effect.fn("MemoryStore.apply")(function* (decision: MemoryDecision) {
+  const applyDecision = Effect.fn("MemoryStore.applyDecision")(function* (
+    decision: MemoryDecision,
+    expectedGeneration?: number,
+  ) {
     return yield* transact(
       Effect.gen(function* () {
         const op = yield* stored("operation-codec", decodeOperation(decision.operation, strict));
@@ -1164,7 +1279,60 @@ const make = Effect.gen(function* () {
         if (old) {
           if (old.operationDigest !== decision.operationDigest)
             return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
-          return old;
+          if (expectedGeneration === undefined) return old;
+        } else if (expectedGeneration !== undefined) {
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        }
+        const reconnect = expectedGeneration !== undefined;
+        if (reconnect) {
+          if (
+            decision.admission.kind !== "approvedReplica" ||
+            op.kind === "forget" ||
+            !old ||
+            !("hubSequence" in old.receipt) ||
+            old.receipt.hubSequence === null ||
+            old.receipt.outcome === "rejected"
+          )
+            return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+          const pending = yield* stored(
+            "reconnect-pending",
+            sql<{
+              operation_digest: string;
+              metadata_json: string;
+            }>`SELECT operation_digest,metadata_json FROM memory_inbox_pending WHERE space=${op.memorySpaceId} AND operation_id=${op.operationId} AND record_kind='operation'`,
+          );
+          // Completion and tombstone purge both remove the durable marker. Replay must not resurrect it.
+          if (!pending[0]) return old;
+          const canonical = yield* operationFromMetadata(
+            yield* metadataCodec.decode(pending[0].metadata_json, strict),
+          );
+          if (
+            pending[0].operation_digest !== decision.operationDigest ||
+            !canonical ||
+            M.encodeMemoryOperation(canonical) !== M.encodeMemoryOperation(op) ||
+            (yield* receiptCodec.encode(old.receipt)) !==
+              (yield* receiptCodec.encode(decision.receipt))
+          )
+            return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+          const current = yield* readItem(op.memorySpaceId, op.memoryId);
+          if ((current?.generation ?? 0) !== expectedGeneration)
+            return yield* new MemoryStoreConflict({ code: "revision_changed" });
+          if (!decision.pending) {
+            const ancestry = yield* readAncestry(
+              op.memorySpaceId,
+              op.memoryId,
+              op.revision.parents,
+            );
+            if (ancestry.parents.some((parent) => parent.status === "crossMemory"))
+              return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+            if (
+              ancestry.parents.some(
+                (parent) => parent.status === "missing" || parent.status === "parked",
+              )
+            )
+              return yield* new MemoryStoreConflict({ code: "missing_parent" });
+          }
+          if (!decision.item) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
         }
         const outcome = yield* stored("receipt-codec", decodeReceipt(decision.receipt, strict));
         if (
@@ -1181,7 +1349,7 @@ const make = Effect.gen(function* () {
           sql`SELECT 1 FROM memory_tombstones WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
         );
         const accepted = outcome.outcome !== "rejected";
-        if (accepted && !tombstones.length && op.kind !== "forget") {
+        if (!reconnect && accepted && !tombstones.length && op.kind !== "forget") {
           const r = op.revision;
           yield* stored(
             "replaced-payload",
@@ -1229,14 +1397,15 @@ const make = Effect.gen(function* () {
         }
         const eventMetadata = yield* stored("metadata-codec", metadataCodec.encode(metadataOf(op)));
         const eventReceipt = yield* stored("receipt-codec", receiptCodec.encode(outcome));
-        yield* stored(
-          "event",
-          sql<{
-            sequence: number;
-          }>`INSERT INTO memory_events (protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,${op.memorySpaceId},${op.memoryId},${op.operationId},${op.kind},${op.originEnvironmentId},${decision.operationDigest},${eventMetadata},${eventReceipt},${op.kind === "forget" ? Date.parse(op.tombstone.deletedAtUtc) : Date.parse(op.revision.createdAtUtc)}) RETURNING sequence`,
-        );
+        if (!reconnect)
+          yield* stored(
+            "event",
+            sql<{
+              sequence: number;
+            }>`INSERT INTO memory_events (protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,${op.memorySpaceId},${op.memoryId},${op.operationId},${op.kind},${op.originEnvironmentId},${decision.operationDigest},${eventMetadata},${eventReceipt},${op.kind === "forget" ? Date.parse(op.tombstone.deletedAtUtc) : Date.parse(op.revision.createdAtUtc)}) RETURNING sequence`,
+          );
         const watermark = yield* nextWatermark(op.memorySpaceId);
-        if (decision.identity)
+        if (!reconnect && decision.identity)
           yield* stored(
             "identity",
             sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) VALUES (${op.memorySpaceId},${op.memoryId},${yield* identityCodec.encode(decision.identity)},${yield* fenceCodec.encode(decision.fence ?? { memorySpaceId: op.memorySpaceId, memoryId: op.memoryId, highestFencingToken: 0, activeLease: null })},${M.MEMORY_IDENTITY_CORE_MAX_BYTES + M.MEMORY_PAYLOAD_MAX_UTF8_BYTES}) ON CONFLICT(space,memory_id) DO NOTHING`,
@@ -1376,7 +1545,7 @@ const make = Effect.gen(function* () {
             claimedBy: null,
             claimedUntil: null,
           });
-        if (accepted && (op.kind === "resolve" || op.kind === "revert")) {
+        if (!reconnect && accepted && (op.kind === "resolve" || op.kind === "revert")) {
           const resolutionId =
             op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId;
           const reportId = hashText(`${op.memorySpaceId}:${op.operationId}:${resolutionId}`);
@@ -1388,12 +1557,17 @@ const make = Effect.gen(function* () {
         if (decision.pending && accepted && op.kind !== "forget" && !tombstones.length)
           yield* stored(
             "park-approved",
-            sql`INSERT INTO memory_inbox_pending (space,pending_key,record_kind,operation_id,memory_id,operation_digest,missing_parents_json,reason,hub_sequence,metadata_json,payload_ref) VALUES (${op.memorySpaceId},${`operation:${op.operationId}`},'operation',${op.operationId},${op.memoryId},${decision.operationDigest},${yield* headsCodec.encode(decision.pending.missingParents)},${decision.pending.reason},${"hubSequence" in outcome ? outcome.hubSequence : null},${eventMetadata},${op.revision.payloadRef}) ON CONFLICT(space,pending_key) DO NOTHING`,
+            sql`INSERT INTO memory_inbox_pending (space,pending_key,record_kind,operation_id,memory_id,operation_digest,missing_parents_json,reason,hub_sequence,metadata_json,payload_ref) VALUES (${op.memorySpaceId},${`operation:${op.operationId}`},'operation',${op.operationId},${op.memoryId},${decision.operationDigest},${yield* headsCodec.encode(decision.pending.missingParents)},${decision.pending.reason},${"hubSequence" in outcome ? outcome.hubSequence : null},${eventMetadata},${op.revision.payloadRef}) ON CONFLICT(space,pending_key) DO UPDATE SET missing_parents_json=excluded.missing_parents_json,reason=excluded.reason`,
           );
         if (accepted && op.kind === "revert")
           yield* stored(
             "accepted-revert-intent",
             sql`DELETE FROM memory_revert_intents WHERE space=${op.memorySpaceId} AND operation_id=${op.operationId}`,
+          );
+        if (reconnect && !decision.pending)
+          yield* stored(
+            "reconnect-complete",
+            sql`DELETE FROM memory_inbox_pending WHERE space=${op.memorySpaceId} AND operation_id=${op.operationId} AND record_kind='operation'`,
           );
         for (const work of decision.work ?? []) yield* enqueueWork(work);
         if (accepted && (!tombstones.length || op.kind === "forget"))
@@ -1405,7 +1579,7 @@ const make = Effect.gen(function* () {
           });
         for (const signal of decision.signals ?? [])
           yield* emit({ ...signal, projectionWatermark: watermark });
-        return { operationDigest: decision.operationDigest, receipt: outcome };
+        return old ?? { operationDigest: decision.operationDigest, receipt: outcome };
       }),
     );
   });
@@ -3198,13 +3372,12 @@ const make = Effect.gen(function* () {
     const rows = yield* stored(
       "pending-received",
       sql<{
-        operation_id: string;
-      }>`SELECT operation_id FROM memory_inbox_pending WHERE space=${space} AND record_kind='operation' ORDER BY hub_sequence,pending_key LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_inbox_pending WHERE space=${space} AND record_kind='operation' ORDER BY hub_sequence,pending_key LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
     );
     return yield* Effect.forEach(rows, (row) =>
       Effect.gen(function* () {
-        const id = yield* stored("pending-operation-id", decodeOperationId(row.operation_id));
-        return yield* readOperation(space, id);
+        return yield* operationFromMetadata(yield* metadataCodec.decode(row.metadata_json, strict));
       }),
     );
   });
@@ -3333,7 +3506,9 @@ const make = Effect.gen(function* () {
     transact,
     receipt,
     loadAggregate: (space, id) => transact(loadAggregate(space, id)),
-    apply,
+    apply: (decision) => applyDecision(decision),
+    reconnectParked: (decision, generation) => applyDecision(decision, generation),
+    readAncestry: (space, id, parents) => transact(readAncestry(space, id, parents)),
     withReceivedCursor,
     readCursor,
     readOperation,
