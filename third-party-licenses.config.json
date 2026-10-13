@@ -16,7 +16,7 @@
         {
           "licenseId": "CC-BY-4.0",
           "preamble": [
-            "Icons: Solar by 480 Design, CC BY 4.0.\nThe web and desktop clients bundle the Solar Linear glyphs from @iconify-json/solar (https://github.com/iconify/icon-sets). Each glyph is converted to SVG element data; the drawings are unchanged."
+            "Icons: Solar by 480 Design, CC BY 4.0.\nThe web and desktop clients bundle the Solar Linear glyphs from @iconify-json/solar (https://github.com/iconify/icon-sets). Each glyph is converted to SVG element data, and every stroke is drawn 1.75 wide instead of 1.5; the shapes are otherwise unchanged."
           ]
         }
       ]
