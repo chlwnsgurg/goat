@@ -164,8 +164,9 @@ In the desktop app, open **Settings → Connections → Add environment**, choos
 or reuses a server there and opens the port forward for you. Projects, provider
 credentials, and agent work stay on the remote machine.
 
-The remote host must be Linux or an Apple Silicon Mac with `tar`, `sha256sum`
-or `shasum`, and [provider setup](./install.md#providers). GOAT keeps its
+The remote host must be Linux, an Apple Silicon Mac, or a Windows machine set up
+as described below, with `tar`, `sha256sum` or `shasum`, and
+[provider setup](./install.md#providers). GOAT keeps its
 server, launch state, and data on the host under `~/.goat`, apart from any T3
 Code install in `~/.t3`.
 
@@ -185,8 +186,8 @@ download fails on the network, GOAT tries the GitHub CLI when it is signed in
 (`gh auth login`). A download that does not match the published checksums is
 refused. If neither source works, the connection fails with an error that names
 the release it looked for.
-Provider CLIs must be on the `PATH` of a non-interactive login shell there;
-check with:
+On Linux and macOS hosts, provider CLIs must be on the `PATH` of a
+non-interactive login shell there; check with:
 
 ```bash
 ssh user@example.com 'sh -lc "command -v claude codex"'
