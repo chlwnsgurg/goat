@@ -610,6 +610,26 @@ describe("DesktopConnectionCatalogStore", () => {
     ),
   );
 
+  it.effect("asks the sibling key once when the recovered catalog cannot be backed up", () =>
+    withSiblingStore((siblingCalls) =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const { catalogPath, raw, stateDir } = yield* writeSiblingCatalog(VALID_CATALOG);
+        // A non-empty directory holds the backup name, so the copy and re-encryption are skipped.
+        const blocker = path.join(stateDir, "connection-catalog.goat-nightly.backup.json");
+        yield* fileSystem.makeDirectory(path.join(blocker, "occupied"), { recursive: true });
+
+        assert.deepStrictEqual(yield* store.get, Option.some(VALID_CATALOG));
+        assert.deepStrictEqual(yield* store.get, Option.some(VALID_CATALOG));
+        assert.deepStrictEqual(yield* store.unreadable, Option.none());
+        assert.equal(yield* fileSystem.readFileString(catalogPath), raw);
+        assert.equal(yield* Ref.get(siblingCalls), 1);
+      }),
+    ),
+  );
+
   it.effect("copies a catalog it cannot open before a save replaces it, without a prior read", () =>
     withSiblingStore(() =>
       Effect.gen(function* () {

@@ -448,6 +448,13 @@ export const make = Effect.gen(function* () {
       }
     >(),
   );
+  /**
+   * A catalog a sibling key opened but that is still under that key, because the backup or the
+   * re-encryption failed. Serving it again by `contentHash` stops repeat key prompts.
+   */
+  const recoveredState = yield* Ref.make(
+    Option.none<{ readonly contentHash: string; readonly plaintext: string }>(),
+  );
   // One operation at a time: concurrent reads would each run recovery and prompt for keys.
   const lock = yield* Semaphore.make(1);
   const encryptionAvailable = safeStorage.isEncryptionAvailable.pipe(
@@ -608,11 +615,14 @@ export const make = Effect.gen(function* () {
   ) {
     // No sibling key opened this same file earlier this launch; asking again would re-prompt.
     const known = yield* Ref.get(unreadableState);
-    if (Option.isSome(known)) {
-      const hash = yield* contentHash(raw).pipe(Effect.option);
-      if (Option.contains(hash, known.value.contentHash)) {
-        return yield* Effect.fail(known.value.error);
-      }
+    const hash = yield* contentHash(raw).pipe(Effect.option);
+    if (Option.isSome(known) && Option.contains(hash, known.value.contentHash)) {
+      return yield* Effect.fail(known.value.error);
+    }
+    // A sibling key already opened this same file earlier this launch.
+    const remembered = yield* Ref.get(recoveredState);
+    if (Option.isSome(remembered) && Option.contains(hash, remembered.value.contentHash)) {
+      return Option.some(remembered.value.plaintext);
     }
     const recovered = yield* siblingKeys.decrypt(encryptedCatalog, isConnectionCatalog);
     if (Option.isNone(recovered)) {
@@ -641,18 +651,27 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo("The connection catalog changed during recovery; reading it again");
       return Option.none<string>();
     }
-    if (Option.isSome(backupPath)) {
-      yield* writeCatalog(plaintext).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("Could not re-encrypt the recovered connection catalog", { error }),
-        ),
-      );
-    }
+    const reencrypted = Option.isSome(backupPath)
+      ? yield* writeCatalog(plaintext).pipe(
+          Effect.as(true),
+          Effect.catch((error) =>
+            Effect.logWarning("Could not re-encrypt the recovered connection catalog", {
+              error,
+            }).pipe(Effect.as(false)),
+          ),
+        )
+      : false;
+    yield* Ref.set(
+      recoveredState,
+      !reencrypted && Option.isSome(hash)
+        ? Option.some({ contentHash: hash.value, plaintext })
+        : Option.none(),
+    );
     yield* Effect.logInfo("Recovered the connection catalog with a sibling channel's key", {
       catalogPath,
       from: runtimeName,
       backupPath: Option.getOrNull(backupPath),
-      reencrypted: Option.isSome(backupPath),
+      reencrypted,
     });
     return Option.some(plaintext);
   });
