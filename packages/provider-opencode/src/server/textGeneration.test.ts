@@ -4,6 +4,8 @@ import type { MemoryGenerationRunnerContext } from "@goat/provider-core/server/m
 import { OpenCodeSettings } from "../settings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -25,6 +27,20 @@ const runtimeMock = {
     promptParts: [] as ReadonlyArray<unknown>[],
     authHeaders: [] as Array<string | null>,
     closeCalls: [] as string[],
+    directories: [] as string[],
+    promptInputs: [] as Array<{
+      tools?: Record<string, boolean>;
+      model?: { providerID: string; modelID: string };
+      agent?: string;
+      variant?: string;
+    }>,
+    deleted: [] as string[],
+    aborted: [] as string[],
+    denied: [] as string[],
+    eventScenario: undefined as "tool" | "permission" | undefined,
+    config: {} as { mcp?: Record<string, { enabled?: boolean }>; plugin?: string[] },
+    stall: false,
+    onPrompt: undefined as (() => void) | undefined,
     sessionCreateCalls: 0,
     connectCalls: 0,
     clientCalls: 0,
@@ -33,7 +49,12 @@ const runtimeMock = {
     sessionResult: undefined as { data?: { id: string } } | undefined,
     promptRequestError: undefined as unknown,
     promptResult: undefined as
-      | { data?: { info?: { error?: unknown }; parts?: Array<unknown> } }
+      | {
+          data?: {
+            info?: { error?: unknown; modelID?: string; providerID?: string; variant?: string };
+            parts?: Array<unknown>;
+          };
+        }
       | undefined,
   },
   reset() {
@@ -42,6 +63,15 @@ const runtimeMock = {
     this.state.promptParts.length = 0;
     this.state.authHeaders.length = 0;
     this.state.closeCalls.length = 0;
+    this.state.directories.length = 0;
+    this.state.promptInputs.length = 0;
+    this.state.deleted.length = 0;
+    this.state.aborted.length = 0;
+    this.state.denied.length = 0;
+    this.state.eventScenario = undefined;
+    this.state.config = {};
+    this.state.stall = false;
+    this.state.onPrompt = undefined;
     this.state.sessionCreateCalls = 0;
     this.state.connectCalls = 0;
     this.state.clientCalls = 0;
@@ -100,10 +130,59 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntime["Service"] = {
         });
   },
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
-  createOpenCodeSdkClient: ({ baseUrl, serverPassword }) => {
+  createOpenCodeSdkClient: ({ baseUrl, serverPassword, directory }) => {
     runtimeMock.state.clientCalls++;
+    runtimeMock.state.directories.push(directory);
+    let begin: (() => void) | undefined;
+    let handled: (() => void) | undefined;
+    const prompting = new Promise<void>((resolve) => {
+      begin = resolve;
+    });
+    const eventsHandled = new Promise<void>((resolve) => {
+      handled = resolve;
+    });
     return {
+      config: { get: async () => ({ data: runtimeMock.state.config }) },
+      mcp: { status: async () => ({ data: {} }) },
+      tool: { ids: async () => ({ data: ["read", "bash", "question"] }) },
+      permission: {
+        reply: async ({ requestID }: { requestID: string }) => {
+          runtimeMock.state.denied.push(requestID);
+          return { data: true };
+        },
+      },
+      event: {
+        subscribe: async (_input: unknown, options: { signal: AbortSignal }) => ({
+          stream: (async function* () {
+            const stopped = new Promise<void>((resolve) => {
+              if (options.signal.aborted) resolve();
+              else options.signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            await Promise.race([prompting, stopped]);
+            if (runtimeMock.state.eventScenario === "tool")
+              yield {
+                type: "message.part.updated",
+                properties: { part: { type: "tool", sessionID: `${baseUrl}/session` } },
+              };
+            if (runtimeMock.state.eventScenario === "permission")
+              yield {
+                type: "permission.asked",
+                properties: { id: "permission-1", sessionID: `${baseUrl}/session` },
+              };
+            handled?.();
+            await stopped;
+          })(),
+        }),
+      },
       session: {
+        abort: async ({ sessionID }: { sessionID: string }) => {
+          runtimeMock.state.aborted.push(sessionID);
+          return { data: true };
+        },
+        delete: async ({ sessionID }: { sessionID: string }) => {
+          runtimeMock.state.deleted.push(sessionID);
+          return { data: true };
+        },
         create: async () => {
           runtimeMock.state.sessionCreateCalls += 1;
           if (runtimeMock.state.sessionCreateError !== undefined) {
@@ -111,7 +190,18 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntime["Service"] = {
           }
           return runtimeMock.state.sessionResult ?? { data: { id: `${baseUrl}/session` } };
         },
-        prompt: async (input: { readonly parts: ReadonlyArray<unknown> }) => {
+        prompt: async (input: {
+          readonly parts: ReadonlyArray<unknown>;
+          tools?: Record<string, boolean>;
+          model?: { providerID: string; modelID: string };
+          agent?: string;
+          variant?: string;
+        }) => {
+          runtimeMock.state.promptInputs.push(input);
+          runtimeMock.state.onPrompt?.();
+          begin?.();
+          if (runtimeMock.state.eventScenario) await eventsHandled;
+          if (runtimeMock.state.stall) await new Promise<void>(() => {});
           runtimeMock.state.promptUrls.push(baseUrl);
           runtimeMock.state.promptParts.push(input.parts);
           runtimeMock.state.authHeaders.push(
@@ -744,12 +834,6 @@ const memoryConflict = M.ResolveMemoryConflictInput.make({
 it.layer(layerOpenCodeTextGenerationTest)("OpenCode v1 memory generation", (it) => {
   const scenarios = [
     {
-      scenario: "owned shared server",
-      settings: DEFAULT_OPENCODE_SETTINGS,
-      context: memoryContext,
-      code: "unavailable",
-    },
-    {
       scenario: "external authenticated server",
       settings: EXISTING_SERVER_OPENCODE_SETTINGS,
       context: memoryContext,
@@ -822,5 +906,119 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCode v1 memory generation", (it) 
         { OPENCODE_CONFIG_CONTENT: '{"plugin":["untrusted"],"mcp":{"untrusted":{}}}' },
         context,
       ),
+  );
+  const operations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+  const output = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+  const setOutput = (
+    operation: (typeof operations)[number],
+    extra: Record<string, unknown> = {},
+  ) => {
+    runtimeMock.state.promptResult = {
+      data: {
+        info: { providerID: "openai", modelID: "gpt-5", variant: "high" },
+        parts: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              ...output,
+              ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+              ...extra,
+            }),
+          },
+        ],
+      },
+    };
+  };
+  const invoke = (generation: ProviderTextGeneration, operation: (typeof operations)[number]) =>
+    operation === "resolveMemoryConflict"
+      ? generation.resolveMemoryConflict!(memoryConflict)
+      : generation.generateMemorySummary!(memorySummary);
+  it.effect.each(operations)(
+    "%s succeeds with disabled tools and trusted metadata, then cleans up",
+    (operation) =>
+      withOpenCodeTextGeneration(
+        DEFAULT_OPENCODE_SETTINGS,
+        (generation) =>
+          Effect.gen(function* () {
+            setOutput(operation);
+            const generated = yield* invoke(generation, operation);
+            expect(generated.result.text).toBe(output.text);
+            expect(generated.execution).toEqual({
+              requestedModelSelection: memorySelection,
+              effectiveModel: "openai/gpt-5",
+              effectiveProvider: "opencode",
+              ...memoryContext,
+            });
+            expect(runtimeMock.state.promptInputs[0]).toMatchObject({
+              tools: { "*": false, read: false, bash: false, question: false },
+              model: { providerID: "openai", modelID: "gpt-5" },
+              variant: "high",
+            });
+            expect(runtimeMock.state.promptInputs[0]?.agent).toBeUndefined();
+            expect(runtimeMock.state.deleted).toHaveLength(1);
+            const fs = yield* FileSystem.FileSystem;
+            expect(yield* fs.exists(runtimeMock.state.directories[0]!)).toBe(false);
+          }),
+        undefined,
+        memoryContext,
+      ),
+  );
+  it.effect.each(
+    operations.flatMap((operation) =>
+      ["tool", "part", "permission", "authority", "model", "mcp"].map((scenario) => ({
+        operation,
+        scenario,
+      })),
+    ),
+  )("$operation rejects $scenario and cleans its helper", ({ operation, scenario }) =>
+    withOpenCodeTextGeneration(
+      DEFAULT_OPENCODE_SETTINGS,
+      (generation) =>
+        Effect.gen(function* () {
+          setOutput(
+            operation,
+            scenario === "authority" ? { execution: { environmentId: "forged" } } : {},
+          );
+          if (scenario === "tool" || scenario === "permission")
+            runtimeMock.state.eventScenario = scenario;
+          if (scenario === "part")
+            runtimeMock.state.promptResult!.data!.parts!.push({ type: "tool" });
+          if (scenario === "model")
+            runtimeMock.state.promptResult!.data!.info = { modelID: "wrong", providerID: "openai" };
+          if (scenario === "mcp") runtimeMock.state.config = { mcp: { unsafe: { enabled: true } } };
+          const failure = yield* invoke(generation, operation).pipe(Effect.flip);
+          expect(failure._tag).toBe("TextGenerationError");
+          if (scenario === "mcp") expect(failure.cause).toMatchObject({ code: "unavailable" });
+          else expect(runtimeMock.state.deleted).toHaveLength(1);
+          if (scenario === "permission") expect(runtimeMock.state.denied).toEqual(["permission-1"]);
+          const fs = yield* FileSystem.FileSystem;
+          expect(yield* fs.exists(runtimeMock.state.directories[0]!)).toBe(false);
+        }),
+      undefined,
+      memoryContext,
+    ),
+  );
+  it.effect.each(operations)("%s times out and aborts/removes only its session", (operation) =>
+    withOpenCodeTextGeneration(
+      DEFAULT_OPENCODE_SETTINGS,
+      (generation) =>
+        Effect.gen(function* () {
+          runtimeMock.state.stall = true;
+          const started = new Promise<void>((resolve) => {
+            runtimeMock.state.onPrompt = resolve;
+          });
+          const fiber = yield* invoke(generation, operation).pipe(Effect.flip, Effect.forkChild);
+          yield* Effect.promise(() => started);
+          yield* TestClock.adjust("3 minutes");
+          const error = yield* Fiber.join(fiber);
+          expect(error.detail).toContain("timed out");
+          expect(runtimeMock.state.aborted).toHaveLength(1);
+          expect(runtimeMock.state.deleted).toEqual(runtimeMock.state.aborted);
+          const fs = yield* FileSystem.FileSystem;
+          expect(yield* fs.exists(runtimeMock.state.directories[0]!)).toBe(false);
+        }),
+      undefined,
+      memoryContext,
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 });
