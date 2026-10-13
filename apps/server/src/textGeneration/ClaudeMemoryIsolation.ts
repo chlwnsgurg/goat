@@ -13,7 +13,7 @@ const ManagedSettings = Schema.Record(Schema.String, Schema.Unknown);
 const decodeManagedSettings = Schema.decodeUnknownEffect(Schema.fromJsonString(ManagedSettings));
 
 /** --settings disableAllHooks cannot override managed hooks. Inspect every file/drop-in
- * before spawning; native registry policy and subscription-fetched policy are uncertified.
+ * before spawning; absent local policy does not require a platform/authentication certificate.
  * https://code.claude.com/docs/en/managed-settings
  */
 export const verifyClaudeMemoryHooks = Effect.fn("Claude.verifyMemoryHooks")(function* (
@@ -30,26 +30,13 @@ export const verifyClaudeMemoryHooks = Effect.fn("Claude.verifyMemoryHooks")(fun
     cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
   });
   return yield* Effect.gen(function* () {
-    // Direct Anthropic credentials (including API keys) can fetch managed policy at startup.
-    // Only API-key authentication to a non-Anthropic endpoint has documented skipped delivery.
-    // https://code.claude.com/docs/en/server-managed-settings#platform-availability
-    const endpoint = yield* Effect.try(() => new URL(environment.ANTHROPIC_BASE_URL ?? ""));
-    if (
-      !environment.ANTHROPIC_API_KEY ||
-      environment.CLAUDE_CODE_OAUTH_TOKEN ||
-      environment.ANTHROPIC_AUTH_TOKEN ||
-      endpoint.hostname === "api.anthropic.com" ||
-      (endpoint.protocol !== "https:" && endpoint.protocol !== "http:") ||
-      environment.CLAUDE_CODE_USE_BEDROCK ||
-      environment.CLAUDE_CODE_USE_VERTEX ||
-      environment.CLAUDE_CODE_USE_FOUNDRY ||
-      environment.WSL_DISTRO_NAME ||
-      platform === "win32" ||
-      (platform !== "darwin" && platform !== "linux")
-    )
-      return yield* failure;
+    // Accept remote admin-authored hooks as residual risk, matching existing one-shot Claude generation.
     const system =
-      platform === "darwin" ? "/Library/Application Support/ClaudeCode" : "/etc/claude-code";
+      platform === "darwin"
+        ? "/Library/Application Support/ClaudeCode"
+        : platform === "win32"
+          ? "C:\\Program Files\\ClaudeCode"
+          : "/etc/claude-code";
     const files = [path.join(system, "managed-settings.json")];
     const dropins = path.join(system, "managed-settings.d");
     if (yield* fs.exists(dropins)) {
@@ -83,6 +70,14 @@ export const verifyClaudeMemoryHooks = Effect.fn("Claude.verifyMemoryHooks")(fun
         for (const name of yield* fs.readDirectory(managed))
           policies.push(path.join(managed, name, "com.anthropic.claudecode.plist"));
       for (const file of policies) if (yield* fs.exists(file)) return yield* failure;
+    }
+    if (environment.WSL_DISTRO_NAME) {
+      // A present Windows policy needs native inspection; WSL alone is not a reason to refuse.
+      for (const file of [
+        "/mnt/c/Program Files/ClaudeCode/managed-settings.json",
+        "/mnt/c/Program Files/ClaudeCode/managed-settings.d",
+      ])
+        if (yield* fs.exists(file)) return yield* failure;
     }
   }).pipe(Effect.mapError(() => failure));
 });

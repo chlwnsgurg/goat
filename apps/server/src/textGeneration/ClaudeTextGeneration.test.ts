@@ -23,6 +23,7 @@ import {
 import * as TextGeneration from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "@goat/provider-core/server/textGenerationUtils";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
+import { verifyClaudeMemoryHooks } from "./ClaudeMemoryIsolation.ts";
 import { writeFakeCli } from "@goat/provider-testing/fakeCli";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -61,8 +62,12 @@ function withFakeClaudeEnv<A, E, R>(
     managedDropin?: string;
     managedUnreadable?: boolean;
     subscription?: boolean;
+    oauthToken?: boolean;
+    wsl?: boolean;
     expectNoSpawn?: boolean;
+    expectSpawn?: boolean;
     directApi?: boolean;
+    defaultEndpoint?: boolean;
     exitCode?: number;
     stderr?: string;
     argsMustContain?: string;
@@ -202,15 +207,17 @@ function withFakeClaudeEnv<A, E, R>(
             ...process.env,
             ANTHROPIC_API_KEY: input.subscription ? "" : "synthetic-api-key",
             ANTHROPIC_AUTH_TOKEN: "",
-            ANTHROPIC_BASE_URL: input.directApi
-              ? "https://api.anthropic.com"
-              : "https://synthetic-provider.invalid",
+            ANTHROPIC_BASE_URL: input.defaultEndpoint
+              ? undefined
+              : input.directApi
+                ? "https://api.anthropic.com"
+                : "https://synthetic-provider.invalid",
             GOAT_FAKE_CLAUDE_SPAWN_MARKER: `${tempDir}/spawned`,
-            CLAUDE_CODE_OAUTH_TOKEN: "",
+            CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken ? "synthetic-oauth-token" : "",
             CLAUDE_CODE_USE_BEDROCK: "",
             CLAUDE_CODE_USE_VERTEX: "",
             CLAUDE_CODE_USE_FOUNDRY: "",
-            WSL_DISTRO_NAME: "",
+            WSL_DISTRO_NAME: input.wsl ? "synthetic-wsl" : "",
           },
       Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
       input.memoryRunnerContext,
@@ -224,7 +231,9 @@ function withFakeClaudeEnv<A, E, R>(
               )
             : file.endsWith("managed-settings.d") || file.endsWith("10-hooks.json")
               ? Effect.succeed(input.managedDropin !== undefined)
-              : file.startsWith("/Library/") || file.startsWith("/etc/claude-code")
+              : file.startsWith("/Library/") ||
+                  file.startsWith("/etc/claude-code") ||
+                  file.startsWith("/mnt/c/Program Files/ClaudeCode")
                 ? Effect.succeed(false)
                 : fs.exists(file),
         readDirectory: (file) =>
@@ -251,6 +260,7 @@ function withFakeClaudeEnv<A, E, R>(
     );
     const result = yield* effectFn(textGeneration);
     if (input.expectNoSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(false);
+    if (input.expectSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(true);
     return result;
   }).pipe(Effect.scoped);
 }
@@ -375,8 +385,6 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         },
         { scenario: "unreadable policy", managedUnreadable: true },
         { scenario: "invalid policy", managedSettings: "{invalid" },
-        { scenario: "subscription policy cannot be certified", subscription: true },
-        { scenario: "direct API remote policy cannot be certified", directApi: true },
       ].map((scenario) => ({ operation, ...scenario })),
     ),
   )(
@@ -385,6 +393,7 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
       withFakeClaudeEnv(
         {
           ...scenario,
+          directApi: true,
           expectNoSpawn: true,
           memoryRunnerContext: memoryContext,
           output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
@@ -399,6 +408,99 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
             expect(failure.cause).toMatchObject({ code: "unavailable" });
           }),
       ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        { scenario: "default Anthropic API", directApi: true },
+        { scenario: "API key without endpoint override", defaultEndpoint: true },
+        { scenario: "subscription login", subscription: true, directApi: true },
+        {
+          scenario: "subscription OAuth token",
+          subscription: true,
+          oauthToken: true,
+          directApi: true,
+        },
+        { scenario: "WSL without Windows policy", wsl: true, directApi: true },
+        {
+          scenario: "hook-free managed file and drop-in",
+          managedSettings: "{}",
+          managedDropin: "{}",
+          directApi: true,
+        },
+      ].map((scenario) => ({ operation, ...scenario })),
+    ),
+  )("$operation allows $scenario after local inspection", ({ operation, ...scenario }) =>
+    withFakeClaudeEnv(
+      {
+        ...scenario,
+        expectSpawn: true,
+        memoryRunnerContext: memoryContext,
+        output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(generated.result.text).toBe(memoryOutput.text);
+        }),
+    ),
+  );
+
+  it.effect.each([
+    { platform: "win32", system: "C:\\Program Files\\ClaudeCode" },
+    { platform: "darwin", system: "/Library/Application Support/ClaudeCode" },
+    { platform: "linux", system: "/etc/claude-code" },
+  ] as const)("allows absent local policy on $platform", ({ platform, system }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const inspected: string[] = [];
+      yield* verifyClaudeMemoryHooks("generateMemorySummary", {}).pipe(
+        Effect.provideService(HostProcess.Platform, platform),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: (file) => {
+            inspected.push(file);
+            return Effect.succeed(false);
+          },
+        }),
+      );
+      expect(inspected).toContain(path.join(system, "managed-settings.json"));
+      expect(inspected).toContain(path.join(system, "managed-settings.d"));
+    }),
+  );
+
+  it.effect.each([
+    {
+      platform: "darwin",
+      policy: "/Library/Managed Preferences/com.anthropic.claudecode.plist",
+      environment: {},
+    },
+    {
+      platform: "linux",
+      policy: "/mnt/c/Program Files/ClaudeCode/managed-settings.json",
+      environment: { WSL_DISTRO_NAME: "synthetic-wsl" },
+    },
+  ] as const)(
+    "refuses a present uninspectable $platform policy",
+    ({ platform, policy, environment }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const failure = yield* Effect.flip(
+          verifyClaudeMemoryHooks("generateMemorySummary", environment).pipe(
+            Effect.provideService(HostProcess.Platform, platform),
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              exists: (file) => Effect.succeed(file === policy),
+            }),
+          ),
+        );
+        expect(failure.cause).toMatchObject({ code: "unavailable" });
+      }),
   );
 
   it.effect.each(memoryOperations)("runs %s with tools hooks and MCP disabled", (operation) =>
