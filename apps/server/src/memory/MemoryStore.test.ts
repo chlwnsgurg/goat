@@ -177,6 +177,65 @@ const parked = (): Store.MemoryDecision => {
   };
 };
 const reconnected = () => approved(childOperation());
+const backgroundWork = (id = "fixture:background"): Store.MemoryWork => ({
+  id,
+  space,
+  memoryId: memory,
+  kind: "rebuild",
+  status: "pending",
+  metadata: { kind: "rebuild", revisionId: null, generation: 0 },
+  payloadRef: null,
+  attempt: 0,
+  nextAttemptAt: 0,
+  claimedBy: null,
+  claimedUntil: null,
+});
+const summaryWork = (n: number, environmentId = env): Store.MemoryWork => ({
+  ...backgroundWork(`summary:${n}`),
+  kind: "summary",
+  metadata: {
+    kind: "summary",
+    sourceThread: { environmentId, threadId: M.ThreadId.make(id(70)) },
+    sourceWatermark: {
+      fromEventId: M.EventId.make(id(71)),
+      toEventId: M.EventId.make(id(72)),
+      throughSequence: n,
+    },
+    memoryId: memory,
+    operationId: M.MemoryOperationId.make(id(n + 100)),
+    revisionId: M.MemoryRevisionId.make(id(n + 200)),
+    modelSelection: { instanceId: M.ProviderInstanceId.make("fixture"), model: "fixture" },
+  },
+});
+const deferredWork = (
+  kind: Store.MemoryDeferredWork["kind"],
+  overrides: Partial<Store.MemoryDeferredWork> = {},
+) => ({
+  kind,
+  state: "pending" as const,
+  reason: null,
+  revisionId: null,
+  generation: 1,
+  sinceAtUtc: now,
+  attempt: 0,
+  dueAt: 0,
+  lastAttemptAt: null,
+  claimedBy: null,
+  claimedUntil: null,
+  ...overrides,
+});
+const seedDeferred = (
+  n: number,
+  entries: ReadonlyArray<ReturnType<typeof deferredWork>>,
+  payloadBytes = 0,
+) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const memoryId = M.MemoryId.make(id(n));
+    yield* sql`INSERT INTO memory_items (space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json,generation,deferred_json) VALUES (${space},${memoryId},'{}','user','[]','blocked',0,'{}','{}',1,${JSON.stringify(entries)})`;
+    if (payloadBytes)
+      yield* sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},${id(n)},${memoryId},${"x".repeat(payloadBytes)},'[]')`;
+  });
 describe("MemoryStore", () => {
   it.effect("rolls back each pre-commit failure boundary", () =>
     Effect.gen(function* () {
@@ -634,7 +693,8 @@ describe("MemoryStore", () => {
         assert.strictEqual((yield* store.pendingReceived(space, 10)).length, 1);
         yield* store.apply(approved());
         const before = yield* sql`SELECT * FROM memory_events ORDER BY sequence`;
-        const bodies = yield* sql`SELECT * FROM memory_payloads ORDER BY payload_ref`;
+        const bodies =
+          yield* sql`SELECT payload_ref,body_json FROM memory_payloads ORDER BY payload_ref`;
         const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
         const generation = (yield* fresh.loadAggregate(space, memory)).generation;
         assert.deepStrictEqual(yield* fresh.reconnectParked(reconnected(), generation), original);
@@ -646,7 +706,7 @@ describe("MemoryStore", () => {
         assert.strictEqual((yield* fresh.pendingReceived(space, 10)).length, 0);
         assert.deepStrictEqual(yield* sql`SELECT * FROM memory_events ORDER BY sequence`, before);
         assert.deepStrictEqual(
-          yield* sql`SELECT * FROM memory_payloads ORDER BY payload_ref`,
+          yield* sql`SELECT payload_ref,body_json FROM memory_payloads ORDER BY payload_ref`,
           bodies,
         );
         assert.strictEqual(yield* fresh.readCursor(space, env), 2);
@@ -906,5 +966,239 @@ describe("MemoryStore", () => {
         { revisionId, status: "parked", missingParents: [M.MemoryRevisionId.make(id(13))] },
       ]);
     }).pipe(Effect.provide(live)),
+  );
+  it.effect("reads work and persists a claimed retry across restart", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      assert.isUndefined(yield* store.readWork("absent"));
+      const work = backgroundWork();
+      yield* store.enqueueWork(work);
+      assert.isTrue(yield* store.claimWork(work.id, "runtime-a", 0, 100));
+      const claimed = (yield* store.readWork(work.id))!;
+      assert.isTrue(yield* store.retryWork(claimed, 5000));
+      assert.isFalse(yield* store.retryWork(claimed, 1));
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(yield* fresh.dueWork(4999, 100), []);
+      const due = yield* fresh.dueWork(5000, 100);
+      assert.strictEqual(due[0]?.status, "retry");
+      assert.strictEqual(due[0]?.attempt, 1);
+      assert.isNull(due[0]?.claimedBy);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("stale worker cannot postpone a reclaimed or terminal row", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = backgroundWork();
+      yield* store.enqueueWork(work);
+      yield* store.claimWork(work.id, "runtime-a", 0, 100);
+      const stale = (yield* store.readWork(work.id))!;
+      yield* store.claimWork(work.id, "runtime-b", 100, 200);
+      assert.isFalse(yield* store.retryWork(stale, 5000));
+      const current = (yield* store.readWork(work.id))!;
+      yield* store.finishWork(work.id, "completed");
+      assert.isFalse(yield* store.retryWork(current, 5000));
+      assert.strictEqual((yield* store.readWork(work.id))?.status, "completed");
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("commits thread hook watermark and work atomically and recovers after restart", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = backgroundWork();
+      assert.strictEqual(yield* store.readThreadHookWatermark(), 0);
+      yield* store.commitThreadHook({ expectedWatermark: 0, throughWatermark: 7, work: [work] });
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.strictEqual(yield* fresh.readThreadHookWatermark(), 7);
+      assert.deepStrictEqual(yield* fresh.readWork(work.id), work);
+      assert.deepStrictEqual(
+        (yield* fresh.dueWork(0, 100)).map((row) => row.id),
+        [work.id],
+      );
+      assert.strictEqual(
+        (yield* Effect.exit(
+          fresh.commitThreadHook({
+            expectedWatermark: 0,
+            throughWatermark: 8,
+            work: [backgroundWork("stale")],
+          }),
+        ))._tag,
+        "Failure",
+      );
+      assert.isUndefined(yield* fresh.readWork("stale"));
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rolls back enqueued hook work if watermark storage fails", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TRIGGER fail_hook BEFORE INSERT ON memory_outbox WHEN NEW.id='memory:thread-hook:v1' BEGIN SELECT RAISE(ABORT,'fixture'); END`;
+      assert.strictEqual(
+        (yield* Effect.exit(
+          store.commitThreadHook({
+            expectedWatermark: 0,
+            throughWatermark: 7,
+            work: [backgroundWork()],
+          }),
+        ))._tag,
+        "Failure",
+      );
+      assert.isUndefined(yield* store.readWork(backgroundWork().id));
+      assert.strictEqual(yield* store.readThreadHookWatermark(), 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "fences concurrent hook sweeps and rejects watermark rollback or marker overwrite",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const results = yield* Effect.all(
+          [
+            Effect.exit(
+              store.commitThreadHook({
+                expectedWatermark: 0,
+                throughWatermark: 1,
+                work: [backgroundWork("one")],
+              }),
+            ),
+            Effect.exit(
+              store.commitThreadHook({
+                expectedWatermark: 0,
+                throughWatermark: 2,
+                work: [backgroundWork("two")],
+              }),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        );
+        assert.strictEqual(results.filter((result) => result._tag === "Success").length, 1);
+        const current = yield* store.readThreadHookWatermark();
+        assert.strictEqual(
+          (yield* Effect.exit(
+            store.commitThreadHook({ expectedWatermark: current, throughWatermark: 0, work: [] }),
+          ))._tag,
+          "Failure",
+        );
+        assert.strictEqual(
+          (yield* Effect.exit(
+            store.commitThreadHook({
+              expectedWatermark: current,
+              throughWatermark: current + 1,
+              work: [backgroundWork("memory:thread-hook:v1")],
+            }),
+          ))._tag,
+          "Failure",
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("caps generic worker sweeps at 100 rows", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      for (let n = 0; n < 101; n++) yield* store.enqueueWork(backgroundWork(`fixture:${n}`));
+      assert.strictEqual((yield* store.dueWork(0, 256)).length, 100);
+      assert.strictEqual((yield* store.dueWork(0, -1)).length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("limits runnable deferred rows after excluding held, future and claimed work", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* seedDeferred(80, [
+        deferredWork("parent", { state: "held" }),
+        deferredWork("scanner", { claimedBy: "other", claimedUntil: 100 }),
+        deferredWork("index", { dueAt: 100 }),
+      ]);
+      yield* seedDeferred(81, [deferredWork("index")]);
+      assert.deepStrictEqual(
+        (yield* store.readDeferred(0, 1)).map((row) => row.memoryId),
+        [M.MemoryId.make(id(81))],
+      );
+      assert.strictEqual((yield* store.readDeferred(0, -1)).length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "orders deferred rows by due, null-first last attempt, memory and kind across restart",
+    () =>
+      Effect.gen(function* () {
+        yield* seedDeferred(80, [deferredWork("index", { lastAttemptAt: 10 })]);
+        yield* seedDeferred(81, [deferredWork("scanner"), deferredWork("index")]);
+        yield* seedDeferred(82, [deferredWork("parent", { dueAt: 1 })]);
+        const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+        assert.deepStrictEqual(
+          (yield* fresh.readDeferred(1, 3)).map((row) => [row.memoryId, row.kind]),
+          [
+            [M.MemoryId.make(id(81)), "index"],
+            [M.MemoryId.make(id(81)), "scanner"],
+            [M.MemoryId.make(id(80)), "index"],
+          ],
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("counts each referenced canonical body once per deferred sweep", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* seedDeferred(
+        80,
+        [deferredWork("index"), deferredWork("scanner")],
+        M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+      );
+      assert.strictEqual((yield* store.readDeferred(0, 10)).length, 2);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("skips an oversize deferred target without starving a smaller runnable target", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* seedDeferred(80, [deferredWork("index")], M.MEMORY_DEFERRED_SWEEP_MAX_BYTES + 1);
+      yield* seedDeferred(81, [deferredWork("index")], 1);
+      assert.deepStrictEqual(
+        (yield* store.readDeferred(0, 10)).map((row) => row.memoryId),
+        [M.MemoryId.make(id(81))],
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("recovers global parked work with bounded pages after event compaction", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.apply(parked());
+      yield* sql`DELETE FROM memory_events`;
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(yield* fresh.readParked(1), [childOperation()]);
+      assert.deepStrictEqual(yield* fresh.readParked(0), []);
+      assert.deepStrictEqual(yield* fresh.readParked(-1), []);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "cancels future and running thread jobs without crossing environment or terminal boundaries",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        yield* store.enqueueWork(summaryWork(1));
+        yield* store.enqueueWork({ ...summaryWork(2), kind: "consolidate", nextAttemptAt: 10000 });
+        yield* store.enqueueWork(summaryWork(3));
+        yield* store.claimWork(summaryWork(3).id, "runtime", 0, 100);
+        yield* store.enqueueWork({ ...summaryWork(4), status: "completed" });
+        yield* store.enqueueWork(summaryWork(5, M.EnvironmentId.make("other")));
+        const thread = { environmentId: env, threadId: M.ThreadId.make(id(70)) };
+        assert.strictEqual(yield* store.cancelThreadWork(thread), 3);
+        assert.strictEqual(yield* store.cancelThreadWork(thread), 0);
+        assert.strictEqual((yield* store.readWork(summaryWork(3).id))?.status, "cancelled");
+        assert.isNull((yield* store.readWork(summaryWork(3).id))?.claimedBy);
+        assert.strictEqual((yield* store.readWork(summaryWork(4).id))?.status, "completed");
+        assert.strictEqual((yield* store.readWork(summaryWork(5).id))?.status, "pending");
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "commits a hook summary intent and watermark with rollback on summary insertion failure",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`CREATE TRIGGER fail_summary BEFORE INSERT ON memory_outbox WHEN NEW.kind='summary' BEGIN SELECT RAISE(ABORT,'fixture'); END`;
+        const input = { expectedWatermark: 0, throughWatermark: 7, work: [summaryWork(7)] };
+        assert.strictEqual((yield* Effect.exit(store.commitThreadHook(input)))._tag, "Failure");
+        assert.strictEqual(yield* store.readThreadHookWatermark(), 0);
+        yield* sql`DROP TRIGGER fail_summary`;
+        yield* store.commitThreadHook(input);
+        assert.deepStrictEqual(yield* store.readWork(summaryWork(7).id), summaryWork(7));
+        assert.strictEqual(yield* store.readThreadHookWatermark(), 7);
+      }).pipe(Effect.provide(live)),
   );
 });

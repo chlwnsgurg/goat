@@ -117,7 +117,13 @@ const LocalIntentMetadata = Schema.Struct({
     }),
   ),
 });
+const threadHookId = "memory:thread-hook:v1";
+const ThreadHookMetadata = Schema.Struct({
+  kind: Schema.Literal("threadHook"),
+  watermark: Schema.Int.check(Schema.makeFilter((n) => n >= 0)),
+});
 const WorkMetadata = Schema.Union([
+  ThreadHookMetadata,
   Metadata,
   LocalIntentMetadata,
   Schema.Struct({
@@ -453,6 +459,24 @@ export class MemoryStore extends Context.Service<
       now: number,
       limit: number,
     ) => Effect.Effect<ReadonlyArray<MemoryWork>, MemoryStorageError>;
+    readonly readWork: (id: string) => Effect.Effect<MemoryWork | undefined, MemoryStorageError>;
+    /** Snapshot ownership prevents a timed-out worker from postponing a newer claim. */
+    readonly retryWork: (
+      work: MemoryWork,
+      nextAttemptAt: number,
+    ) => Effect.Effect<boolean, MemoryStorageError>;
+    readonly cancelThreadWork: (
+      thread: M.ScopedThreadRef,
+    ) => Effect.Effect<number, MemoryStorageError>;
+    readonly readThreadHookWatermark: () => Effect.Effect<number, MemoryStorageError>;
+    readonly commitThreadHook: (input: {
+      readonly expectedWatermark: number;
+      readonly throughWatermark: number;
+      readonly work: ReadonlyArray<MemoryWork>;
+    }) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    readonly readParked: (
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<M.MemoryOperation>, MemoryStorageError>;
     readonly enqueueWork: (work: MemoryWork) => Effect.Effect<void, MemoryStorageError>;
     readonly claimWork: (
       id: string,
@@ -662,6 +686,8 @@ const codec = <S extends Schema.Constraint>(schema: S) => {
     decode: (value: unknown, options?: typeof strict) => stored("decode", decode(value, options)),
   };
 };
+const threadHookCodec = codec(ThreadHookMetadata);
+const deferredRowCodec = codec(DeferredRow);
 const decodeLocalIntent = Schema.decodeUnknownEffect(LocalMemoryIntent);
 const localMetadataCodec = codec(LocalIntentMetadata);
 const decodeTicket = Schema.decodeUnknownEffect(M.MemoryResolutionLease);
@@ -1317,21 +1343,16 @@ const make = Effect.gen(function* () {
           const current = yield* readItem(op.memorySpaceId, op.memoryId);
           if ((current?.generation ?? 0) !== expectedGeneration)
             return yield* new MemoryStoreConflict({ code: "revision_changed" });
-          if (!decision.pending) {
-            const ancestry = yield* readAncestry(
-              op.memorySpaceId,
-              op.memoryId,
-              op.revision.parents,
-            );
-            if (ancestry.parents.some((parent) => parent.status === "crossMemory"))
-              return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-            if (
-              ancestry.parents.some(
-                (parent) => parent.status === "missing" || parent.status === "parked",
-              )
+          const ancestry = yield* readAncestry(op.memorySpaceId, op.memoryId, op.revision.parents);
+          if (ancestry.parents.some((parent) => parent.status === "crossMemory"))
+            return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+          if (
+            !decision.pending &&
+            ancestry.parents.some(
+              (parent) => parent.status === "missing" || parent.status === "parked",
             )
-              return yield* new MemoryStoreConflict({ code: "missing_parent" });
-          }
+          )
+            return yield* new MemoryStoreConflict({ code: "missing_parent" });
           if (!decision.item) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
         }
         const outcome = yield* stored("receipt-codec", decodeReceipt(decision.receipt, strict));
@@ -1349,12 +1370,15 @@ const make = Effect.gen(function* () {
           sql`SELECT 1 FROM memory_tombstones WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
         );
         const accepted = outcome.outcome !== "rejected";
-        if (!reconnect && accepted && !tombstones.length && op.kind !== "forget") {
+        if (accepted && !decision.pending && !tombstones.length && op.kind !== "forget") {
           const r = op.revision;
           yield* stored(
             "replaced-payload",
             sql`UPDATE memory_payloads SET replaced_at=${Date.parse(r.createdAtUtc)},purge_eligible_after=${Date.parse(r.createdAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId} AND payload_ref IN (SELECT value FROM json_each(${yield* headsCodec.encode(r.parents)}))`,
           );
+        }
+        if (!reconnect && accepted && !tombstones.length && op.kind !== "forget") {
+          const r = op.revision;
           const existing = yield* stored(
             "revision-identity",
             sql<{
@@ -1717,10 +1741,75 @@ const make = Effect.gen(function* () {
     );
   });
   type WorkRow = Parameters<typeof workRows>[0][number];
+  const readWork = Effect.fn("MemoryStore.readWork")(function* (id: string) {
+    const rows = yield* stored(
+      "read-work",
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id}`,
+    );
+    return (yield* workRows(rows))[0];
+  });
+  const retryWork = Effect.fn("MemoryStore.retryWork")(function* (
+    work: MemoryWork,
+    nextAttemptAt: number,
+  ) {
+    if (work.status !== "running" || work.claimedBy === null || work.claimedUntil === null)
+      return false;
+    const rows = yield* stored(
+      "retry-work",
+      sql`UPDATE memory_outbox SET status='retry',next_attempt_at=${nextAttemptAt},claimed_by=NULL,claimed_until=NULL WHERE id=${work.id} AND kind NOT IN ('claim','resolve','revert_intent') AND status='running' AND claimed_by=${work.claimedBy} AND claimed_until=${work.claimedUntil} AND attempt=${work.attempt} RETURNING id`,
+    );
+    return rows.length === 1;
+  });
+  const cancelThreadWork = Effect.fn("MemoryStore.cancelThreadWork")(function* (
+    input: M.ScopedThreadRef,
+  ) {
+    const thread = yield* threadCodec.decode(yield* threadCodec.encode(input), strict);
+    const rows = yield* stored(
+      "cancel-thread-work",
+      sql`UPDATE memory_outbox SET status='cancelled',payload_ref=NULL,claimed_by=NULL,claimed_until=NULL WHERE kind IN ('summary','consolidate') AND status IN ('pending','running','retry') AND json_extract(metadata_json,'$.kind')='summary' AND json_extract(metadata_json,'$.sourceThread.environmentId')=${thread.environmentId} AND json_extract(metadata_json,'$.sourceThread.threadId')=${thread.threadId} RETURNING id`,
+    );
+    return rows.length;
+  });
+  const readThreadHookWatermark = Effect.fn("MemoryStore.readThreadHookWatermark")(function* () {
+    const rows = yield* stored(
+      "thread-hook-read",
+      sql<{
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_outbox WHERE id=${threadHookId}`,
+    );
+    return rows[0] ? (yield* threadHookCodec.decode(rows[0].metadata_json, strict)).watermark : 0;
+  });
+  const commitThreadHook = Effect.fn("MemoryStore.commitThreadHook")(function* (input: {
+    expectedWatermark: number;
+    throughWatermark: number;
+    work: ReadonlyArray<MemoryWork>;
+  }) {
+    yield* transact(
+      Effect.gen(function* () {
+        const metadata = yield* threadHookCodec.encode({
+          kind: "threadHook",
+          watermark: input.throughWatermark,
+        });
+        if (
+          input.throughWatermark < input.expectedWatermark ||
+          (yield* readThreadHookWatermark()) !== input.expectedWatermark
+        )
+          return yield* new MemoryStoreConflict({ code: "revision_changed" });
+        if (input.work.some((work) => work.id === threadHookId))
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        for (const work of input.work) yield* enqueueWork(work);
+        // Completed marker is never runnable; no transcript is retained in hook metadata.
+        yield* stored(
+          "thread-hook-commit",
+          sql`INSERT INTO memory_outbox (id,space,kind,status,metadata_json,next_attempt_at) VALUES (${threadHookId},'_worker','rebuild','completed',${metadata},0) ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json`,
+        );
+      }),
+    );
+  });
   const dueWork = Effect.fn("MemoryStore.dueWork")(function* (now: number, limit: number) {
     const rows = yield* stored(
       "due-work",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE kind NOT IN ('sync','claim','resolve','revert_intent') AND (status IN ('pending','retry') OR (status='running' AND claimed_until<=${now})) AND next_attempt_at<=${now} ORDER BY next_attempt_at,attempt,id LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE kind NOT IN ('sync','claim','resolve','revert_intent') AND (status IN ('pending','retry') OR (status='running' AND claimed_until<=${now})) AND next_attempt_at<=${now} ORDER BY next_attempt_at,attempt,id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
     );
     return yield* workRows(rows);
   });
@@ -1920,6 +2009,8 @@ const make = Effect.gen(function* () {
     now: number,
     limit: number,
   ) {
+    const maxItems = Math.max(0, Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS));
+    // Limit runnable work rows, not items containing held or currently claimed work.
     const rows = yield* stored(
       "deferred",
       sql<{
@@ -1927,43 +2018,30 @@ const make = Effect.gen(function* () {
         memory_id: string;
         deferred_json: string;
         payload_bytes: number;
-      }>`SELECT i.space,i.memory_id,i.deferred_json,coalesce((SELECT sum(length(CAST(body_json AS BLOB))) FROM memory_payloads p WHERE p.space=i.space AND p.memory_id=i.memory_id),0) AS payload_bytes FROM memory_items i WHERE i.status!='forgotten' AND EXISTS (SELECT 1 FROM json_each(i.deferred_json) d WHERE json_extract(d.value,'$.state')='pending' AND json_extract(d.value,'$.dueAt')<=${now}) ORDER BY (SELECT min(json_extract(d.value,'$.dueAt')) FROM json_each(i.deferred_json) d),i.memory_id LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
+      }>`SELECT i.space,i.memory_id,d.value AS deferred_json,
+      coalesce((SELECT sum(length(CAST(body_json AS BLOB))) FROM memory_payloads p WHERE p.space=i.space AND p.memory_id=i.memory_id),0) AS payload_bytes
+      FROM memory_items i JOIN json_each(i.deferred_json) d
+      WHERE i.status!='forgotten' AND json_extract(d.value,'$.state')='pending'
+      AND json_extract(d.value,'$.dueAt')<=${now}
+      AND (json_extract(d.value,'$.claimedUntil') IS NULL OR json_extract(d.value,'$.claimedUntil')<=${now})
+      ORDER BY json_extract(d.value,'$.dueAt'),json_extract(d.value,'$.lastAttemptAt') NULLS FIRST,i.memory_id,json_extract(d.value,'$.kind'),i.space
+      LIMIT ${maxItems}`,
     );
-    const all = yield* stored(
-      "deferred-codec",
-      Effect.flatMap(
-        Effect.forEach(rows, (row) =>
-          Effect.gen(function* () {
-            const memorySpaceId = yield* decodeMemorySpaceId(row.space);
-            const memoryId = yield* decodeMemoryId(row.memory_id);
-            return (yield* deferredCodec.decode(row.deferred_json, strict))
-              .filter(
-                (d) =>
-                  d.state === "pending" &&
-                  d.dueAt <= now &&
-                  (!d.claimedUntil || d.claimedUntil <= now),
-              )
-              .map((d) => ({ ...d, memorySpaceId, memoryId, payloadBytes: row.payload_bytes }));
-          }),
-        ),
-        (groups) => Effect.succeed(groups.flat()),
-      ),
-    );
-    all.sort(
-      (a, b) =>
-        a.dueAt - b.dueAt ||
-        (a.lastAttemptAt ?? -1) - (b.lastAttemptAt ?? -1) ||
-        a.memoryId.localeCompare(b.memoryId) ||
-        a.kind.localeCompare(b.kind),
-    );
+    const selected: MemoryDeferredWork[] = [];
+    const charged = new Set<string>();
     let bytes = 0;
-    return all.filter((d, index) => {
-      bytes += d.payloadBytes;
-      return (
-        index < Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS) &&
-        bytes <= M.MEMORY_DEFERRED_SWEEP_MAX_BYTES
-      );
-    });
+    for (const row of rows) {
+      const memorySpaceId = yield* stored("deferred-space", decodeMemorySpaceId(row.space));
+      const memoryId = yield* stored("deferred-memory", decodeMemoryId(row.memory_id));
+      const work = yield* deferredRowCodec.decode(row.deferred_json, strict);
+      const key = `${memorySpaceId}:${memoryId}`;
+      const charge = charged.has(key) ? 0 : row.payload_bytes;
+      if (bytes + charge > M.MEMORY_DEFERRED_SWEEP_MAX_BYTES) continue;
+      bytes += charge;
+      charged.add(key);
+      selected.push({ ...work, memorySpaceId, memoryId, payloadBytes: row.payload_bytes });
+    }
+    return selected;
   });
   const claimDeferred = Effect.fn("MemoryStore.claimDeferred")(function* (
     target: MemoryDeferredWork,
@@ -3381,6 +3459,22 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readParked = Effect.fn("MemoryStore.readParked")(function* (limit: number) {
+    const rows = yield* stored(
+      "parked-recovery",
+      sql<{
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_inbox_pending WHERE record_kind='operation' AND hub_sequence IS NOT NULL ORDER BY hub_sequence,space,pending_key LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS))}`,
+    );
+    const result: M.MemoryOperation[] = [];
+    for (const row of rows) {
+      const operation = yield* operationFromMetadata(
+        yield* metadataCodec.decode(row.metadata_json, strict),
+      );
+      if (operation) result.push(operation);
+    }
+    return result;
+  });
   const stageRevertIntent = Effect.fn("MemoryStore.stageRevertIntent")(function* (input: {
     operation: Extract<M.MemoryOperation, { kind: "revert" }>;
     requestDigest: string;
@@ -3518,6 +3612,12 @@ const make = Effect.gen(function* () {
     list: (filter) => transact(list(filter)),
     search: (filter, text, mode) => transact(search(filter, text, mode)),
     dueWork,
+    readWork,
+    retryWork,
+    readThreadHookWatermark,
+    cancelThreadWork,
+    commitThreadHook,
+    readParked,
     enqueueWork,
     claimWork,
     finishWork,
