@@ -44,9 +44,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
   receipt: {
     operationId: op.operationId,
     memoryId: op.memoryId,
-    operationDigest: hash,
+    pendingSync: true,
+    revisionId: op.kind === "forget" ? null : op.revision.revisionId,
     outcome: op.kind === "forget" ? "deleted" : "accepted",
-    hubSequence: 1,
   },
   ...(op.kind !== "forget"
     ? {
@@ -72,6 +72,57 @@ const database = NodeSqliteClient.layer({ filename: ":memory:" });
 const setup = Layer.effectDiscard(migration).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
+const checkpoint = () => {
+  const op = operation();
+  if (op.kind === "forget") throw new Error("Fixture kind");
+  const item = decision(op).item!;
+  return M.MemoryHubCheckpointPage.make({
+    memorySpaceId: space,
+    checkpointSequence: 1,
+    retentionFloor: 0,
+    causalBoundary: { checkpointSequence: 1, boundaryId: "fixture" },
+    pageOrdinal: 0,
+    items: [{ ...item, pendingSync: false }],
+    revisions: [{ revision: op.revision, payload: op.payload }],
+    tombstones: [],
+    conflicts: [],
+    resolutions: [],
+    compactReceipts: [
+      {
+        memorySpaceId: space,
+        originEnvironmentId: env,
+        operationKind: "upsert",
+        receipt: {
+          operationId: op.operationId,
+          memoryId: memory,
+          operationDigest: hash,
+          outcome: "accepted",
+          hubSequence: 1,
+        },
+        revisionId: op.revision.revisionId,
+        resolutionId: null,
+        revertsResolutionId: null,
+        attemptId: null,
+        fencingToken: null,
+        reportGuard: null,
+      },
+    ],
+    identities: [
+      {
+        memorySpaceId: space,
+        memoryId: memory,
+        scope: op.revision.scope,
+        creatingEnvironmentId: env,
+        createOperationId: op.operationId,
+        createdAtUtc: now,
+      },
+    ],
+    fences: [{ memorySpaceId: space, memoryId: memory, highestFencingToken: 0, activeLease: null }],
+    suppressions: [],
+    nextCursor: null,
+    bootstrapComplete: true,
+  });
+};
 describe("MemoryStore", () => {
   it.effect("rolls back each pre-commit failure boundary", () =>
     Effect.gen(function* () {
@@ -121,7 +172,7 @@ describe("MemoryStore", () => {
         store.apply({
           ...decision(),
           operationDigest: "b".repeat(64),
-          receipt: { ...decision().receipt, operationDigest: "b".repeat(64) },
+          receipt: decision().receipt,
         }),
       );
       assert.isTrue(result._tag === "Failure");
@@ -244,7 +295,17 @@ describe("MemoryStore", () => {
         operationDigest: null,
         submissionState: "rejected",
       });
-      yield* store.apply({ ...decision(), admission: Store.approvedReplica });
+      yield* store.apply({
+        ...decision(),
+        admission: Store.approvedReplica,
+        receipt: {
+          operationId: operation().operationId,
+          memoryId: memory,
+          operationDigest: hash,
+          outcome: "accepted",
+          hubSequence: 1,
+        },
+      });
       const second = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
       const item = (yield* second.loadAggregate(space, memory)).item;
       assert.strictEqual(item?.status, "blocked");
@@ -252,6 +313,256 @@ describe("MemoryStore", () => {
       assert.isDefined((yield* second.loadAggregate(space, memory)).revisions[0]?.payload);
       assert.isFalse(item !== undefined && "payload" in item);
       assert.strictEqual((yield* second.pendingForgetIntents(10)).length, 1);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("materializes an unbound intent once after checkpoint install", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const op = operation();
+      if (op.kind === "forget") return;
+      const draft = {
+        intentId: "fixture-local",
+        environmentId: env,
+        memoryId: M.MemoryId.make(id(70)),
+        scope: op.revision.scope,
+        provenance: op.revision.provenance,
+        assertionKind: op.revision.assertionKind,
+        createdAtUtc: now,
+        payload: op.payload,
+      };
+      yield* store.putLocalIntent(draft);
+      const input = {
+        environmentId: env,
+        intentId: draft.intentId,
+        memorySpaceId: space,
+        operationId: M.MemoryOperationId.make(id(71)),
+        revisionId: M.MemoryRevisionId.make(id(72)),
+      };
+      assert.isTrue((yield* Effect.exit(store.materializeLocalIntent(input)))._tag === "Failure");
+      yield* store.installCheckpointPage({ checkpointId: "fixture", page: checkpoint() });
+      yield* store.completeCheckpoint({
+        memorySpaceId: space,
+        hubEnvironmentId: env,
+        checkpointId: "fixture",
+        pageCount: 1,
+      });
+      const first = yield* store.materializeLocalIntent(input);
+      const second = yield* store.materializeLocalIntent({
+        ...input,
+        operationId: M.MemoryOperationId.make(id(73)),
+        revisionId: M.MemoryRevisionId.make(id(74)),
+      });
+      assert.deepStrictEqual(first, second);
+      assert.strictEqual((yield* store.loadAggregate(space, draft.memoryId)).revisions.length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("partial checkpoint stays invisible and forget purges staged bodies", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.installCheckpointPage({ checkpointId: "fixture", page: checkpoint() });
+      assert.isUndefined((yield* store.loadAggregate(space, memory)).item);
+      const forget = decodeOperation({
+        protocolVersion: 1,
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: id(50),
+        originEnvironmentId: env,
+        expectedHeads: [],
+        kind: "forget",
+        tombstone: {
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: id(50),
+          deletingEnvironmentId: env,
+          deletedAtUtc: now,
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      });
+      yield* store.apply(decision(forget));
+      assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 0);
+      yield* store.completeCheckpoint({
+        memorySpaceId: space,
+        hubEnvironmentId: env,
+        checkpointId: "fixture",
+        pageCount: 1,
+      });
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("unions 101 suppressed source keys across bounded forget fragments", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      for (const [ordinal, count] of [
+        [0, 100],
+        [1, 1],
+      ] as const) {
+        const operationId = M.MemoryOperationId.make(id(100 + ordinal));
+        const op = decodeOperation({
+          protocolVersion: 1,
+          memorySpaceId: space,
+          memoryId: memory,
+          operationId,
+          originEnvironmentId: env,
+          expectedHeads: [],
+          kind: "forget",
+          tombstone: {
+            memorySpaceId: space,
+            memoryId: memory,
+            deleteOperationId: operationId,
+            deletingEnvironmentId: env,
+            deletedAtUtc: now,
+            suppressedSourceKeys: Array.from({ length: count }, (_, n) => ({
+              environmentId: env,
+              sourceId: id(200),
+              sourceItemKey: `key:${ordinal}:${n}`,
+            })),
+            suppressedContent: [],
+            sourceExclusions: [],
+          },
+        });
+        yield* store.apply(decision(op));
+        yield* store.apply(decision(op));
+      }
+      assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 101);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("search excludes only quarantined memory", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      if (op.kind === "forget") return;
+      yield* store.apply(decision(op));
+      const current = yield* store.loadAggregate(space, memory);
+      yield* store.index({
+        memorySpaceId: space,
+        memoryId: memory,
+        revisionId: op.revision.revisionId,
+        generation: current.generation,
+      });
+      const other = M.MemoryId.make(id(90));
+      yield* sql`INSERT INTO memory_items (space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) VALUES (${space},${other},'{}','user','[]','quarantined',0,'{}','{}')`;
+      const results = yield* store.search(
+        { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+        "synthetic",
+        "fts",
+      );
+      assert.deepStrictEqual(
+        results.map((item) => item.memoryId),
+        [memory],
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("encodes worst-case compact receipts and guards within the binary budget", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const base = checkpoint().compactReceipts[0]!;
+      const record = M.MemoryCompactReceipt.make({
+        ...base,
+        operationKind: "resolve",
+        resolutionId: M.MemoryResolutionId.make(id(10)),
+        attemptId: M.MemoryOperationId.make(id(11)),
+        fencingToken: Number.MAX_SAFE_INTEGER,
+        receipt: { ...base.receipt, hubSequence: Number.MAX_SAFE_INTEGER },
+        reportGuard: {
+          reportId: "b".repeat(64),
+          resolvingEnvironmentId: env,
+          resolutionId: M.MemoryResolutionId.make(id(10)),
+          outcome: "resolved",
+        },
+      });
+      const encoded = Store.encodeCompactReceipt(record, () => Number.MAX_SAFE_INTEGER);
+      assert.isAtMost(encoded.length, M.MEMORY_COMPACT_RECEIPT_MAX_BYTES);
+      yield* store.persistCompactReceipt(record);
+      const restored = yield* store.receipt(space, record.receipt.operationId);
+      assert.deepStrictEqual(restored?.receipt, record.receipt);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("pending forget holds scanner and conflicting claim candidates after restart", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.preserveForgetIntent({
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: M.MemoryOperationId.make(id(91)),
+        requestedAtUtc: now,
+        attempts: 0,
+        lastFailureCode: "capacity_exceeded",
+        operationDigest: null,
+        submissionState: "rejected",
+      });
+      const op = operation();
+      if (op.kind === "forget") return;
+      yield* store.apply({
+        ...decision(op),
+        admission: Store.approvedReplica,
+        receipt: {
+          operationId: op.operationId,
+          memoryId: memory,
+          operationDigest: hash,
+          outcome: "accepted",
+          hubSequence: 1,
+        },
+      });
+      const pending = yield* store.readDeferred(0, 256);
+      const scanner = pending.find((d) => d.kind === "scanner")!;
+      yield* store.finishDeferred(scanner, { now: 0, scannerPolicyVersion: 1 });
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "blocked");
+      yield* store.recoverClaimCandidates(0);
+      assert.deepStrictEqual(yield* store.readDueClaimCandidates(256, 0), []);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("derived purge failure remains fenced and recovers after restart", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      if (op.kind === "forget") return;
+      yield* store.apply(decision(op));
+      const before = yield* store.loadAggregate(space, memory);
+      yield* store.index({
+        memorySpaceId: space,
+        memoryId: memory,
+        revisionId: op.revision.revisionId,
+        generation: before.generation,
+      });
+      yield* sql`ALTER TABLE memory_items_fts RENAME TO unavailable_fts_fixture`;
+      const forget = decodeOperation({
+        protocolVersion: 1,
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: id(50),
+        originEnvironmentId: env,
+        expectedHeads: [],
+        kind: "forget",
+        tombstone: {
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: id(50),
+          deletingEnvironmentId: env,
+          deletedAtUtc: now,
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      });
+      yield* store.apply(decision(forget));
+      const restored = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.strictEqual(
+        (yield* restored.loadAggregate(space, memory)).item?.localAvailability.cleanupPending,
+        true,
+      );
+      assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 0);
+      yield* sql`ALTER TABLE unavailable_fts_fixture RENAME TO memory_items_fts`;
+      assert.strictEqual(yield* restored.cleanupDerived(256), 1);
+      assert.strictEqual((yield* sql`SELECT * FROM memory_items_fts`).length, 0);
+      assert.strictEqual(
+        (yield* restored.loadAggregate(space, memory)).item?.localAvailability.cleanupPending,
+        false,
+      );
     }).pipe(Effect.provide(live)),
   );
 });

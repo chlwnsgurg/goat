@@ -260,6 +260,7 @@ export default Effect.gen(function* () {
   )`;
   yield* sql`CREATE TABLE IF NOT EXISTS memory_compaction_state (
     space TEXT PRIMARY KEY,
+    projection_watermark INTEGER NOT NULL DEFAULT 0 CHECK(projection_watermark>=0),
     checkpoint_id TEXT,
     boundary_json TEXT,
     retained_revision_boundary INTEGER NOT NULL DEFAULT 0,
