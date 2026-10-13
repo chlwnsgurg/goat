@@ -3298,11 +3298,12 @@ const make = Effect.gen(function* () {
             }
           }
         }
+        const cloudTask = cloudTaskForRun(
+          target.providerThreads ?? [],
+          target.runs.find((run) => run.id === (shell.activeRunId ?? shell.latestRunId)),
+        );
         return {
-          cloudTask: cloudTaskForRun(
-            target.providerThreads ?? [],
-            target.runs.find((run) => run.id === (shell.activeRunId ?? shell.latestRunId)),
-          ),
+          ...(cloudTask === undefined ? {} : { cloudTask }),
           thread: threadDetail(target, timeline.totalItems, shell, yield* Clock.currentTimeMillis),
           recentRuns: target.runs
             .toSorted((left, right) => right.ordinal - left.ordinal)
@@ -3436,11 +3437,11 @@ const make = Effect.gen(function* () {
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
-        yield* ensureCloudCancellationSupported(target, "invalid_request", input.runId);
         yield* assertLiveCallerForOtherThread(scope, parent, target);
         // Stopping another thread's work is a write: it must run within the caller's modes.
         yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
         yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+        yield* ensureCloudCancellationSupported(target, "invalid_request", input.runId);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({
