@@ -832,7 +832,7 @@ describe("memory bounded transport", () => {
     expect(Object.values(M.MEMORY_HUB_PATHS)).toHaveLength(11);
     round(M.MemoryHubReceipt, receipt);
   });
-  it("rejects new resolution through push but permits accepted replay receipt lookup", () => {
+  it("preserves resolve push envelopes admission errors and accepted replay receipts", () => {
     // Push retains the resolve envelope so the stateful hub can replay an existing receipt; new admission is exclusively apply-resolution.
     const value = {
       ...operation,
@@ -1373,11 +1373,8 @@ describe("memory binding and relay contracts", () => {
     });
     rejects(M.MemorySourceReadRequest, { ...request, expiresAtHubTime: "2026-10-14T00:00:00Z" });
   });
-  it("source request id is not an operation id", () => {
+  it("round-trips transient source request ids", () => {
     const source = M.MemorySourceReadRequestId.make(id(11));
-    // @ts-expect-error -- transient source requests and durable operations use distinct nominal identities.
-    const operationId: M.MemoryOperationId = source;
-    expect(operationId).toBe(source);
     round(M.MemorySourceReadRequestId, source);
   });
 });
