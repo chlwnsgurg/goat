@@ -83,6 +83,7 @@ import Migration0065 from "./Migrations/065_ChannelLedger.ts";
 import Migration0066 from "./Migrations/066_RemoteDispatchQuestions.ts";
 import Migration0067 from "./Migrations/067_ThreadRunResults.ts";
 import Migration0068 from "./Migrations/068_RemoteReportRelay.ts";
+import Migration0070 from "./Migrations/070_Memory.ts";
 import Migration0069 from "./Migrations/069_ProjectionTurnItemRequestIndex.ts";
 
 /**
@@ -169,6 +170,7 @@ export const migrationEntries = [
   [67, "ThreadRunResults", Migration0067],
   [68, "RemoteReportRelay", Migration0068],
   [69, "ProjectionTurnItemRequestIndex", Migration0069],
+  [70, "Memory", Migration0070],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

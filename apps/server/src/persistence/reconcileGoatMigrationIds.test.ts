@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { reconcileGoatMigrationIds } from "./reconcileGoatMigrationIds.ts";
 import { migrationEntries, migrationManifest, runMigrations } from "./Migrations.ts";
 
 // GOAT builds before the upstream sync that added PullRequestReviewGuides at 61 recorded
@@ -51,6 +52,7 @@ describe("GOAT migration ids", () => {
         "ThreadRunResults",
         "RemoteReportRelay",
         "ProjectionTurnItemRequestIndex",
+        "Memory",
       ]);
       assert.isFalse(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* runMigrations(), [[61, "PullRequestReviewGuides"]]);
@@ -70,9 +72,39 @@ describe("GOAT migration ids", () => {
         [67, "ThreadRunResults"],
         [68, "RemoteReportRelay"],
         [69, "ProjectionTurnItemRequestIndex"],
+        [70, "Memory"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+  it.effect("reconciles Memory by stable name after upstream claims its old ID", () =>
+    Effect.gen(function* () {
+      yield* runMigrations();
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_quota_counters VALUES ('fixture','live','user',7)`;
+      const future = migrationEntries.map(
+        ([n, name, migration]) => [name === "Memory" ? 71 : n, name, migration] as const,
+      );
+      const displaced = Effect.gen(function* () {
+        yield* sql`CREATE TABLE IF NOT EXISTS future_fixture (id INTEGER)`;
+      });
+      const incoming = [
+        ...future.filter(([n]) => n < 70),
+        [70, "FutureUpstream", displaced] as const,
+        ...future.filter(([n]) => n >= 70),
+      ];
+      yield* reconcileGoatMigrationIds(incoming);
+      const ledger = yield* history;
+      assert.isTrue(ledger.some(([n, name]) => n === 71 && name === "Memory"));
+      assert.strictEqual(
+        (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters`)[0]?.value,
+        7,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT name FROM sqlite_master WHERE name='future_fixture'`).length,
+        1,
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
