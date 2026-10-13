@@ -971,3 +971,7 @@ completion is claimed.
 
 - R6: deferred drain order (due_at, last_attempt_at NULLS FIRST, memory_id, kind), per-sweep item/byte caps, exponential backoff capped at 1 h, held rows excluded, SQL-resident order for restart. CI (MemoryService.test.ts): failing rows with low ids plus a held row ahead of a healthy row; the healthy row completes by the second sweep, the held row is never selected, caps hold, restart preserves order.
 - R7: secret_detected release only through MemoryWorker policy-version rescan (start and scanner policy upgrade). CI: hold recorded under policyVersion N, start with N+1 allowing the text, item becomes active; a forget committed before the rescan wins and the rescan is cancelled. No explicit rescan entry point.
+
+## WP1 code review r1 handoff (2026-10-14)
+
+- Checkpoint report-guard digests: WP1 now validates only digest format and structural links. WP2 computes and verifies the report-id formula with Node crypto before WP3 installs a snapshot; contracts carry no SHA-256 implementation.
