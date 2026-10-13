@@ -177,6 +177,19 @@ const make = Effect.gen(function* () {
             const thread = { environmentId, threadId: M.ThreadId.make(row.stream_id) };
             if (row.event_type === "thread.deleted") {
               yield* store.cancelThreadWork(thread);
+              yield* store
+                .forgetLocalIntent(environmentId, `${environmentId}:${row.stream_id}:summary`)
+                .pipe(
+                  Effect.catchTags({
+                    MemoryStoreConflict: (error) =>
+                      error.code === "space_mismatch" ? Effect.void : Effect.fail(error),
+                  }),
+                );
+              for (let index = work.length - 1; index >= 0; index--) {
+                const queued = work[index]?.metadata;
+                if (queued?.kind === "summary" && queued.sourceThread.threadId === thread.threadId)
+                  work.splice(index, 1);
+              }
               continue;
             }
             if (row.event_type !== "run.updated") continue;
@@ -266,19 +279,43 @@ const make = Effect.gen(function* () {
     if (work.claimedBy !== runtime.instanceId || work.status !== "running")
       return yield* new MemoryWorkerError({ code: "attempt_expired" });
     const run = Effect.gen(function* () {
-      if (
-        work.kind === "rebuild" &&
-        work.metadata.kind === "rebuild" &&
-        work.memoryId &&
-        work.metadata.revisionId
-      ) {
-        yield* maintenance.repair({
-          memorySpaceId: M.MemorySpaceId.make(work.space),
-          memoryId: work.memoryId,
-          revisionId: work.metadata.revisionId,
-          generation: work.metadata.generation,
-        });
-        yield* store.finishWork(work.id, "completed");
+      if (work.kind === "rebuild") {
+        if (work.metadata.kind !== "rebuild" || !work.memoryId || !work.metadata.revisionId)
+          return yield* new MemoryWorkerError({ code: "unsupported_operation" });
+        const metadata = work.metadata;
+        yield* store.transact(
+          Effect.gen(function* () {
+            const owner = yield* store.readWork(work.id);
+            if (
+              owner?.status !== "running" ||
+              owner.claimedBy !== work.claimedBy ||
+              owner.attempt !== work.attempt ||
+              owner.claimedUntil === null ||
+              owner.claimedUntil <= (yield* Clock.currentTimeMillis)
+            )
+              return yield* new MemoryWorkerError({ code: "attempt_expired" });
+            const current = yield* store.loadAggregate(
+              M.MemorySpaceId.make(work.space),
+              work.memoryId!,
+            );
+            if (current.tombstone || current.generation !== metadata.generation) {
+              yield* store.finishWork(work.id, "cancelled");
+              return;
+            }
+            const repaired = yield* maintenance.repair({
+              memorySpaceId: M.MemorySpaceId.make(work.space),
+              memoryId: work.memoryId!,
+              revisionId: metadata.revisionId!,
+              generation: metadata.generation,
+            });
+            if (repaired) yield* store.finishWork(work.id, "completed");
+            else
+              yield* store.retryWork(
+                work,
+                (yield* Clock.currentTimeMillis) + memoryRetryDelay(work.attempt),
+              );
+          }),
+        );
         return;
       }
       if (work.metadata.kind !== "summary" || !work.memoryId)
@@ -289,7 +326,7 @@ const make = Effect.gen(function* () {
         ? undefined
         : yield* store.receipt(M.MemorySpaceId.make(work.space), meta.operationId);
       if (existingReceipt) {
-        yield* store.finishWork(work.id, "completed");
+        yield* store.completeSummaryWork(work);
         return;
       }
       const current = work.space.startsWith("_local:")
@@ -369,7 +406,8 @@ const make = Effect.gen(function* () {
                 effectiveModel: execution.effectiveModel,
               },
             });
-            yield* store.finishWork(work.id, "completed");
+            if (!(yield* store.completeSummaryWork(work)))
+              return yield* new MemoryWorkerError({ code: "attempt_expired" });
           }),
         );
       } else
@@ -453,7 +491,7 @@ const make = Effect.gen(function* () {
             payloads: current.revisions.map((r) => r.payload),
             originals: resolutionPayloads,
           });
-          yield* store.finishDeferred(target, {
+          yield* store.finishOwnedDeferred(target, runtime.instanceId, now + 600000, {
             now,
             scannerPolicyVersion: MEMORY_SCANNER_POLICY_VERSION,
             ...(scan.kind === "blocked"
@@ -467,15 +505,15 @@ const make = Effect.gen(function* () {
             revisionId: target.revisionId,
             generation: target.generation,
           });
-          yield* store.finishDeferred(target, {
+          yield* store.finishOwnedDeferred(target, runtime.instanceId, now + 600000, {
             now,
             ...(!repaired ? { failure: "index_unavailable" as const } : {}),
           });
         } else if (target.kind === "cleanup") {
           yield* store.cleanupDerived(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS);
-          yield* store.finishDeferred(target, { now });
+          yield* store.finishOwnedDeferred(target, runtime.instanceId, now + 600000, { now });
         } else
-          yield* store.finishDeferred(target, {
+          yield* store.finishOwnedDeferred(target, runtime.instanceId, now + 600000, {
             now,
             failure: target.reason ?? "dependency_invalidated",
           });
@@ -483,7 +521,10 @@ const make = Effect.gen(function* () {
       yield* process.pipe(
         Effect.catch(() =>
           store
-            .finishDeferred(target, { now, failure: target.reason ?? "dependency_invalidated" })
+            .finishOwnedDeferred(target, runtime.instanceId, now + 600000, {
+              now,
+              failure: target.reason ?? "dependency_invalidated",
+            })
             .pipe(Effect.asVoid),
         ),
       );

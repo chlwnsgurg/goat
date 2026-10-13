@@ -290,3 +290,46 @@ describe("MemoryDecider", () => {
     assert.deepStrictEqual(decision.heads, [...current.heads, op.revision.revisionId].sort());
   });
 });
+
+describe("published ancestry boundary", () => {
+  const parent = M.MemoryRevisionId.make(id(200));
+  const op = root(4, [parent]);
+  const boundary = { checkpointSequence: 10, boundaryId: "fixture" };
+  it("links an approved edit to a proven compacted parent", () => {
+    const decision = decideMemoryOperation(empty(), op, approvedReplica, undefined, approval(op), {
+      causalBoundary: boundary,
+      retentionFloor: 10,
+      parents: [{ revisionId: parent, status: "compacted", boundary }],
+    });
+    assert.isUndefined(decision.pending);
+    assert.strictEqual(decision.item?.status, "active");
+  });
+  it("does not infer compaction of an unknown parent from a boundary", () => {
+    const decision = decideMemoryOperation(empty(), op, approvedReplica, undefined, approval(op), {
+      causalBoundary: boundary,
+      retentionFloor: 10,
+      parents: [{ revisionId: parent, status: "missing" }],
+    });
+    assert.deepStrictEqual(decision.pending?.missingParents, [parent]);
+  });
+  it("requires local writers to resync a compacted base", () => {
+    assert.throws(() =>
+      decideMemoryOperation(empty(), op, localIntent, { kind: "allowed" }, undefined, {
+        causalBoundary: boundary,
+        retentionFloor: 10,
+        parents: [{ revisionId: parent, status: "compacted", boundary }],
+      }),
+    );
+  });
+  it("rejects a known foreign parent before parking it", () => {
+    assert.throws(() =>
+      decideMemoryOperation(empty(), op, approvedReplica, undefined, approval(op), {
+        causalBoundary: boundary,
+        retentionFloor: 10,
+        parents: [
+          { revisionId: parent, status: "crossMemory", memoryId: M.MemoryId.make(id(201)) },
+        ],
+      }),
+    );
+  });
+});

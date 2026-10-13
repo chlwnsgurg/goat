@@ -1,7 +1,12 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- protocol digests are stable across runtimes.
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
-import type { MemoryAdmissionContext, MemoryAggregate, MemoryDecision } from "./MemoryStore.ts";
+import type {
+  MemoryAdmissionContext,
+  MemoryAggregate,
+  MemoryAncestry,
+  MemoryDecision,
+} from "./MemoryStore.ts";
 import { MemoryStoreConflict } from "./MemoryStore.ts";
 import type { MemoryScanResult } from "./MemorySecretScanner.ts";
 
@@ -24,6 +29,7 @@ export function decideMemoryOperation(
   admission: MemoryAdmissionContext,
   scan: MemoryScanResult | undefined,
   approval?: M.MemoryHubReceipt,
+  ancestry?: MemoryAncestry,
 ): MemoryDecision {
   const digest = memoryOperationDigest(operation); // strict encoding rejects extra nested fields
   if (current.memoryId !== operation.memoryId || current.memorySpaceId !== operation.memorySpaceId)
@@ -98,7 +104,15 @@ export function decideMemoryOperation(
   if (existing && JSON.stringify(existing) !== JSON.stringify(r)) fail("identity_mismatch");
   if (r.parents.includes(r.revisionId)) fail("identity_mismatch");
   if (r.parents.length === 0 && current.identity) fail("revision_changed");
-  const missing = r.parents.filter((id) => !revisions.has(id));
+  if (ancestry?.parents.some((parent) => parent.status === "crossMemory"))
+    fail("identity_mismatch");
+  const compacted = new Set(
+    ancestry?.parents
+      .filter((parent) => parent.status === "compacted")
+      .map((parent) => parent.revisionId),
+  );
+  if (!replica && compacted.size) fail("base_compacted");
+  const missing = r.parents.filter((id) => !revisions.has(id) && !compacted.has(id));
   if (!replica && !sameSet(current.heads, operation.expectedHeads) && missing.length === 0)
     fail("revision_changed");
   if (operation.kind === "resolve" && !replica) {

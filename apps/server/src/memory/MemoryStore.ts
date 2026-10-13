@@ -530,6 +530,18 @@ export class MemoryStore extends Context.Service<
       scannerPolicyVersion: number,
       now: number,
     ) => Effect.Effect<void, MemoryStorageError>;
+    readonly finishOwnedDeferred: (
+      target: MemoryDeferredWork,
+      owner: string,
+      until: number,
+      outcome: {
+        readonly now: number;
+        readonly failure?: M.MemoryDeferredReason;
+        readonly scannerPolicyVersion?: number;
+        readonly ruleIds?: ReadonlyArray<string>;
+      },
+    ) => Effect.Effect<boolean, MemoryStorageError>;
+    readonly completeSummaryWork: (work: MemoryWork) => Effect.Effect<boolean, MemoryStorageError>;
     readonly finishDeferred: (
       target: MemoryDeferredWork,
       outcome: {
@@ -2248,6 +2260,74 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const finishOwnedDeferred = Effect.fn("MemoryStore.finishOwnedDeferred")(function* (
+    target: MemoryDeferredWork,
+    owner: string,
+    until: number,
+    outcome: {
+      now: number;
+      failure?: M.MemoryDeferredReason;
+      scannerPolicyVersion?: number;
+      ruleIds?: ReadonlyArray<string>;
+    },
+  ) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const rows = yield* stored(
+          "deferred-owner",
+          sql<{
+            deferred_json: string;
+          }>`SELECT deferred_json FROM memory_items WHERE space=${target.memorySpaceId} AND memory_id=${target.memoryId} AND generation=${target.generation}`,
+        );
+        if (!rows[0]) return false;
+        const current = (yield* deferredCodec.decode(rows[0].deferred_json, strict)).find(
+          (d) => d.kind === target.kind,
+        );
+        if (
+          !current ||
+          current.claimedBy !== owner ||
+          current.claimedUntil !== until ||
+          current.revisionId !== target.revisionId ||
+          until <= (yield* Clock.currentTimeMillis)
+        )
+          return false;
+        return yield* finishDeferred(target, outcome);
+      }),
+    );
+  });
+  const completeSummaryWork = Effect.fn("MemoryStore.completeSummaryWork")(function* (
+    work: MemoryWork,
+  ) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const current = yield* readWork(work.id);
+        if (
+          work.metadata.kind !== "summary" ||
+          !current ||
+          current.kind !== work.kind ||
+          (yield* workMetadataCodec.encode(current.metadata)) !==
+            (yield* workMetadataCodec.encode(work.metadata)) ||
+          current.status !== "running" ||
+          current.claimedBy !== work.claimedBy ||
+          current.claimedUntil !== work.claimedUntil ||
+          current.attempt !== work.attempt ||
+          current.claimedUntil === null ||
+          current.claimedUntil <= (yield* Clock.currentTimeMillis)
+        )
+          return false;
+        yield* finishWork(work.id, "completed");
+        const meta = work.metadata;
+        yield* stored(
+          "summary-compact",
+          sql`DELETE FROM memory_outbox WHERE kind=${work.kind} AND status='completed' AND id!=${work.id}
+        AND json_extract(metadata_json,'$.kind')='summary' AND json_extract(metadata_json,'$.sourceThread.environmentId')=${meta.sourceThread.environmentId}
+        AND json_extract(metadata_json,'$.sourceThread.threadId')=${meta.sourceThread.threadId}
+        AND json_extract(metadata_json,'$.sourceWatermark.throughSequence')<${meta.sourceWatermark.throughSequence}`,
+        );
+        return true;
+      }),
+    );
+  });
   const recoverDeferred = Effect.fn("MemoryStore.recoverDeferred")(function* (
     scannerPolicyVersion: number,
     now: number,
@@ -3776,6 +3856,8 @@ const make = Effect.gen(function* () {
     readDeferred,
     claimDeferred,
     finishDeferred,
+    finishOwnedDeferred,
+    completeSummaryWork,
     recoverDeferred,
     getProjectBinding,
     putProjectBinding,

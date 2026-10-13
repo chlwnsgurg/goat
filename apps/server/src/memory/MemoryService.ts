@@ -297,6 +297,7 @@ const make = Effect.gen(function* () {
     op: M.MemoryOperation,
     admission: Store.MemoryAdmissionContext,
     receipt?: M.MemoryHubReceipt,
+    ancestry?: Store.MemoryAncestry,
   ) =>
     Effect.try({
       try: () =>
@@ -306,6 +307,7 @@ const make = Effect.gen(function* () {
           admission,
           admission.kind === "approvedReplica" ? undefined : scanMemoryValue(op),
           receipt,
+          ancestry,
         ),
       catch: (cause) => (isConflict(cause) ? cause : invalid()),
     });
@@ -329,19 +331,23 @@ const make = Effect.gen(function* () {
           const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
           if (admission.kind !== "approvedReplica" && current.pendingForget && op.kind !== "forget")
             return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+          let ancestry: Store.MemoryAncestry | undefined;
           if (op.kind !== "forget") {
             if (admission.kind !== "approvedReplica") yield* requireScope(op.revision.scope);
-            const ancestry = yield* store.readAncestry(
+            ancestry = yield* store.readAncestry(
               op.memorySpaceId,
               op.memoryId,
               op.revision.parents,
             );
             if (ancestry.parents.some((p) => p.status === "crossMemory"))
               return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
-            if (ancestry.parents.some((p) => p.status === "compacted"))
+            if (
+              admission.kind !== "approvedReplica" &&
+              ancestry.parents.some((p) => p.status === "compacted")
+            )
               return yield* new Store.MemoryStoreConflict({ code: "base_compacted" });
           }
-          const decision = yield* decide(current, op, admission, approval);
+          const decision = yield* decide(current, op, admission, approval, ancestry);
           return yield* quota.commit(decision, environmentId, permit);
         }),
       )
@@ -795,8 +801,9 @@ const make = Effect.gen(function* () {
           op.memoryId,
           op.revision.parents,
         );
-        if (ancestry.parents.some((p) => p.status !== "retained")) return false;
-        const decision = yield* decide(current, op, Store.approvedReplica, old.receipt);
+        if (ancestry.parents.some((p) => p.status !== "retained" && p.status !== "compacted"))
+          return false;
+        const decision = yield* decide(current, op, Store.approvedReplica, old.receipt, ancestry);
         yield* store.reconnectParked(decision, current.generation);
         return !decision.pending;
       }),
@@ -881,7 +888,8 @@ const make = Effect.gen(function* () {
           Store.localIntent,
           Effect.void,
         );
-        yield* store.finishWork(work.id, "completed");
+        if (!(yield* store.completeSummaryWork(work)))
+          return yield* new Store.MemoryStoreConflict({ code: "attempt_expired" });
         return receipt;
       }),
     );

@@ -1363,3 +1363,53 @@ describe("derived work integration", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+describe("worker completion fencing", () => {
+  it.effect("rejects a deferred completion from an old owner", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(decision());
+      const target = (yield* store.readDeferred(0, 100))[0]!;
+      yield* store.claimDeferred(target, "new-owner", 0, Number.MAX_SAFE_INTEGER);
+      assert.isFalse(
+        yield* store.finishOwnedDeferred(target, "old-owner", Number.MAX_SAFE_INTEGER, { now: 1 }),
+      );
+      assert.strictEqual((yield* store.readDeferred(0, 100)).length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("compacts older completed summary rows without dropping the latest receipt", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.enqueueWork({ ...summaryWork(9), status: "completed" });
+      yield* store.enqueueWork(summaryWork(10));
+      yield* store.claimWork("summary:10", "worker", 0, Number.MAX_SAFE_INTEGER);
+      const work = (yield* store.readWork("summary:10"))!;
+      assert.isTrue(yield* store.completeSummaryWork(work));
+      assert.isUndefined(yield* store.readWork("summary:9"));
+      assert.strictEqual((yield* store.readWork("summary:10"))!.status, "completed");
+      assert.isFalse(yield* store.completeSummaryWork(work));
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rolls back summary completion and receipt compaction together", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.enqueueWork({ ...summaryWork(9), status: "completed" });
+      yield* store.enqueueWork(summaryWork(10));
+      yield* store.claimWork("summary:10", "worker", 0, Number.MAX_SAFE_INTEGER);
+      const work = (yield* store.readWork("summary:10"))!;
+      yield* store
+        .transact(
+          store
+            .completeSummaryWork(work)
+            .pipe(
+              Effect.andThen(
+                Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" })),
+              ),
+            ),
+        )
+        .pipe(Effect.flip);
+      assert.isDefined(yield* store.readWork("summary:9"));
+      assert.strictEqual((yield* store.readWork("summary:10"))!.status, "running");
+    }).pipe(Effect.provide(live)),
+  );
+});
