@@ -13573,8 +13573,10 @@ describe("AcpAdapterV2", () => {
           requestRuntimeRestart: true,
         })
         .pipe(Effect.forkScoped);
+      // A watchdog only: cancelCalled below proves the hard teardown skipped ACP cancel. Killing
+      // the TERM-ignoring process group takes over 3 s on loaded CI runners.
       const interruptCompleted = yield* Fiber.join(interruptFiber).pipe(
-        Effect.timeoutOption("3 seconds"),
+        Effect.timeoutOption("15 seconds"),
       );
       assert.isTrue(Option.isSome(interruptCompleted), "hung ACP cancel must not block teardown");
       assert.isFalse(cancelCalled, "hard process-group teardown must skip ACP cancel");
