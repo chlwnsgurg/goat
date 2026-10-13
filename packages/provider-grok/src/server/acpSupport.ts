@@ -1,6 +1,15 @@
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { type ProviderApprovalOption, ProviderDriverKind, type RuntimeMode } from "@goat/contracts";
+import {
+  type ProviderApprovalOption,
+  ProviderDriverKind,
+  type RuntimeMode,
+  TextGenerationError,
+} from "@goat/contracts";
+import {
+  MemoryGenerationRunnerError,
+  type MemoryOperationName,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import type { GrokSettings } from "../settings.ts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -20,6 +29,17 @@ const GOAT_OAUTH_REFERRER = "t3code";
 const GROK_AUTH_METHOD_API_KEY = "xai.api_key";
 const GROK_AUTH_METHOD_CACHED_TOKEN = "cached_token";
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
+
+/** ACP capability denial does not disable Grok's native tools or managed hooks. */
+export const requireGrokMemoryIsolation = (operation: MemoryOperationName) =>
+  Effect.fail(
+    new TextGenerationError({
+      operation,
+      detail:
+        "Grok ACP cannot certify that native tools, MCP and hooks are disabled for memory generation.",
+      cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+    }),
+  );
 
 type GrokAcpRuntimeGrokSettings = Pick<GrokSettings, "binaryPath">;
 

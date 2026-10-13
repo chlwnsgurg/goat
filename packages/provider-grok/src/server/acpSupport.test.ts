@@ -10,6 +10,7 @@ import {
   grokAcpSpawnArgs,
   isValidGrokReasoningEffortToken,
   resolveGrokAcpBaseModelId,
+  requireGrokMemoryIsolation,
 } from "./acpSupport.ts";
 
 describe("grokAcpRuntimeProcessOwnership", () => {
@@ -261,5 +262,21 @@ describe("applyGrokAcpModelSelection", () => {
       );
       expect(error).toBe(failure.message);
     }),
+  );
+});
+
+// Capability denial alone cannot prove that native tools and global hooks are off.
+describe("Grok memory isolation", () => {
+  it.effect.each(["resolveMemoryConflict", "generateMemorySummary"] as const)(
+    "%s is unavailable without a certified native no-tool policy",
+    (operation) =>
+      Effect.gen(function* () {
+        const failure = yield* Effect.flip(requireGrokMemoryIsolation(operation));
+        expect(failure.operation).toBe(operation);
+        expect(failure.cause).toMatchObject({
+          _tag: "MemoryGenerationRunnerError",
+          code: "unavailable",
+        });
+      }),
   );
 });

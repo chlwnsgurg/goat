@@ -6,7 +6,11 @@ import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpErrors from "effect-acp/errors";
 
-import { TextGenerationError } from "@goat/contracts";
+import { ProviderDriverKind, TextGenerationError } from "@goat/contracts";
+import {
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import type { GrokSettings } from "../settings.ts";
 import { getModelSelectionStringOptionValue } from "@goat/shared/model";
 
@@ -17,6 +21,7 @@ import {
   currentGrokReasoningEffortFromSessionSetup,
   makeGrokAcpRuntime,
   resolveGrokAcpBaseModelId,
+  requireGrokMemoryIsolation,
 } from "./acpSupport.ts";
 
 const GROK_TIMEOUT_MS = 180_000;
@@ -26,6 +31,7 @@ const isTextGenerationError = Schema.is(TextGenerationError);
 export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(function* (
   grokSettings: GrokSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  options: { readonly memoryRunnerContext?: MemoryGenerationRunnerContext } = {},
 ) {
   const crypto = yield* Crypto.Crypto;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -132,5 +138,12 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
   return TextGenerationOperations.fromRunner(
     "GrokTextGeneration",
     TextGenerationOperations.withoutInvestigation("Grok", runGrokJson),
+    {
+      memoryRunner: withMemoryExecution(
+        options.memoryRunnerContext,
+        ProviderDriverKind.make("grok"),
+        (request) => requireGrokMemoryIsolation(request.operation),
+      ),
+    },
   );
 });
