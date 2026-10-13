@@ -1202,3 +1202,77 @@ describe("MemoryStore", () => {
       }).pipe(Effect.provide(live)),
   );
 });
+
+describe("generation failure ownership", () => {
+  const failure = (work: Store.MemoryWork, retryAt: number | null = null) => ({
+    work,
+    environmentId: env,
+    failureCode: "generation_failed" as const,
+    now: 1,
+    retryAt,
+  });
+  const claimed = Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    yield* store.enqueueWork({ ...summaryWork(9), space, memoryId: memory });
+    yield* store.claimWork("summary:9", "worker", 0, 100);
+    return (yield* store.readWork("summary:9"))!;
+  });
+  it.effect("records one report and terminates atomically", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = yield* claimed;
+      assert.isTrue(yield* store.failGenerationAttempt(failure(work)));
+      assert.isFalse(yield* store.failGenerationAttempt(failure(work)));
+      const reports = yield* store.pendingReports(100);
+      assert.strictEqual(reports.length, 1);
+      assert.strictEqual(reports[0]!.outcome, "failed");
+      assert.strictEqual(reports[0]!.failureCode, "generation_failed");
+      assert.strictEqual((yield* store.readWork(work.id))!.status, "failed");
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("persists retry due time with the safe report", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = yield* claimed;
+      assert.isTrue(yield* store.failGenerationAttempt(failure(work, 5001)));
+      assert.strictEqual((yield* store.readWork(work.id))!.nextAttemptAt, 5001);
+      assert.strictEqual((yield* store.pendingReports(100)).length, 1);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rejects stale owners and expired claims without reports", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = yield* claimed;
+      assert.isFalse(yield* store.failGenerationAttempt(failure({ ...work, claimedBy: "other" })));
+      assert.isFalse(yield* store.failGenerationAttempt({ ...failure(work), now: 100 }));
+      assert.deepStrictEqual(yield* store.pendingReports(100), []);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rejects foreign environment authority", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = yield* claimed;
+      const result = yield* store
+        .failGenerationAttempt({ ...failure(work), environmentId: M.EnvironmentId.make("foreign") })
+        .pipe(Effect.flip);
+      assert.strictEqual(result._tag, "MemoryStoreConflict");
+      assert.deepStrictEqual(yield* store.pendingReports(100), []);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rolls back report and retry together", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const work = yield* claimed;
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* store.failGenerationAttempt(failure(work, 5001));
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* store.pendingReports(100), []);
+      assert.strictEqual((yield* store.readWork(work.id))!.status, "running");
+    }).pipe(Effect.provide(live)),
+  );
+});

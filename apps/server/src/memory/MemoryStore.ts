@@ -667,6 +667,14 @@ export class MemoryStore extends Context.Service<
     readonly acknowledgeReport: (
       input: M.MemoryReportDelivery,
     ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    /** Failure intent and retry/termination share one ownership-fenced transaction. */
+    readonly failGenerationAttempt: (input: {
+      readonly work: MemoryWork;
+      readonly environmentId: M.EnvironmentId;
+      readonly failureCode: M.MemoryFailureCode;
+      readonly now: number;
+      readonly retryAt: number | null;
+    }) => Effect.Effect<boolean, MemoryStorageError | MemoryStoreConflict>;
     readonly failReport: (
       id: string,
       failure: M.MemoryFailureCode,
@@ -686,6 +694,8 @@ const codec = <S extends Schema.Constraint>(schema: S) => {
     decode: (value: unknown, options?: typeof strict) => stored("decode", decode(value, options)),
   };
 };
+const decodeFailureCode = Schema.decodeUnknownEffect(M.MemoryFailureCode);
+const decodeFailureEnvironment = Schema.decodeUnknownEffect(M.EnvironmentId);
 const threadHookCodec = codec(ThreadHookMetadata);
 const deferredRowCodec = codec(DeferredRow);
 const decodeLocalIntent = Schema.decodeUnknownEffect(LocalMemoryIntent);
@@ -2797,6 +2807,63 @@ const make = Effect.gen(function* () {
     );
     if (!rows.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
   });
+  const failGenerationAttempt = Effect.fn("MemoryStore.failGenerationAttempt")(function* (input: {
+    work: MemoryWork;
+    environmentId: M.EnvironmentId;
+    failureCode: M.MemoryFailureCode;
+    now: number;
+    retryAt: number | null;
+  }) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const work = input.work;
+        const code = yield* stored("failure-code", decodeFailureCode(input.failureCode, strict));
+        const environment = yield* stored(
+          "failure-environment",
+          decodeFailureEnvironment(input.environmentId, strict),
+        );
+        const current = yield* readWork(work.id);
+        if (
+          !current ||
+          current.status !== "running" ||
+          work.status !== "running" ||
+          work.claimedBy === null ||
+          work.claimedUntil === null ||
+          current.claimedBy !== work.claimedBy ||
+          current.claimedUntil !== work.claimedUntil ||
+          current.attempt !== work.attempt ||
+          current.claimedUntil <= input.now
+        )
+          return false;
+        if (
+          current.space !== work.space ||
+          current.memoryId !== work.memoryId ||
+          (yield* workMetadataCodec.encode(current.metadata)) !==
+            (yield* workMetadataCodec.encode(work.metadata))
+        )
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const metadata = current.metadata;
+        if (
+          metadata.kind !== "summary" ||
+          !current.memoryId ||
+          metadata.sourceThread.environmentId !== environment ||
+          !["summary", "consolidate"].includes(current.kind)
+        )
+          return yield* new MemoryStoreConflict({ code: "unsupported_operation" });
+        const reportId = hashText(`${environment}:${work.id}:${work.attempt}:failed`);
+        yield* stored(
+          "generation-failure-intent",
+          sql`INSERT INTO memory_report_outbox
+        (report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at)
+        VALUES (${reportId},${current.space},${current.memoryId},${metadata.operationId},NULL,${metadata.operationId},${environment},'failed','pending',${code},${input.now})
+        ON CONFLICT(report_id) DO NOTHING`,
+        );
+        if (input.retryAt !== null) yield* retryWork(current, input.retryAt);
+        else yield* finishWork(current.id, "failed");
+        return true;
+      }),
+    );
+  });
   const failReport = Effect.fn("MemoryStore.failReport")(function* (
     id: string,
     failure: M.MemoryFailureCode,
@@ -3669,6 +3736,7 @@ const make = Effect.gen(function* () {
     claimReport,
     acknowledgeReport,
     failReport,
+    failGenerationAttempt,
     wake,
     subscribeWake: Effect.map(PubSub.subscribe(wakes), Stream.fromSubscription),
   });
