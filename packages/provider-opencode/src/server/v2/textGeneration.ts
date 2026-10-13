@@ -7,7 +7,11 @@
  * @module textGeneration/OpenCode2TextGeneration
  */
 import { AbsolutePath, Location, Model, Provider, Session } from "@opencode/client/effect";
-import { TextGenerationError } from "@goat/contracts";
+import { ProviderDriverKind, TextGenerationError } from "@goat/contracts";
+import {
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import { getModelSelectionStringOptionValue } from "@goat/shared/model";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -18,6 +22,7 @@ import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as OpenCode2Server from "./OpenCode2Server.ts";
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
 import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
+import { requireOpenCodeMemoryIsolation } from "../textGeneration.ts";
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
@@ -182,7 +187,9 @@ const runOnServer = (
   }).pipe(Effect.scoped);
 
 /** Text generation for an instance whose server is OpenCode 2. */
-export const make = Effect.fn("OpenCode2TextGeneration.make")(function* () {
+export const make = Effect.fn("OpenCode2TextGeneration.make")(function* (
+  options: { readonly memoryRunnerContext?: MemoryGenerationRunnerContext } = {},
+) {
   const server = yield* OpenCode2Server.OpenCode2Server;
   const host = yield* ProviderHost.ProviderHost;
   const run: TextGenerationOperations.Runner = (input) =>
@@ -204,5 +211,12 @@ export const make = Effect.fn("OpenCode2TextGeneration.make")(function* () {
   return TextGenerationOperations.fromRunner(
     "OpenCode2TextGeneration",
     TextGenerationOperations.withoutInvestigation("OpenCode", run),
+    {
+      memoryRunner: withMemoryExecution(
+        options.memoryRunnerContext,
+        ProviderDriverKind.make("opencode"),
+        (request) => requireOpenCodeMemoryIsolation(request.operation),
+      ),
+    },
   );
 });

@@ -1,7 +1,13 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TextGenerationError } from "@goat/contracts";
+import { NonNegativeInt, ProviderDriverKind, TextGenerationError } from "@goat/contracts";
+import {
+  MemoryGenerationRunnerError,
+  withMemoryExecution,
+  type MemoryGenerationRunnerContext,
+  type MemoryOperationName,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 import type { OpenCodeSettings } from "../settings.ts";
 import { getModelSelectionStringOptionValue } from "@goat/shared/model";
 
@@ -9,6 +15,17 @@ import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
 import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
+
+/** A session deny policy cannot disable plugins/hooks inherited by the shared server. */
+export const requireOpenCodeMemoryIsolation = (operation: MemoryOperationName) =>
+  Effect.fail(
+    new TextGenerationError({
+      operation,
+      detail:
+        "OpenCode cannot certify isolated configuration and disabled tools, MCP and hooks on its shared or external server.",
+      cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+    }),
+  );
 
 const OpenCodeTextGenerationOperation = Schema.Literals([
   "resolveMemoryConflict",
@@ -155,6 +172,7 @@ function getOpenCodeTextResponse(parts: ReadonlyArray<unknown> | undefined): str
 
 export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration")(function* (
   openCodeSettings: OpenCodeSettings,
+  options: { readonly memoryRunnerContext?: MemoryGenerationRunnerContext } = {},
 ) {
   const host = yield* ProviderHost.ProviderHost;
   const openCodeRuntime = yield* OpenCodeRuntime.OpenCodeRuntime;
@@ -327,5 +345,12 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
   return TextGenerationOperations.fromRunner(
     "OpenCodeTextGeneration",
     TextGenerationOperations.withoutInvestigation("OpenCode", runOpenCodeJson),
+    {
+      memoryRunner: withMemoryExecution(
+        options.memoryRunnerContext,
+        ProviderDriverKind.make("opencode"),
+        (request) => requireOpenCodeMemoryIsolation(request.operation),
+      ),
+    },
   );
 });
