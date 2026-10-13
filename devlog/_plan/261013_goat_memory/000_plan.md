@@ -316,3 +316,11 @@ Main adopts M20/M20a–k and defaults ①–④; amended M5/M7/M8/M18/M19 rows, 
 Docs-only amendment; no source edits, installation, tests, builds, server/user-data writes, commit
 or push. All newly specified runtime/CI cases are NOT RUN; no runtime CLOSED or requirement 7
 completion is claimed.
+
+## WP0 D record (2026-10-14)
+
+Conclusion: the roadmap is audited (independent audit r5 GO-WITH-FIXES, folded as near-pass) and published as draft PR #172 plus goat_initiative PR #2. Direction for WP1: start from 010 rev 10, re-anchor every cited line against the current origin/dev, and keep the contracts PR self-contained (OpenCode/Muse operation enums move with it).
+
+What did not improve: phase documents written in parallel kept producing cross-phase gaps; four of five audit rounds found a new interaction between two mechanisms rather than a defect inside one. Dead hypothesis: "replica-side capacity and scanner gates are local details" died in audit r4; it is replaced by M20 (the hub is the only admission authority, replicas defer local work). What would refute the current direction: an implementation that cannot commit approved data, receipt, deferred markers and cursor in one SQLite transaction within the page bounds, or a provider adapter whose turn input cannot carry `memoryContext` without breaking compaction restore.
+
+Verification limits: no tests ran on this Mac (Jun, 2026-10-13). The formatting receipt (`vp fmt --check`, exit 0 at 763b470a4) and link resolution (105/105) are the local evidence. PR CI for #172 failed in "Setup Vite+" on every job because all EPYC runners report "No space left on device" (repository-wide since 18:14 UTC, dev push included); that run is not evidence either way.
