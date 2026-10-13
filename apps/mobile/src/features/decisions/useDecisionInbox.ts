@@ -1,5 +1,9 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
-import { type DecisionItem, orderDecisionQueue } from "@goat/client-runtime/state/decision-inbox";
+import {
+  type DecisionItem,
+  isDecisionItemRemoved,
+  orderDecisionQueue,
+} from "@goat/client-runtime/state/decision-inbox";
 import {
   seedUserInputDraftAnswers,
   type ThreadUserInputQuestion,
@@ -24,9 +28,9 @@ import { useAtomCommand } from "../../state/use-atom-command";
 const sameRef = (a: DecisionItem["ref"], b: DecisionItem["ref"]) =>
   a.environmentId === b.environmentId && a.threadId === b.threadId;
 
-function prune<A>(values: Record<string, A>, liveIds: ReadonlySet<string>) {
+function prune<A>(values: Record<string, A>, keep: (id: string) => boolean) {
   const entries = Object.entries(values);
-  const kept = entries.filter(([id]) => liveIds.has(id));
+  const kept = entries.filter(([id]) => keep(id));
   return kept.length === entries.length ? values : Object.fromEntries(kept);
 }
 
@@ -89,7 +93,7 @@ export function useDecisionInbox(
     liveSelected ??
     (selected !== null && unresolved(selected)
       ? selected
-      : state.loadingRefs.length > 0 && selected === null
+      : state.isLoading && selected === null
         ? null
         : (queue[0] ?? null));
   const paused = current !== null && unresolved(current);
@@ -124,29 +128,18 @@ export function useDecisionInbox(
 
   useEffect(() => {
     if (!isFocused()) return;
-    const liveIds = new Set(state.items.map((item) => item.id));
-    for (const [id, item] of inFlight.current) {
-      if (!liveIds.has(id) && !unresolved(item)) inFlight.current.delete(id);
+    const keep = (id: string) => !isDecisionItemRemoved(state, id);
+    for (const id of inFlight.current.keys()) {
+      if (!keep(id)) inFlight.current.delete(id);
     }
-    const busyIds = new Set(inFlight.current.keys());
-    setBusyById((previous) => prune(previous, busyIds));
-    if (state.loadingRefs.length > 0 || state.errors.length > 0) return;
-    setDraftsById((previous) => prune(previous, liveIds));
-    setErrorsById((previous) => prune(previous, liveIds));
+    setBusyById((previous) => prune(previous, (id) => inFlight.current.has(id)));
+    setDraftsById((previous) => prune(previous, keep));
+    setErrorsById((previous) => prune(previous, keep));
     setSkippedIds((previous) => {
-      const next = previous.filter((id) => liveIds.has(id));
+      const next = previous.filter(keep);
       return next.length === previous.length ? previous : next;
     });
-  }, [
-    state,
-    unresolved,
-    isFocused,
-    inFlight,
-    setBusyById,
-    setDraftsById,
-    setErrorsById,
-    setSkippedIds,
-  ]);
+  }, [state, isFocused, inFlight, setBusyById, setDraftsById, setErrorsById, setSkippedIds]);
 
   function readActionItem(id: string): DecisionItem | undefined {
     if (!isFocused()) return undefined;
@@ -177,16 +170,12 @@ export function useDecisionInbox(
     if (inFlight.current.has(item.id)) return;
     inFlight.current.set(item.id, item);
     setBusyById((previous) => ({ ...previous, [item.id]: true }));
-    setErrorsById((previous) =>
-      prune(previous, new Set(Object.keys(previous).filter((id) => id !== item.id))),
-    );
+    setErrorsById((previous) => prune(previous, (id) => id !== item.id));
     function fail(message: string) {
       // Projection removal may already have released this exact submission.
       if (inFlight.current.get(item.id) !== item) return;
       inFlight.current.delete(item.id);
-      setBusyById((previous) =>
-        prune(previous, new Set(Object.keys(previous).filter((id) => id !== item.id))),
-      );
+      setBusyById((previous) => prune(previous, (id) => id !== item.id));
       setErrorsById((previous) => ({ ...previous, [item.id]: message }));
     }
     try {

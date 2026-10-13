@@ -10,6 +10,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 type Snapshot = {
   items: readonly DecisionItem[];
+  authoritativeRefs: readonly ScopedThreadRef[];
   loadingRefs: readonly ScopedThreadRef[];
   errors: readonly { ref: ScopedThreadRef; message: string }[];
   isLoading: boolean;
@@ -32,6 +33,7 @@ vi.mock("../../state/threads", async () => {
   const { Atom } = await import("effect/reactivity");
   state.snapshot = Atom.make<Snapshot>({
     items: [],
+    authoritativeRefs: [],
     loadingRefs: [],
     errors: [],
     isLoading: false,
@@ -95,16 +97,29 @@ function inbox() {
   return latest;
 }
 function write(items: readonly DecisionItem[], diagnostics: Partial<Omit<Snapshot, "items">> = {}) {
+  const unresolved = [
+    ...(diagnostics.loadingRefs ?? []),
+    ...(diagnostics.errors ?? []).map(({ ref }) => ref),
+  ];
   state.registry!.set(state.snapshot!, {
     items,
+    authoritativeRefs: [a.ref, b.ref, ...items.map((item) => item.ref)].filter(
+      (ref) =>
+        !unresolved.some(
+          (other) => other.environmentId === ref.environmentId && other.threadId === ref.threadId,
+        ),
+    ),
     loadingRefs: [],
     errors: [],
     isLoading: false,
     ...diagnostics,
   });
 }
-async function mount(items: readonly DecisionItem[] = [a, b]) {
-  write(items);
+async function mount(
+  items: readonly DecisionItem[] = [a, b],
+  diagnostics: Partial<Omit<Snapshot, "items">> = {},
+) {
+  write(items, diagnostics);
   await act(async () => {
     renderer = create(
       <RegistryContext.Provider value={state.registry!}>
@@ -263,6 +278,60 @@ it("keeps the editing cursor on older arrivals and reconciles when it leaves", a
   await act(async () => write([x, a]));
   expect(inbox().current?.id).toBe(x.id);
   expect(inbox().position).toBe(1);
+});
+
+it("chooses the oldest initial decision after staggered environment responses", async () => {
+  const remote = item("remote", "2026-09-01T00:00:00.000Z", EnvironmentId.make("ssh"));
+  await mount([b], { isLoading: true, loadingRefs: [remote.ref] });
+  expect(inbox().current?.id).toBe(b.id);
+  await act(async () => write([b, remote]));
+  expect(inbox().current?.id).toBe(remote.id);
+  expect(inbox().position).toBe(1);
+});
+
+it.each(["type", "skip", "submit"])(
+  "pins partial results on the first %s interaction",
+  async (action) => {
+    const remote = item("remote", "2026-09-01T00:00:00.000Z", EnvironmentId.make("ssh"));
+    await mount([b, c], { isLoading: true, loadingRefs: [remote.ref] });
+    await act(async () => {
+      if (action === "type") inbox().setAnswers(b.id, { q: { customAnswer: "In progress" } });
+      else if (action === "skip") inbox().skip();
+      else await inbox().submit(b.id, "accept");
+    });
+    await act(async () => write([remote, b, c]));
+    expect(inbox().current?.id).toBe(action === "skip" ? c.id : b.id);
+  },
+);
+
+it("keeps drafts and skip positions through disconnect, other skips and reconnect", async () => {
+  const local = item("local", "2026-10-04T00:00:00.000Z", EnvironmentId.make("local"));
+  const nextLocal = item("next-local", "2026-10-05T00:00:00.000Z", local.ref.environmentId);
+  await mount([a, b, local, nextLocal]);
+  await act(async () => {
+    inbox().setAnswers(a.id, { q: { customAnswer: "Keep across disconnect" } });
+    inbox().skip();
+  });
+  await act(async () => write([local, nextLocal], { authoritativeRefs: [local.ref] }));
+  expect(inbox().drafts[a.id]?.q?.customAnswer).toBe("Keep across disconnect");
+  await act(async () => inbox().skip());
+  await act(async () => write([a, b, local, nextLocal]));
+  expect(inbox().ordered.map((entry) => entry.id)).toEqual([b.id, nextLocal.id, a.id, local.id]);
+  expect(inbox().drafts[a.id]?.q?.customAnswer).toBe("Keep across disconnect");
+  await act(async () => write([b, local, nextLocal]));
+  expect(inbox().drafts[a.id]).toBeUndefined();
+});
+
+it("keeps the receipt lock through disconnect and reconnect until live removal", async () => {
+  await mount();
+  await act(async () => inbox().submit(a.id, "accept"));
+  await act(async () => write([], { authoritativeRefs: [] }));
+  expect(inbox().submissions[a.id]?.phase).toBe("awaitingProjection");
+  await act(async () => write([a, b]));
+  await act(async () => inbox().submit(a.id, "accept"));
+  expect(state.approval).toHaveBeenCalledTimes(1);
+  await act(async () => write([b]));
+  expect(inbox().submissions[a.id]).toBeUndefined();
 });
 
 it("retains hidden drafts during loading and errors, pruning only authoritative removal", async () => {

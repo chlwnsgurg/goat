@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import { orderDecisionQueue, skipDecisionItem } from "@goat/client-runtime/state/decision-inbox";
+import {
+  isDecisionItemRemoved,
+  orderDecisionQueue,
+} from "@goat/client-runtime/state/decision-inbox";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -23,9 +26,9 @@ type Submission =
   | { phase: "submitting" | "awaitingProjection" }
   | { phase: "failed"; message: string };
 
-function prune<A>(values: Record<string, A>, liveIds: ReadonlySet<string>) {
+function prune<A>(values: Record<string, A>, keep: (id: string) => boolean) {
   const entries = Object.entries(values);
-  const kept = entries.filter(([id]) => liveIds.has(id));
+  const kept = entries.filter(([id]) => keep(id));
   return kept.length === entries.length ? values : Object.fromEntries(kept);
 }
 
@@ -44,18 +47,20 @@ export function useDecisionInbox() {
   });
   const ordered = orderDecisionQueue(snapshot.items, skippedIds);
   const current = ordered.find((item) => item.id === activeId) ?? ordered[0] ?? null;
-  // Reconcile before children mount so older arrivals cannot steal draft focus.
-  if ((current?.id ?? null) !== activeId) setActiveId(current?.id ?? null);
+  // Initial partial results stay unpinned until loading finishes or the user acts.
+  if ((!snapshot.isLoading || activeId !== null) && (current?.id ?? null) !== activeId)
+    setActiveId(current?.id ?? null);
 
   function skip() {
     if (!current || ordered.length < 2) return;
-    const nextSkipped = [...skipDecisionItem(snapshot.items, skippedIds, current.id)];
+    const nextSkipped = [...skippedIds.filter((id) => id !== current.id), current.id];
     const next = orderDecisionQueue(snapshot.items, nextSkipped);
     setSkippedIds(nextSkipped);
     setActiveId(next.find((item) => item.id !== current.id)?.id ?? current.id);
   }
 
   function setAnswers(id: string, answers: QuestionDrafts) {
+    if (current?.id === id) setActiveId(id);
     setDrafts((previous) => ({ ...previous, [id]: answers }));
   }
 
@@ -82,6 +87,7 @@ export function useDecisionInbox() {
       return;
     }
     if ((live.kind === "approval") !== (typeof response === "string")) return;
+    setActiveId(id);
     inFlight.current.add(id);
     setSubmissions((previous) => ({ ...previous, [id]: { phase: "submitting" } }));
     try {
@@ -121,16 +127,15 @@ export function useDecisionInbox() {
   }
 
   useEffect(() => {
-    if (snapshot.isLoading || snapshot.errors.length > 0) return;
-    const liveIds = new Set(snapshot.items.map((item) => item.id));
-    for (const id of inFlight.current) if (!liveIds.has(id)) inFlight.current.delete(id);
+    const keep = (id: string) => !isDecisionItemRemoved(snapshot, id);
+    for (const id of inFlight.current) if (!keep(id)) inFlight.current.delete(id);
     setSkippedIds((previous) => {
-      const next = previous.filter((id) => liveIds.has(id));
+      const next = previous.filter(keep);
       return next.length === previous.length ? previous : next;
     });
-    setDrafts((previous) => prune(previous, liveIds));
-    setSubmissions((previous) => prune(previous, liveIds));
-  }, [snapshot.items, snapshot.isLoading, snapshot.errors, submissions]);
+    setDrafts((previous) => prune(previous, keep));
+    setSubmissions((previous) => prune(previous, keep));
+  }, [snapshot, submissions]);
 
   return {
     snapshot,

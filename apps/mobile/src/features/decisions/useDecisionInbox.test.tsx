@@ -19,6 +19,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 type Snapshot = {
   items: readonly DecisionItem[];
+  authoritativeRefs: readonly ScopedThreadRef[];
   loadingRefs: readonly ScopedThreadRef[];
   errors: readonly { ref: ScopedThreadRef; message: string }[];
   isLoading: boolean;
@@ -78,6 +79,7 @@ vi.mock("../../state/threads", async () => {
   const { Atom } = await import("effect/reactivity");
   fixture.raw = Atom.make<Snapshot>({
     items: [],
+    authoritativeRefs: [],
     loadingRefs: [],
     errors: [],
     isLoading: false,
@@ -356,8 +358,18 @@ function Probe(props: { body?: boolean }) {
   return fixture.focused ? <Child session={value} body={props.body ?? false} /> : null;
 }
 function write(items: readonly DecisionItem[], diagnostics: Partial<Omit<Snapshot, "items">> = {}) {
+  const unresolved = [
+    ...(diagnostics.loadingRefs ?? []),
+    ...(diagnostics.errors ?? []).map(({ ref }) => ref),
+  ];
   registry.set(fixture.raw!, {
     items,
+    authoritativeRefs: [a.ref, b.ref, ...items.map((item) => item.ref)].filter(
+      (ref) =>
+        !unresolved.some(
+          (other) => other.environmentId === ref.environmentId && other.threadId === ref.threadId,
+        ),
+    ),
     loadingRefs: [],
     errors: [],
     isLoading: false,
@@ -497,6 +509,56 @@ it("waits for initial loading then corrects two flagged threads to three request
   await act(async () => write([b, third, a]));
   expect(inbox().queue).toHaveLength(3);
   expect(inbox().position).toBe(1);
+});
+
+it("waits for staggered initial responses and selects the oldest decision", async () => {
+  write([b], { loadingRefs: [a.ref], isLoading: true });
+  await render(<Probe />);
+  expect(inbox().current).toBeNull();
+  expect(session?.selected).toBeNull();
+  await act(async () => write([b, a]));
+  expect(inbox().current?.id).toBe(a.id);
+  expect(inbox().position).toBe(1);
+});
+
+it("keeps drafts and skip positions through disconnect, other skips and reconnect", async () => {
+  const qa = userInput();
+  const qb = userInput(envB);
+  const qc = {
+    ...userInput(envB, [question], ThreadId.make("second")),
+    createdAt: "2026-10-03T00:00:00.000Z",
+  };
+  await mount([qa, qb, qc]);
+  await act(async () => {
+    inbox().onChangeCustomAnswer(requestId, "q", "Keep across disconnect");
+    inbox().skip();
+  });
+  await act(async () => write([qb, qc], { authoritativeRefs: [qb.ref, qc.ref] }));
+  expect(session?.draftsById[qa.id]?.q?.customAnswer).toBe("Keep across disconnect");
+  await act(async () => inbox().skip());
+  await act(async () => write([qa, qb, qc]));
+  expect(inbox().queue.map((entry) => entry.id)).toEqual([qc.id, qa.id, qb.id]);
+  await act(async () => inbox().skip());
+  expect(inbox().current?.id).toBe(qa.id);
+  expect(inbox().drafts.q?.customAnswer).toBe("Keep across disconnect");
+  await act(async () => write([qb, qc]));
+  expect(session?.draftsById[qa.id]).toBeUndefined();
+  expect(session?.skippedIds).not.toContain(qa.id);
+});
+
+it("keeps the receipt lock through disconnect and reconnect until live removal", async () => {
+  await mount([a]);
+  await act(async () => inbox().onRespond(requestId, "accept"));
+  await act(async () => write([], { authoritativeRefs: [] }));
+  expect(session?.busyById[a.id]).toBe(true);
+  expect(session?.inFlight.current.has(a.id)).toBe(true);
+  await act(async () => write([a]));
+  expect(inbox().responding).toBe(true);
+  await act(async () => inbox().onRespond(requestId, "accept"));
+  expect(fixture.approval).toHaveBeenCalledTimes(1);
+  await act(async () => write([]));
+  expect(session?.busyById[a.id]).toBeUndefined();
+  expect(session?.inFlight.current.has(a.id)).toBe(false);
 });
 
 it("pins the draft and disables replies through its own reload or error", async () => {

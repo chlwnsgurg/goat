@@ -18,6 +18,21 @@ export type DecisionItem = {
 
 const compareStrings = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
 
+export function isDecisionItemRemoved(
+  snapshot: {
+    readonly items: ReadonlyArray<DecisionItem>;
+    readonly authoritativeRefs: ReadonlyArray<ScopedThreadRef>;
+  },
+  id: string,
+): boolean {
+  if (snapshot.items.some((item) => item.id === id)) return false;
+  // Decision IDs are serialized [environmentId, threadId, requestId] tuples.
+  const [environmentId, threadId] = JSON.parse(id) as [string, string, string];
+  return snapshot.authoritativeRefs.some(
+    (ref) => ref.environmentId === environmentId && ref.threadId === threadId,
+  );
+}
+
 export function orderDecisionQueue(
   items: ReadonlyArray<DecisionItem>,
   skipOrder: ReadonlyArray<string>,
@@ -92,6 +107,7 @@ export function createDecisionInboxAtoms(input: {
 
   const itemsAtom = Atom.make((get) => {
     const items: DecisionItem[] = [];
+    const authoritativeRefs: ScopedThreadRef[] = [];
     const loadingRefs: ScopedThreadRef[] = [];
     const errors: { readonly ref: ScopedThreadRef; readonly message: string }[] = [];
     for (const ref of get(summaryAtom).refs) {
@@ -102,6 +118,7 @@ export function createDecisionInboxAtoms(input: {
       if (error !== null) errors.push({ ref, message: error });
       else if (status !== "live") loadingRefs.push(ref);
       if (pending === null) continue;
+      if (status === "live" && error === null) authoritativeRefs.push(ref);
       for (const request of pending.approvals) {
         items.push({
           id: JSON.stringify([ref.environmentId, ref.threadId, request.requestId]),
@@ -123,6 +140,7 @@ export function createDecisionInboxAtoms(input: {
     }
     return {
       items: orderDecisionQueue(items, []),
+      authoritativeRefs,
       loadingRefs,
       errors,
       isLoading: loadingRefs.length > 0,

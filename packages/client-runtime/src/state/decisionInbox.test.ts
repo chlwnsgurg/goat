@@ -18,6 +18,7 @@ import type {
 import { PrimaryConnectionTarget } from "../connection/model.ts";
 import {
   createDecisionInboxAtoms,
+  isDecisionItemRemoved,
   orderDecisionQueue,
   skipDecisionItem,
   type DecisionItem,
@@ -247,6 +248,7 @@ describe("decision inbox", () => {
       h.set(ref(b), []);
       expect(h.registry.get(h.inbox.itemsAtom)).toEqual({
         items: [],
+        authoritativeRefs: [ref(a), ref(b)],
         loadingRefs: [],
         errors: [],
         isLoading: false,
@@ -289,6 +291,45 @@ describe("decision inbox", () => {
         ),
       });
       expect(h.registry.get(h.inbox.summaryAtom).count).toBe(1);
+    } finally {
+      stop();
+      h.registry.dispose();
+    }
+  });
+  it("requires connected live detail before removing retained decision state", () => {
+    const h = harness();
+    const stop = h.registry.mount(h.inbox.itemsAtom);
+    const id = JSON.stringify([a, ref(a).threadId, "retained"]);
+    try {
+      h.set(ref(a), [request("retained", "2026-10-13T00:00:00Z")]);
+      h.set(ref(b), []);
+      expect(isDecisionItemRemoved(h.registry.get(h.inbox.itemsAtom), id)).toBe(false);
+      const connected = h.registry.get(h.presentations(a))!;
+      h.registry.set(h.presentations(a), {
+        ...connected,
+        connection: { phase: "reconnecting", error: null, traceId: null },
+      });
+      let snapshot = h.registry.get(h.inbox.itemsAtom);
+      expect(snapshot.items).toEqual([]);
+      expect(snapshot.authoritativeRefs).toEqual([ref(b)]);
+      expect(isDecisionItemRemoved(snapshot, id)).toBe(false);
+      h.set(ref(a), [], "cached");
+      h.registry.set(h.presentations(a), connected);
+      snapshot = h.registry.get(h.inbox.itemsAtom);
+      expect(snapshot.isLoading).toBe(true);
+      expect(isDecisionItemRemoved(snapshot, id)).toBe(false);
+      h.set(ref(a), [], "synchronizing");
+      expect(isDecisionItemRemoved(h.registry.get(h.inbox.itemsAtom), id)).toBe(false);
+      h.set(ref(a), [], "live", "Could not synchronize.");
+      expect(isDecisionItemRemoved(h.registry.get(h.inbox.itemsAtom), id)).toBe(false);
+      h.set(ref(a), [request("retained", "2026-10-13T00:00:00Z")]);
+      expect(isDecisionItemRemoved(h.registry.get(h.inbox.itemsAtom), id)).toBe(false);
+      // Another environment still loading does not prevent authoritative removal here.
+      h.set(ref(b), [], "synchronizing");
+      h.set(ref(a), []);
+      snapshot = h.registry.get(h.inbox.itemsAtom);
+      expect(snapshot.authoritativeRefs).toEqual([ref(a)]);
+      expect(isDecisionItemRemoved(snapshot, id)).toBe(true);
     } finally {
       stop();
       h.registry.dispose();
@@ -421,6 +462,7 @@ describe("decision inbox", () => {
       ]);
       expect(h.registry.get(h.inbox.itemsAtom)).toEqual({
         items: [],
+        authoritativeRefs: [ref(a), ref(b)],
         loadingRefs: [],
         errors: [],
         isLoading: false,
@@ -451,6 +493,7 @@ describe("decision inbox", () => {
       const reads = h.detailReads();
       expect(h.registry.get(h.inbox.itemsAtom)).toEqual({
         items: [],
+        authoritativeRefs: [],
         loadingRefs: [],
         errors: [],
         isLoading: false,
@@ -535,6 +578,7 @@ describe("decision inbox", () => {
       h.set(ref(a), pending, "deleted", "Deleted thread.");
       expect(h.registry.get(h.inbox.itemsAtom)).toEqual({
         items: [],
+        authoritativeRefs: [ref(b)],
         loadingRefs: [],
         errors: [],
         isLoading: false,
