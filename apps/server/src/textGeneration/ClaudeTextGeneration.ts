@@ -1,5 +1,6 @@
 import { ProviderDriverKind } from "@goat/contracts";
 import {
+  MemoryGenerationRunnerError,
   withMemoryExecution,
   type MemoryGenerationRunnerContext,
 } from "@goat/provider-core/server/memoryGenerationRunner";
@@ -69,13 +70,46 @@ const CLAUDE_INVESTIGATION_DENIED = ["Bash(git * --output*)", "Bash(git * -o *)"
  * Schema for the wrapper JSON returned by `claude -p --output-format json`.
  * Verbose mode wraps the result in an array of conversation messages.
  */
+const claudeOutputDiagnostics = {
+  permission_denials: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  subtype: Schema.optionalKey(Schema.String),
+  content: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  message: Schema.optionalKey(
+    Schema.Struct({
+      content: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+    }),
+  ),
+};
 const ClaudeOutputEnvelope = Schema.Struct({
+  ...claudeOutputDiagnostics,
+  type: Schema.optionalKey(Schema.String),
   structured_output: Schema.Unknown,
 });
 const ClaudeOutputMessage = Schema.Struct({
+  ...claudeOutputDiagnostics,
   type: Schema.String,
   structured_output: Schema.optionalKey(Schema.Unknown),
 });
+
+const hasClaudeToolAttempt = (
+  message: typeof ClaudeOutputMessage.Type | typeof ClaudeOutputEnvelope.Type,
+) => {
+  const isToolBlock = (block: unknown) =>
+    block !== null &&
+    typeof block === "object" &&
+    "type" in block &&
+    (block.type === "tool_use" || block.type === "tool_result");
+  return (
+    (message.permission_denials?.length ?? 0) > 0 ||
+    message.type === "tool_use" ||
+    message.type === "tool_result" ||
+    message.type === "permission_request" ||
+    message.subtype === "permission_denied" ||
+    message.subtype === "permission_denial" ||
+    (message.content ?? []).some(isToolBlock) ||
+    (message.message?.content ?? []).some(isToolBlock)
+  );
+};
 const isClaudeOutputEnvelope = Schema.is(ClaudeOutputEnvelope);
 
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -226,6 +260,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "-p",
           "--output-format",
           "json",
+          ...(TextGenerationOperations.isMemoryOperation(operation)
+            ? ["--verbose", "--setting-sources", ""]
+            : []),
           "--json-schema",
           jsonSchemaStr,
           "--model",
@@ -325,6 +362,16 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           ),
       }),
     );
+    const messages = isClaudeOutputEnvelope(output) ? [output] : output;
+    if (
+      TextGenerationOperations.isMemoryOperation(operation) &&
+      messages.some(hasClaudeToolAttempt)
+    )
+      return yield* new TextGenerationError({
+        operation,
+        detail: "Claude attempted a tool or permission request during memory generation.",
+        cause: new MemoryGenerationRunnerError({ code: "invalid_output" }),
+      });
     const envelope = isClaudeOutputEnvelope(output)
       ? output
       : output.findLast((message) => message.type === "result");

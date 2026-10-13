@@ -470,6 +470,112 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         }),
     ),
   );
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        "envelope denial",
+        "result denial",
+        "assistant tool",
+        "user tool result",
+        "permission event",
+        "envelope tool",
+      ].map((scenario) => ({ operation, scenario })),
+    ),
+  )("$operation discards $scenario even with valid final JSON", ({ operation, scenario }) => {
+    const structured_output = {
+      ...memoryOutput,
+      ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+    };
+    const denial = {
+      tool_name: "Bash",
+      tool_use_id: "synthetic-tool",
+      tool_input: { command: "synthetic" },
+    };
+    const final = { type: "result", structured_output };
+    const output =
+      scenario === "envelope denial"
+        ? { structured_output, permission_denials: [denial] }
+        : scenario === "result denial"
+          ? [{ ...final, permission_denials: [denial] }, final]
+          : scenario === "assistant tool"
+            ? [
+                {
+                  type: "assistant",
+                  message: {
+                    content: [{ type: "tool_use", id: "synthetic-tool", name: "Bash", input: {} }],
+                  },
+                },
+                final,
+              ]
+            : scenario === "user tool result"
+              ? [
+                  {
+                    type: "user",
+                    message: {
+                      content: [
+                        {
+                          type: "tool_result",
+                          tool_use_id: "synthetic-tool",
+                          is_error: true,
+                          content: "Permission denied",
+                        },
+                      ],
+                    },
+                  },
+                  final,
+                ]
+              : scenario === "permission event"
+                ? [{ type: "system", subtype: "permission_denied" }, final]
+                : { structured_output, content: [{ type: "tool_use", name: "Read" }] };
+    return withFakeClaudeEnv(
+      {
+        output: JSON.stringify(output),
+        memoryRunnerContext: memoryContext,
+        argsMustContain: "--verbose",
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const failure = yield* Effect.flip(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(failure.cause).toMatchObject({ code: "invalid_output" });
+          expect(failure.detail).toContain("attempted a tool or permission request");
+        }),
+    );
+  });
+  it.effect.each(memoryOperations)(
+    "%s accepts verbose output with empty diagnostics",
+    (operation) =>
+      withFakeClaudeEnv(
+        {
+          memoryRunnerContext: memoryContext,
+          argsMustContain: "--verbose",
+          output: JSON.stringify([
+            { type: "system", subtype: "init" },
+            { type: "assistant", message: { content: [{ type: "text", text: "Synthetic" }] } },
+            {
+              type: "result",
+              permission_denials: [],
+              structured_output: {
+                ...memoryOutput,
+                ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+              },
+            },
+          ]),
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const result =
+              operation === "resolveMemoryConflict"
+                ? yield* generation.resolveMemoryConflict!(memoryConflict)
+                : yield* generation.generateMemorySummary!(memorySummary);
+            expect(result.result.text).toBe(memoryOutput.text);
+          }),
+      ),
+  );
+
   it.effect.each(memoryOperations)("rejects forged authority JSON for %s", (operation) =>
     withFakeClaudeEnv(
       {

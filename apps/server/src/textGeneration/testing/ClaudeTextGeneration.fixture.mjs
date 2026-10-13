@@ -29,6 +29,12 @@ if (!argv.includes("--disable-slash-commands")) {
 if (!argv.includes("--strict-mcp-config")) {
   fail("text generation must not load configured MCP servers", 9);
 }
+if (process.env.GOAT_FAKE_CLAUDE_SPAWN_MARKER) {
+  const sources = argv.indexOf("--setting-sources");
+  if (sources === -1 || argv[sources + 1] !== "") {
+    fail("memory generation must exclude user and project settings sources", 12);
+  }
+}
 const settingsIndex = argv.indexOf("--settings");
 if (settingsIndex === -1 || JSON.parse(argv[settingsIndex + 1]).disableAllHooks !== true) {
   fail("text generation must disable hooks", 10);
