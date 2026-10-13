@@ -2356,10 +2356,24 @@ export function validateMemoryCheckpointRecords(
       const rec = receipts.find(
         (c) => c.resolutionId === r.resolutionId && c.operationKind === "resolve",
       );
+      const result = revisions.find((v) => v.revision.revisionId === r.resultRevisionId)?.revision;
       return (
         rec !== undefined &&
+        (rec.receipt.outcome === "accepted" || rec.receipt.outcome === "conflicted") &&
+        rec.receipt.memoryId === r.memoryId &&
+        rec.originEnvironmentId === r.resolvingEnvironmentId &&
+        rec.reportGuard?.resolvingEnvironmentId === r.resolvingEnvironmentId &&
         rec.revisionId === r.resultRevisionId &&
         rec.fencingToken === r.fencingToken &&
+        result !== undefined &&
+        result.memoryId === r.memoryId &&
+        result.operationId === rec.receipt.operationId &&
+        result.provenance.environmentId === r.resolvingEnvironmentId &&
+        sameSet(result.parents, r.inputRevisionIds) &&
+        r.inputRevisionIds.every((id, i) => {
+          const input = revisions.find((v) => v.revision.revisionId === id)?.revision;
+          return input?.memoryId === r.memoryId && input.payloadRef === r.inputPayloadRefs[i];
+        }) &&
         (fence(r.memoryId)?.highestFencingToken ?? -1) >= r.fencingToken
       );
     })

@@ -451,6 +451,108 @@ describe("memory sync and views", () => {
       causalBoundary: { checkpointSequence: 2, boundaryId: "boundary" },
     });
   });
+  it("links retained resolutions to the same memory resolver and input/result revisions", () => {
+    const resolveReceipt = {
+      ...compact,
+      operationKind: "resolve",
+      receipt: { ...receipt, operationId: id(12), hubSequence: 2 },
+      revisionId: id(3),
+      resolutionId: id(7),
+      attemptId: id(13),
+      fencingToken: 7,
+      reportGuard: {
+        reportId: "1de81be9ef4203181b25b4fc4996a81492602dc4b6e61205546257fbb04e8e90",
+        resolvingEnvironmentId: "env",
+        resolutionId: id(7),
+        outcome: "resolved",
+      },
+    };
+    const input = (revisionId: string, operationId: string, memoryId = id(2)) => ({
+      revision: { ...revision, memoryId, revisionId, payloadRef: revisionId, operationId },
+      payload: null,
+    });
+    const bIdentity = { ...identity, memoryId: id(20), createOperationId: id(21) };
+    const bReceipt = {
+      ...compact,
+      receipt: { ...receipt, memoryId: id(20), operationId: id(21) },
+      revisionId: id(22),
+    };
+    const result = {
+      revision: { ...revision, operationId: id(12), parents: [id(5), id(6)] },
+      payload: null,
+    };
+    const page = {
+      ...checkpoint,
+      checkpointSequence: 2,
+      causalBoundary: { checkpointSequence: 2, boundaryId: "boundary" },
+      identities: [identity, bIdentity],
+      fences: [fence, { ...fence, memoryId: id(20) }],
+      compactReceipts: [
+        { ...compact, revisionId: id(5) },
+        { ...compact, receipt: { ...receipt, operationId: id(14) }, revisionId: id(6) },
+        resolveReceipt,
+        bReceipt,
+      ],
+      revisions: [input(id(5), id(4)), input(id(6), id(14)), result, input(id(22), id(21), id(20))],
+      resolutions: [{ resolution, payload: null }],
+    };
+    expect(M.validateMemoryCheckpointRecords([decode(M.MemoryHubCheckpointPage, page)])).toBe(true);
+    for (const bad of [
+      // Both identities and fences exist: a retained B resolution cannot reuse A's receipt.
+      {
+        ...page,
+        resolutions: [{ resolution: { ...resolution, memoryId: id(20) }, payload: null }],
+      },
+      {
+        ...page,
+        resolutions: [
+          { resolution: { ...resolution, resolvingEnvironmentId: "other" }, payload: null },
+        ],
+      },
+      { ...page, revisions: page.revisions.filter((v) => v.revision.revisionId !== id(3)) },
+      { ...page, revisions: page.revisions.filter((v) => v.revision.revisionId !== id(6)) },
+      {
+        ...page,
+        resolutions: [
+          {
+            resolution: {
+              ...resolution,
+              inputRevisionIds: [id(5), id(22)],
+              inputPayloadRefs: [id(5), id(22)],
+            },
+            payload: null,
+          },
+        ],
+        revisions: [
+          page.revisions[0],
+          page.revisions[1],
+          { ...result, revision: { ...result.revision, parents: [id(5), id(22)] } },
+          page.revisions[3],
+        ],
+      },
+      {
+        ...page,
+        revisions: [
+          page.revisions[0],
+          page.revisions[1],
+          { ...result, revision: { ...result.revision, parents: [id(5)] } },
+          page.revisions[3],
+        ],
+      },
+      {
+        ...page,
+        revisions: [
+          page.revisions[0],
+          page.revisions[1],
+          { ...result, revision: { ...result.revision, provenance: { environmentId: "other" } } },
+          page.revisions[3],
+        ],
+      },
+    ])
+      expect(M.validateMemoryCheckpointRecords([decode(M.MemoryHubCheckpointPage, bad)])).toBe(
+        false,
+      );
+  });
   it("restores deletion suppression and released lease fencing across pages", () => {
     const deletion = { ...receipt, operationId: id(9), outcome: "deleted", hubSequence: 2 };
     const common = {
