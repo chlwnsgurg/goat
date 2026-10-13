@@ -17,7 +17,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { readEnvironmentScope } from "../../state/session";
-import { decisionInbox, threadEnvironment } from "../../state/threads";
+import { decisionInbox } from "../../state/decisionInbox";
+import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 
 type QuestionDrafts = Record<string, PendingUserInputDraftAnswer>;

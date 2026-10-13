@@ -1,4 +1,3 @@
-import { createDecisionInboxAtoms } from "@goat/client-runtime/state/decision-inbox";
 import { useAtomValue } from "@effect/atom-react";
 import { enabledEnvironmentIds } from "@goat/client-runtime/state/connections";
 import { arrayElementsEqual } from "@goat/client-runtime/state/entities";
@@ -17,7 +16,6 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { environmentSnapshotAtom } from "./shell";
-import { environmentPresentations } from "./presentation";
 
 export const threadEnvironment = createThreadEnvironmentAtoms(
   connectionAtomRuntime,
@@ -30,13 +28,6 @@ export const environmentThreadDetails = createEnvironmentThreadDetailAtoms(
 export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: threadEnvironment.snapshotAtom,
-});
-
-export const decisionInbox = createDecisionInboxAtoms({
-  catalogValueAtom: environmentCatalog.catalogValueAtom,
-  threadShellsAtom: environmentThreadShells.threadShellsAtom,
-  presentationAtom: environmentPresentations.presentationAtom,
-  details: environmentThreadDetails,
 });
 
 const EMPTY_THREAD_STATE_ATOM = Atom.make(AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE)).pipe(

@@ -29,7 +29,7 @@ const state = vi.hoisted<{
   approval: vi.fn<(...args: unknown[]) => Promise<AtomCommandResult<void, Error>>>(),
   userInput: vi.fn<(...args: unknown[]) => Promise<AtomCommandResult<void, Error>>>(),
 }));
-vi.mock("../../state/threads", async () => {
+vi.mock("../../state/decisionInbox", async () => {
   const { Atom } = await import("effect/reactivity");
   state.snapshot = Atom.make<Snapshot>({
     items: [],
@@ -40,12 +40,14 @@ vi.mock("../../state/threads", async () => {
   }).pipe(Atom.keepAlive);
   return {
     decisionInbox: { itemsAtom: state.snapshot },
-    threadEnvironment: {
-      respondToApproval: "approval",
-      respondToUserInput: "userInput",
-    },
   };
 });
+vi.mock("../../state/threads", () => ({
+  threadEnvironment: {
+    respondToApproval: "approval",
+    respondToUserInput: "userInput",
+  },
+}));
 vi.mock("../../rpc/atomRegistry", () => ({
   get appAtomRegistry() {
     return state.registry;

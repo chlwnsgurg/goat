@@ -2,7 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { Link, useLocation } from "@tanstack/react-router";
 
 import { cn } from "../../lib/utils";
-import { decisionInbox } from "../../state/threads";
+import { decisionInbox } from "../../state/decisionInbox";
 import { useSidebar } from "../ui/sidebar";
 
 export function DecisionInboxSidebarRow() {
