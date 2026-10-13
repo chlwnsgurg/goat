@@ -2198,7 +2198,10 @@ export const MEMORY_HUB_PATHS = {
 const checkpointDecode = Schema.decodeUnknownSync(MemoryHubCheckpointPage, {
   onExcessProperty: "error",
 });
-/** Validate the complete staged snapshot without applying stateful admission or quotas. */
+/**
+ * Validate structural ledger links without stateful admission or quotas.
+ * The server must separately verify report-key digests before installing the snapshot.
+ */
 export function validateMemoryCheckpointRecords(
   pages: readonly MemoryHubCheckpointPage[],
 ): boolean {
@@ -2230,23 +2233,40 @@ export function validateMemoryCheckpointRecords(
     suppressions = pages.flatMap((p) => p.suppressions),
     conflicts = pages.flatMap((p) => p.conflicts),
     items = pages.flatMap((p) => p.items);
+  const identitiesById = uniqueIndex(identities, (v) => v.memoryId);
+  const fencesById = uniqueIndex(fences, (v) => v.memoryId);
+  const receiptsByOperation = uniqueIndex(receipts, (v) => v.receipt.operationId);
+  const revisionsById = uniqueIndex(revisions, (v) => v.revision.revisionId);
+  const resolutionsById = uniqueIndex(resolutions, (v) => v.resolution.resolutionId);
+  const tombstonesById = uniqueIndex(tombstones, (v) => v.memoryId);
+  const conflictsById = uniqueIndex(conflicts, (v) => v.conflictId);
+  const itemsById = uniqueIndex(items, (v) => v.memoryId);
+  const suppressionRows = uniqueIndex(suppressions, (v) => JSON.stringify(v));
+  // Rejected attempts may share a resolution id; only committed results own that key.
+  const resolveReceiptsById = uniqueIndex(
+    receipts.filter(
+      (v) =>
+        v.operationKind === "resolve" &&
+        (v.receipt.outcome === "accepted" || v.receipt.outcome === "conflicted"),
+    ),
+    (v) => v.resolutionId,
+  );
   if (
-    ![
-      identities.map((v) => v.memoryId),
-      fences.map((v) => v.memoryId),
-      receipts.map((v) => v.receipt.operationId),
-      revisions.map((v) => v.revision.revisionId),
-      resolutions.map((v) => v.resolution.resolutionId),
-      tombstones.map((v) => v.memoryId),
-      conflicts.map((v) => v.conflictId),
-      items.map((v) => v.memoryId),
-      suppressions.map((v) => JSON.stringify(v)),
-    ].every(unique)
+    !identitiesById ||
+    !fencesById ||
+    !receiptsByOperation ||
+    !revisionsById ||
+    !resolutionsById ||
+    !tombstonesById ||
+    !conflictsById ||
+    !itemsById ||
+    !suppressionRows ||
+    !resolveReceiptsById
   )
     return false;
-  const identity = (id: MemoryId) => identities.find((v) => v.memoryId === id);
-  const fence = (id: MemoryId) => fences.find((v) => v.memoryId === id);
-  const receipt = (id: MemoryOperationId) => receipts.find((v) => v.receipt.operationId === id);
+  const identity = (id: MemoryId) => identitiesById.get(id);
+  const fence = (id: MemoryId) => fencesById.get(id);
+  const receipt = (id: MemoryOperationId) => receiptsByOperation.get(id);
   const metadata = [
     ...identities,
     ...fences,
@@ -2267,23 +2287,8 @@ export function validateMemoryCheckpointRecords(
     )
   )
     return false;
-  if (
-    !receipts.every(
-      (r) =>
-        r.reportGuard === null ||
-        r.reportGuard.reportId ===
-          reportKeyDigest(
-            JSON.stringify([
-              r.memorySpaceId,
-              r.reportGuard.resolvingEnvironmentId,
-              r.reportGuard.resolutionId,
-              r.receipt.operationId,
-              r.reportGuard.outcome,
-            ]),
-          ),
-    )
-  )
-    return false;
+  // Digest shape is enforced by the codec. WP2's server verifies report-key hashes
+  // with Node crypto before WP3 installs a snapshot; contracts do not compute hashes.
   if (
     !receipts.every(
       (r) =>
@@ -2326,7 +2331,7 @@ export function validateMemoryCheckpointRecords(
   if (
     !items.every((i) =>
       i.status === "forgotten"
-        ? tombstones.some((t) => same(t, i.tombstone))
+        ? same(tombstonesById.get(i.memoryId), i.tombstone)
         : same(i.scope, identity(i.memoryId)?.scope),
     )
   )
@@ -2344,19 +2349,15 @@ export function validateMemoryCheckpointRecords(
   )
     return false;
   if (
-    !suppressions.every((s) =>
-      tombstones.some(
-        (t) => t.memoryId === s.memoryId && t.deleteOperationId === s.deleteOperationId,
-      ),
+    !suppressions.every(
+      (s) => tombstonesById.get(s.memoryId)?.deleteOperationId === s.deleteOperationId,
     )
   )
     return false;
   if (
     !resolutions.every(({ resolution: r }) => {
-      const rec = receipts.find(
-        (c) => c.resolutionId === r.resolutionId && c.operationKind === "resolve",
-      );
-      const result = revisions.find((v) => v.revision.revisionId === r.resultRevisionId)?.revision;
+      const rec = resolveReceiptsById.get(r.resolutionId);
+      const result = revisionsById.get(r.resultRevisionId)?.revision;
       return (
         rec !== undefined &&
         (rec.receipt.outcome === "accepted" || rec.receipt.outcome === "conflicted") &&
@@ -2371,7 +2372,7 @@ export function validateMemoryCheckpointRecords(
         result.provenance.environmentId === r.resolvingEnvironmentId &&
         sameSet(result.parents, r.inputRevisionIds) &&
         r.inputRevisionIds.every((id, i) => {
-          const input = revisions.find((v) => v.revision.revisionId === id)?.revision;
+          const input = revisionsById.get(id)?.revision;
           return input?.memoryId === r.memoryId && input.payloadRef === r.inputPayloadRefs[i];
         }) &&
         (fence(r.memoryId)?.highestFencingToken ?? -1) >= r.fencingToken
@@ -2379,73 +2380,27 @@ export function validateMemoryCheckpointRecords(
     })
   )
     return false;
-  return fences.every(
-    (f) =>
-      f.activeLease === null ||
-      conflicts.some(
-        (c) =>
-          c.memoryId === f.memoryId &&
-          c.conflictId === f.activeLease?.conflictId &&
-          c.status !== "resolved" &&
-          same(c.heads, f.activeLease.conflictHeadSet),
-      ),
-  );
+  return fences.every((f) => {
+    if (f.activeLease === null) return true;
+    const conflict = conflictsById.get(f.activeLease.conflictId);
+    return (
+      conflict !== undefined &&
+      conflict.memoryId === f.memoryId &&
+      conflict.status !== "resolved" &&
+      same(conflict.heads, f.activeLease.conflictHeadSet)
+    );
+  });
 }
 
-// A synchronous SHA256 over bounded canonical report keys keeps this validator usable by every client.
-function reportKeyDigest(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  const length = Math.ceil((bytes.length + 9) / 64) * 64;
-  const buffer = new Uint8Array(length);
-  buffer.set(bytes);
-  buffer[bytes.length] = 128;
-  const view = new DataView(buffer.buffer);
-  view.setUint32(length - 4, bytes.length * 8);
-  const primes: number[] = [];
-  for (let n = 2; primes.length < 64; n++) if (!primes.some((p) => n % p === 0)) primes.push(n);
-  const k = primes.map((p) => Math.floor((Math.cbrt(p) % 1) * 2 ** 32));
-  const h = primes.slice(0, 8).map((p) => Math.floor((Math.sqrt(p) % 1) * 2 ** 32));
-  const rotr = (v: number, n: number) => (v >>> n) | (v << (32 - n));
-  const w = new Uint32Array(64);
-  for (let offset = 0; offset < length; offset += 64) {
-    for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
-    for (let i = 16; i < 64; i++) {
-      const a = w[i - 15]!;
-      const b = w[i - 2]!;
-      w[i] =
-        w[i - 16]! +
-        (rotr(a, 7) ^ rotr(a, 18) ^ (a >>> 3)) +
-        w[i - 7]! +
-        (rotr(b, 17) ^ rotr(b, 19) ^ (b >>> 10));
-    }
-    let [a, b, c, d, e, f, g, j] = h as [
-      number,
-      number,
-      number,
-      number,
-      number,
-      number,
-      number,
-      number,
-    ];
-    for (let i = 0; i < 64; i++) {
-      const t1 =
-        (j + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + k[i]! + w[i]!) | 0;
-      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
-      j = g;
-      g = f;
-      f = e;
-      e = (d + t1) | 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (t1 + t2) | 0;
-    }
-    [a, b, c, d, e, f, g, j].forEach((v, i) => {
-      h[i] = (h[i]! + v) >>> 0;
-    });
+/** Index one ledger collection without silently overwriting duplicate keys. */
+function uniqueIndex<T, K>(values: readonly T[], keyOf: (value: T) => K): Map<K, T> | undefined {
+  const index = new Map<K, T>();
+  for (const value of values) {
+    const key = keyOf(value);
+    if (index.has(key)) return undefined;
+    index.set(key, value);
   }
-  return h.map((v) => v.toString(16).padStart(8, "0")).join("");
+  return index;
 }
 
 /** Source admission still belongs to the owner; this only checks returned locators. */

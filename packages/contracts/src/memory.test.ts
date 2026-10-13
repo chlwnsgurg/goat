@@ -497,6 +497,70 @@ describe("memory sync and views", () => {
       resolutions: [{ resolution, payload: null }],
     };
     expect(M.validateMemoryCheckpointRecords([decode(M.MemoryHubCheckpointPage, page)])).toBe(true);
+    const emptyLedger = {
+      ...page,
+      pageOrdinal: 1,
+      identities: [],
+      fences: [],
+      compactReceipts: [],
+      revisions: [],
+      resolutions: [],
+    };
+    for (const collection of [
+      "identities",
+      "fences",
+      "compactReceipts",
+      "revisions",
+      "resolutions",
+    ] as const) {
+      expect(
+        M.validateMemoryCheckpointRecords([
+          decode(M.MemoryHubCheckpointPage, {
+            ...page,
+            nextCursor: "next",
+            bootstrapComplete: false,
+          }),
+          decode(M.MemoryHubCheckpointPage, {
+            ...emptyLedger,
+            [collection]: [page[collection][0]],
+          }),
+        ]),
+      ).toBe(false);
+    }
+    const rejectedAttempt = {
+      ...resolveReceipt,
+      receipt: {
+        ...resolveReceipt.receipt,
+        operationId: id(30),
+        outcome: "rejected",
+        failureCode: "fenced",
+      },
+      revisionId: null,
+      reportGuard: null,
+    };
+    // An earlier rejected attempt does not hide the committed resolve receipt.
+    expect(
+      M.validateMemoryCheckpointRecords([
+        decode(M.MemoryHubCheckpointPage, {
+          ...page,
+          compactReceipts: [rejectedAttempt, ...page.compactReceipts],
+        }),
+      ]),
+    ).toBe(true);
+    expect(
+      M.validateMemoryCheckpointRecords([
+        decode(M.MemoryHubCheckpointPage, {
+          ...page,
+          compactReceipts: [
+            ...page.compactReceipts,
+            {
+              ...resolveReceipt,
+              receipt: { ...resolveReceipt.receipt, operationId: id(31) },
+            },
+          ],
+        }),
+      ]),
+    ).toBe(false);
     for (const bad of [
       // Both identities and fences exist: a retained B resolution cannot reuse A's receipt.
       {
@@ -1140,7 +1204,7 @@ describe("checkpoint byte and retry metadata bounds", () => {
   });
 });
 
-it("validates permanent report guard digest after detail purge", () => {
+it("preserves well-formed report guard digests after detail purge for server verification", () => {
   const resolveReceipt = {
     ...compact,
     operationKind: "resolve",
@@ -1176,7 +1240,11 @@ it("validates permanent report guard digest after detail purge", () => {
         ],
       }),
     ]),
-  ).toBe(false);
+  ).toBe(true);
+  rejects(M.MemoryCheckpointReportGuard, {
+    ...resolveReceipt.reportGuard,
+    reportId: "not-a-digest",
+  });
 });
 describe("memory binding and relay contracts", () => {
   const project = { environmentId: "env", projectId: "project" };
