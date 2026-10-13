@@ -157,8 +157,11 @@ export interface RuntimeBuild {
   readonly commitTime?: number | undefined;
 }
 
+// A dev build's identifier is a commit sha, and a sha can be all digits, so dev is never numbered.
 const isNumberedTrain = (prerelease: ReadonlyArray<string>) =>
-  prerelease.length > 1 && prerelease.slice(1).every((part) => SEMVER_NUMBER_SEGMENT.test(part));
+  prerelease.length > 1 &&
+  prerelease[0] !== "dev" &&
+  prerelease.slice(1).every((part) => SEMVER_NUMBER_SEGMENT.test(part));
 
 /**
  * Orders two runtime builds, or returns `undefined` when nothing proves an order.

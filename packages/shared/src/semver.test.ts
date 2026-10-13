@@ -102,6 +102,12 @@ describe("semver helpers", () => {
         { version: "0.1.0-nightly.20261012.2", commitTime: newer },
         0,
       ],
+      // A sha can be all digits; it still orders by commit, never as a number.
+      [
+        { version: "0.1.0-dev.987654321", commitTime: older },
+        { version: "0.1.0-dev.123456789", commitTime: newer },
+        -1,
+      ],
     ] as const)("orders %j against %j", (left, right, order) => {
       expect(Math.sign(compareRuntimeBuilds(left, right) ?? Number.NaN)).toBe(order);
       expect(Math.sign(compareRuntimeBuilds(right, left) ?? Number.NaN)).toBe(
@@ -114,6 +120,7 @@ describe("semver helpers", () => {
       [{ version: "0.1.0-dev.e17501807", commitTime: older }, { version: "0.1.0-dev.84b52e284" }],
       [{ version: "0.1.0-nightly.20261012.2" }, { version: "0.1.0-dev.84b52e284" }],
       [{ version: "0.1.0" }, { version: "0.1.0-dev.84b52e284" }],
+      [{ version: "0.1.0-dev.123456789" }, { version: "0.1.0-dev.987654321" }],
       [
         { version: "not-a-version", commitTime: older },
         { version: "0.1.0", commitTime: newer },
