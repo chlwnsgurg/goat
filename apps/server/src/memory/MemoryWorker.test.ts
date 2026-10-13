@@ -51,7 +51,7 @@ const service = Service.layer.pipe(
   ),
 );
 const maintenance = Maintenance.layer.pipe(Layer.provideMerge(quota));
-const live = (failure = false) =>
+const live = (failure = false, onInput?: (input: M.GenerateMemorySummaryInput) => void) =>
   Worker.layer.pipe(
     Layer.provideMerge(service),
     Layer.provideMerge(maintenance),
@@ -71,8 +71,9 @@ const live = (failure = false) =>
     Layer.provide(Layer.mock(Events.EventSinkV2)({ stream: () => Stream.empty })),
     Layer.provide(
       Layer.mock(Generation.TextGeneration)({
-        generateMemorySummary: (input) =>
-          failure
+        generateMemorySummary: (input) => {
+          onInput?.(input);
+          return failure
             ? Effect.fail(
                 new M.TextGenerationError({
                   operation: "generateMemorySummary",
@@ -99,11 +100,15 @@ const live = (failure = false) =>
                   providerInstanceId: selection.instanceId,
                   environmentId,
                 },
-              }),
+              });
+        },
       }),
     ),
   );
 const encodeMessage = Schema.encodeSync(
+  Schema.fromJsonString(M.OrchestrationV2ConversationMessageJson),
+);
+const decodeMessage = Schema.decodeUnknownEffect(
   Schema.fromJsonString(M.OrchestrationV2ConversationMessageJson),
 );
 const encodeRun = Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2RunJson));
@@ -251,6 +256,67 @@ describe("MemoryWorker", () => {
       );
     }).pipe(Effect.provide(live())),
   );
+  it.effect("filters streaming and system messages before applying the chunk limit", () => {
+    const batches: string[][] = [];
+    return Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      const original = (yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+      const message = yield* decodeMessage(original.payload_json);
+      yield* sql`UPDATE orchestration_events SET sequence=112 WHERE sequence=2`;
+      for (let index = 2; index <= 111; index++) {
+        yield* sql`INSERT INTO orchestration_events VALUES (${index},${id(2000 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`skipped-${index}`), streaming: index % 2 === 0, role: index % 2 === 0 ? "user" : "system" })},${now},2,'thread')`;
+      }
+      const worker = yield* Worker.MemoryWorker;
+      yield* worker.sweepDue();
+      yield* worker.sweepDue();
+      yield* worker.sweepDue();
+      assert.deepStrictEqual(batches, [["message"]]);
+    }).pipe(
+      Effect.provide(
+        live(false, (input) => batches.push(input.messages.map((message) => message.messageId))),
+      ),
+    );
+  });
+  it.effect("advances through 100 then 101 messages and later updates", () => {
+    const batches: string[][] = [];
+    return Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      const original = (yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+      const message = yield* decodeMessage(original.payload_json);
+      yield* sql`UPDATE orchestration_events SET sequence=102 WHERE sequence=2`;
+      for (let index = 2; index <= 101; index++) {
+        yield* sql`INSERT INTO orchestration_events VALUES (${index},${id(1000 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`message-${index}`) })},${now},2,'thread')`;
+      }
+      const worker = yield* Worker.MemoryWorker;
+      const store = yield* Store.MemoryStore;
+      yield* worker.sweepDue();
+      yield* worker.sweepDue();
+      yield* worker.sweepDue();
+      assert.deepStrictEqual(
+        batches.map((batch) => batch.length),
+        [100, 1],
+      );
+      assert.strictEqual(new Set(batches.flat()).size, 101);
+      assert.deepStrictEqual(yield* store.pendingReports(100), []);
+      const run = (yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM orchestration_events WHERE sequence=102`)[0]!;
+      yield* sql`INSERT INTO orchestration_events VALUES (103,${id(1200)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make("later") })},${now},2,'thread')`;
+      yield* sql`INSERT INTO orchestration_events VALUES (104,${id(1201)},${threadId},'run.updated',${run.payload_json},${now},2,'thread')`;
+      yield* worker.sweepDue();
+      assert.deepStrictEqual(batches.at(-1), ["later"]);
+    }).pipe(
+      Effect.provide(
+        live(false, (input) => batches.push(input.messages.map((message) => message.messageId))),
+      ),
+    );
+  });
   it.effect("records one safe report and durable future retry on provider failure", () =>
     Effect.gen(function* () {
       yield* seed;

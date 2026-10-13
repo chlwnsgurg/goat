@@ -46,6 +46,16 @@ const decodeMessage = Schema.decodeUnknownEffect(
 const decodeRun = Schema.decodeUnknownEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
 const decodeSelection = Schema.decodeUnknownEffect(M.MemoryModelSelection);
 const decodeInput = Schema.decodeUnknownEffect(M.GenerateMemorySummaryInput);
+const encodeIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(M.MessageId)));
+const encodeGenerationMessage = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      messageId: M.MessageId,
+      text: Schema.String,
+      completed: Schema.Boolean,
+    }),
+  ),
+);
 const strict = { onExcessProperty: "error" } as const;
 const terminal = new Set(["completed", "failed", "interrupted", "cancelled"]);
 export const memoryRetryDelay = (attempt: number) =>
@@ -93,62 +103,67 @@ const make = Effect.gen(function* () {
           );
           if (!thread.length) return yield* new MemoryWorkerError({ code: "source_invalidated" });
           const newer = yield* query(
-            sql`SELECT 1 FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${meta.sourceThread.threadId} AND sequence>${meta.sourceWatermark.throughSequence} AND (event_type='thread.deleted' OR event_type='message.updated' OR (event_type='run.updated' AND json_extract(payload_json,'$.status') IN ('completed','failed','interrupted','cancelled','rolled_back'))) LIMIT 1`,
+            sql`SELECT 1 FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${meta.sourceThread.threadId} AND sequence>${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} AND (event_type='thread.deleted' OR event_type='message.updated' OR (event_type='run.updated' AND json_extract(payload_json,'$.status') IN ('completed','failed','interrupted','cancelled','rolled_back'))) LIMIT 1`,
           );
           if (newer.length) return yield* new MemoryWorkerError({ code: "source_invalidated" });
-          const rows = yield* query(sql<{
-            payload_json: string;
-            sequence: number;
-          }>`SELECT e.payload_json,e.sequence FROM orchestration_events e
-        WHERE e.application_event_version=2 AND e.aggregate_kind='thread' AND e.stream_id=${meta.sourceThread.threadId} AND e.event_type='message.updated'
-        AND e.sequence<=${meta.sourceWatermark.throughSequence}
-        AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='message.updated' AND json_extract(n.payload_json,'$.id')=json_extract(e.payload_json,'$.id') AND n.sequence>e.sequence AND n.sequence<=${meta.sourceWatermark.throughSequence})
-        ORDER BY e.sequence LIMIT 101`);
-          if (rows.length > 100)
-            return yield* new MemoryWorkerError({ code: "generation_input_too_large" });
-          const messages: M.GenerateMemorySummaryInput["messages"][number][] = [];
           const excluded = yield* store.readSuppressions(
             M.MemorySpaceId.make(
               work.space.startsWith("_local:") ? Service.memoryStableUuid(work.space) : work.space,
             ),
             meta.memoryId,
           );
-          const exclusions = new Set(
-            excluded.flatMap((r) =>
-              r.kind === "sourceExclusion" &&
-              r.exclusion.sourceThread.environmentId === environmentId &&
-              r.exclusion.sourceThread.threadId === meta.sourceThread.threadId
-                ? r.exclusion.messageIds
-                : [],
-            ),
+          const exclusions = excluded.flatMap((r) =>
+            r.kind === "sourceExclusion" &&
+            r.exclusion.sourceThread.environmentId === environmentId &&
+            r.exclusion.sourceThread.threadId === meta.sourceThread.threadId
+              ? r.exclusion.messageIds
+              : [],
           );
+          // Filter eligibility before the bound; historical updates and skipped messages cannot fill a chunk.
+          const rows = yield* query(sql<{
+            payload_json: string;
+            sequence: number;
+            event_id: string;
+          }>`
+            SELECT e.payload_json,e.sequence,e.event_id FROM orchestration_events e
+            WHERE e.application_event_version=2 AND e.aggregate_kind='thread' AND e.stream_id=${meta.sourceThread.threadId}
+            AND e.event_type='message.updated' AND e.sequence>${meta.fromSequence ?? 0} AND e.sequence<=${meta.sourceWatermark.throughSequence}
+            AND coalesce(json_extract(e.payload_json,'$.streaming'),0)=0 AND trim(json_extract(e.payload_json,'$.text'))!=''
+            AND json_extract(e.payload_json,'$.role') IN ('user','assistant')
+            AND json_extract(e.payload_json,'$.id') NOT IN (SELECT value FROM json_each(${yield* query(encodeIds(exclusions))}))
+            AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='message.updated' AND json_extract(n.payload_json,'$.id')=json_extract(e.payload_json,'$.id') AND n.sequence>e.sequence AND n.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence})
+            AND (CASE WHEN json_extract(e.payload_json,'$.runId') IS NULL THEN '' ELSE coalesce((SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1),'') END)!='rolled_back'
+            AND (json_extract(e.payload_json,'$.role')='user' OR (SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${meta.observedThroughSequence ?? meta.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1)='completed')
+            ORDER BY e.sequence LIMIT 101`);
+          const messages: M.GenerateMemorySummaryInput["messages"][number][] = [];
+          let bytes = 0;
+          let last = rows[0];
           for (const row of rows) {
             const message = yield* query(decodeMessage(row.payload_json));
-            if (
-              message.streaming ||
-              !message.text.trim() ||
-              message.role === "system" ||
-              exclusions.has(message.id)
-            )
-              continue;
-            let status: string | undefined;
-            if (message.runId) {
-              const runs = yield* query(
-                sql<{
-                  payload_json: string;
-                }>`SELECT payload_json FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${meta.sourceThread.threadId} AND event_type IN ('run.created','run.updated') AND json_extract(payload_json,'$.id')=${message.runId} AND sequence<=${meta.sourceWatermark.throughSequence} ORDER BY sequence DESC LIMIT 1`,
-              );
-              status = runs[0] ? (yield* query(decodeRun(runs[0].payload_json))).status : undefined;
-            }
-            if (status === "rolled_back") continue;
-            if (message.role === "assistant" && status !== "completed") continue;
-            if (message.role === "user" || status === "completed")
-              messages.push({ messageId: message.id, text: message.text, completed: true });
+            const input = { messageId: message.id, text: message.text, completed: true };
+            const size = new TextEncoder().encode(
+              yield* query(encodeGenerationMessage(input)),
+            ).length;
+            if (messages.length === 100 || bytes + size > 200000) break;
+            messages.push(input);
+            bytes += size;
+            last = row;
           }
           if (!messages.length) return yield* new MemoryWorkerError({ code: "source_invalidated" });
           if (scanMemoryValue({ messages }).kind !== "allowed")
             return yield* new MemoryWorkerError({ code: "secret_detected" });
-          return messages;
+          return {
+            messages,
+            watermark:
+              messages.length < rows.length && last
+                ? {
+                    ...meta.sourceWatermark,
+                    fromEventId: M.EventId.make(rows[0]!.event_id),
+                    toEventId: M.EventId.make(last.event_id),
+                    throughSequence: last.sequence,
+                  }
+                : { ...meta.sourceWatermark, fromEventId: M.EventId.make(rows[0]!.event_id) },
+          };
         }),
       )
       .pipe(Effect.mapError(workerError));
@@ -165,7 +180,16 @@ const make = Effect.gen(function* () {
         occurred_at: string;
       }>`SELECT sequence,event_id,stream_id,event_type,payload_json,occurred_at FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread' AND sequence>${watermark} ORDER BY sequence LIMIT 100`,
     );
-    if (!rows.length) return;
+    const continuations = yield* query(sql<(typeof rows)[number]>`
+      SELECT e.sequence,e.event_id,e.stream_id,e.event_type,e.payload_json,e.occurred_at FROM orchestration_events e
+      JOIN orchestration_v2_projection_threads t ON t.thread_id=e.stream_id AND t.deleted_at IS NULL
+      WHERE e.application_event_version=2 AND e.aggregate_kind='thread' AND e.event_type='run.updated'
+      AND json_extract(e.payload_json,'$.status') IN ('completed','failed','interrupted','cancelled') AND e.sequence<=${watermark}
+      AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='run.updated' AND n.sequence>e.sequence)
+      AND EXISTS (SELECT 1 FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated' AND m.sequence<=e.sequence AND m.sequence>coalesce((SELECT max(json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')) FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id),0))
+      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status IN ('pending','running','retry','failed') AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),json_extract(o.metadata_json,'$.sourceWatermark.throughSequence'))=e.sequence)
+      ORDER BY e.sequence LIMIT 100`);
+    if (!rows.length && !continuations.length) return;
     const snapshot = yield* query(settings.getSettings);
     const modelSelection = yield* query(decodeSelection(snapshot.defaultModelSelection, strict));
     const space = snapshot.memoryHub.mode === "disabled" ? null : snapshot.memoryHub.memorySpaceId;
@@ -173,7 +197,7 @@ const make = Effect.gen(function* () {
     yield* store
       .transact(
         Effect.gen(function* () {
-          for (const row of rows) {
+          for (const row of [...rows, ...continuations]) {
             const thread = { environmentId, threadId: M.ThreadId.make(row.stream_id) };
             if (row.event_type === "thread.deleted") {
               yield* store.cancelThreadWork(thread);
@@ -233,7 +257,7 @@ const make = Effect.gen(function* () {
                 ? ("consolidate" as const)
                 : ("summary" as const);
             const workId = `${key}:${row.sequence}:v1:${mode}`;
-            work.push({
+            const candidate: Store.MemoryWork = {
               id: workId,
               space: space ?? `_local:${environmentId}`,
               memoryId,
@@ -247,6 +271,8 @@ const make = Effect.gen(function* () {
               metadata: {
                 kind: "summary",
                 sourceThread: thread,
+                fromSequence: latest[0]?.watermark ?? 0,
+                observedThroughSequence: row.sequence,
                 sourceWatermark: {
                   fromEventId: M.EventId.make(source[0].event_id),
                   toEventId: M.EventId.make(row.event_id),
@@ -259,11 +285,33 @@ const make = Effect.gen(function* () {
                 revisionId: M.MemoryRevisionId.make(Service.memoryStableUuid(`${workId}:revision`)),
                 modelSelection,
               },
+            };
+            const chunk = yield* readSource(candidate).pipe(
+              Effect.catchTags({
+                MemoryWorkerError: (error) =>
+                  error.code === "source_invalidated" ? Effect.succeed(null) : Effect.fail(error),
+              }),
+            );
+            if (!chunk || candidate.metadata.kind !== "summary") continue;
+            const chunkId = `${workId}:chunk:${chunk.watermark.throughSequence}`;
+            work.push({
+              ...candidate,
+              id: chunkId,
+              metadata: {
+                ...candidate.metadata,
+                sourceWatermark: chunk.watermark,
+                operationId: M.MemoryOperationId.make(
+                  Service.memoryStableUuid(`${chunkId}:operation`),
+                ),
+                revisionId: M.MemoryRevisionId.make(
+                  Service.memoryStableUuid(`${chunkId}:revision`),
+                ),
+              },
             });
           }
           yield* store.commitThreadHook({
             expectedWatermark: watermark,
-            throughWatermark: rows.at(-1)!.sequence,
+            throughWatermark: rows.at(-1)?.sequence ?? watermark,
             work,
           });
         }),
@@ -343,7 +391,7 @@ const make = Effect.gen(function* () {
                 cwd,
                 sourceThread: meta.sourceThread,
                 sourceWatermark: meta.sourceWatermark,
-                messages: source,
+                messages: source.messages,
                 modelSelection: meta.modelSelection,
               },
               strict,

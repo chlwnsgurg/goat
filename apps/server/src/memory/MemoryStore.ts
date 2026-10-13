@@ -130,6 +130,8 @@ const WorkMetadata = Schema.Union([
     kind: Schema.Literal("summary"),
     sourceThread: M.ScopedThreadRef,
     sourceWatermark: M.MemorySourceWatermark,
+    fromSequence: Schema.optionalKey(Schema.Int),
+    observedThroughSequence: Schema.optionalKey(Schema.Int),
     memoryId: M.MemoryId,
     operationId: M.MemoryOperationId,
     revisionId: M.MemoryRevisionId,
