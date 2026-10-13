@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import * as TestClock from "effect/testing/TestClock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -317,6 +318,56 @@ describe("MemoryWorker", () => {
       ),
     );
   });
+  it.effect("revisits consolidation at exactly 24 hours after extracting turns", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(now));
+      yield* seed;
+      const worker = yield* Worker.MemoryWorker;
+      const sql = yield* SqlClient.SqlClient;
+      yield* worker.sweepDue();
+      yield* TestClock.setTime(Date.parse(now) + 86400000 - 1);
+      yield* worker.sweepDue();
+      assert.strictEqual(
+        (yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_outbox WHERE kind='consolidate' AND status='completed'`)[0]!
+          .count,
+        0,
+      );
+      yield* TestClock.adjust(1);
+      yield* worker.sweepDue();
+      assert.strictEqual(
+        (yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_outbox WHERE kind='consolidate' AND status='completed'`)[0]!
+          .count,
+        1,
+      );
+      yield* worker.sweepDue();
+      assert.strictEqual(
+        (yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_outbox WHERE kind='consolidate'`)[0]!.count,
+        1,
+      );
+    }).pipe(Effect.provide(live())),
+  );
+  it.effect("consolidates delayed terminal events using the processing clock", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      const terminalAt = DateTime.formatIso(DateTime.add(DateTime.makeUnsafe(now), { hours: 1 }));
+      yield* sql`UPDATE orchestration_events SET occurred_at=${terminalAt} WHERE sequence=2`;
+      yield* TestClock.setTime(Date.parse(now) + 25 * 3600000);
+      const worker = yield* Worker.MemoryWorker;
+      yield* worker.sweepDue();
+      const rows = yield* sql<{
+        kind: string;
+        status: string;
+      }>`SELECT kind,status FROM memory_outbox WHERE kind='consolidate'`;
+      assert.deepStrictEqual(rows, [{ kind: "consolidate", status: "completed" }]);
+    }).pipe(Effect.provide(live())),
+  );
   it.effect("records one safe report and durable future retry on provider failure", () =>
     Effect.gen(function* () {
       yield* seed;

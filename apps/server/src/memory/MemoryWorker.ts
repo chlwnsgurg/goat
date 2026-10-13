@@ -169,6 +169,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(workerError));
   });
   const catchUp = Effect.fn("MemoryWorker.catchUp")(function* () {
+    const now = yield* Clock.currentTimeMillis;
     const watermark = yield* store.readThreadHookWatermark();
     const rows = yield* query(
       sql<{
@@ -186,8 +187,10 @@ const make = Effect.gen(function* () {
       WHERE e.application_event_version=2 AND e.aggregate_kind='thread' AND e.event_type='run.updated'
       AND json_extract(e.payload_json,'$.status') IN ('completed','failed','interrupted','cancelled') AND e.sequence<=${watermark}
       AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='run.updated' AND n.sequence>e.sequence)
-      AND EXISTS (SELECT 1 FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated' AND m.sequence<=e.sequence AND m.sequence>coalesce((SELECT max(json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')) FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id),0))
-      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status IN ('pending','running','retry','failed') AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),json_extract(o.metadata_json,'$.sourceWatermark.throughSequence'))=e.sequence)
+      AND (EXISTS (SELECT 1 FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated' AND m.sequence<=e.sequence AND m.sequence>coalesce((SELECT max(json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')) FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id),0)) OR (
+      EXISTS (SELECT 1 FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated' AND m.sequence<=e.sequence AND m.sequence>coalesce((SELECT max(json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')) FROM memory_outbox o WHERE o.kind='consolidate' AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id),0))
+      AND ${now}-coalesce((SELECT max(json_extract(o.metadata_json,'$.completedAt')) FROM memory_outbox o WHERE o.kind='consolidate' AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')>=coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),0)),(SELECT min(CAST((julianday(m.occurred_at)-2440587.5)*86400000 AS INTEGER)) FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated'))>=86400000))
+      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status IN ('pending','running','retry') AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),json_extract(o.metadata_json,'$.sourceWatermark.throughSequence'))=e.sequence)
       ORDER BY e.sequence LIMIT 100`);
     if (!rows.length && !continuations.length) return;
     const snapshot = yield* query(settings.getSettings);
@@ -236,26 +239,21 @@ const make = Effect.gen(function* () {
             const latest = yield* query(sql<{
               watermark: number;
               consolidated: number | null;
+              consolidated_at: number | null;
             }>`SELECT max(CASE WHEN status='completed' THEN json_extract(metadata_json,'$.sourceWatermark.throughSequence') END) AS watermark,
-          max(CASE WHEN kind='consolidate' AND status='completed' THEN json_extract(metadata_json,'$.sourceWatermark.throughSequence') END) AS consolidated FROM memory_outbox WHERE kind IN ('summary','consolidate') AND json_extract(metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(metadata_json,'$.sourceThread.threadId')=${row.stream_id}`);
-            const delta = yield* query(
-              sql`SELECT 1 FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${row.stream_id} AND event_type='message.updated' AND sequence>${latest[0]?.watermark ?? 0} AND sequence<=${row.sequence} LIMIT 1`,
-            );
-            if (!delta.length) continue;
-            const lastConsolidated = latest[0]?.consolidated;
-            const baseline = lastConsolidated
-              ? yield* query(
-                  sql<{
-                    occurred_at: string;
-                  }>`SELECT occurred_at FROM orchestration_events WHERE sequence=${lastConsolidated}`,
-                )
-              : [];
+          max(CASE WHEN kind='consolidate' AND status='completed' THEN json_extract(metadata_json,'$.sourceWatermark.throughSequence') END) AS consolidated,
+          max(CASE WHEN kind='consolidate' AND status='completed' AND json_extract(metadata_json,'$.sourceWatermark.throughSequence')>=coalesce(json_extract(metadata_json,'$.observedThroughSequence'),0) THEN json_extract(metadata_json,'$.completedAt') END) AS consolidated_at FROM memory_outbox WHERE kind IN ('summary','consolidate') AND json_extract(metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(metadata_json,'$.sourceThread.threadId')=${row.stream_id}`);
             const mode =
-              Date.parse(row.occurred_at) -
-                Date.parse(baseline[0]?.occurred_at ?? source[0].occurred_at) >=
-              86400000
+              now - (latest[0]?.consolidated_at ?? Date.parse(source[0].occurred_at)) >= 86400000
                 ? ("consolidate" as const)
                 : ("summary" as const);
+            // Extraction and consolidation consume independent source ranges.
+            const fromSequence =
+              mode === "consolidate" ? (latest[0]?.consolidated ?? 0) : (latest[0]?.watermark ?? 0);
+            const delta = yield* query(
+              sql`SELECT 1 FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${row.stream_id} AND event_type='message.updated' AND sequence>${fromSequence} AND sequence<=${row.sequence} LIMIT 1`,
+            );
+            if (!delta.length) continue;
             const workId = `${key}:${row.sequence}:v1:${mode}`;
             const candidate: Store.MemoryWork = {
               id: workId,
@@ -271,7 +269,7 @@ const make = Effect.gen(function* () {
               metadata: {
                 kind: "summary",
                 sourceThread: thread,
-                fromSequence: latest[0]?.watermark ?? 0,
+                fromSequence,
                 observedThroughSequence: row.sequence,
                 sourceWatermark: {
                   fromEventId: M.EventId.make(source[0].event_id),

@@ -130,6 +130,7 @@ const WorkMetadata = Schema.Union([
     kind: Schema.Literal("summary"),
     sourceThread: M.ScopedThreadRef,
     sourceWatermark: M.MemorySourceWatermark,
+    completedAt: Schema.optionalKey(Schema.Int),
     fromSequence: Schema.optionalKey(Schema.Int),
     observedThroughSequence: Schema.optionalKey(Schema.Int),
     memoryId: M.MemoryId,
@@ -2326,6 +2327,10 @@ const make = Effect.gen(function* () {
           return false;
         yield* finishWork(work.id, "completed");
         const meta = work.metadata;
+        yield* stored(
+          "summary-completion-clock",
+          sql`UPDATE memory_outbox SET metadata_json=${yield* workMetadataCodec.encode({ ...meta, completedAt: yield* Clock.currentTimeMillis })} WHERE id=${work.id}`,
+        );
         yield* stored(
           "summary-compact",
           sql`DELETE FROM memory_outbox WHERE kind=${work.kind} AND status='completed' AND id!=${work.id}
