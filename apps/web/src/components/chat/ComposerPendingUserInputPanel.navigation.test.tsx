@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { RuntimeRequestId } from "@goat/contracts";
 import { act, useState, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
@@ -18,12 +19,13 @@ vi.mock("../ui/collapsible", () => {
 });
 
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
+import type { PendingUserInput } from "../../session-logic";
 
-const prompt = {
+const prompt: PendingUserInput = {
   requestId: RuntimeRequestId.make("question-navigation"),
   createdAt: "2026-10-09T00:00:00.000Z",
   dismissible: false,
-  responseCapability: "live" as const,
+  responseCapability: "live",
   questions: [0, 1, 2].map((index) => ({
     id: `question-${index}`,
     header: `Question ${index + 1}`,
@@ -33,18 +35,27 @@ const prompt = {
   })),
 };
 
-function Questions({ initialIndex = 0 }: { initialIndex?: number }) {
+function Questions({
+  initialIndex = 0,
+  responseCapability = "live",
+}: {
+  initialIndex?: number;
+  responseCapability?: PendingUserInput["responseCapability"];
+}) {
   const [questionIndex, setQuestionIndex] = useState(initialIndex);
+  const [disabled, setDisabled] = useState(false);
   const [answers, setAnswers] = useState<Record<string, PendingUserInputDraftAnswer>>({});
   const advance = () => setQuestionIndex(questionIndex + 1);
   return (
     <>
       <output>{questionIndex}</output>
+      <button onClick={() => setDisabled(true)}>Revoke</button>
+      <button onClick={() => setDisabled(false)}>Grant</button>
       <button onClick={advance}>Next</button>
       <button onClick={() => setQuestionIndex(questionIndex - 1)}>Previous</button>
       <ComposerPendingUserInputPanel
-        pendingUserInputs={[prompt]}
-        disabled={false}
+        pendingUserInputs={[{ ...prompt, responseCapability }]}
+        disabled={disabled}
         respondingRequestIds={[]}
         answers={answers}
         questionIndex={questionIndex}
@@ -70,11 +81,6 @@ let renderer: ReactTestRenderer | undefined;
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("window", {
-    setTimeout: globalThis.setTimeout,
-    clearTimeout: globalThis.clearTimeout,
-  });
-  vi.stubGlobal("document", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
 });
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -141,4 +147,68 @@ it("still auto-advances once after the answer draft rerenders the same question"
   expect(activeIndex()).toBe("1");
   await act(async () => vi.advanceTimersByTime(200));
   expect(activeIndex()).toBe("1");
+});
+
+it("cancels progression on revocation and resumes only after a new selection under a grant", async () => {
+  await act(async () => {
+    renderer = create(<Questions />);
+  });
+  await chooseOption();
+  await navigate("Revoke");
+  await act(async () => vi.advanceTimersByTime(200));
+  expect(activeIndex()).toBe("0");
+  await navigate("Grant");
+  await act(async () => vi.advanceTimersByTime(200));
+  expect(activeIndex()).toBe("0");
+  await chooseOption();
+  await act(async () => vi.advanceTimersByTime(200));
+  expect(activeIndex()).toBe("1");
+});
+
+it("blocks native option mutation and progression for a nonresumable request", async () => {
+  await act(async () => {
+    renderer = create(<Questions responseCapability="not_resumable" />);
+  });
+  const option = renderer!.root
+    .findAllByType("button")
+    .find((button) =>
+      button.findAllByType("span").some((span) => span.children.includes("Incremental")),
+    );
+  expect(option?.props.disabled).toBe(true);
+  await chooseOption();
+  await act(async () => vi.advanceTimersByTime(200));
+  expect(activeIndex()).toBe("0");
+  expect(option?.findAllByType("svg")).toHaveLength(0);
+});
+
+it("cancels an existing timer when the provider capability becomes nonresumable", async () => {
+  await act(async () => {
+    renderer = create(<Questions />);
+  });
+  await chooseOption();
+  await act(async () => renderer!.update(<Questions responseCapability="not_resumable" />));
+  await act(async () => vi.advanceTimersByTime(200));
+  expect(activeIndex()).toBe("0");
+});
+
+it("preserves digit selection and ignores shortcuts in editable fields", async () => {
+  await act(async () => {
+    renderer = create(<Questions />);
+  });
+  const input = document.createElement("input");
+  document.body.append(input);
+  try {
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "1", bubbles: true }));
+    });
+    await act(async () => vi.advanceTimersByTime(200));
+    expect(activeIndex()).toBe("0");
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "1", bubbles: true }));
+    });
+    await act(async () => vi.advanceTimersByTime(200));
+    expect(activeIndex()).toBe("1");
+  } finally {
+    input.remove();
+  }
 });

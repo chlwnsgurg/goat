@@ -80,6 +80,7 @@ import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-sw
 import { useMaterialFabScroll } from "./MaterialFabScrollContext";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { ThreadListFilters } from "./ThreadListFilters";
+import { DecisionInboxRow } from "../decisions/DecisionInboxRow";
 
 /* ─── Types ──────────────────────────────────────────────────────────── */
 
@@ -101,6 +102,7 @@ interface HomeScreenProps {
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
   readonly onAddConnection: () => void;
+  readonly onOpenDecisions: () => void;
   readonly onOpenSettings: () => void;
   readonly onStartNewTask: () => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
@@ -937,7 +939,7 @@ export function HomeScreen(props: HomeScreenProps) {
       <View className={containerClassName}>
         <View
           className={cn(
-            "flex-1 items-center justify-center px-8",
+            "flex-1",
             contentBackground,
             Platform.OS === "android" && "overflow-hidden rounded-t-[28px]",
           )}
@@ -948,30 +950,37 @@ export function HomeScreen(props: HomeScreenProps) {
             paddingRight: 32 + (contentSideInsets?.right ?? 0),
           }}
         >
-          <View className="w-full max-w-[430px]">
-            <EmptyState
-              title={emptyState.title}
-              detail={emptyState.detail}
-              actionLabel={!props.catalogState.hasReadyEnvironment ? "Add environment" : undefined}
-              onAction={!props.catalogState.hasReadyEnvironment ? props.onAddConnection : undefined}
-              action={
-                Platform.OS === "android" && !props.catalogState.hasReadyEnvironment ? (
-                  <MaterialFloatingActionButton
-                    label="Add environment"
-                    icon="plus"
-                    variant="extended"
-                    tone="primary"
-                    onPress={props.onAddConnection}
-                  />
-                ) : undefined
-              }
-              variant="plain"
-            />
-            {emptyState.loading ? (
-              <View className="mt-4 items-center">
-                <AppActivityIndicator colorClassName="accent-icon-muted" />
-              </View>
-            ) : null}
+          <DecisionInboxRow onPress={props.onOpenDecisions} />
+          <View className="flex-1 items-center justify-center">
+            <View className="w-full max-w-[430px]">
+              <EmptyState
+                title={emptyState.title}
+                detail={emptyState.detail}
+                actionLabel={
+                  !props.catalogState.hasReadyEnvironment ? "Add environment" : undefined
+                }
+                onAction={
+                  !props.catalogState.hasReadyEnvironment ? props.onAddConnection : undefined
+                }
+                action={
+                  Platform.OS === "android" && !props.catalogState.hasReadyEnvironment ? (
+                    <MaterialFloatingActionButton
+                      label="Add environment"
+                      icon="plus"
+                      variant="extended"
+                      tone="primary"
+                      onPress={props.onAddConnection}
+                    />
+                  ) : undefined
+                }
+                variant="plain"
+              />
+              {emptyState.loading ? (
+                <View className="mt-4 items-center">
+                  <AppActivityIndicator colorClassName="accent-icon-muted" />
+                </View>
+              ) : null}
+            </View>
           </View>
         </View>
       </View>
@@ -993,6 +1002,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onProjectChange={props.onProjectChange}
         />
       ) : null}
+      <DecisionInboxRow onPress={props.onOpenDecisions} />
     </>
   );
 
@@ -1029,10 +1039,11 @@ export function HomeScreen(props: HomeScreenProps) {
     return (
       <View className="flex-1 bg-header">
         <View
-          className="flex-1 items-center justify-center overflow-hidden rounded-t-[28px] bg-screen px-4"
+          className="flex-1 overflow-hidden rounded-t-[28px] bg-screen px-4"
           style={{ paddingBottom: insets.bottom }}
         >
-          {v2ListEmpty}
+          <DecisionInboxRow onPress={props.onOpenDecisions} />
+          <View className="flex-1 items-center justify-center">{v2ListEmpty}</View>
         </View>
       </View>
     );

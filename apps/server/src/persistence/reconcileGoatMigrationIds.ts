@@ -14,6 +14,7 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "RemoteDispatchQuestions",
   "ThreadRunResults",
   "RemoteReportRelay",
+  "ProjectionTurnItemRequestIndex",
 ]);
 
 type MigrationEntry<E> = readonly [

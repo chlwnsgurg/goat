@@ -1,5 +1,8 @@
 import {
   MessageId,
+  RuntimeRequestId,
+  ProviderSessionId,
+  type OrchestrationV2RuntimeRequest,
   NodeId,
   RunId,
   ThreadId,
@@ -156,6 +159,82 @@ function makeProjection(visibleTurnItems: OrchestrationV2ProjectedTurnItem[]) {
     visibleTurnItems,
     updatedAt: NOW,
   } as unknown as Parameters<typeof buildBoundedThreadProjection>[0]["projection"];
+}
+
+function pendingDecisionFixture() {
+  const base = {
+    threadId: THREAD,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    status: "waiting" as const,
+    title: null,
+    startedAt: NOW,
+    completedAt: null,
+    updatedAt: NOW,
+  };
+  const question = {
+    ...base,
+    id: TurnItemId.make("d10-question-item"),
+    ordinal: 1,
+    type: "user_input_request",
+    requestId: RuntimeRequestId.make("d10-question"),
+    responseMode: "message",
+    questions: [
+      {
+        id: "q",
+        header: "Choice",
+        question: "Choose a destination",
+        options: [{ label: "One", description: "First destination", value: "  native\t" }],
+        multiSelect: false,
+        allowCustomAnswer: true,
+        initialAnswer: "  draft\n",
+      },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const approval = {
+    ...base,
+    id: TurnItemId.make("d10-approval-item"),
+    ordinal: 2,
+    type: "approval_request",
+    requestId: RuntimeRequestId.make("d10-approval"),
+    requestKind: "command",
+    prompt: "Run the requested command?",
+    appName: "D10 fixture",
+    options: [
+      { decision: "acceptForSession", label: "Allow this session", warning: "Fixture caution" },
+      { decision: "decline", label: "Decline" },
+    ],
+  } satisfies OrchestrationV2TurnItem;
+  const requestBase = {
+    nodeId: NodeId.make("d10-node"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    status: "pending" as const,
+    createdAt: NOW,
+    resolvedAt: null,
+  };
+  const requests: OrchestrationV2RuntimeRequest[] = [
+    {
+      ...requestBase,
+      id: question.requestId,
+      kind: "user_input",
+      responseCapability: { type: "message" },
+    },
+    {
+      ...requestBase,
+      id: approval.requestId,
+      kind: "command",
+      responseCapability: {
+        type: "live",
+        providerSessionId: ProviderSessionId.make("d10-session"),
+      },
+    },
+  ];
+  return { question, approval, requests };
 }
 
 describe("threadHistoryPaging", () => {
@@ -442,6 +521,116 @@ describe("threadHistoryPaging", () => {
     ]);
     expect(bounded.latestLocalTurnOrdinal).toBe(2);
     expect(computeLatestLocalTurnOrdinal([])).toBeNull();
+  });
+
+  it("retains pending decision bodies without widening the recent timeline or cursor", () => {
+    const { question, approval, requests } = pendingDecisionFixture();
+    const rows = [
+      { ...makeRow(0), sourceItemId: question.id, item: question },
+      { ...makeRow(1), sourceItemId: approval.id, item: approval },
+      makeRow(2),
+      makeRow(3),
+    ];
+    const projection = {
+      ...makeProjection(rows),
+      runs: [],
+      attempts: [],
+      runtimeRequests: requests,
+    };
+    const bounded = buildBoundedThreadProjection({
+      projection,
+      snapshotSequence: 1,
+      policy: { maxItems: 1, maxEncodedBytes: 10_000_000 },
+    });
+    expect(bounded.projection.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
+      "item-3",
+    ]);
+    expect(bounded.projection.turnItems.map((item) => item.id)).toEqual([
+      "item-3",
+      "d10-question-item",
+      "d10-approval-item",
+    ]);
+    expect(bounded.projection.turnItems[1]).toEqual(question);
+    expect(bounded.projection.turnItems[2]).toEqual(approval);
+    expect(bounded.hasMoreHistory).toBe(true);
+    expect(bounded.historyCursor).not.toBeNull();
+    expect(decodeThreadHistoryCursor(bounded.historyCursor!).si).toBe("item-3");
+    const all = buildBoundedThreadProjection({
+      projection,
+      snapshotSequence: 1,
+      policy: { maxItems: 4, maxEncodedBytes: 10_000_000 },
+    });
+    expect(all.projection.turnItems.map((item) => item.id)).toEqual([
+      "d10-question-item",
+      "d10-approval-item",
+      "item-2",
+      "item-3",
+    ]);
+    expect(new Set(all.projection.turnItems.map((item) => item.id)).size).toBe(4);
+  });
+
+  it.each(["resolved", "expired", "cancelled"] as const)(
+    "does not retain %s request bodies outside selected history",
+    (status) => {
+      const { question, approval, requests } = pendingDecisionFixture();
+      const rows = [
+        { ...makeRow(0), sourceItemId: question.id, item: question },
+        { ...makeRow(1), sourceItemId: approval.id, item: approval },
+        makeRow(2),
+        makeRow(3),
+      ];
+      const projection = {
+        ...makeProjection(rows),
+        runs: [],
+        attempts: [],
+        runtimeRequests: requests.map((request) => ({ ...request, status, resolvedAt: NOW })),
+      };
+      const bounded = buildBoundedThreadProjection({
+        projection,
+        snapshotSequence: 1,
+        policy: { maxItems: 1, maxEncodedBytes: 10_000_000 },
+      });
+      expect(bounded.projection.turnItems.map((item) => item.id)).toEqual(["item-3"]);
+      const all = buildBoundedThreadProjection({
+        projection,
+        snapshotSequence: 1,
+        policy: { maxItems: 4, maxEncodedBytes: 10_000_000 },
+      });
+      expect(all.projection.turnItems.map((item) => item.id)).toEqual([
+        "d10-question-item",
+        "d10-approval-item",
+        "item-2",
+        "item-3",
+      ]);
+    },
+  );
+
+  it("retains oversized mandatory questions and approval options intact", () => {
+    const { question, approval, requests } = pendingDecisionFixture();
+    const huge = {
+      ...question,
+      questions: [{ ...question.questions[0]!, question: "x".repeat(20_000) }],
+    };
+    const rows = [
+      { ...makeRow(0), sourceItemId: huge.id, item: huge },
+      { ...makeRow(1), sourceItemId: approval.id, item: approval },
+      makeRow(2),
+      makeRow(3),
+    ];
+    const bounded = buildBoundedThreadProjection({
+      projection: { ...makeProjection(rows), runs: [], attempts: [], runtimeRequests: requests },
+      snapshotSequence: 1,
+      policy: { maxItems: 4, maxEncodedBytes: 1_000 },
+    });
+    expect(bounded.projection.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
+      "item-3",
+    ]);
+    expect(bounded.projection.turnItems[1]).toEqual(huge);
+    expect(bounded.projection.turnItems[2]).toEqual(approval);
+    expect(bounded.payloadBudgetExceeded).toBe(true);
+    expect(bounded.hasMoreHistory).toBe(true);
+    expect(bounded.historyCursor).not.toBeNull();
+    expect(decodeThreadHistoryCursor(bounded.historyCursor!).si).toBe("item-3");
   });
 
   it("retains an out-of-window run_interrupt_request needed by a visible result", () => {
