@@ -1434,3 +1434,29 @@ describe("memory binding and relay contracts", () => {
     round(M.MemorySourceReadRequestId, source);
   });
 });
+
+
+describe("pending forget contracts", () => {
+  it("bounds durable pending forget intents per environment", () => {
+    expect(M.MEMORY_PENDING_FORGET_INTENTS_MAX).toBe(2000);
+  });
+  it("round-trips forget_pending failure and deferred reasons", () => {
+    round(M.MemoryFailureCode, "forget_pending");
+    round(M.MemoryDeferredReason, "forget_pending");
+  });
+  it("round-trips body-free blocked read and list items after receive and restart", () => {
+    const item = {
+      status: "blocked",
+      memorySpaceId: id(),
+      memoryId: id(2),
+      scope: { kind: "user" },
+      failureCode: "forget_pending",
+      pendingSync: false,
+      localAvailability: { ...held, reasons: ["forget_pending"] },
+    };
+    const received = round(M.MemoryItem, item);
+    round(M.MemoryItem, JSON.parse(JSON.stringify(received)));
+    rejects(M.MemoryItem, { ...item, payload });
+    rejects(M.MemoryItem, { ...item, revision });
+  });
+});

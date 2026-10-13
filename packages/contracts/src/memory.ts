@@ -153,6 +153,7 @@ export const MEMORY_REPORT_DETAIL_RETENTION_MS = 2592000000;
 export const MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT = 32;
 export const MEMORY_SOURCE_READ_MAX_PER_HUB = 128;
 export const MEMORY_SOURCE_READ_OUTCOME_MAX_BYTES = 65536;
+export const MEMORY_PENDING_FORGET_INTENTS_MAX = 2000;
 export const MEMORY_REPORT_MAX_PENDING_ITEMS = 2000;
 export const MEMORY_REPORT_MAX_PENDING_BYTES = 2097152;
 export const MEMORY_REPORT_MAX_AUTOMATIC_ATTEMPTS = 10;
@@ -277,10 +278,12 @@ export const MemoryFailureCode = Schema.Literals([
   "base_compacted",
   "revert_expired",
   "scanner_pending",
+  "forget_pending",
 ]);
 export type MemoryFailureCode = typeof MemoryFailureCode.Type;
 
 export const MemoryDeferredReason = Schema.Literals([
+  "forget_pending",
   "scanner_pending",
   "secret_detected",
   "missing_parent",
@@ -591,6 +594,7 @@ export const MemoryItem = bounded(
       status: Schema.Literal("blocked"),
       scope: MemoryScope,
       failureCode: Schema.Literals([
+        "forget_pending",
         "scanner_pending",
         "secret_detected",
         "source_invalidated",
