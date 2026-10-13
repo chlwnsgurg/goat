@@ -73,7 +73,7 @@ import {
   pendingBackgroundTurnItems,
 } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
-import { canCheckpoint } from "@goat/provider-core/server/cloudTask";
+import { canCheckpoint, isCloudExecution } from "@goat/provider-core/server/cloudTask";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -91,7 +91,11 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
+import {
+  CommandPolicyCapabilityUnsupportedError,
+  CommandPolicyV2,
+  resolveMessageDispatchIntent,
+} from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "@goat/provider-core/server/notification";
@@ -155,6 +159,11 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
     return `Failed to dispatch orchestration command ${this.commandType} (${this.commandId}).`;
   }
 }
+
+const isOrchestratorDispatchError = Schema.is(OrchestratorDispatchError);
+const isCommandPolicyCapabilityUnsupportedError = Schema.is(
+  CommandPolicyCapabilityUnsupportedError,
+);
 
 export class OrchestratorCommandRejectedError extends Schema.TaggedError<OrchestratorCommandRejectedError>()(
   "OrchestratorCommandRejectedError",
@@ -1995,7 +2004,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         ],
       );
-    }).pipe(Effect.catch((cause) => failQueuedRunStart(threadId, cause)));
+    }).pipe(
+      // Admission refusal keeps a legacy queued message editable and cancellable.
+      Effect.catchIf(
+        (cause) =>
+          !(
+            isOrchestratorDispatchError(cause) &&
+            isCommandPolicyCapabilityUnsupportedError(cause.cause) &&
+            cause.cause.capability === "follow_up"
+          ),
+        (cause) => failQueuedRunStart(threadId, cause),
+      ),
+    );
 
   const resumeQueuedRuns = Effect.gen(function* () {
     const threadIds = yield* projectionStore.getRecoveryThreadIds("queued-runs");
@@ -7084,6 +7104,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
+      const targetCapabilities = yield* targetAdapter.getCapabilities().pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProviderAdapterError({
+              commandId: command.commandId,
+              providerInstanceId: command.modelSelection.instanceId,
+              cause,
+            }),
+        ),
+      );
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
         commandId: command.commandId,
@@ -7143,6 +7173,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         title: command.title ?? null,
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        ...(isCloudExecution(targetCapabilities)
+          ? { completionDelivery: { state: "pending" as const, observedByRunId: null } }
+          : {}),
         status: "running",
         result: null,
         startedAt: now,

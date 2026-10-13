@@ -994,8 +994,32 @@ it.effect.each(["succeeded", "cancelled"] as const)(
           1,
         );
         assert.lengthOf(offers, 1);
+        const delivery = offers[0]!.delegatedCompletion!;
+        // An offer is recoverable until the continuation consumer commits its message.
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("cloud-background-deliver-result"),
+          threadId: parentId,
+          messageId: delivery.messageId,
+          text: "The delegated cloud task has returned its result.",
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+          delegatedCompletion: {
+            parentRunId: delivery.parentRunId,
+            generation: delivery.generation,
+            taskIds: [task.id],
+          },
+        });
         yield* orchestrator.recoverDelegatedTasks;
         assert.lengthOf(offers, 1);
+        const parent = yield* orchestrator.getThreadProjection(parentId);
+        assert.equal(parent.subagents[0]?.completionDelivery?.state, "claimed");
+        assert.equal(
+          parent.messages.filter((message) => message.delegatedCompletion !== undefined).length,
+          1,
+        );
       }).pipe(Effect.provide(runtime));
     }).pipe(Effect.scoped),
 );

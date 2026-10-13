@@ -298,12 +298,15 @@ it.effect(
             },
           ],
         });
-        yield* Effect.result(
-          orchestrator.dispatch({
+        const resumeError = yield* orchestrator
+          .dispatch({
             type: "queue.resume",
             commandId: CommandId.make("command:cloud-resume-queue"),
             threadId,
-          }),
+          })
+          .pipe(Effect.flip);
+        assert.isTrue(
+          Cause.pretty(Cause.fail(resumeError)).includes("Fake Cloud has no follow-up"),
         );
         const resumed = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(resumed.runs.find((run) => run.id === queuedId)?.status, "queued");
