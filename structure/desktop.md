@@ -30,6 +30,32 @@ accepts both renderer origins (`DESKTOP_RENDERER_ORIGINS` in `apps/server/src/ht
 
 > Decision record: [ADR-0014](decisions/ADR-0014-desktop-runtime-identity.md)
 
+## Shared connection catalog
+
+GOAT, GOAT (Nightly), and development builds share one GOAT home, so they share the saved
+connection catalog, `connection-catalog.json` in its state directory. Each runtime name has its
+own safeStorage key, so a catalog one channel saved does not decrypt through another channel's
+`safeStorage`. `apps/desktop/src/app/DesktopConnectionCatalogStore.ts` then asks
+`apps/desktop/src/app/DesktopSafeStorageSiblingKeys.ts`, which reads the other channels' keys from
+the same key store and decrypts with Chromium's OSCrypt scheme. macOS asks once before an app may
+read another app's key. The renderer replaces a catalog it cannot parse, so the store serves only
+plaintext that decodes as a connection catalog, whichever key opened it. A wrong key can decrypt to
+valid padding, so a non-catalog from this app's key also tries the sibling keys.
+
+- **Recovered.** The original file is copied to `connection-catalog.<channel>.backup.json`, then
+  re-encrypted under this app's key. The other channel may be running and saving, so when the file
+  changed while it was being recovered, the store reads it again and the newer catalog wins.
+- **Unreadable.** A file no key opens (`locked`) or that is not a valid catalog (`damaged`)
+  stays in place, and a copy of its exact bytes goes to
+  `connection-catalog.unreadable-<hash>.backup.json`, never replacing a different file. Reads
+  fail. A `locked` file is not retried against sibling keys until the app restarts, so a refused
+  prompt does not repeat. Settings → Connections, a launch toast, and the first-run recovery
+  screen explain where both files are
+  (`apps/web/src/components/desktop/ConnectionCatalogUnreadableNotice.tsx`). Start fresh saves an
+  empty catalog, since a missing file would re-import the legacy saved environments.
+- **Writes.** `set` and `clear` read the file on disk first. One this app cannot open is copied
+  before it is replaced, and the change is refused when no copy can be made.
+
 ## Shell
 
 The bundled server entry is `backendEntryPath` in `apps/desktop/src/app/DesktopEnvironment.ts`:
