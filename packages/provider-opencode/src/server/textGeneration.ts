@@ -18,6 +18,7 @@ import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as TextGenerationOperations from "@goat/provider-core/server/textGenerationOperations";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
 import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
+import { prepareMemoryServer } from "./memoryIsolation.ts";
 
 /** External servers are not controlled by the instance owner. */
 export const requireOpenCodeMemoryIsolation = (operation: MemoryOperationName) =>
@@ -177,7 +178,10 @@ function getOpenCodeTextResponse(parts: ReadonlyArray<unknown> | undefined): str
 
 export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration")(function* (
   openCodeSettings: OpenCodeSettings,
-  options: { readonly memoryRunnerContext?: MemoryGenerationRunnerContext } = {},
+  options: {
+    readonly memoryRunnerContext?: MemoryGenerationRunnerContext;
+    readonly environment?: NodeJS.ProcessEnv;
+  } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const host = yield* ProviderHost.ProviderHost;
@@ -189,9 +193,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       const memory = TextGenerationOperations.isMemoryOperation(input.operation);
       if (memory && openCodeSettings.serverUrl.trim().length > 0)
         return yield* requireOpenCodeMemoryIsolation(input.operation);
-      const cwd = memory
-        ? yield* fs.makeTempDirectoryScoped({ prefix: "goat-opencode-memory-" })
-        : input.cwd;
+
       const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(input.modelSelection.model);
       if (!parsedModel) {
         return yield* new TextGenerationError({
@@ -199,6 +201,16 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
           detail: "OpenCode model selection must use the 'provider/model' format.",
         });
       }
+
+      const isolated = memory
+        ? yield* prepareMemoryServer(
+            input.operation,
+            parsedModel.providerID,
+            options.environment ?? process.env,
+            1,
+          )
+        : undefined;
+      const cwd = isolated?.directory ?? input.cwd;
 
       const fileParts = OpenCodeRuntime.toOpenCodeFileParts({
         attachments: input.attachments?.filter((attachment) => attachment.type === "image"),
@@ -243,6 +255,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
             });
             if (
               !config.data ||
+              (config.data.plugin?.length ?? 0) > 0 ||
               Object.values(config.data.mcp ?? {}).some(
                 (entry) => !("enabled" in entry) || entry.enabled !== false,
               )
@@ -450,8 +463,15 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         }),
       );
 
-      const serverOutput =
-        openCodeSettings.serverUrl.length > 0
+      const serverOutput = isolated
+        ? openCodeRuntime
+            .startOpenCodeServerProcess({
+              binaryPath: openCodeSettings.binaryPath,
+              directory: isolated.directory,
+              environment: isolated.environment,
+            })
+            .pipe(Effect.flatMap(runAgainstServer))
+        : openCodeSettings.serverUrl.length > 0
           ? openCodeRuntime
               .connectToOpenCodeServer({
                 binaryPath: openCodeSettings.binaryPath,

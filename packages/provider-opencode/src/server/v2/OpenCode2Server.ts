@@ -7,6 +7,9 @@
  */
 import type { OpenCodeClient } from "@opencode/client/effect";
 import * as Context from "effect/Context";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as HostProcess from "@goat/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
@@ -18,6 +21,12 @@ import * as HttpClientError from "effect/http/HttpClientError";
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
 import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
+import { prepareMemoryServer } from "../memoryIsolation.ts";
+import { TextGenerationError } from "@goat/contracts";
+import {
+  MemoryGenerationRunnerError,
+  type MemoryOperationName,
+} from "@goat/provider-core/server/memoryGenerationRunner";
 
 const INFO_TIMEOUT = "5 seconds";
 
@@ -30,6 +39,11 @@ export interface OpenCode2Connection extends OpenCode2Client.OpenCode2Api {
 export class OpenCode2Server extends Context.Service<
   OpenCode2Server,
   {
+    readonly withMemoryConnection?: <A, E, R>(
+      operation: MemoryOperationName,
+      providerId: string,
+      use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | TextGenerationError | OpenCodeRuntime.OpenCodeRuntimeError, R>;
     /** Runs `use` against the instance's server, spawning it first when GOAT owns it. */
     readonly withConnection: <A, E, R>(
       use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
@@ -155,6 +169,12 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
       const version = yield* verifyServer(api.client);
       return { ...api, url, version, external } satisfies OpenCode2Connection;
     });
+  const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+  const crypto = yield* Crypto.Crypto;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const home = yield* HostProcess.HomeDirectory;
   let latest: OpenCode2Connection | undefined;
   const remember = (connection: OpenCode2Connection) =>
     Effect.sync(() => {
@@ -183,6 +203,38 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
     verify: (url) => connectTo(url, password, false).pipe(Effect.flatMap(remember)),
   });
   return OpenCode2Server.of({
+    withMemoryConnection: (operation, providerId, use) =>
+      Effect.gen(function* () {
+        const isolated = yield* prepareMemoryServer(operation, providerId, input.environment, 2);
+        const password = yield* generatePassword;
+        let connection: OpenCode2Connection | undefined;
+        yield* runtime.startOpenCodeServerProcess({
+          binaryPath: input.binaryPath,
+          directory: isolated.directory,
+          environment: serverEnvironment(isolated.environment, password),
+          verify: (url) =>
+            connectTo(url, password, false).pipe(
+              Effect.map((api) => {
+                connection = api;
+                return api.version;
+              }),
+            ),
+        });
+        if (connection === undefined)
+          return yield* new TextGenerationError({
+            operation,
+            detail: "OpenCode memory server could not be verified.",
+            cause: new MemoryGenerationRunnerError({ code: "unavailable" }),
+          });
+        return yield* use(connection);
+      }).pipe(
+        Effect.scoped,
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(HostProcess.Platform, platform),
+        Effect.provideService(HostProcess.HomeDirectory, home),
+      ),
     withConnection: (use) =>
       owner.withServer((server) =>
         // The owner verifies every server it starts before lending it out.

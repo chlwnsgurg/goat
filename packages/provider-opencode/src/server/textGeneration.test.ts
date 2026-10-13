@@ -22,6 +22,7 @@ import type { ProviderTextGeneration } from "@goat/provider-core/server/textGene
 
 const runtimeMock = {
   state: {
+    environments: [] as NodeJS.ProcessEnv[],
     startCalls: [] as string[],
     promptUrls: [] as string[],
     promptParts: [] as ReadonlyArray<unknown>[],
@@ -58,6 +59,7 @@ const runtimeMock = {
       | undefined,
   },
   reset() {
+    this.state.environments.length = 0;
     this.state.startCalls.length = 0;
     this.state.promptUrls.length = 0;
     this.state.promptParts.length = 0;
@@ -89,6 +91,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntime["Service"] = {
       const index = runtimeMock.state.startCalls.length + 1;
       const url = `http://127.0.0.1:${4_300 + index}`;
       runtimeMock.state.startCalls.push(binaryPath);
+      runtimeMock.state.environments.push(environment ?? {});
       // The production runtime binds server lifetime to the caller's scope.
       // Mirror that here so the closeCalls probe observes scope close.
       yield* Effect.addFinalizer(() =>
@@ -313,10 +316,10 @@ function withOpenCodeTextGeneration<A, E, R>(
       ...(settings.serverPassword ? { serverPassword: settings.serverPassword } : {}),
       ...(environment ? { environment } : {}),
     });
-    const textGeneration = yield* OpenCodeTextGeneration.makeOpenCodeTextGeneration(
-      settings,
-      memoryRunnerContext === undefined ? {} : { memoryRunnerContext },
-    ).pipe(Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner));
+    const textGeneration = yield* OpenCodeTextGeneration.makeOpenCodeTextGeneration(settings, {
+      ...(memoryRunnerContext === undefined ? {} : { memoryRunnerContext }),
+      ...(environment === undefined ? {} : { environment }),
+    }).pipe(Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner));
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
@@ -955,6 +958,12 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCode v1 memory generation", (it) 
               variant: "high",
             });
             expect(runtimeMock.state.promptInputs[0]?.agent).toBeUndefined();
+            expect(runtimeMock.state.startCalls).toHaveLength(1);
+            expect(runtimeMock.state.closeCalls).toHaveLength(1);
+            expect(runtimeMock.state.environments[0]?.OPENCODE_PURE).toBe("true");
+            expect(runtimeMock.state.environments[0]?.OPENCODE_CONFIG_CONTENT).not.toContain(
+              "untrusted",
+            );
             expect(runtimeMock.state.deleted).toHaveLength(1);
             const fs = yield* FileSystem.FileSystem;
             expect(yield* fs.exists(runtimeMock.state.directories[0]!)).toBe(false);
@@ -965,7 +974,7 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCode v1 memory generation", (it) 
   );
   it.effect.each(
     operations.flatMap((operation) =>
-      ["tool", "part", "permission", "authority", "model", "mcp"].map((scenario) => ({
+      ["tool", "part", "permission", "authority", "model", "mcp", "plugin"].map((scenario) => ({
         operation,
         scenario,
       })),
@@ -986,9 +995,11 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCode v1 memory generation", (it) 
           if (scenario === "model")
             runtimeMock.state.promptResult!.data!.info = { modelID: "wrong", providerID: "openai" };
           if (scenario === "mcp") runtimeMock.state.config = { mcp: { unsafe: { enabled: true } } };
+          if (scenario === "plugin") runtimeMock.state.config = { plugin: ["untrusted"] };
           const failure = yield* invoke(generation, operation).pipe(Effect.flip);
           expect(failure._tag).toBe("TextGenerationError");
-          if (scenario === "mcp") expect(failure.cause).toMatchObject({ code: "unavailable" });
+          if (scenario === "mcp" || scenario === "plugin")
+            expect(failure.cause).toMatchObject({ code: "unavailable" });
           else expect(runtimeMock.state.deleted).toHaveLength(1);
           if (scenario === "permission") expect(runtimeMock.state.denied).toEqual(["permission-1"]);
           const fs = yield* FileSystem.FileSystem;
