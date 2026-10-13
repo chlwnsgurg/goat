@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import judgmentMigration from "../persistence/Migrations/072_MemoryJudgmentRetention.ts";
 import reservationMigration from "../persistence/Migrations/071_MemoryForgetReservations.ts";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
@@ -411,6 +412,104 @@ describe("MemoryQuotaService", () => {
             : M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES,
         );
       }).pipe(Effect.provide(services)),
+  );
+  it.effect("prunes an expired judgment only after approval and a covering checkpoint", () =>
+    Effect.gen(function* () {
+      const quota = yield* Quota.MemoryQuotaService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* quota.commit(decision(operation(3)), env, Effect.void);
+      yield* quota.commit(decision(operation(4)), env, Effect.void);
+      const op = resolutionOperation();
+      if (op.kind !== "resolve") throw new Error("Fixture kind");
+      yield* quota.commit(
+        {
+          ...decision(op),
+          admission: Store.approvedReplica,
+          receipt: {
+            operationId: op.operationId,
+            memoryId: memory,
+            outcome: "accepted",
+            operationDigest: hash,
+            hubSequence: 3,
+          },
+        },
+        env,
+        Effect.void,
+      );
+      const expires = Date.parse(now) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS;
+      assert.strictEqual(
+        (yield* sql<{
+          expiry: number;
+        }>`SELECT purge_eligible_after AS expiry FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)[0]!
+          .expiry,
+        expires,
+      );
+      yield* sql`UPDATE memory_payloads SET purge_eligible_after=NULL WHERE payload_ref=${op.resolution.judgmentRef}`;
+      yield* judgmentMigration;
+      assert.strictEqual(
+        (yield* sql<{
+          expiry: number;
+        }>`SELECT purge_eligible_after AS expiry FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)[0]!
+          .expiry,
+        expires,
+      );
+      assert.strictEqual(yield* store.prunePayloads(expires, 100), 0);
+      yield* sql`UPDATE memory_compaction_state SET published=1,boundary_json='{"checkpointSequence":2,"boundaryId":"fixture"}' WHERE space=${space}`;
+      assert.strictEqual(yield* store.prunePayloads(expires, 100), 0);
+      yield* sql`UPDATE memory_compaction_state SET boundary_json='{"checkpointSequence":3,"boundaryId":"fixture"}' WHERE space=${space}`;
+      assert.strictEqual(yield* store.prunePayloads(expires - 1, 100), 0);
+      yield* store.enqueueWork({
+        id: "judgment-guard",
+        space,
+        memoryId: memory,
+        kind: "rebuild",
+        status: "pending",
+        payloadRef: op.revision.payloadRef,
+        attempt: 0,
+        nextAttemptAt: 0,
+        claimedBy: null,
+        claimedUntil: null,
+        metadata: { kind: "rebuild", revisionId: op.revision.revisionId, generation: 1 },
+      });
+      assert.strictEqual(yield* store.prunePayloads(expires, 100), 0);
+      yield* store.finishWork("judgment-guard", "completed");
+      yield* store.persistCompactReceipt({
+        memorySpaceId: space,
+        originEnvironmentId: env,
+        operationKind: "resolve",
+        receipt: {
+          operationId: op.operationId,
+          memoryId: memory,
+          operationDigest: hash,
+          outcome: "accepted",
+          hubSequence: 3,
+        },
+        revisionId: op.revision.revisionId,
+        resolutionId: op.resolution.resolutionId,
+        revertsResolutionId: null,
+        attemptId: null,
+        fencingToken: op.fencingToken,
+        reportGuard: null,
+      });
+      yield* sql`DELETE FROM memory_events WHERE operation_id=${op.operationId}`;
+      assert.strictEqual(yield* store.prunePayloads(expires, 100), 1);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)
+          .length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${op.revision.payloadRef}`)
+          .length,
+        1,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_resolutions WHERE resolution_id=${op.resolution.resolutionId}`)
+          .length,
+        1,
+      );
+    }).pipe(Effect.provide(services)),
   );
   it.effect("unknown-ID forget reserves at lifetime equality but refuses plus one", () =>
     Effect.gen(function* () {

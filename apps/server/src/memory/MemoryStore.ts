@@ -1487,7 +1487,7 @@ const make = Effect.gen(function* () {
             if (!execution) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
             yield* stored(
               "judgment",
-              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline) VALUES (${op.memorySpaceId},${resolution.judgmentRef},${op.memoryId},${yield* resolutionPayloadCodec.encode(op.resolutionPayload)},${yield* headsCodec.encode(resolution.inputRevisionIds)},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)}) ON CONFLICT(space,payload_ref) DO NOTHING`,
+              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline,purge_eligible_after) VALUES (${op.memorySpaceId},${resolution.judgmentRef},${op.memoryId},${yield* resolutionPayloadCodec.encode(op.resolutionPayload)},${yield* headsCodec.encode(resolution.inputRevisionIds)},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${Date.parse(resolution.appliedAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS}) ON CONFLICT(space,payload_ref) DO NOTHING`,
             );
             yield* stored(
               "resolution",
@@ -3138,7 +3138,7 @@ const make = Effect.gen(function* () {
             if (forgotten.length) continue;
             yield* stored(
               "checkpoint-judgment",
-              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${page.memorySpaceId},${pair.resolution.judgmentRef},${pair.resolution.memoryId},${yield* resolutionPayloadCodec.encode(pair.payload)},${yield* headsCodec.encode(pair.resolution.inputRevisionIds)}) ON CONFLICT(space,payload_ref) DO NOTHING`,
+              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline,purge_eligible_after) VALUES (${page.memorySpaceId},${pair.resolution.judgmentRef},${pair.resolution.memoryId},${yield* resolutionPayloadCodec.encode(pair.payload)},${yield* headsCodec.encode(pair.resolution.inputRevisionIds)},${Date.parse(pair.resolution.appliedAtUtc)},${Date.parse(pair.resolution.revertDeadlineUtc)},${Date.parse(pair.resolution.appliedAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS}) ON CONFLICT(space,payload_ref) DO NOTHING`,
             );
           }
         yield* stored(
@@ -3722,7 +3722,16 @@ const make = Effect.gen(function* () {
         AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=p.space AND o.payload_ref=p.payload_ref AND o.status IN ('pending','retry','running'))
         AND NOT EXISTS (SELECT 1 FROM memory_revert_intents r WHERE r.space=p.space AND r.payload_ref=p.payload_ref)
         AND NOT EXISTS (SELECT 1 FROM memory_resolutions r JOIN json_each(r.input_payload_refs_json) refs WHERE r.space=p.space AND refs.value=p.payload_ref AND r.revert_deadline>${now})
-        AND EXISTS (SELECT 1 FROM memory_revisions r JOIN memory_events e ON e.memory_space_id=r.space AND e.operation_id=r.operation_id WHERE r.space=p.space AND r.payload_ref=p.payload_ref AND json_extract(e.receipt_json,'$.hubSequence') IS NOT NULL)
+        AND (EXISTS (SELECT 1 FROM memory_revisions r JOIN memory_events e ON e.memory_space_id=r.space AND e.operation_id=r.operation_id WHERE r.space=p.space AND r.payload_ref=p.payload_ref AND json_extract(e.receipt_json,'$.hubSequence') IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM memory_resolutions r JOIN memory_revisions v ON v.space=r.space AND v.revision_id=r.result_revision_id
+          JOIN memory_compaction_state c ON c.space=r.space AND c.published=1
+          LEFT JOIN memory_events e ON e.memory_space_id=v.space AND e.operation_id=v.operation_id
+          LEFT JOIN memory_compact_receipts k ON k.space=v.space AND k.operation_id=v.operation_id
+          WHERE r.space=p.space AND r.judgment_payload_ref=p.payload_ref AND r.revert_deadline<=${now}
+          AND coalesce(json_extract(e.receipt_json,'$.outcome'),json_extract(k.receipt_json,'$.outcome'))='accepted'
+          AND coalesce(json_extract(e.receipt_json,'$.hubSequence'),k.hub_sequence)<=json_extract(c.boundary_json,'$.checkpointSequence')
+          AND NOT EXISTS (SELECT 1 FROM memory_revert_intents ri WHERE ri.space=r.space AND ri.resolution_id=r.resolution_id)
+          AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=v.space AND o.payload_ref=v.payload_ref AND o.status IN ('pending','retry','running'))))
         ORDER BY p.purge_eligible_after,p.space,p.payload_ref LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
         );
         for (const row of rows)
