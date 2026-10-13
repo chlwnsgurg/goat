@@ -5,7 +5,6 @@ import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
   CommandId,
-  MessageId,
   RunId,
   TurnItemId,
   type EventId,
@@ -55,6 +54,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@goat/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import { makeCloudResultEvents } from "./CloudResultEvents.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
@@ -717,66 +717,18 @@ export const layer: Layer.Layer<
         const checkpointCaptureCommandId = CommandId.make(
           `command:effect:checkpoint.capture:${input.run.id}`,
         );
-        const cloudResultEvents: OrchestrationV2DomainEvent[] = [];
-        if (finalizedProviderThread.cloudTask !== undefined) {
-          const text = cloudTaskResultText(finalizedProviderThread.cloudTask);
-          const messageId = MessageId.make(`message:cloud-result:${input.run.id}`);
-          const itemId = TurnItemId.make(`turn-item:cloud-result:${input.run.id}`);
-          cloudResultEvents.push({
-            id: yield* allocateEventId(),
-            type: "message.updated",
-            threadId: input.run.threadId,
-            runId: input.run.id,
-            nodeId: input.rootNode.id,
-            providerInstanceId: input.run.providerInstanceId,
-            occurredAt: completedAt,
-            payload: {
-              id: messageId,
-              threadId: input.run.threadId,
-              runId: input.run.id,
-              nodeId: input.rootNode.id,
-              createdBy: "agent",
-              creationSource: "provider",
-              role: "assistant",
-              text,
-              attachments: [],
-              streaming: false,
-              createdAt: completedAt,
-              updatedAt: completedAt,
-            },
-          });
-          cloudResultEvents.push({
-            id: yield* allocateEventId(),
-            type: "turn-item.updated",
-            threadId: input.run.threadId,
-            runId: input.run.id,
-            nodeId: input.rootNode.id,
-            providerInstanceId: input.run.providerInstanceId,
-            occurredAt: completedAt,
-            payload: {
-              id: itemId,
-              type: "assistant_message",
-              threadId: input.run.threadId,
-              runId: input.run.id,
-              nodeId: input.rootNode.id,
-              providerThreadId: input.providerThread.id,
-              providerTurnId: input.terminal.providerTurnId,
-              nativeItemRef: null,
-              parentItemId: null,
-              // EventSink assigns the durable position in the finalization transaction.
-              ordinal: 0,
-              status: "completed",
-              title: null,
-              startedAt: completedAt,
-              completedAt,
-              updatedAt: completedAt,
-              messageId,
-              text,
-              attachments: [],
-              streaming: false,
-            },
-          });
-        }
+        const cloudResultEvents =
+          finalizedProviderThread.cloudTask === undefined
+            ? []
+            : yield* makeCloudResultEvents({
+                run: input.run,
+                nodeId: input.rootNode.id,
+                providerThreadId: input.providerThread.id,
+                providerTurnId: input.terminal.providerTurnId,
+                text: cloudTaskResultText(finalizedProviderThread.cloudTask),
+                completedAt,
+                allocateEventId,
+              });
         // Stopped runs capture too: their checkpoint is the rollback point for
         // the next message. The capture is enqueued with these terminal events,
         // ahead of any later run's start on this thread's effect lane.

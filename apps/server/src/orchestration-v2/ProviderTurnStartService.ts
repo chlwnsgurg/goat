@@ -2,7 +2,6 @@ import { modelSelectionsEqual } from "@goat/shared/model";
 import { projectComposerContextForProvider } from "@goat/shared/composerContextReferences";
 import {
   CommandId,
-  MessageId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
@@ -27,6 +26,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventSink from "./EventSink.ts";
+import { makeCloudResultEvents } from "./CloudResultEvents.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
@@ -1463,56 +1463,54 @@ export const layer: Layer.Layer<
                     updatedAt: DateTime.formatIso(now),
                   },
                 };
+                const allocateEventId = () =>
+                  idAllocator.allocate.event({ threadId: input.threadId });
+                const cloudResultEvents = yield* makeCloudResultEvents({
+                  run,
+                  nodeId: root.id,
+                  providerThreadId: thread.id,
+                  providerTurnId:
+                    latestProviderTurnForAttempt(current.providerTurns, attempt.id)?.id ?? null,
+                  text: `${reason}${thread.cloudTask.url ? `\nTask: ${thread.cloudTask.url}` : ""}`,
+                  completedAt: now,
+                  allocateEventId,
+                });
                 yield* eventSink.writeIfRunCurrent({
                   threadId: input.threadId,
                   runId: run.id,
                   activeAttemptId: attempt.id,
                   expectedStatus: "running",
-                  events: yield* Effect.forEach(
-                    [
-                      { type: "provider-thread.updated" as const, payload: updated },
-                      {
-                        type: "run.updated" as const,
-                        payload: { ...run, status: "failed" as const, completedAt: now },
-                      },
-                      {
-                        type: "run-attempt.updated" as const,
-                        payload: { ...attempt, status: "failed" as const, completedAt: now },
-                      },
-                      {
-                        type: "node.updated" as const,
-                        payload: { ...root, status: "failed" as const, completedAt: now },
-                      },
-                      {
-                        type: "message.updated" as const,
-                        payload: {
-                          id: MessageId.make(`message:cloud-result:${run.id}`),
-                          threadId: input.threadId,
-                          runId: run.id,
-                          nodeId: root.id,
-                          role: "assistant" as const,
-                          createdBy: "agent" as const,
-                          creationSource: "provider" as const,
-                          text: `${reason}${thread.cloudTask.url ? `\nTask: ${thread.cloudTask.url}` : ""}`,
-                          attachments: [],
-                          streaming: false,
-                          createdAt: now,
-                          updatedAt: now,
+                  events: [
+                    ...(yield* Effect.forEach(
+                      [
+                        { type: "provider-thread.updated" as const, payload: updated },
+                        {
+                          type: "run.updated" as const,
+                          payload: { ...run, status: "failed" as const, completedAt: now },
                         },
-                      },
-                    ],
-                    (event) =>
-                      idAllocator.allocate.event({ threadId: input.threadId }).pipe(
-                        Effect.map((id) => ({
-                          ...event,
-                          id,
-                          threadId: input.threadId,
-                          runId: run.id,
-                          providerInstanceId: run.providerInstanceId,
-                          occurredAt: now,
-                        })),
-                      ),
-                  ),
+                        {
+                          type: "run-attempt.updated" as const,
+                          payload: { ...attempt, status: "failed" as const, completedAt: now },
+                        },
+                        {
+                          type: "node.updated" as const,
+                          payload: { ...root, status: "failed" as const, completedAt: now },
+                        },
+                      ],
+                      (event) =>
+                        allocateEventId().pipe(
+                          Effect.map((id) => ({
+                            ...event,
+                            id,
+                            threadId: input.threadId,
+                            runId: run.id,
+                            providerInstanceId: run.providerInstanceId,
+                            occurredAt: now,
+                          })),
+                        ),
+                    )),
+                    ...cloudResultEvents,
+                  ],
                 });
                 return yield* Effect.fail(cause);
               }),

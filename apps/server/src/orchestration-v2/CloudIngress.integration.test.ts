@@ -61,6 +61,7 @@ import * as ThreadResults from "../threadResults/ThreadResultService.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as Registry from "./ProviderAdapterRegistry.ts";
 import { layerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
@@ -95,14 +96,12 @@ function assertCloudResultItem(projection: OrchestrationV2ThreadProjection, runI
   assert.equal(result.messageId, `message:cloud-result:${runId}`);
   assert.equal(result.status, "completed");
   assert.isFalse(result.streaming);
-  assert.equal(
-    result.text,
-    projection.messages.find((message) => message.id === result.messageId)?.text,
-  );
-  assert.deepEqual(
-    projection.visibleTurnItems.find((row) => row.sourceItemId === result.id)?.item,
-    result,
-  );
+  const messages = projection.messages.filter((message) => message.id === result.messageId);
+  assert.equal(messages.length, 1);
+  assert.equal(result.text, messages[0]!.text);
+  const visible = projection.visibleTurnItems.filter((row) => row.sourceItemId === result.id);
+  assert.equal(visible.length, 1);
+  assert.deepEqual(visible[0]!.item, result);
   const run = projection.runs.find((candidate) => candidate.id === runId)!;
   assert.isAbove(result.ordinal, run.ordinal * 1_000_000);
   return result;
@@ -1218,47 +1217,54 @@ it.effect.each([
 );
 
 it.effect.each([
-  { ownershipLost: false, stage: "open" },
-  { ownershipLost: true, stage: "open" },
-  { ownershipLost: false, stage: "resume" },
-  { ownershipLost: true, stage: "resume" },
+  { ownershipLost: false, stage: "open", taskStatus: "running" },
+  { ownershipLost: false, stage: "open", taskStatus: "unknown" },
+  { ownershipLost: true, stage: "open", taskStatus: "running" },
+  { ownershipLost: false, stage: "resume", taskStatus: "running" },
+  { ownershipLost: false, stage: "resume", taskStatus: "unknown" },
+  { ownershipLost: true, stage: "resume", taskStatus: "running" },
 ] as const)(
-  "final attach $stage failure settles only its original attempt ownershipLost=$ownershipLost",
-  ({ ownershipLost, stage }) =>
+  "final attach $stage failure settles $taskStatus task only for its original attempt ownershipLost=$ownershipLost",
+  ({ ownershipLost, stage, taskStatus }) =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("codex");
       const fake = yield* makeFakeCloudAdapter(true, instanceId);
-      const opening = yield* Deferred.make<void>();
-      const failOpen = yield* Deferred.make<void>();
+      let opening = yield* Deferred.make<void>();
+      let failOpen = yield* Deferred.make<void>();
       const adapter = {
         ...fake.adapter,
         openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
           Effect.gen(function* () {
-            const failure = Deferred.succeed(opening, undefined).pipe(
-              Effect.andThen(Deferred.await(failOpen)),
-              Effect.andThen(
-                Effect.fail(
-                  new ProviderAdapterOpenSessionError({
-                    driver: fake.adapter.driver,
-                    providerSessionId: input.providerSessionId,
-                    cause: "Tracking transport unavailable",
-                  }),
+            const failure = () =>
+              Deferred.succeed(opening, undefined).pipe(
+                Effect.andThen(Deferred.await(failOpen)),
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterOpenSessionError({
+                      driver: fake.adapter.driver,
+                      providerSessionId: input.providerSessionId,
+                      cause: "Tracking transport unavailable",
+                    }),
+                  ),
                 ),
-              ),
-            );
-            if (stage === "open") return yield* failure;
+              );
+            if (stage === "open") return yield* failure();
             const session = yield* fake.adapter.openSession(input);
-            return { ...session, resumeTurn: () => failure };
+            return { ...session, resumeTurn: failure };
           }),
       };
-      const runtime = layerWithRegistry(
-        { name: `cloud-attach-${stage}-failure-${ownershipLost}` },
-        Registry.layerFromAdapters([adapter]),
-        { runEffectWorker: false },
+      const runtime = Layer.merge(
+        layerWithRegistry(
+          { name: `cloud-attach-${stage}-failure-${ownershipLost}-${taskStatus}` },
+          Registry.layerFromAdapters([adapter]),
+          { runEffectWorker: false },
+        ),
+        EventStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
       );
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const sink = yield* EventSink.EventSinkV2;
+        const eventStore = yield* EventStore.EventStoreV2;
         const threadId = ThreadId.make("thread:cloud-open-failure");
         yield* orchestrator.dispatch({
           type: "thread.create",
@@ -1293,7 +1299,7 @@ it.effect.each([
         const now = yield* DateTime.now;
         const task = {
           taskId: "accepted-before-restart",
-          status: "running" as const,
+          status: taskStatus,
           tracking: "live" as const,
           url: "https://example.com/tasks/saved",
           source: {
@@ -1345,7 +1351,52 @@ it.effect.each([
             },
           ],
         });
-        const starting = yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2)
+        const savedTurnId =
+          stage === "resume" ? ProviderTurnId.make("provider-turn:saved-cloud") : null;
+        if (savedTurnId !== null)
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("event:open-failure-provider-turn"),
+                type: "provider-turn.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  id: savedTurnId,
+                  providerThreadId: providerThread.id,
+                  nodeId: root.id,
+                  runAttemptId: attempt.id,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "running",
+                  startedAt: now,
+                  completedAt: null,
+                },
+              },
+            ],
+          });
+        const starter = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        // A retryable attach failure must leave the task live and emit no result.
+        const retrying = yield* starter
+          .start({ threadId, runId: run.id, reattach: true, willRetry: true })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(opening);
+        yield* Deferred.succeed(failOpen, undefined);
+        assert.equal((yield* Fiber.join(retrying))._tag, "Failure");
+        const afterRetry = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(afterRetry.runs[0]?.status, "running");
+        assert.equal(afterRetry.providerThreads[0]?.cloudTask?.status, taskStatus);
+        assert.isFalse(
+          afterRetry.turnItems.some((item) => item.id === `turn-item:cloud-result:${run.id}`),
+        );
+        assert.isFalse(
+          afterRetry.messages.some((message) => message.id === `message:cloud-result:${run.id}`),
+        );
+        // Gate the final attempt independently so the ownership race stays deterministic.
+        opening = yield* Deferred.make<void>();
+        failOpen = yield* Deferred.make<void>();
+        const beforeFailureSequence = yield* sink.latestSequence({ threadId });
+        const starting = yield* starter
           .start({
             threadId,
             runId: run.id,
@@ -1384,13 +1435,21 @@ it.effect.each([
         assert.equal(after.runs[0]?.status, ownershipLost ? "running" : "failed");
         assert.equal(
           after.providerThreads[0]?.cloudTask?.status,
-          ownershipLost ? "running" : "unknown",
+          ownershipLost ? taskStatus : "unknown",
         );
         assert.deepEqual(after.providerThreads[0]?.nativeThreadRef, savedThread.nativeThreadRef);
         assert.deepEqual(after.providerThreads[0]?.cloudTask?.source, task.source);
         assert.equal(after.providerThreads[0]?.cloudTask?.url, task.url);
         if (ownershipLost) {
           assert.equal(after.runs[0]?.activeAttemptId, newerAttemptId);
+          assert.isFalse(
+            after.turnItems.some((item) => item.id === `turn-item:cloud-result:${run.id}`),
+          );
+          assert.isFalse(
+            after.visibleTurnItems.some(
+              (row) => row.sourceItemId === `turn-item:cloud-result:${run.id}`,
+            ),
+          );
           assert.equal(
             after.messages.filter((message) => message.id === `message:cloud-result:${run.id}`)
               .length,
@@ -1402,7 +1461,54 @@ it.effect.each([
           assert.isTrue(
             after.providerThreads[0]?.cloudTask?.error?.includes("remote work may continue"),
           );
-          assert.isTrue(after.messages.some((message) => message.text.includes(task.url)));
+          const result = assertCloudResultItem(after, run.id);
+          assert.equal(
+            result.text,
+            "Cloud tracking could not be reattached. Open the task link; remote work may continue.\nTask: https://example.com/tasks/saved",
+          );
+          assert.equal(result.providerThreadId, providerThread.id);
+          assert.equal(result.providerTurnId, savedTurnId);
+          const resultEvents = yield* eventStore
+            .read({ threadId, afterSequence: beforeFailureSequence })
+            .pipe(Stream.runCollect);
+          const persistedResults = resultEvents.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" && stored.event.payload.id === result.id,
+          );
+          assert.equal(persistedResults.length, 1);
+          // Replay the pair with fresh event ids: EventSink must keep its text, time and position.
+          const replay = yield* sink.write({
+            events: yield* Effect.forEach(
+              resultEvents.filter(
+                (stored) =>
+                  stored.event.type === "message.updated" ||
+                  stored.event.type === "turn-item.updated",
+              ),
+              (stored, index) =>
+                Effect.succeed({
+                  ...stored.event,
+                  id: EventId.make(`event:attach-result-replay:${index}`),
+                }),
+            ),
+          });
+          assert.equal(replay.length, 0);
+          yield* starter.start({ threadId, runId: run.id, reattach: true }).pipe(Effect.result);
+          const replayed = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(assertCloudResultItem(replayed, run.id), result);
+          const replayedResults = yield* eventStore
+            .read({
+              threadId,
+              afterSequence: beforeFailureSequence,
+              eventType: "turn-item.updated",
+            })
+            .pipe(Stream.runCollect);
+          assert.equal(
+            replayedResults.filter(
+              (stored) =>
+                stored.event.type === "turn-item.updated" && stored.event.payload.id === result.id,
+            ).length,
+            1,
+          );
         }
         assert.equal(yield* Ref.get(fake.submissions), 0);
         assert.equal(yield* Ref.get(fake.creations), 0);
@@ -1828,6 +1934,14 @@ it.effect.each([
           assert.equal(afterFailure.attempts[0]?.status, "running");
           assert.equal(afterFailure.nodes.find((node) => node.id === root.id)?.status, "running");
           assert.deepEqual(afterFailure.providerThreads[0]?.cloudTask, cloudTask);
+          assert.isFalse(
+            afterFailure.turnItems.some((item) => item.id === `turn-item:cloud-result:${run.id}`),
+          );
+          assert.isFalse(
+            afterFailure.visibleTurnItems.some(
+              (row) => row.sourceItemId === `turn-item:cloud-result:${run.id}`,
+            ),
+          );
           assert.equal(
             afterFailure.messages.filter(
               (message) => message.id === `message:cloud-result:${run.id}`,
@@ -1890,7 +2004,24 @@ it.effect.each([
         yield* worker.drain();
         const finished = yield* orchestrator.getThreadProjection(childId);
         assert.equal(finished.runs[0]?.status, "completed");
-        assertCloudResultItem(finished, run.id);
+        const result = assertCloudResultItem(finished, run.id);
+        assert.include(result.text, "Completed fake task");
+        assert.include(result.text, "Task: https://example.com/tasks/1");
+        // A replayed recovery effect after settlement cannot attach or emit a second result.
+        yield* outbox.enqueue([
+          {
+            id: "effect:recovery-reattach-replay",
+            commandId: CommandId.make("command:recovery-reattach-replay"),
+            threadId: childId,
+            request: { type: "provider-turn.reattach", runId: run.id },
+          },
+        ]);
+        yield* worker.drain();
+        assert.deepEqual(
+          assertCloudResultItem(yield* orchestrator.getThreadProjection(childId), run.id),
+          result,
+        );
+        assert.equal(yield* Ref.get(fake.attachments), 1);
         assert.equal(
           finished.messages.filter((message) => message.id === `message:cloud-result:${run.id}`)
             .length,
