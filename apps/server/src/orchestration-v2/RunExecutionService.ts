@@ -32,6 +32,7 @@ import * as Context from "effect/Context";
 import { cloudTaskResultText } from "@goat/provider-core/server/cloudTask";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -1006,6 +1007,7 @@ export const layer: Layer.Layer<
           const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
           const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
           const latestProviderThread = yield* Ref.make(input.providerThread);
+          const cloudRunSubscriptionClosed = yield* Deferred.make<void>();
           const routeIdentity: ProviderEventRouteIdentity = {
             threadId: input.run.threadId,
             runId: input.run.id,
@@ -1482,6 +1484,10 @@ export const layer: Layer.Layer<
                       return next;
                     })
                   : Effect.void,
+              ).pipe(
+                Effect.ensuring(
+                  cloud ? Deferred.succeed(cloudRunSubscriptionClosed, undefined) : Effect.void,
+                ),
               ),
             ),
             Effect.forkDetach,
@@ -1542,6 +1548,43 @@ export const layer: Layer.Layer<
               : { cloudLaunchSource: input.cloudLaunchSource }),
             ...(cloud
               ? {
+                  commitCloudTaskMetadata: (
+                    nativeId: string,
+                    metadata: ProviderAdapter.ProviderAdapterV2CloudTaskMetadata,
+                  ) =>
+                    Deferred.await(cloudRunSubscriptionClosed).pipe(
+                      Effect.andThen(
+                        Effect.gen(function* () {
+                          yield* eventSink.writeCloudTaskMetadata({
+                            eventId: yield* idAllocator.allocate.event({
+                              threadId: input.run.threadId,
+                            }),
+                            threadId: input.run.threadId,
+                            providerThreadId: input.providerThread.id,
+                            providerSessionId: input.providerSessionId,
+                            providerInstanceId: input.run.providerInstanceId,
+                            runId: input.run.id,
+                            activeAttemptId: input.attempt.id,
+                            expectedLastRunOrdinal: input.run.ordinal,
+                            nativeId,
+                            metadata,
+                          });
+                        }),
+                      ),
+                      Effect.tapError(() =>
+                        Effect.logWarning("Cloud metadata persistence failed", {
+                          runId: input.run.id,
+                        }),
+                      ),
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterProtocolError({
+                            driver: input.session.driver,
+                            detail: "Cloud metadata persistence failed",
+                            cause,
+                          }),
+                      ),
+                    ),
                   commitCloudTask: (
                     task: import("@goat/contracts").OrchestrationV2CloudTask,
                     refs?: Pick<

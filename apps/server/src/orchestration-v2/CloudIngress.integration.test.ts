@@ -6,11 +6,15 @@ import {
   NodeId,
   ProjectId,
   ProviderInstanceId,
+  ProviderTurnId,
   RunAttemptId,
   RunId,
   ThreadId,
   EnvironmentId,
   OrchestratorMcpTaskCancelResult,
+  OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadStatusResult,
   type Project,
   type OrchestrationV2Command,
 } from "@goat/contracts";
@@ -24,11 +28,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { McpServer, McpSchema } from "effect/ai";
 import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import { ProviderAdapterOpenSessionError } from "@goat/provider-core/server/ProviderAdapter";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
+import * as ProviderSessions from "./ProviderSessionManager.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProviderContinuationRequests from "@goat/provider-core/server/ProviderContinuationRequests";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as CloudSource from "./CloudTaskSourceService.ts";
@@ -62,6 +69,9 @@ const cloudMcpClient = McpSchema.McpServerClient.of({
   getClient: Effect.die("unused"),
 });
 const decodeTaskCancelResult = Schema.decodeUnknownSync(OrchestratorMcpTaskCancelResult);
+const decodeThreadStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
+const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
+const decodeTaskStatus = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 
 it.effect(
   "serializes cloud direct, queued and MCP admission before durable second messages exist",
@@ -316,8 +326,8 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
-it.effect.each(["succeeded", "cancelled"] as const)(
-  "task_cancel retains parent delivery until authoritative %s",
+it.effect.each(["succeeded", "cancelled", "unknown"] as const)(
+  "cloud %s settlement retains result and parent delivery across late metadata",
   (outcome) =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("codex");
@@ -325,20 +335,45 @@ it.effect.each(["succeeded", "cancelled"] as const)(
       const interruptEntered = yield* Deferred.make<void>();
       const acknowledge = yield* Deferred.make<void>();
       const delivered = yield* Deferred.make<void>();
+      const observerReady = yield* Deferred.make<void>();
+      const observerRelease = yield* Deferred.make<void>();
+      const observerClosed = yield* Deferred.make<void>();
+      const lateCallbacks = yield* Ref.make(0);
       const offers: ProviderContinuationRequests.ProviderContinuationRequest[] = [];
       const adapter = {
         ...fake.adapter,
         openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
-          fake.adapter.openSession(input).pipe(
-            Effect.map((session) => ({
+          Effect.gen(function* () {
+            const session = yield* fake.adapter.openSession(input);
+            const scope = yield* Scope.Scope;
+            return {
               ...session,
+              startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+                session.startTurn(turn).pipe(
+                  Effect.andThen(
+                    Effect.gen(function* () {
+                      // The attached observer belongs to the provider runtime, not the run.
+                      yield* Deferred.await(observerRelease).pipe(
+                        Effect.andThen(Ref.update(lateCallbacks, (count) => count + 1)),
+                        Effect.andThen(
+                          turn.commitCloudTaskMetadata!("native-session-1", {
+                            title: "Disposed observer",
+                          }),
+                        ),
+                        Effect.ensuring(Deferred.succeed(observerClosed, undefined)),
+                        Effect.forkIn(scope),
+                      );
+                      yield* Deferred.succeed(observerReady, undefined);
+                    }),
+                  ),
+                ),
               interruptTurn: (request: ProviderAdapter.ProviderAdapterV2InterruptInput) =>
                 Deferred.succeed(interruptEntered, undefined).pipe(
                   Effect.andThen(Deferred.await(acknowledge)),
                   Effect.andThen(session.interruptTurn(request)),
                 ),
-            })),
-          ),
+            };
+          }),
       };
       const registry = Registry.layerFromAdapters([adapter]);
       const projectId = ProjectId.make("project:cloud-cancel");
@@ -387,8 +422,15 @@ it.effect.each(["succeeded", "cancelled"] as const)(
         Layer.provide(Layer.mock(Secrets.SecretRequests)({})),
         Layer.provide(Layer.mock(RemoteDispatch.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshDispatch.SshRemoteDispatch)({})),
-        Layer.provide(Layer.mock(LaunchWatches.LaunchWatchService)({})),
-        Layer.provide(Layer.mock(ThreadResults.ThreadResultService)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatches.LaunchWatchService)({ find: () => Effect.succeed(null) }),
+        ),
+        Layer.provide(
+          ThreadResults.layer.pipe(
+            Layer.provide(runtime),
+            Layer.provide(SqlitePersistence.layerMemory),
+          ),
+        ),
         Layer.provide(NodeServices.layer),
       );
       yield* Effect.gen(function* () {
@@ -507,10 +549,43 @@ it.effect.each(["succeeded", "cancelled"] as const)(
         assert.equal(acknowledged.attempts[0]?.status, "running");
         assert.deepEqual(acknowledged.providerThreads[0]?.cloudTask, savedTask);
         assert.equal(yield* Ref.get(fake.cancellations), 1);
-        yield* fake.finish(false, outcome);
+        const captured = (yield* Ref.get(fake.current))!;
+        const terminal: ProviderAdapter.ProviderAdapterV2Event = {
+          type: "turn.terminal",
+          driver: fake.adapter.driver,
+          providerThreadId: captured.providerThread.id,
+          providerTurnId: ProviderTurnId.make(`provider-turn:fake-cloud:${captured.attemptId}`),
+          runOrdinal: captured.runOrdinal,
+          ...(outcome === "unknown"
+            ? {
+                status: "failed" as const,
+                failureItemOrdinal: 101,
+                failure: {
+                  class: "unknown" as const,
+                  message: "Observation lost",
+                  code: null,
+                  retryable: null,
+                },
+              }
+            : {
+                status: outcome === "cancelled" ? ("cancelled" as const) : ("completed" as const),
+                failure: null,
+              }),
+          threadDisposition: "reusable",
+        };
+        if (outcome === "unknown") {
+          yield* captured.commitCloudTask!({ ...savedTask!, summary: "Last observed summary" });
+          yield* fake.publish(terminal);
+        } else {
+          yield* fake.finish(false, outcome);
+        }
         yield* Deferred.await(delivered);
+        yield* worker.drain();
         const finished = yield* orchestrator.getThreadProjection(childId);
-        assert.equal(finished.runs[0]?.status, outcome === "cancelled" ? "cancelled" : "completed");
+        assert.equal(
+          finished.runs[0]?.status,
+          outcome === "unknown" ? "failed" : outcome === "cancelled" ? "cancelled" : "completed",
+        );
         assert.equal(finished.providerThreads[0]?.cloudTask?.status, outcome);
         assert.equal(
           finished.messages.filter(
@@ -518,24 +593,81 @@ it.effect.each(["succeeded", "cancelled"] as const)(
           ).length,
           1,
         );
+        const resultBefore = finished.messages.find(
+          (message) => message.id === `message:cloud-result:${childRun.id}`,
+        )!;
+        assert.isFalse(resultBefore.streaming);
+        assert.isTrue(
+          resultBefore.text.includes(
+            outcome === "unknown" ? "Last observed summary" : "Completed fake task",
+          ),
+        );
+        const metadata = {
+          url: "https://example.com/tasks/refreshed",
+          title: "Late title",
+          progress: "Blocked after end_turn",
+        };
+        // This callback must wait for real ingestion cleanup, including the final full-thread write.
+        yield* captured.commitCloudTaskMetadata!("native-session-1", metadata);
+        const refreshed = yield* orchestrator.getThreadProjection(childId);
+        const beforeProvider = finished.providerThreads[0]!;
+        const afterProvider = refreshed.providerThreads[0]!;
+        const { updatedAt: _beforeAt, ...beforeTask } = beforeProvider.cloudTask!;
+        const { updatedAt: _afterAt, ...afterTask } = afterProvider.cloudTask!;
+        assert.deepEqual(afterTask, { ...beforeTask, ...metadata });
+        assert.equal(afterProvider.status, beforeProvider.status);
+        assert.deepEqual(refreshed.runs, finished.runs);
+        assert.deepEqual(refreshed.attempts, finished.attempts);
+        assert.deepEqual(refreshed.nodes, finished.nodes);
+        assert.deepEqual(refreshed.messages, finished.messages);
+        assert.equal(refreshed.thread.settledAt, finished.thread.settledAt);
+        const sequence = yield* sink.latestSequence();
+        yield* captured.commitCloudTaskMetadata!("native-session-1", metadata);
+        yield* captured.commitCloudTaskMetadata!("foreign-session", { title: "Foreign title" });
+        assert.equal(yield* sink.latestSequence(), sequence);
+
+        // Observe the manager pump's duplicate terminal, after the original run subscriber closed.
+        const session = Option.getOrThrow(
+          yield* (yield* ProviderSessions.ProviderSessionManagerV2).get(
+            afterProvider.providerSessionId!,
+          ),
+        );
+        const duplicateSubscription = yield* session.subscribeEvents!;
+        const duplicateSeen = yield* duplicateSubscription.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* fake.publish(terminal);
+        yield* Fiber.join(duplicateSeen);
+        yield* duplicateSubscription.close;
+        yield* worker.drain();
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(childId)).messages,
+          finished.messages,
+        );
+        assert.equal(offers.length, 1);
         const delivery = offers[0]!.delegatedCompletion!;
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make("command:deliver-cloud-result"),
-          threadId: parentId,
-          messageId: delivery.messageId,
-          text: "The delegated cloud task has returned its result.",
-          attachments: [],
-          dispatchMode: { type: "queue_after_active" },
-          createdBy: "agent",
-          creationSource: "server",
-          delegatedCompletion: {
-            parentRunId: delivery.parentRunId,
-            generation: delivery.generation,
-            taskIds: [taskId],
-          },
-        });
-        yield* orchestrator.recoverDelegatedTasks;
+        if (outcome !== "unknown") {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("command:deliver-cloud-result"),
+            threadId: parentId,
+            messageId: delivery.messageId,
+            text: "The delegated cloud task has returned its result.",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+            delegatedCompletion: {
+              parentRunId: delivery.parentRunId,
+              generation: delivery.generation,
+              taskIds: [taskId],
+            },
+          });
+        }
+        if (outcome !== "unknown") yield* orchestrator.recoverDelegatedTasks;
         assert.equal(offers.length, 1);
         const parent = yield* orchestrator.getThreadProjection(parentId);
         assert.equal(parent.subagents[0]?.completionDelivery?.state, "claimed");
@@ -545,9 +677,103 @@ it.effect.each(["succeeded", "cancelled"] as const)(
         );
         assert.equal(
           parent.messages.filter((message) => message.delegatedCompletion !== undefined).length,
-          1,
+          outcome === "unknown" ? 0 : 1,
         );
         assert.equal(yield* Ref.get(fake.submissions), 1);
+        const mcpServer = yield* McpServer.McpServer;
+        const invoke = (name: string, arguments_: Record<string, unknown>) =>
+          mcpServer
+            .callTool({ name, arguments: arguments_ })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+              Effect.provideService(McpSchema.McpServerClient, cloudMcpClient),
+            );
+        const statusResult = yield* invoke("goat_thread_status", { threadId: childId });
+        assert.isFalse(statusResult.isError === true, JSON.stringify(statusResult.content));
+        const statusView = yield* decodeThreadStatus(statusResult.structuredContent);
+        const readResult = yield* invoke("goat_thread_read", { threadId: childId });
+        assert.isFalse(readResult.isError === true, JSON.stringify(readResult.content));
+        const readView = yield* decodeThreadRead(readResult.structuredContent);
+        const taskResult = yield* invoke("task_status", { taskId });
+        assert.isFalse(taskResult.isError === true, JSON.stringify(taskResult.content));
+        const taskView = yield* decodeTaskStatus(taskResult.structuredContent);
+        for (const view of [statusView, readView, taskView]) {
+          assert.equal(view.cloudTask?.url, metadata.url);
+          assert.equal(view.cloudTask?.progress, metadata.progress);
+          assert.equal(view.cloudTask?.status, outcome);
+        }
+        assert.isTrue(statusView.terminal);
+        assert.equal(offers.length, 1);
+        if (outcome !== "unknown") {
+          // Hold the old observer's callback while a real follow-up claims the same native session.
+          const staleReady = yield* Deferred.make<void>();
+          const staleRelease = yield* Deferred.make<void>();
+          const stale = yield* Deferred.succeed(staleReady, undefined).pipe(
+            Effect.andThen(Deferred.await(staleRelease)),
+            Effect.andThen(
+              captured.commitCloudTaskMetadata!("native-session-1", {
+                title: "Old observer",
+                progress: "Stale activity",
+              }),
+            ),
+            Effect.forkChild,
+          );
+          yield* Deferred.await(staleReady);
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("command:metadata-followup"),
+            threadId: childId,
+            messageId: MessageId.make("message:metadata-followup"),
+            text: "Follow up in the same session",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          const successorInput = (yield* Ref.get(fake.current))!;
+          const successorAccepted = yield* sink
+            .stream({ threadId: childId, eventType: "provider-turn.updated" })
+            .pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "provider-turn.updated" &&
+                  stored.event.payload.runAttemptId === successorInput.attemptId,
+              ),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkChild,
+            );
+          yield* Fiber.join(successorAccepted);
+          assert.notEqual(successorInput.runId, captured.runId);
+          const successor = yield* orchestrator.getThreadProjection(childId);
+          assert.equal(successor.providerThreads[0]!.nativeThreadRef?.nativeId, "native-session-1");
+          assert.equal(successor.providerThreads[0]!.cloudTask?.status, "running");
+          const successorSequence = yield* sink.latestSequence();
+          yield* Deferred.succeed(staleRelease, undefined);
+          yield* Fiber.join(stale);
+          assert.equal(yield* sink.latestSequence(), successorSequence);
+          assert.deepEqual(yield* orchestrator.getThreadProjection(childId), successor);
+          // Settle the successor before proving runtime disposal never reopens either run.
+          yield* fake.finish();
+          yield* successorInput.commitCloudTaskMetadata!("native-session-1", {});
+          yield* worker.drain();
+        }
+        const beforeDisposal = yield* orchestrator.getThreadProjection(childId);
+        // Runtime disposal interrupts the attached observer without a remote cancel or new terminal.
+        yield* Deferred.await(observerReady);
+        yield* (yield* ProviderSessions.ProviderSessionManagerV2).close(
+          afterProvider.providerSessionId!,
+        );
+        yield* Deferred.await(observerClosed);
+        yield* Deferred.succeed(observerRelease, undefined);
+        assert.equal(yield* Ref.get(lateCallbacks), 0);
+        assert.equal(yield* Ref.get(fake.cancellations), 1);
+        assert.equal(yield* Ref.get(fake.detaches), 1);
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(childId)).runs,
+          beforeDisposal.runs,
+        );
       }).pipe(Effect.provide(mcp));
     }).pipe(Effect.scoped),
 );
