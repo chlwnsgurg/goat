@@ -2,12 +2,14 @@
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
-import * as Equal from "effect/Equal";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
+import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
@@ -42,6 +44,26 @@ type SummaryCommit = {
 export class MemoryService extends Context.Service<
   MemoryService,
   {
+    readonly getProjectBinding: (
+      input: M.MemoryProjectBindingGetInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemoryProjectBinding, MemoryServiceError>;
+    readonly updateProjectBinding: (
+      input: M.MemoryProjectBindingUpdateInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemoryProjectBindingUpdateResult, MemoryServiceError>;
+    readonly resolveProjectKey: (
+      space: M.MemorySpaceId,
+      project: M.ScopedProjectRef,
+    ) => Effect.Effect<M.MemoryProjectKey | null, MemoryServiceError>;
+    readonly changes: (
+      input: M.MemoryChangesInput,
+      permit: Permit,
+    ) => Effect.Effect<
+      Stream.Stream<M.MemoryChangeSignal, MemoryServiceError>,
+      MemoryServiceError,
+      Scope.Scope
+    >;
     readonly upsert: (
       input: M.MemoryUpsertInput,
       permit: Permit,
@@ -102,7 +124,18 @@ export class MemoryService extends Context.Service<
     ) => Effect.Effect<M.MemoryContextCandidates, MemoryServiceError>;
   }
 >()("goat/memory/MemoryService") {}
+const encodeSelection = Schema.encodeSync(Schema.fromJsonString(M.MemoryModelSelection));
+const encodeHeads = Schema.encodeSync(Schema.fromJsonString(Schema.Array(M.MemoryRevisionId)));
+const encodeProjectKey = Schema.encodeSync(
+  Schema.fromJsonString(Schema.NullOr(M.MemoryProjectKey)),
+);
 const strict = { onExcessProperty: "error" } as const;
+const decodeBindingGet = Schema.decodeUnknownEffect(M.MemoryProjectBindingGetInput);
+const decodeBindingUpdate = Schema.decodeUnknownEffect(M.MemoryProjectBindingUpdateInput);
+const encodeBindingUpdate = Schema.encodeSync(
+  Schema.fromJsonString(M.MemoryProjectBindingUpdateInput),
+);
+const decodeChanges = Schema.decodeUnknownEffect(M.MemoryChangesInput);
 const decodeUpsert = Schema.decodeUnknownEffect(M.MemoryUpsertInput);
 const decodeForget = Schema.decodeUnknownEffect(M.MemoryForgetInput);
 const decodeRevert = Schema.decodeUnknownEffect(M.MemoryRevertResolutionInput);
@@ -125,6 +158,7 @@ export const memoryStableUuid = (text: string) => {
 };
 const decode = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(invalid));
 const make = Effect.gen(function* () {
+  const repositoryResolver = yield* RepositoryResolver.RepositoryIdentityResolver;
   const store = yield* Store.MemoryStore;
   const quota = yield* Quota.MemoryQuotaService;
   const identity = yield* Environment.ServerEnvironmentIdentity;
@@ -134,6 +168,126 @@ const make = Effect.gen(function* () {
     effect.pipe(
       Effect.mapError((cause) => new Store.MemoryStorageError({ stage: "service-read", cause })),
     );
+  const projectRoot = Effect.fn("MemoryService.projectRoot")(function* (
+    project: M.ScopedProjectRef,
+  ) {
+    if (project.environmentId !== environmentId)
+      return yield* new MemoryAccessError({ code: "identity_mismatch" });
+    const rows = yield* query(
+      sql<{
+        workspace_root: string;
+      }>`SELECT workspace_root FROM projection_projects WHERE project_id=${project.projectId} AND deleted_at IS NULL`,
+    );
+    if (!rows[0]) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
+    return rows[0].workspace_root;
+  });
+  const getProjectBinding = Effect.fn("MemoryService.getProjectBinding")(function* (
+    input: M.MemoryProjectBindingGetInput,
+    permit: Permit,
+  ) {
+    const value = yield* decode(decodeBindingGet(input, strict));
+    yield* permit;
+    const root = yield* projectRoot(value.project);
+    const observed = yield* repositoryResolver.resolve(root);
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        yield* projectRoot(value.project);
+        const old = yield* store.getProjectBinding(value.memorySpaceId, value.project);
+        if (old?.repositoryKey || !observed)
+          return old ?? { ...value, projectKey: null, repositoryKey: null, version: 0 };
+        const repositoryKey = {
+          kind: "repository" as const,
+          groupingKey: M.repositoryGroupingKeyOf(observed),
+        };
+        const binding = {
+          ...value,
+          repositoryKey,
+          projectKey: old?.projectKey?.kind === "explicit" ? old.projectKey : repositoryKey,
+          version: old?.version ?? 0,
+        };
+        yield* store.putProjectBinding(
+          binding,
+          old?.version ?? null,
+          yield* Clock.currentTimeMillis,
+        );
+        return binding;
+      }),
+    );
+  });
+  const updateProjectBinding = Effect.fn("MemoryService.updateProjectBinding")(function* (
+    input: M.MemoryProjectBindingUpdateInput,
+    permit: Permit,
+  ) {
+    const value = yield* decode(decodeBindingUpdate(input, strict));
+    yield* getProjectBinding(
+      { memorySpaceId: value.memorySpaceId, project: value.project },
+      permit,
+    );
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        yield* projectRoot(value.project);
+        const id = `binding:${value.memorySpaceId}:${value.requestId}`;
+        const digest = hash(encodeBindingUpdate(value));
+        const replay = yield* store.readWork(id);
+        if (replay) {
+          if (replay.metadata.kind !== "binding" || replay.metadata.requestDigest !== digest)
+            return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+          return replay.metadata.result;
+        }
+        const old = (yield* store.getProjectBinding(value.memorySpaceId, value.project)) ?? {
+          memorySpaceId: value.memorySpaceId,
+          project: value.project,
+          repositoryKey: null,
+          projectKey: null,
+          version: 0,
+        };
+        if (old.version !== value.expectedVersion)
+          return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+        const projectKey =
+          value.action === "setExplicit"
+            ? { kind: "explicit" as const, sharedProjectId: value.sharedProjectId }
+            : old.repositoryKey;
+        const changed = encodeProjectKey(projectKey) !== encodeProjectKey(old.projectKey);
+        const binding = { ...old, projectKey, version: old.version + Number(changed) };
+        if (changed)
+          yield* store.putProjectBinding(
+            binding,
+            (yield* store.getProjectBinding(value.memorySpaceId, value.project))?.version ?? null,
+            yield* Clock.currentTimeMillis,
+          );
+        const result = { binding, requestId: value.requestId };
+        yield* store.enqueueWork({
+          id,
+          space: value.memorySpaceId,
+          memoryId: null,
+          kind: "admin",
+          status: "completed",
+          metadata: { kind: "binding", requestDigest: digest, result },
+          payloadRef: null,
+          attempt: 0,
+          nextAttemptAt: 0,
+          claimedBy: null,
+          claimedUntil: null,
+        });
+        return result;
+      }),
+    );
+  });
+  const resolveProjectKey = (space: M.MemorySpaceId, project: M.ScopedProjectRef) =>
+    getProjectBinding({ memorySpaceId: space, project }, Effect.void).pipe(
+      Effect.map((binding) => binding.projectKey),
+    );
+  const changes = Effect.fn("MemoryService.changes")(function* (
+    input: M.MemoryChangesInput,
+    permit: Permit,
+  ) {
+    const value = yield* decode(decodeChanges(input, strict));
+    yield* permit;
+    const stream = yield* store.changes(value.memorySpaceId);
+    return stream.pipe(Stream.tap(() => permit));
+  });
   const requireScope = (scope: M.MemoryScope) =>
     scope.kind === "thread" && scope.thread.environmentId !== environmentId
       ? Effect.fail(new MemoryAccessError({ code: "identity_mismatch" }))
@@ -176,7 +330,7 @@ const make = Effect.gen(function* () {
           if (admission.kind !== "approvedReplica" && current.pendingForget && op.kind !== "forget")
             return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
           if (op.kind !== "forget") {
-            yield* requireScope(op.revision.scope);
+            if (admission.kind !== "approvedReplica") yield* requireScope(op.revision.scope);
             const ancestry = yield* store.readAncestry(
               op.memorySpaceId,
               op.memoryId,
@@ -254,7 +408,7 @@ const make = Effect.gen(function* () {
             old &&
             (old.kind !== "forget" ||
               old.memoryId !== value.memoryId ||
-              !Equal.equals(old.expectedHeads, value.expectedHeads))
+              encodeHeads(old.expectedHeads) !== encodeHeads(value.expectedHeads))
           )
             return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
           if (current.tombstone && !old)
@@ -657,7 +811,8 @@ const make = Effect.gen(function* () {
     if (
       generated.execution.environmentId !== environmentId ||
       generated.execution.providerInstanceId !== meta.modelSelection.instanceId ||
-      !Equal.equals(generated.execution.requestedModelSelection, meta.modelSelection)
+      encodeSelection(generated.execution.requestedModelSelection) !==
+        encodeSelection(meta.modelSelection)
     )
       return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
     if (!M.validateMemoryGenerationResult(input.input, generated.result)) return yield* invalid();
@@ -683,7 +838,7 @@ const make = Effect.gen(function* () {
         );
         if (current.tombstone || current.pendingForget)
           return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
-        if (!Equal.equals(current.heads, input.expectedHeads))
+        if (encodeHeads(current.heads) !== encodeHeads(input.expectedHeads))
           return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
         const execution = generated.execution;
         const receipt = yield* apply(
@@ -805,6 +960,10 @@ const make = Effect.gen(function* () {
     );
   });
   return MemoryService.of({
+    getProjectBinding,
+    updateProjectBinding,
+    resolveProjectKey,
+    changes,
     upsert,
     forget,
     revertResolution,

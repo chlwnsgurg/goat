@@ -615,6 +615,9 @@ export class MemoryStore extends Context.Service<
     readonly putLocalIntent: (
       input: LocalMemoryIntent,
     ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    readonly refreshLocalSummaryIntent: (
+      intent: LocalMemoryIntent,
+    ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
     readonly materializeLocalIntent: (input: {
       readonly environmentId: M.EnvironmentId;
       readonly intentId: string;
@@ -981,7 +984,15 @@ const make = Effect.gen(function* () {
               ),
             )
         : yield* stored("item-codec", decodeItem(projection, strict));
-    return { item, heads: yield* headsCodec.decode(row.heads_json), generation: row.generation };
+    const unsent = yield* stored(
+      "pending-sync-read",
+      sql`SELECT 1 FROM memory_outbox WHERE space=${space} AND memory_id=${id} AND kind IN ('sync','revert_intent') AND status IN ('pending','retry','running') LIMIT 1`,
+    );
+    return {
+      item: { ...item, pendingSync: unsent.length > 0 },
+      heads: yield* headsCodec.decode(row.heads_json),
+      generation: row.generation,
+    };
   });
   const loadAggregate = Effect.fn("MemoryStore.loadAggregate")(function* (
     space: M.MemorySpaceId,
@@ -1195,7 +1206,23 @@ const make = Effect.gen(function* () {
             },
           ]
         : held.localAvailability.deferred;
-    const deferred = scannerDeferred.map((d) => ({
+    const indexDeferred =
+      heads.length === 1 &&
+      held.status !== "forgotten" &&
+      !scannerDeferred.some((d) => d.kind === "index")
+        ? [
+            ...scannerDeferred,
+            {
+              kind: "index" as const,
+              state: "pending" as const,
+              reason: "index_unavailable" as const,
+              revisionId: heads[0]!,
+              generation,
+              sinceAtUtc: DateTime.formatIso(DateTime.makeUnsafe(0)),
+            },
+          ]
+        : scannerDeferred;
+    const deferred = indexDeferred.map((d) => ({
       ...d,
       generation,
       attempt: 0,
@@ -1819,7 +1846,7 @@ const make = Effect.gen(function* () {
   const dueWork = Effect.fn("MemoryStore.dueWork")(function* (now: number, limit: number) {
     const rows = yield* stored(
       "due-work",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE kind NOT IN ('sync','claim','resolve','revert_intent') AND (status IN ('pending','retry') OR (status='running' AND claimed_until<=${now})) AND next_attempt_at<=${now} ORDER BY next_attempt_at,attempt,id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE kind IN ('summary','consolidate','rebuild') AND (status IN ('pending','retry') OR (status='running' AND claimed_until<=${now})) AND next_attempt_at<=${now} ORDER BY next_attempt_at,attempt,id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
     );
     return yield* workRows(rows);
   });
@@ -3126,6 +3153,57 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const refreshLocalSummaryIntent = Effect.fn("MemoryStore.refreshLocalSummaryIntent")(function* (
+    input: LocalMemoryIntent,
+  ) {
+    yield* transact(
+      Effect.gen(function* () {
+        const intent = yield* stored("summary-local-codec", decodeLocalIntent(input, strict));
+        const source = intent.provenance.sourceThread;
+        const watermark = intent.provenance.sourceWatermark;
+        if (
+          !source ||
+          !watermark ||
+          source.environmentId !== intent.environmentId ||
+          intent.scope.kind !== "thread" ||
+          (yield* threadCodec.encode(source)) !== (yield* threadCodec.encode(intent.scope.thread))
+        )
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const id = `local:${intent.environmentId}:${intent.intentId}`;
+        const rows = yield* stored(
+          "summary-local-read",
+          sql<{
+            metadata_json: string;
+            status: string;
+          }>`SELECT metadata_json,status FROM memory_outbox WHERE id=${id}`,
+        );
+        if (!rows[0]) return yield* putLocalIntent(intent);
+        const previous = yield* localMetadataCodec.decode(rows[0].metadata_json, strict);
+        if (rows[0].status === "cancelled")
+          return yield* new MemoryStoreConflict({ code: "forgotten" });
+        if (
+          previous.mapping ||
+          previous.memoryId !== intent.memoryId ||
+          !previous.provenance.sourceThread ||
+          (yield* threadCodec.encode(previous.provenance.sourceThread)) !==
+            (yield* threadCodec.encode(source))
+        )
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        if (
+          (previous.provenance.sourceWatermark?.throughSequence ?? 0) >= watermark.throughSequence
+        )
+          return;
+        yield* stored(
+          "summary-local-payload",
+          sql`UPDATE memory_payloads SET body_json=${yield* payloadCodec.encode(intent.payload)},dependencies_json=${yield* headsCodec.encode(intent.payload.derivedFromMemoryRevisions)} WHERE space=${`_local:${intent.environmentId}`} AND payload_ref=${intent.intentId}`,
+        );
+        yield* stored(
+          "summary-local-metadata",
+          sql`UPDATE memory_outbox SET metadata_json=${yield* localMetadataCodec.encode({ kind: "localIntent", intentId: intent.intentId, environmentId: intent.environmentId, memoryId: intent.memoryId, scope: intent.scope, provenance: intent.provenance, assertionKind: intent.assertionKind, createdAtUtc: intent.createdAtUtc, mapping: null })} WHERE id=${id}`,
+        );
+      }),
+    );
+  });
   const materializeLocalIntent = Effect.fn("MemoryStore.materializeLocalIntent")(function* (input: {
     environmentId: M.EnvironmentId;
     intentId: string;
@@ -3724,6 +3802,7 @@ const make = Effect.gen(function* () {
     samples,
     putLocalIntent,
     materializeLocalIntent,
+    refreshLocalSummaryIntent,
     installCheckpointPage,
     completeCheckpoint,
     readDueClaimCandidates,

@@ -1,9 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -17,6 +19,11 @@ const database = Layer.effectDiscard(migration).pipe(
 );
 const store = Store.layer.pipe(Layer.provideMerge(database));
 const live = Service.layer.pipe(
+  Layer.provide(
+    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+      resolve: () => Effect.succeed(null),
+    }),
+  ),
   Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
   Layer.provide(
     Layer.succeed(Environment.ServerEnvironmentIdentity, {
@@ -220,6 +227,62 @@ describe("MemoryService", () => {
         .pipe(Effect.flip);
       assert.isUndefined(yield* store.receipt(space, input().operationId));
       assert.deepStrictEqual(yield* store.readEligibleOutbox(space, 0, 100), []);
+    }).pipe(Effect.provide(live)),
+  );
+});
+
+describe("memory project bindings", () => {
+  const project = { environmentId, projectId: M.ProjectId.make("project") };
+  const seedProject = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE projection_projects (project_id TEXT PRIMARY KEY,workspace_root TEXT,deleted_at TEXT)`;
+    yield* sql`INSERT INTO projection_projects VALUES ('project','/synthetic',NULL)`;
+  });
+  it.effect("persists explicit binding and replays without version inflation", () =>
+    Effect.gen(function* () {
+      yield* seedProject;
+      const service = yield* Service.MemoryService;
+      const request = {
+        memorySpaceId: space,
+        project,
+        requestId: M.MemoryOperationId.make(id(70)),
+        expectedVersion: 0,
+        action: "setExplicit" as const,
+        sharedProjectId: "shared",
+      };
+      const result = yield* service.updateProjectBinding(request, Effect.void);
+      assert.strictEqual(result.binding.version, 1);
+      assert.deepStrictEqual(yield* service.updateProjectBinding(request, Effect.void), result);
+      assert.deepStrictEqual(yield* service.resolveProjectKey(space, project), {
+        kind: "explicit",
+        sharedProjectId: "shared",
+      });
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("unbound projects resolve to no project key", () =>
+    Effect.gen(function* () {
+      yield* seedProject;
+      const service = yield* Service.MemoryService;
+      assert.isNull(yield* service.resolveProjectKey(space, project));
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("stale version and revoked permit commit no binding", () =>
+    Effect.gen(function* () {
+      yield* seedProject;
+      const service = yield* Service.MemoryService;
+      const request = {
+        memorySpaceId: space,
+        project,
+        requestId: M.MemoryOperationId.make(id(71)),
+        expectedVersion: 1,
+        action: "setExplicit" as const,
+        sharedProjectId: "shared",
+      };
+      yield* service.updateProjectBinding(request, Effect.void).pipe(Effect.flip);
+      yield* service
+        .updateProjectBinding({ ...request, expectedVersion: 0 }, denied)
+        .pipe(Effect.flip);
+      assert.isNull(yield* service.resolveProjectKey(space, project));
     }).pipe(Effect.provide(live)),
   );
 });

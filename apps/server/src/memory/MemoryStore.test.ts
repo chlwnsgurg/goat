@@ -1276,3 +1276,90 @@ describe("generation failure ownership", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+describe("unbound summary replacement", () => {
+  const draft = (watermark: number): Store.LocalMemoryIntent => ({
+    intentId: "summary-draft",
+    environmentId: env,
+    memoryId: memory,
+    scope: { kind: "thread", thread: { environmentId: env, threadId: M.ThreadId.make("thread") } },
+    assertionKind: "inference",
+    createdAtUtc: now,
+    provenance: {
+      environmentId: env,
+      sourceThread: { environmentId: env, threadId: M.ThreadId.make("thread") },
+      sourceWatermark: {
+        fromEventId: M.EventId.make("first"),
+        toEventId: M.EventId.make("last"),
+        throughSequence: watermark,
+      },
+    },
+    payload: {
+      text: `synthetic summary ${watermark}`,
+      evidence: [],
+      derivedFromMemoryRevisions: [],
+    },
+  });
+  it.effect("replaces only with a newer committed watermark", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.refreshLocalSummaryIntent(draft(1));
+      yield* store.refreshLocalSummaryIntent(draft(2));
+      yield* store.refreshLocalSummaryIntent(draft(1));
+      const work = yield* store.readWork("local:fixture:summary-draft");
+      assert.strictEqual(work?.metadata.kind, "localIntent");
+      if (work?.metadata.kind === "localIntent")
+        assert.strictEqual(work.metadata.provenance.sourceWatermark?.throughSequence, 2);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("cannot resurrect a forgotten local draft", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.refreshLocalSummaryIntent(draft(1));
+      yield* store.forgetLocalIntent(env, "summary-draft");
+      const result = yield* store.refreshLocalSummaryIntent(draft(2)).pipe(Effect.flip);
+      assert.strictEqual(result._tag, "MemoryStoreConflict");
+      if (result._tag === "MemoryStoreConflict") assert.strictEqual(result.code, "forgotten");
+    }).pipe(Effect.provide(live)),
+  );
+});
+
+describe("derived work integration", () => {
+  it.effect("active writes durably schedule a generation-fenced index repair", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(decision());
+      const rows = yield* store.readDeferred(0, 100);
+      assert.isTrue(
+        rows.some((r) => r.kind === "index" && r.memoryId === memory && r.generation === 1),
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("local draft admin rows cannot starve generic work", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.enqueueWork({ ...backgroundWork("a-admin"), kind: "admin" });
+      yield* store.enqueueWork(backgroundWork("z-index"));
+      assert.deepStrictEqual(
+        (yield* store.dueWork(0, 1)).map((w) => w.id),
+        ["z-index"],
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("pending sync clears after durable acknowledgement", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const op = operation();
+      yield* store.apply(decision(op));
+      assert.isTrue((yield* store.loadAggregate(space, memory)).item!.pendingSync);
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, {
+        operationId: op.operationId,
+        memoryId: memory,
+        operationDigest: hash,
+        hubSequence: 1,
+        outcome: "accepted",
+      });
+      assert.isFalse((yield* store.loadAggregate(space, memory)).item!.pendingSync);
+    }).pipe(Effect.provide(live)),
+  );
+});
