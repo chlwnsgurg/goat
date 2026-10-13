@@ -1,3 +1,4 @@
+import { PendingUserInputBody } from "./PendingUserInputBody";
 import { RequestActionButton } from "./RequestActionButton";
 import { QuestionAttachments } from "./QuestionAttachments";
 import type { RuntimeRequestId } from "@goat/contracts";
@@ -20,12 +21,7 @@ import { USER_INPUT_TOGGLE_DURATION_MS } from "./pendingUserInputLayout";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { ControlPill } from "../../components/ControlPill";
-import { cn } from "../../lib/cn";
-import {
-  isPendingUserInputOptionSelected,
-  type PendingUserInput,
-  type PendingUserInputDraftAnswer,
-} from "../../lib/threadActivity";
+import { type PendingUserInput, type PendingUserInputDraftAnswer } from "../../lib/threadActivity";
 
 export interface PendingUserInputCardProps {
   readonly canOperateThread: boolean;
@@ -266,81 +262,25 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
         showsVerticalScrollIndicator
         style={{ flexShrink: 1 }}
       >
-        {!canRespond ? (
-          <Text className="font-sans text-sm leading-5 text-foreground-muted">
-            The provider process for this request is no longer available. Interrupt or restart the
-            run to continue.
-          </Text>
-        ) : null}
-        {props.pendingUserInput.questions.map((question) => {
-          const draft = props.drafts[question.id];
-          return (
-            <View key={question.id} className="gap-2 pt-1">
-              <Text className="font-goat-bold text-xs uppercase tracking-[1px] text-foreground-muted">
-                {question.header}
-              </Text>
-              <Text className="font-sans text-base leading-snug text-foreground">
-                {question.question}
-              </Text>
-              <View className="gap-2">
-                {question.options.map((option) => {
-                  const optionValue = option.value ?? option.label.trim();
-                  const selected = isPendingUserInputOptionSelected(question, draft, optionValue);
-                  const description =
-                    option.description !== option.label ? option.description : undefined;
-                  return (
-                    <Pressable
-                      key={optionValue}
-                      accessibilityRole={question.multiSelect ? "checkbox" : "radio"}
-                      accessibilityState={{ checked: selected, disabled: responseDisabled }}
-                      disabled={responseDisabled}
-                      className={cn(
-                        "min-h-12 w-full rounded-2xl border px-3.5 py-3",
-                        selected ? "border-primary bg-primary/10" : "border-border bg-input",
-                      )}
-                      onPress={() =>
-                        props.onSelectOption(
-                          props.pendingUserInput.requestId,
-                          question,
-                          optionValue,
-                        )
-                      }
-                    >
-                      <View className="min-w-0 flex-1 gap-0.5">
-                        <Text
-                          className={cn(
-                            "font-goat-bold text-sm",
-                            selected ? "text-foreground" : "text-foreground-secondary",
-                          )}
-                        >
-                          {option.label}
-                        </Text>
-                        {description ? (
-                          <Text className="font-sans text-sm leading-5 text-foreground-muted">
-                            {description}
-                          </Text>
-                        ) : null}
-                      </View>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              {question.allowCustomAnswer !== false ? (
-                <QuestionAttachments
-                  requestId={props.pendingUserInput.requestId}
-                  question={question}
-                  questions={props.pendingUserInput.questions}
-                  disabled={responseDisabled}
-                  value={draft?.customAnswer ?? ""}
-                  onChangeText={(value) =>
-                    props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
-                  }
-                  onInputFocusChange={props.onInputFocusChange}
-                />
-              ) : null}
-            </View>
-          );
-        })}
+        <PendingUserInputBody
+          pendingUserInput={props.pendingUserInput}
+          drafts={props.drafts}
+          respondingUserInputId={props.respondingUserInputId}
+          onSelectOption={props.onSelectOption}
+          renderCustomAnswer={(question, draft, disabled) => (
+            <QuestionAttachments
+              requestId={props.pendingUserInput.requestId}
+              question={question}
+              questions={props.pendingUserInput.questions}
+              disabled={disabled}
+              value={draft?.customAnswer ?? ""}
+              onChangeText={(value) =>
+                props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
+              }
+              onInputFocusChange={props.onInputFocusChange}
+            />
+          )}
+        />
       </ScrollView>
       <RequestActionButton
         label="Submit answers"
