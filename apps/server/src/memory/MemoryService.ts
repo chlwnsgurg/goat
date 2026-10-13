@@ -318,40 +318,34 @@ const make = Effect.gen(function* () {
     approval?: M.MemoryHubReceipt,
   ) {
     const digest = yield* Effect.try({ try: () => memoryOperationDigest(op), catch: invalid });
-    return yield* store
-      .transact(
-        Effect.gen(function* () {
-          yield* permit;
-          const old = yield* store.receipt(op.memorySpaceId, op.operationId);
-          if (old) {
-            if (old.operationDigest !== digest)
-              return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
-            return old;
-          }
-          const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
-          if (admission.kind !== "approvedReplica" && current.pendingForget && op.kind !== "forget")
-            return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
-          let ancestry: Store.MemoryAncestry | undefined;
-          if (op.kind !== "forget") {
-            if (admission.kind !== "approvedReplica") yield* requireScope(op.revision.scope);
-            ancestry = yield* store.readAncestry(
-              op.memorySpaceId,
-              op.memoryId,
-              op.revision.parents,
-            );
-            if (ancestry.parents.some((p) => p.status === "crossMemory"))
-              return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
-            if (
-              admission.kind !== "approvedReplica" &&
-              ancestry.parents.some((p) => p.status === "compacted")
-            )
-              return yield* new Store.MemoryStoreConflict({ code: "base_compacted" });
-          }
-          const decision = yield* decide(current, op, admission, approval, ancestry);
-          return yield* quota.commit(decision, environmentId, permit);
-        }),
-      )
-      .pipe(Effect.tap(() => store.wake));
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        const old = yield* store.receipt(op.memorySpaceId, op.operationId);
+        if (old) {
+          if (old.operationDigest !== digest)
+            return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+          return old;
+        }
+        const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
+        if (admission.kind !== "approvedReplica" && current.pendingForget && op.kind !== "forget")
+          return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+        let ancestry: Store.MemoryAncestry | undefined;
+        if (op.kind !== "forget") {
+          if (admission.kind !== "approvedReplica") yield* requireScope(op.revision.scope);
+          ancestry = yield* store.readAncestry(op.memorySpaceId, op.memoryId, op.revision.parents);
+          if (ancestry.parents.some((p) => p.status === "crossMemory"))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          if (
+            admission.kind !== "approvedReplica" &&
+            ancestry.parents.some((p) => p.status === "compacted")
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "base_compacted" });
+        }
+        const decision = yield* decide(current, op, admission, approval, ancestry);
+        return yield* quota.commit(decision, environmentId, permit);
+      }),
+    );
   });
   const upsert = Effect.fn("MemoryService.upsert")(function* (
     input: M.MemoryUpsertInput,
@@ -901,8 +895,7 @@ const make = Effect.gen(function* () {
       work.metadata.sourceThread.environmentId !== environmentId
     )
       return yield* new Store.MemoryStoreConflict({ code: "unsupported_operation" });
-    yield* store.enqueueWork(work);
-    yield* store.wake;
+    yield* store.transact(store.enqueueWork(work));
   });
   const readContextCandidates = Effect.fn("MemoryService.readContextCandidates")(function* (
     input: M.MemoryListInput,

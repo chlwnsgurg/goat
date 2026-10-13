@@ -170,6 +170,20 @@ const work = (kind: Store.MemoryWork["kind"] = "summary"): Store.MemoryWork => (
   },
 });
 describe("MemoryWorker", () => {
+  it.effect("started idle worker drains without waking itself", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const worker = yield* Worker.MemoryWorker;
+        const store = yield* Store.MemoryStore;
+        yield* worker.start();
+        yield* worker.drain;
+        yield* store.loadAggregate(space, memoryId);
+        yield* store.recoverDeferred(1, 0);
+        yield* worker.drain;
+        assert.deepStrictEqual(yield* store.dueWork(0, 100), []);
+      }),
+    ).pipe(Effect.provide(live())),
+  );
   it("stores the bounded retry sequence without sleeping", () => {
     assert.deepStrictEqual(
       [1, 2, 3, 4, 20].map(Worker.memoryRetryDelay),

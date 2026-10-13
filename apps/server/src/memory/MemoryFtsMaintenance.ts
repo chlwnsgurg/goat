@@ -98,7 +98,6 @@ const make = Effect.gen(function* () {
           after.ftsBytes === null || after.ftsBytes >= M.MEMORY_FTS_ALLOCATED_WARNING_BYTES,
       };
       yield* store.putFtsState(state);
-      if (canResume) yield* store.wake;
     }
     yield* quota.recordStorageSample(environmentId);
     return admissionStatus(state);

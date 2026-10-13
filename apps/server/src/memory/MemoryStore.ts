@@ -386,7 +386,7 @@ export type MemoryIndexTarget = {
 
 class Transaction extends Context.Service<
   Transaction,
-  { readonly signals: M.MemoryChangeSignal[] }
+  { readonly signals: M.MemoryChangeSignal[]; runnable: boolean }
 >()("goat/memory/MemoryStore/Transaction") {}
 
 export class MemoryStore extends Context.Service<
@@ -831,7 +831,7 @@ const make = Effect.gen(function* () {
       return yield* lane.withPermit(
         Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
-            const journal = { signals: [] as M.MemoryChangeSignal[] };
+            const journal = { signals: [] as M.MemoryChangeSignal[], runnable: false };
             const result = yield* sql
               .withTransaction(restore(effect).pipe(Effect.provideService(Transaction, journal)))
               .pipe(
@@ -845,7 +845,7 @@ const make = Effect.gen(function* () {
               yield* PubSub.shutdown(signals);
               signals = yield* PubSub.dropping<M.MemoryChangeSignal>(256);
             }
-            yield* wake;
+            if (journal.runnable) yield* wake;
             return result;
           }),
         ),
@@ -1171,6 +1171,11 @@ const make = Effect.gen(function* () {
     if (Option.isNone(tx)) return yield* Effect.die("Memory write requires transaction ownership");
     tx.value.signals.push(signal);
   });
+  const markRunnable = Effect.gen(function* () {
+    const tx = yield* Effect.serviceOption(Transaction);
+    if (Option.isSome(tx)) tx.value.runnable = true;
+    else yield* wake;
+  });
   const putItem = Effect.fnUntraced(function* (
     item: M.MemoryItem,
     heads: ReadonlyArray<M.MemoryRevisionId>,
@@ -1249,13 +1254,15 @@ const make = Effect.gen(function* () {
       VALUES (${held.memorySpaceId},${held.memoryId},${yield* scopeCodec.encode(scope)},${scopeKey(scope)},${yield* headsCodec.encode(heads)},${held.status},${held.status === "active" ? held.revision.payloadRef : null},${watermark},${yield* projectionCodec.encode(safeProjection)},${yield* availabilityCodec.encode(held.localAvailability)},${generation},${yield* deferredCodec.encode(deferred)},${held.localAvailability.cleanupPending ? 1 : 0})
       ON CONFLICT(space,memory_id) DO UPDATE SET scope_json=excluded.scope_json,scope_key=excluded.scope_key,heads_json=excluded.heads_json,status=excluded.status,payload_ref=excluded.payload_ref,projection_watermark=excluded.projection_watermark,item_json=excluded.item_json,availability_json=excluded.availability_json,generation=excluded.generation,deferred_json=excluded.deferred_json,cleanup_pending=excluded.cleanup_pending,index_state='pending'`,
     );
+    if (deferred.some((d) => d.state === "pending")) yield* markRunnable;
   });
   const enqueueWork = Effect.fn("MemoryStore.enqueueWork")(function* (input: MemoryWork) {
     const work = yield* stored("work-codec", decodeWork(input, strict));
-    yield* stored(
+    const inserted = yield* stored(
       "outbox",
-      sql`INSERT INTO memory_outbox (id,space,memory_id,kind,status,metadata_json,payload_ref,attempt,next_attempt_at,claimed_by,claimed_until) VALUES (${work.id},${work.space},${work.memoryId},${work.kind},${work.status},${yield* workMetadataCodec.encode(work.metadata)},${work.payloadRef},${work.attempt},${work.nextAttemptAt},${work.claimedBy},${work.claimedUntil}) ON CONFLICT(id) DO NOTHING`,
+      sql`INSERT INTO memory_outbox (id,space,memory_id,kind,status,metadata_json,payload_ref,attempt,next_attempt_at,claimed_by,claimed_until) VALUES (${work.id},${work.space},${work.memoryId},${work.kind},${work.status},${yield* workMetadataCodec.encode(work.metadata)},${work.payloadRef},${work.attempt},${work.nextAttemptAt},${work.claimedBy},${work.claimedUntil}) ON CONFLICT(id) DO NOTHING RETURNING id`,
     );
+    if (inserted.length && ["pending", "retry"].includes(work.status)) yield* markRunnable;
   });
   const purge = Effect.fnUntraced(function* (
     space: M.MemorySpaceId,
