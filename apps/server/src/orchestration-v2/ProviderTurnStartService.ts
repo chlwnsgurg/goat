@@ -44,7 +44,7 @@ import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapters from "./ProviderAdapterRegistry.ts";
 import * as CloudSource from "./CloudTaskSourceService.ts";
-import { isCloudExecution } from "@goat/provider-core/server/cloudTask";
+import { cloudTaskResultText, isCloudExecution } from "@goat/provider-core/server/cloudTask";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@goat/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -1471,7 +1471,7 @@ export const layer: Layer.Layer<
                   providerThreadId: thread.id,
                   providerTurnId:
                     latestProviderTurnForAttempt(current.providerTurns, attempt.id)?.id ?? null,
-                  text: `${reason}${thread.cloudTask.url ? `\nTask: ${thread.cloudTask.url}` : ""}`,
+                  text: cloudTaskResultText({ ...updated.cloudTask, summary: reason }),
                   completedAt: now,
                   allocateEventId,
                 });
