@@ -43,6 +43,8 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ProviderAdapters from "./ProviderAdapterRegistry.ts";
+import { isCloudExecution } from "@goat/provider-core/server/cloudTask";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -112,7 +114,7 @@ export interface ThreadLaunchInput {
 /** What workspace preparation reads from a launch; a retry rebuilds it from the run. */
 type PreparationInput = Pick<
   ThreadLaunchInput,
-  "commandId" | "projectId" | "workspaceStrategy" | "initialMessage"
+  "commandId" | "projectId" | "workspaceStrategy" | "initialMessage" | "modelSelection"
 > & {
   /**
    * Set when a retry reuses the worktree its failed attempt created and
@@ -270,6 +272,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitWorkflow.GitWorkflowService;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  const providerAdapters = yield* Effect.serviceOption(ProviderAdapters.ProviderAdapterRegistryV2);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
@@ -394,6 +397,26 @@ const make = Effect.gen(function* () {
       ),
     );
 
+    if (Option.isSome(providerAdapters)) {
+      const adapter = yield* providerAdapters.value
+        .get(input.modelSelection.instanceId)
+        .pipe(Effect.mapError(mapError(input, "resolve-project", threadId)));
+      const capabilities = yield* adapter
+        .getCapabilities()
+        .pipe(Effect.mapError(mapError(input, "resolve-project", threadId)));
+      if (isCloudExecution(capabilities)) {
+        if (runId !== null)
+          yield* threads
+            .dispatch({
+              type: "prepared-run.release",
+              commandId: CommandId.make(`${input.commandId}:release`),
+              threadId,
+              runId,
+            })
+            .pipe(Effect.mapError(mapError(input, "release-run", threadId)));
+        return;
+      }
+    }
     const reused = input.reusedWorktree;
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
     let createdWorktreePath: string | null = null;
@@ -867,6 +890,27 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (input) {
+      const adapter = Option.isSome(providerAdapters)
+        ? yield* providerAdapters.value
+            .get(input.modelSelection.instanceId)
+            .pipe(Effect.mapError(mapError(input, "resolve-project")))
+        : undefined;
+      const cloud =
+        adapter !== undefined &&
+        isCloudExecution(
+          yield* adapter
+            .getCapabilities()
+            .pipe(Effect.mapError(mapError(input, "resolve-project"))),
+        );
+      if (cloud && input.workspaceStrategy.type === "worktree") {
+        input = {
+          ...input,
+          workspaceStrategy: {
+            type: "root",
+            branch: input.workspaceStrategy.baseRef,
+          },
+        };
+      }
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,
@@ -935,7 +979,7 @@ const make = Effect.gen(function* () {
         // A Scratch thread launched at the project root runs in a folder of its
         // own. Only the first attempt claims one; a retry replays its create.
         const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
-          input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
+          !cloud && input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
             ? Option.match(
                 yield* managedFolders
                   .folderForThread({
@@ -1159,6 +1203,7 @@ const make = Effect.gen(function* () {
       {
         commandId: input.commandId,
         projectId: projection.thread.projectId,
+        modelSelection: run.modelSelection,
         workspaceStrategy: reuse?.strategy ?? workspacePreparation,
         ...(reuse === null ? {} : { reusedWorktree: reuse.reusedWorktree }),
         ...(message === undefined

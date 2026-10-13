@@ -19,6 +19,7 @@ export function useThreadHeaderOptions(props: {
   readonly subtitle: string;
   readonly headerColor: string;
   readonly usesNativeHeaderGlass: boolean;
+  readonly localWorkspaceAvailable?: boolean;
   readonly gitControls: Parameters<typeof ThreadGitControls>[0];
   readonly onReturnToThread?: () => void;
 }) {
@@ -26,8 +27,22 @@ export function useThreadHeaderOptions(props: {
   const usesDuoHeader = usesNativeWorkspaceColumns && Platform.OS === "ios" && !Platform.isPad;
   const navigation = useNavigation();
   const { layout, panes, togglePrimarySidebar } = useAdaptiveWorkspaceLayout();
-  const threadCenterHeaderItems = useThreadGitCenterHeaderItems(props.gitControls);
-  const compactRightHeaderItems = useThreadGitRightHeaderItems(props.gitControls);
+  const localCenterItems = useThreadGitCenterHeaderItems(props.gitControls);
+  const localRightItems = useThreadGitRightHeaderItems(props.gitControls);
+  const threadCenterHeaderItems = useMemo(
+    () =>
+      props.localWorkspaceAvailable === false
+        ? localCenterItems.filter((item) => item.identifier !== "thread-right-git")
+        : localCenterItems,
+    [localCenterItems, props.localWorkspaceAvailable],
+  );
+  const compactRightHeaderItems = useMemo(
+    () =>
+      props.localWorkspaceAvailable === false
+        ? localRightItems.filter((item) => item.identifier !== "thread-right-git")
+        : localRightItems,
+    [localRightItems, props.localWorkspaceAvailable],
+  );
   const splitLeftHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       ...(!usesDuoHeader
@@ -193,7 +208,11 @@ export function useThreadHeaderOptions(props: {
     sidebar: false,
     fallback:
       !layout.usesSplitView && !props.usesNativeHeaderGlass ? (
-        <ThreadGitControls {...props.gitControls} showActionControls />
+        <ThreadGitControls
+          {...props.gitControls}
+          showActionControls
+          showGitControls={props.localWorkspaceAvailable !== false}
+        />
       ) : null,
   };
 }

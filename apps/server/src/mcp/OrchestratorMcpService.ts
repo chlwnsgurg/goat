@@ -3,6 +3,9 @@ import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import { recordRemoteTaskResult } from "../remoteReports/recordRemoteTaskResult.ts";
 import { hostFailure } from "./hostFailure.ts";
 import { statusFromShell } from "./threadStatus.ts";
+import { cloudTaskForRun, cloudTaskView } from "./cloudTaskView.ts";
+import { isCloudExecution } from "@goat/provider-core/server/cloudTask";
+import * as CloudSource from "../orchestration-v2/CloudTaskSourceService.ts";
 import { derive } from "@goat/provider-core/server/IdAllocator";
 import {
   CommandId,
@@ -47,12 +50,12 @@ import {
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadListResult,
   type OrchestratorMcpThreadReadInput,
-  type OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadReadResult,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadSendDelivered,
   type OrchestratorMcpThreadStatusInput,
-  type OrchestratorMcpThreadStatusResult,
+  OrchestratorMcpThreadStatusResult,
   type OrchestratorMcpThreadTimelineItem,
   type OrchestratorMcpThreadWaitInput,
   type OrchestratorMcpThreadWaitResult,
@@ -974,6 +977,7 @@ const make = Effect.gen(function* () {
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const projects = yield* ProjectService.ProjectService;
+  const cloudSources = yield* Effect.serviceOption(CloudSource.CloudTaskSourceService);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
 
   /** A caller-named project, which must exist before anything is recorded against it. */
@@ -1186,6 +1190,7 @@ const make = Effect.gen(function* () {
           "runs",
           "runtimeRequests",
           "contextTransfers",
+          "providerThreads",
         ])
         .pipe(Effect.mapError(threadManagementFailure));
       return { parent, target, shell } as const;
@@ -1273,6 +1278,135 @@ const make = Effect.gen(function* () {
         );
       return caller.runtimeMode;
     });
+  const preflightCloudLaunch = (
+    projectId: ProjectId,
+    modelSelection: ModelSelection,
+    worktreePath: string | null,
+    branch: string | null,
+  ) =>
+    Effect.gen(function* () {
+      const adapter = yield* providerAdapters
+        .get(modelSelection.instanceId)
+        .pipe(
+          Effect.mapError(() =>
+            failure("provider_unavailable", "The selected provider is unavailable."),
+          ),
+        );
+      const capabilities = yield* adapter
+        .getCapabilities()
+        .pipe(
+          Effect.mapError(() =>
+            failure("provider_unavailable", "Provider capabilities are unavailable."),
+          ),
+        );
+      if (!isCloudExecution(capabilities)) return;
+      if (Option.isNone(cloudSources))
+        return yield* failure("orchestration_error", "Cloud source preflight is unavailable.");
+      const project = Option.getOrUndefined(
+        yield* projects
+          .getById(projectId)
+          .pipe(
+            Effect.mapError(() => failure("orchestration_error", "Unable to read the project.")),
+          ),
+      );
+      if (project === undefined)
+        return yield* failure("invalid_request", "The project was not found.");
+      yield* cloudSources.value
+        .resolve({
+          cwd: worktreePath ?? project.workspaceRoot,
+          restriction: capabilities.sessions.sourceRestriction ?? "published-ref",
+          ...(branch === null ? {} : { branch }),
+        })
+        .pipe(Effect.mapError((error) => failure("invalid_request", error.message)));
+    });
+
+  const ensureCloudCancellationSupported = (
+    projection: Pick<OrchestrationV2ThreadProjection, "runs" | "providerThreads">,
+    code: "task_not_cancellable" | "invalid_request",
+    runId?: RunId,
+  ) =>
+    Effect.gen(function* () {
+      const run =
+        runId === undefined
+          ? (ThreadManagementService.latestActiveRun(projection) ??
+            ThreadManagementService.latestRun(projection))
+          : projection.runs.find((candidate) => candidate.id === runId);
+      const thread = projection.providerThreads.find(
+        (candidate) => candidate.id === run?.providerThreadId,
+      );
+      if (thread?.cloudTask?.status !== "running" && thread?.cloudTask?.status !== "submitting")
+        return;
+      const adapter = yield* providerAdapters
+        .get(thread.providerInstanceId)
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "provider_unavailable",
+              "Cloud tracking is unavailable; remote work may continue.",
+            ),
+          ),
+        );
+      const capabilities = yield* adapter
+        .getCapabilities()
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "provider_unavailable",
+              "Cloud capabilities are unavailable; remote work may continue.",
+            ),
+          ),
+        );
+      if (!capabilities.turns.supportsInterrupt)
+        return yield* failure(
+          code,
+          `Cloud cancellation is not supported by ${thread.providerInstanceId}. Remote work may continue.`,
+        );
+    });
+
+  const decodeRemoteThreadStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
+  const decodeRemoteThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
+  const readRemoteCloudTask = (
+    scope: McpThreadInvocationScope,
+    host: string,
+    threadId: ThreadId,
+  ) => {
+    const read = (tool: string, args: Readonly<Record<string, unknown>>) =>
+      ssh
+        .callHostTool(
+          {
+            host,
+            tool,
+            arguments: args,
+            writes: false,
+            timeoutMs: 120_000,
+          },
+          authorizeRemoteWrite(scope),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            error instanceof SshRemoteDispatch.SshRemoteDispatchError ? hostFailure(error) : error,
+          ),
+        );
+    const decodeFailure = () =>
+      failure("orchestration_error", "Remote cloud task metadata is invalid.");
+    return read("goat_thread_status", { threadId }).pipe(
+      Effect.flatMap((value) =>
+        decodeRemoteThreadStatus(value).pipe(Effect.mapError(decodeFailure)),
+      ),
+      Effect.map((status) => cloudTaskView(status.cloudTask)),
+      Effect.catchIf(
+        (error) => error.message.includes(SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED),
+        () =>
+          read("goat_thread_read", { threadId, limit: 1, runLimit: 2 }).pipe(
+            Effect.flatMap((value) =>
+              decodeRemoteThreadRead(value).pipe(Effect.mapError(decodeFailure)),
+            ),
+            Effect.map((result) => cloudTaskView(result.cloudTask)),
+          ),
+      ),
+    );
+  };
+
   const decodeRemoteCapabilities = Schema.decodeUnknownEffect(OrchestratorMcpCapabilitiesResult);
   const resolveRemoteTarget = Effect.fn("orchestratorMcp.resolveRemoteTarget")(function* (
     scope: McpThreadInvocationScope,
@@ -1534,7 +1668,12 @@ const make = Effect.gen(function* () {
                   failure("orchestration_error", "Unable to load the persisted remote dispatch."),
                 ),
               ))?.pendingRequestIds ?? []);
+        const remoteCloudTask =
+          task.remote.threadId === null
+            ? undefined
+            : yield* readRemoteCloudTask(scope, task.remote.host, task.remote.threadId);
         const response = {
+          cloudTask: remoteCloudTask,
           taskId: task.id,
           host: task.remote.host,
           childThreadId: task.remote.threadId,
@@ -1691,6 +1830,7 @@ const make = Effect.gen(function* () {
       const resultTransfer = taskResultTransfer(parentProjection, childProjection, task) ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
       const response = {
+        cloudTask: cloudTaskForRun(childControls.providerThreads ?? [], taskResultRun ?? childRun),
         taskId: task.id,
         childThreadId: task.childThreadId,
         childRunId: childRun?.id ?? null,
@@ -2265,38 +2405,61 @@ const make = Effect.gen(function* () {
           inheritedModel: parent?.thread.modelSelection.model ?? null,
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
-          providers: providers.map((provider) => {
-            const constraints = providerConstraints(
-              provider,
-              orchestrationCapableInstanceIds.has(provider.instanceId),
-            );
-            return {
-              providerInstanceId: provider.instanceId,
-              driverKind: provider.driver,
-              displayName: provider?.displayName ?? null,
-              models:
-                provider?.models
-                  .filter(
-                    (model) =>
-                      model.isCustom ||
-                      !modelPreferences[provider.instanceId]?.hiddenModels.includes(model.slug),
-                  )
-                  .map((model) => ({
-                    id: model.slug,
-                    label: model.name ?? null,
-                    ...(model.capabilities?.optionDescriptors === undefined
-                      ? {}
-                      : { options: model.capabilities.optionDescriptors }),
-                  })) ?? [],
-              ...(provider.supportedRuntimeModes === undefined ||
-              provider.supportedRuntimeModes.length === 0
-                ? {}
-                : { runtimeModes: [...provider.supportedRuntimeModes] }),
-              canRunChildTask: constraints.length === 0,
-              canRunCrossProviderChildTask: constraints.length === 0,
-              constraints: [...constraints],
-            };
-          }),
+          providers: yield* Effect.forEach(providers, (provider) =>
+            Effect.gen(function* () {
+              const maybeAdapter = orchestrationCapableInstanceIds.has(provider.instanceId)
+                ? yield* providerAdapters.get(provider.instanceId).pipe(Effect.option)
+                : Option.none();
+              const maybeCapabilities = Option.isSome(maybeAdapter)
+                ? yield* maybeAdapter.value.getCapabilities().pipe(Effect.option)
+                : Option.none();
+              const caps = Option.getOrUndefined(maybeCapabilities);
+              const constraints = providerConstraints(
+                provider,
+                orchestrationCapableInstanceIds.has(provider.instanceId) && caps !== undefined,
+              );
+              return {
+                executionLocation:
+                  provider.executionLocation ?? caps?.sessions.executionLocation ?? "local",
+                ...(caps === undefined
+                  ? {}
+                  : {
+                      followUp: {
+                        supported: caps.sessions.followUp?.supported ?? true,
+                        ...(caps.sessions.followUp?.reason === undefined
+                          ? {}
+                          : {
+                              reason: caps.sessions.followUp.reason.slice(0, 1000),
+                            }),
+                      },
+                    }),
+                providerInstanceId: provider.instanceId,
+                driverKind: provider.driver,
+                displayName: provider?.displayName ?? null,
+                models:
+                  provider?.models
+                    .filter(
+                      (model) =>
+                        model.isCustom ||
+                        !modelPreferences[provider.instanceId]?.hiddenModels.includes(model.slug),
+                    )
+                    .map((model) => ({
+                      id: model.slug,
+                      label: model.name ?? null,
+                      ...(model.capabilities?.optionDescriptors === undefined
+                        ? {}
+                        : { options: model.capabilities.optionDescriptors }),
+                    })) ?? [],
+                ...(provider.supportedRuntimeModes === undefined ||
+                provider.supportedRuntimeModes.length === 0
+                  ? {}
+                  : { runtimeModes: [...provider.supportedRuntimeModes] }),
+                canRunChildTask: constraints.length === 0,
+                canRunCrossProviderChildTask: constraints.length === 0,
+                constraints: [...constraints],
+              };
+            }),
+          ),
           features: {
             appOwnedSubagents: true,
             asyncPolling: true,
@@ -2516,6 +2679,13 @@ const make = Effect.gen(function* () {
         // ThreadManagementService.dispatch is the chokepoint for this command
         // type's own enablement check, using the same command id and its
         // receipt-replay exemption, so no separate assert runs here.
+        if (!isRetryOfAcceptedDelegation)
+          yield* preflightCloudLaunch(
+            parent.thread.projectId,
+            target.modelSelection,
+            parent.thread.worktreePath,
+            parent.thread.branch,
+          );
         const result = yield* threadManagement
           .dispatch({
             type: "delegated_task.request",
@@ -2636,6 +2806,10 @@ const make = Effect.gen(function* () {
         if (current.childThreadId === null)
           return yield* failure("task_not_cancellable", "The task has no local child thread.");
         const childThreadId = current.childThreadId;
+        yield* ensureCloudCancellationSupported(
+          yield* loadProjection(childThreadId),
+          "task_not_cancellable",
+        );
 
         // Cancelling stops the child and every task under it, each a write to a
         // thread its user may have raised above the parent's modes since it was
@@ -2670,8 +2844,19 @@ const make = Effect.gen(function* () {
         const parentTask = parentProjection.subagents.find(
           (task) => task.id === input.taskId && task.origin === "app_owned",
         );
-        const disposeCompletionDelivery =
-          parentTask?.completionDelivery?.state === "disposed"
+        const disposeCompletionDelivery = Effect.gen(function* () {
+          const child = yield* loadProjection(childThreadId);
+          const latestRun =
+            ThreadManagementService.latestActiveRun(child) ??
+            ThreadManagementService.latestRun(child);
+          const cloudTask = child.providerThreads.find(
+            (thread) => thread.id === latestRun?.providerThreadId,
+          )?.cloudTask;
+          // Stop only requests cloud cancellation. Keep the promised parent
+          // delivery until the observer records the actual result, including
+          // a link-only task whose GOAT observation has already completed.
+          if (cloudTask?.status === "running" || cloudTask?.status === "submitting") return;
+          return yield* parentTask?.completionDelivery?.state === "disposed"
             ? Effect.void
             : threadManagement
                 .dispatch({
@@ -2693,6 +2878,7 @@ const make = Effect.gen(function* () {
                     ),
                   ),
                 );
+        });
         // Cancelling stops the child thread the way Stop does, including work that came
         // after a published result: follow-up runs, pull request watch wakes, and the
         // tasks it delegated. The published result stays terminal.
@@ -2835,6 +3021,23 @@ const make = Effect.gen(function* () {
                 stableCommandId({ scope, requestKey: key, operation: "create-thread", index }),
                 target,
               );
+              const createCommandId = stableCommandId({
+                scope,
+                requestKey: key,
+                operation: "create-thread",
+                index,
+              });
+              if (
+                request.prompt !== undefined &&
+                !(yield* threadManagement.hasReceipt(createCommandId))
+              ) {
+                yield* preflightCloudLaunch(
+                  parent.thread.projectId,
+                  target.modelSelection,
+                  parent.thread.worktreePath,
+                  parent.thread.branch,
+                );
+              }
               const title = threadTitle({
                 parentTitle: parent.thread.title,
                 prompt: request.prompt,
@@ -2854,12 +3057,7 @@ const make = Effect.gen(function* () {
                     threadTitle: parent.thread.title,
                     via: "create_threads",
                   },
-                  commandId: stableCommandId({
-                    scope,
-                    requestKey: key,
-                    operation: "create-thread",
-                    index,
-                  }),
+                  commandId: createCommandId,
                   threadId,
                   projectId: parent.thread.projectId,
                   title,
@@ -3087,6 +3285,10 @@ const make = Effect.gen(function* () {
           }
         }
         return {
+          cloudTask: cloudTaskForRun(
+            target.providerThreads ?? [],
+            target.runs.find((run) => run.id === (shell.activeRunId ?? shell.latestRunId)),
+          ),
           thread: threadDetail(target, timeline.totalItems, shell, yield* Clock.currentTimeMillis),
           recentRuns: target.runs
             .toSorted((left, right) => right.ordinal - left.ordinal)
@@ -3202,21 +3404,25 @@ const make = Effect.gen(function* () {
         const runIds = [
           ...new Set([shell.activeRunId, shell.latestRunId].filter((id) => id !== null)),
         ];
-        const records =
-          runIds.length === 0
-            ? { runs: [], turnItems: [] }
-            : yield* threadManagement
-                .getThreadRecords(input.threadId, ["runs", "turnItems"], {
-                  runIds,
-                  turnItemRunIds: runIds,
-                  turnItemTypes: ["user_message", "assistant_message"],
-                })
-                .pipe(Effect.mapError(threadManagementFailure));
-        return statusFromShell(shell, records.runs, records.turnItems);
+        const records = yield* threadManagement
+          .getThreadRecords(input.threadId, ["runs", "turnItems", "providerThreads"], {
+            runIds,
+            turnItemRunIds: runIds,
+            turnItemTypes: ["user_message", "assistant_message"],
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        return {
+          ...statusFromShell(shell, records.runs, records.turnItems),
+          cloudTask: cloudTaskForRun(
+            records.providerThreads ?? [],
+            records.runs.find((run) => run.id === (shell.activeRunId ?? shell.latestRunId)),
+          ),
+        };
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
+        yield* ensureCloudCancellationSupported(target, "invalid_request", input.runId);
         yield* assertLiveCallerForOtherThread(scope, parent, target);
         // Stopping another thread's work is a write: it must run within the caller's modes.
         yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);

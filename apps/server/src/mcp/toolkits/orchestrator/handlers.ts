@@ -144,9 +144,7 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* HostThreadsMcpService.HostThreadsMcpService;
-      const read = yield* service.readThread(scope, input);
-      if (input.host !== undefined) return read;
-      return { ...read, result: yield* localResult(input.threadId, read.thread.latestRunId) };
+      return yield* service.readThread(scope, input);
     }),
   ),
   goat_thread_update: McpToolAccess.writesThreads(

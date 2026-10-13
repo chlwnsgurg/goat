@@ -197,6 +197,60 @@ export const make = Effect.gen(function* () {
       continueAfterRestart: boolean,
     ) {
       const now = yield* DateTime.now;
+      const saved = projection;
+      const cloudThreads = saved.providerThreads.filter(
+        (thread) =>
+          thread.cloudTask !== undefined &&
+          saved.providerSessions.some(
+            (session) =>
+              session.id === thread.providerSessionId &&
+              session.capabilities.sessions.executionLocation === "cloud",
+          ),
+      );
+      const cloudThreadIds = new Set(cloudThreads.map((thread) => thread.id));
+      const cloudSessionIds = new Set(cloudThreads.map((thread) => thread.providerSessionId));
+      const cloudRuns = saved.runs.filter(
+        (run) => run.providerThreadId !== null && cloudThreadIds.has(run.providerThreadId),
+      );
+      const cloudRunIds = new Set(cloudRuns.map((run) => run.id));
+      const cloudNodeIds = new Set(
+        saved.nodes
+          .filter((node) => node.runId !== null && cloudRunIds.has(node.runId))
+          .map((node) => node.id),
+      );
+      const cloudAttemptIds = new Set(
+        saved.attempts
+          .filter((attempt) => cloudRunIds.has(attempt.runId))
+          .map((attempt) => attempt.id),
+      );
+      // Reconcile only local process-owned rows, including mixed-provider histories.
+      projection = {
+        ...saved,
+        providerThreads: saved.providerThreads.filter((thread) => !cloudThreadIds.has(thread.id)),
+        providerSessions: saved.providerSessions.filter(
+          (session) => !cloudSessionIds.has(session.id),
+        ),
+        runs: saved.runs.filter((run) => !cloudRunIds.has(run.id)),
+        attempts: saved.attempts.filter((attempt) => !cloudAttemptIds.has(attempt.id)),
+        nodes: saved.nodes.filter((node) => !cloudNodeIds.has(node.id)),
+        providerTurns: saved.providerTurns.filter(
+          (turn) => !cloudThreadIds.has(turn.providerThreadId),
+        ),
+        runtimeRequests: saved.runtimeRequests.filter(
+          (request) => !cloudNodeIds.has(request.nodeId),
+        ),
+        messages: saved.messages.filter(
+          (message) => message.runId === null || !cloudRunIds.has(message.runId),
+        ),
+        turnItems: saved.turnItems.filter(
+          (item) =>
+            (item.runId === null || !cloudRunIds.has(item.runId)) &&
+            (item.providerThreadId == null || !cloudThreadIds.has(item.providerThreadId)),
+        ),
+        subagents: saved.subagents.filter(
+          (agent) => agent.providerThreadId === null || !cloudThreadIds.has(agent.providerThreadId),
+        ),
+      };
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -581,11 +635,23 @@ export const make = Effect.gen(function* () {
             },
           ]
         : [];
+      if (trigger === "startup") {
+        for (const run of cloudRuns) {
+          const task = cloudThreads.find((thread) => thread.id === run.providerThreadId)?.cloudTask;
+          if (run.status !== "running" || task === undefined) continue;
+          effects.push({
+            id: `effect:cloud-reattach:${run.id}:${DateTime.formatIso(now)}`,
+            commandId,
+            threadId: saved.thread.id,
+            request: { type: "provider-turn.reattach", runId: run.id },
+          });
+        }
+      }
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
       let retiredEffects: number;
-      if (events.length === 0) {
+      if (events.length === 0 && effects.length === 0) {
         const retiredEffectIds = yield* outbox
           .cancelUnsettled({
             threadId: projection.thread.id,
@@ -705,7 +771,20 @@ export const make = Effect.gen(function* () {
             .continueThreadsAfterServerUpdate
         )
           return;
-        const run = restartContinuationRun(projection, yield* DateTime.now);
+        const cloudThreadIds = new Set(
+          projection.providerThreads
+            .filter((thread) => thread.cloudTask !== undefined)
+            .map((thread) => thread.id),
+        );
+        const run = restartContinuationRun(
+          {
+            ...projection,
+            runs: projection.runs.filter(
+              (run) => run.providerThreadId === null || !cloudThreadIds.has(run.providerThreadId),
+            ),
+          },
+          yield* DateTime.now,
+        );
         if (!run) return;
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({

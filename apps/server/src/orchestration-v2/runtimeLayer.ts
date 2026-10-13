@@ -55,6 +55,8 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as CloudTaskSource from "./CloudTaskSourceService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 
 /** The shared application event log and its command receipts. */
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -160,6 +162,8 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
 const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
+      CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer)),
+      layerProviderAdapterRegistryProvided,
       layerContextHandoffServiceProvided,
       layerEventSinkProvided,
       IdAllocator.layer,
@@ -266,6 +270,7 @@ const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
     Layer.mergeAll(
       layerProjectService,
       layerProjectSetupScriptRunner,
+      layerProviderAdapterRegistryProvided,
       layerManagedProjectFoldersProvided,
       layerThreadManagementProvided,
       layerCommandReceiptStoreProvided,

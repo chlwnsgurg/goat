@@ -53,6 +53,8 @@ import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationServi
 import * as RuntimePolicy from "../RuntimePolicy.ts";
 import * as TurnItemPositionStore from "../TurnItemPositionStore.ts";
 import * as RuntimeRequestService from "../RuntimeRequestService.ts";
+import * as CloudTaskSource from "../CloudTaskSourceService.ts";
+import * as ProjectService from "../../project/ProjectService.ts";
 import * as ThreadCommandExecutor from "../ThreadCommandExecutor.ts";
 import * as ChannelBotDirectory from "../../channels/ChannelBotDirectory.ts";
 import * as ThreadForkService from "../ThreadForkService.ts";
@@ -262,6 +264,9 @@ export function layerWithRegistry<Error>(
     McpProviderSessions.McpProviderSessions
   >,
   options: {
+    readonly cloudSources?: Layer.Layer<CloudTaskSource.CloudTaskSourceService>;
+    readonly projects?: Layer.Layer<ProjectService.ProjectService>;
+    readonly continuationRequests?: Layer.Layer<never>;
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
       MigrationError | PlatformError.PlatformError | SqlError
@@ -279,6 +284,11 @@ export function layerWithRegistry<Error>(
   | Orchestrator.OrchestratorV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
+  | EffectOutbox.EffectOutboxV2
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderTurnStartService.ProviderTurnStartServiceV2
+  | ProviderTurnControlService.ProviderTurnControlServiceV2
+  | ThreadManagementService.ThreadManagementService
   | ProviderSessionManager.ProviderSessionManagerV2,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
@@ -296,7 +306,8 @@ export function layerWithRegistry<Error>(
   // One queue shared by the adapters, the orchestrator, and the worker, like
   // runtimeLayer.ts; layer memoization keeps it a single instance.
   const layerContinuationRequests =
-    options.runContinuationWorker === true ? ProviderContinuationRequests.layer : Layer.empty;
+    options.continuationRequests ??
+    (options.runContinuationWorker === true ? ProviderContinuationRequests.layer : Layer.empty);
   const layerProvidedRegistry = registryLayer.pipe(
     Layer.provide(Layer.merge(layerContinuationRequests, McpProviderSessions.layer)),
   );
@@ -386,6 +397,8 @@ export function layerWithRegistry<Error>(
   const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerProvidedRegistry,
+        options.cloudSources ?? Layer.empty,
         layerContextHandoffServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,
@@ -461,6 +474,9 @@ export function layerWithRegistry<Error>(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       return Layer.mock(ThreadManagementService.ThreadManagementService)({
         dispatch: orchestrator.dispatch,
+        getThreadShell: orchestrator.getThreadShell,
+        getThreadEventSequence: orchestrator.getThreadEventSequence,
+        streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
         getThreadRecords: orchestrator.getThreadRecords,
         getThreadProjection: orchestrator.getThreadProjection,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
@@ -501,11 +517,22 @@ export function layerWithRegistry<Error>(
   );
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
+    layerStores,
+    layerProviderTurnStartServiceProvided,
+    layerProviderTurnControlServiceProvided,
+    layerThreadManagementProvided,
     layerProviderSessionManagerProvided,
     layerEffectWorkerProvided,
     layerEventSinkProvided,
     layerContinuationWorkerProvided,
-  ).pipe(Layer.provide(ProviderTurnStartServiceTestkit.layer), Layer.provide(NodeServices.layer));
+  ).pipe(
+    Layer.provide(
+      options.projects === undefined
+        ? ProviderTurnStartServiceTestkit.layer
+        : Layer.merge(ProviderTurnStartServiceTestkit.layer, options.projects),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
 
   // Build the daemon from the exact worker instance exposed alongside the
   // orchestrator. Keeping this acquisition in the replay layer makes the

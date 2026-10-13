@@ -62,6 +62,19 @@ export function isNonRetryableProviderTurnControlFailure(
   );
 }
 
+const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
+const isProviderTurnControlError = Schema.is(ProviderTurnControlService.ProviderTurnControlError);
+
+function hasCloudTrackingFailure(cause: Cause.Cause<unknown>): boolean {
+  return cause.reasons.some((reason) => {
+    if (!Cause.isFailReason(reason)) return false;
+    const error = isOrchestrationEffectExecutionError(reason.error)
+      ? reason.error.cause
+      : reason.error;
+    return isProviderTurnControlError(error) && error.reason === "tracking-unavailable";
+  });
+}
+
 export interface OrchestrationEffectExecutorV2Shape {
   /**
    * Runs one claimed effect. `willRetry` is true when the worker will retry a
@@ -149,6 +162,24 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "provider-turn.reattach":
+            return providerTurnStart
+              .start({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                reattach: true,
+                willRetry,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-turn.start":
             return providerTurnStart
               .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
@@ -175,6 +206,7 @@ export const layerExecutor: Layer.Layer<
               })
               .pipe(
                 Effect.catch((cause) =>
+                  cause.reason !== "tracking-unavailable" &&
                   isNonRetryableProviderTurnControlFailure(
                     effect.request.type,
                     Cause.pretty(Cause.fail(cause)),
@@ -740,7 +772,9 @@ export const layerWithOptions = (
           }
 
           const error = Cause.pretty(exit.cause);
-          const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
+          const nonRetryable =
+            !hasCloudTrackingFailure(exit.cause) &&
+            isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,
             effectType: effect.request.type,

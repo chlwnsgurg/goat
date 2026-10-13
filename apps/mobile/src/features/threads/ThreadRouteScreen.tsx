@@ -330,6 +330,7 @@ function ThreadRouteContent(
   const mergeBackBusyRef = useRef(false);
   const handleMergeBack = useCallback(async () => {
     if (
+      !composer.cloudState.showLocalWorkspace ||
       mergeBackBusyRef.current ||
       !selectedThread ||
       mergeBackTargetThreadId === null ||
@@ -356,7 +357,14 @@ function ThreadRouteContent(
     } finally {
       mergeBackBusyRef.current = false;
     }
-  }, [mergeBack, mergeBackRun, mergeBackTargetThreadId, navigation, selectedThread]);
+  }, [
+    composer.cloudState.showLocalWorkspace,
+    mergeBack,
+    mergeBackRun,
+    mergeBackTargetThreadId,
+    navigation,
+    selectedThread,
+  ]);
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
   const environmentId = environmentIdRaw ? EnvironmentId.make(environmentIdRaw) : null;
@@ -368,6 +376,9 @@ function ThreadRouteContent(
   );
   const inspectorMode = (() => {
     if (inspectorSelection?.routeThreadIdentity === routeThreadIdentity) {
+      if (inspectorSelection.mode === "git" && !composer.cloudState.showLocalWorkspace) {
+        return null;
+      }
       if (inspectorSelection.mode === "files" && selectedThreadCwd === null) {
         return null;
       }
@@ -486,6 +497,7 @@ function ThreadRouteContent(
   const gitActionProgress = useGitActionProgress(gitActionProgressTarget);
 
   const handleOpenGitInspector = useCallback(() => {
+    if (!composer.cloudState.showLocalWorkspace) return;
     if (!fileInspector.supported) {
       if (selectedThread === null) {
         return;
@@ -498,7 +510,14 @@ function ThreadRouteContent(
     }
     setInspectorSelection({ routeThreadIdentity, mode: "git" });
     showAuxiliaryPane("inspector");
-  }, [fileInspector.supported, navigation, routeThreadIdentity, selectedThread, showAuxiliaryPane]);
+  }, [
+    composer.cloudState.showLocalWorkspace,
+    fileInspector.supported,
+    navigation,
+    routeThreadIdentity,
+    selectedThread,
+    showAuxiliaryPane,
+  ]);
   const handleOpenFilesInspector = useCallback(() => {
     if (selectedThread === null || selectedThreadCwd === null) {
       return;
@@ -604,13 +623,14 @@ function ThreadRouteContent(
       inspectorMode === null ? null : (
         <ThreadInspectorContentStack
           renderFiles={FilesInspector}
-          renderGit={GitInspector}
+          renderGit={composer.cloudState.showLocalWorkspace ? GitInspector : undefined}
           mode={inspectorMode}
           resetKeys={[routeThreadIdentity, selectedThreadCwd]}
           renderRoute={props.renderInspector ? RouteInspector : undefined}
         />
       ),
     [
+      composer.cloudState.showLocalWorkspace,
       FilesInspector,
       GitInspector,
       RouteInspector,
@@ -994,6 +1014,7 @@ function ThreadRouteContent(
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
           feedbackSubmissions={composer.feedbackSubmissions}
           onDismissFeedback={composer.dismissFeedback}
+          cloudState={composer.cloudState}
           selectedThreadFeed={composer.selectedThreadFeed}
           activityRun={composer.selectedThreadActivityRun}
           activeWorkStartedAt={
@@ -1088,6 +1109,7 @@ function ThreadRouteContent(
         subtitle={headerSubtitle}
         headerColor={headerColor}
         usesNativeHeaderGlass={usesNativeHeaderGlass}
+        localWorkspaceAvailable={composer.cloudState.showLocalWorkspace}
         gitControls={threadGitControlProps}
         hasThreadCwd={selectedThreadCwd !== null}
         hasWorkspaceRoot={Boolean(selectedThreadProject?.workspaceRoot)}
