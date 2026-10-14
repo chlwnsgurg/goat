@@ -48,6 +48,8 @@ export interface CursorAgentSdkOpenInput {
 
 export interface CursorAgentSdkSendInput<Error> {
   readonly message: string | SDKUserMessage;
+  /** Process-local admission for recovery sends; message is the prepared first admission. */
+  readonly prepareMessage?: () => Effect.Effect<string | SDKUserMessage, CursorAgentSdkRunnerError>;
   readonly options?: Omit<SendOptions, "onDelta">;
   readonly onDelta?: (update: InteractionUpdate) => Effect.Effect<void, Error>;
 }
@@ -395,16 +397,6 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
         agentId: agent.agentId,
         send: Effect.fn("CursorAgentSdkSession.send")(function* (sendInput) {
           const context = yield* Effect.context();
-          yield* log({
-            direction: "outgoing",
-            stage: "decoded",
-            payload: {
-              type: "run.start",
-              message: sendInput.message,
-              options: loggedCursorSendOptions(sendInput.options),
-            },
-          });
-
           let callbacksReady = false;
           const pendingUpdates: Array<InteractionUpdate> = [];
           let callbackFailure: { readonly cause: unknown } | undefined;
@@ -434,20 +426,37 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
             return callbackChain;
           };
 
-          const startRun = () =>
-            Effect.tryPromise({
-              try: () =>
-                agent.send(sendInput.message, {
-                  ...sendInput.options,
-                  onDelta: async ({ update }) => {
-                    if (!callbacksReady) {
-                      pendingUpdates.push(update);
-                      return;
-                    }
-                    await dispatchUpdate(update);
-                  },
-                }),
-              catch: (cause) => runnerError(cause, "run.start"),
+          const startRun = (recovering = false) =>
+            Effect.gen(function* () {
+              const message =
+                recovering && sendInput.prepareMessage
+                  ? yield* sendInput
+                      .prepareMessage()
+                      .pipe(Effect.mapError((cause) => runnerError(cause, "run.prepareMessage")))
+                  : sendInput.message;
+              yield* log({
+                direction: "outgoing",
+                stage: "decoded",
+                payload: {
+                  type: "run.start",
+                  message,
+                  options: loggedCursorSendOptions(sendInput.options),
+                },
+              });
+              return yield* Effect.tryPromise({
+                try: () =>
+                  agent.send(message, {
+                    ...sendInput.options,
+                    onDelta: async ({ update }) => {
+                      if (!callbacksReady) {
+                        pendingUpdates.push(update);
+                        return;
+                      }
+                      await dispatchUpdate(update);
+                    },
+                  }),
+                catch: (cause) => runnerError(cause, "run.start"),
+              });
             });
           const run = yield* startRun().pipe(
             Effect.catchIf(
@@ -474,7 +483,7 @@ export const makeCursorAgentSdkRunner = Effect.fn("makeCursorAgentSdkRunner")(fu
                     try: () => Agent.cancelRun(activeRun.id, runOptions),
                     catch: (cause) => runnerError(cause, "agent.cancelRun"),
                   });
-                  return yield* startRun();
+                  return yield* startRun(true);
                 }),
             ),
           );
