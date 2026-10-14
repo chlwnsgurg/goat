@@ -514,10 +514,8 @@ export default Effect.gen(function* () {
             const previous = oldValues[index]![1];
             const next = `coalesce((${expression}),0)`;
             const old = `coalesce((${previous}),0)`;
-            return `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
-            SELECT NEW.space,'processing_${dimension}','',${next}-${old}
-            WHERE ${next}!=${old}
-            ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+            return `UPDATE memory_quota_counters SET value=value+${next}-${old}
+            WHERE space=NEW.space AND dimension='processing_${dimension}' AND scope_key='' AND ${next}!=${old};`;
           })
           .join("\n");
         yield* sql.unsafe(
