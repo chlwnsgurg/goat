@@ -1718,6 +1718,7 @@ it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] 
       let completed: M.MemorySourceReadOutcome | undefined;
       let attempted = 0;
       let pushes = 0;
+      const pushedMemories: M.MemoryId[] = [];
       const client = peer({
         requestSourceRead: (_c, { protocolVersion: _p, ...input }) =>
           Effect.sync(() => {
@@ -1748,6 +1749,7 @@ it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] 
         push: (_c, input) =>
           Effect.sync(() => {
             pushes++;
+            pushedMemories.push(...input.operations.map((op) => op.memoryId));
             return {
               receipts: input.operations.map((op) => ({
                 operationId: op.operationId,
@@ -1806,7 +1808,11 @@ it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] 
               requested = undefined;
               yield* enqueue(806, M.MemoryId.make(id(807)));
               yield* sync.syncOnce;
-              assert.strictEqual(pushes, 1);
+              assert.strictEqual(pushes, 2);
+              assert.deepStrictEqual(pushedMemories.toSorted(), [
+                M.MemoryId.make(id(2)),
+                M.MemoryId.make(id(807)),
+              ]);
             }).pipe(
               Effect.provide(
                 Layer.fresh(Sync.layer).pipe(
