@@ -1260,15 +1260,32 @@ const make = Effect.gen(function* () {
               const permit = runtime
                 .ownerPermit(request)
                 .pipe(Effect.andThen(ensureEpoch(r.settings.memoryHubVersion)));
-              const outcome = yield* permit.pipe(
-                Effect.andThen(runtime.ownerReader.readCommitted(request, permit)),
-                Effect.timeout("5 seconds"),
+              const outcome = yield* Effect.gen(function* () {
+                const read = yield* permit.pipe(
+                  Effect.andThen(runtime.ownerReader.readCommitted(request, permit)),
+                  Effect.timeout("5 seconds"),
+                  Effect.catchTags({
+                    TimeoutError: () =>
+                      Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+                  }),
+                );
+                yield* permit.pipe(Effect.timeout("1 second"));
+                return read;
+              }).pipe(
                 Effect.catchTags({
-                  TimeoutError: () =>
-                    Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+                  MemoryAccessError: (error) =>
+                    error.code === "fenced"
+                      ? Effect.fail(error)
+                      : noteFailure(r.settings.memoryHubVersion, error).pipe(
+                          Effect.as({
+                            kind: "denied",
+                            requiredPermission: "orchestration:read",
+                          } as const),
+                        ),
                 }),
               );
-              yield* permit.pipe(Effect.timeout("1 second"));
+              // Denial needs no source grant, but every response still belongs to this epoch.
+              yield* ensureEpoch(r.settings.memoryHubVersion);
               if (Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)) return;
               const checked = yield* decodeSource(outcome).pipe(
                 Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
@@ -1297,6 +1314,7 @@ const make = Effect.gen(function* () {
                 requestId: request.requestId,
                 outcome: safe,
               };
+              yield* ensureEpoch(r.settings.memoryHubVersion);
               yield* (
                 r.connection
                   ? client.respondSourceRead(r.connection, response)

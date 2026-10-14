@@ -1058,79 +1058,104 @@ it.effect("partial member checkpoint preserves token and keeps push blocked acro
   }),
 );
 
-it.effect("one denied owner relay read leaves other responses and push moving", () =>
-  Effect.gen(function* () {
-    const requested = (n: number): M.MemorySourceReadRequest => ({
-      requestId: M.MemorySourceReadRequestId.make(id(n)),
-      memorySpaceId: space,
-      memoryId: M.MemoryId.make(id(2)),
-      requesterEnvironmentId: remote,
-      sourceThread: { environmentId: local, threadId: M.ThreadId.make("synthetic-thread") },
-      sourceWatermark: {
-        fromEventId: M.EventId.make("e1"),
-        toEventId: M.EventId.make("e2"),
-        throughSequence: 2,
-      },
-      messageIds: [M.MessageId.make("synthetic-message")],
-      limit: 10,
-      authorizedScopes: ["memory:read", "orchestration:read"],
-      expiresAtHubTime: "1970-01-01T00:01:15.000Z",
-    });
-    const responses: M.MemoryHubSourceReadRespondInput[] = [];
-    let pushes = 0;
-    const client = peer({
-      collectSourceReads: () => Effect.succeed({ requests: [requested(801), requested(802)] }),
-      respondSourceRead: (_c, input) =>
-        Effect.sync(() => {
-          responses.push(input);
-          return { accepted: true };
-        }),
-      push: (_c, input) =>
-        Effect.sync(() => {
-          pushes++;
-          return {
-            receipts: input.operations.map((op) => ({
-              operationId: op.operationId,
-              memoryId: op.memoryId,
-              operationDigest: memoryOperationDigest(op),
-              hubSequence: 1,
-              outcome: "accepted" as const,
-            })),
-          };
-        }),
-    });
-    yield* Effect.scoped(
-      Effect.gen(function* () {
-        yield* ready;
-        yield* enqueue(60);
-        const base = yield* Sync.MemorySyncRuntime;
-        const owner = Sync.MemorySyncRuntime.of({
-          ...base,
-          ownerPermit: (request) =>
-            request.requestId === id(801)
-              ? Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }))
-              : Effect.void,
-        });
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const sync = yield* Sync.MemorySyncService;
-            yield* sync.syncOnce;
-          }).pipe(
-            Effect.provide(
-              Layer.fresh(Sync.layer).pipe(
-                Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, owner)),
+it.effect.each(["permit", "reader", "recheck"] as const)(
+  "owner %s denial completes the relay while other responses and push move",
+  (boundary) =>
+    Effect.gen(function* () {
+      const requested = (n: number): M.MemorySourceReadRequest => ({
+        requestId: M.MemorySourceReadRequestId.make(id(n)),
+        memorySpaceId: space,
+        memoryId: M.MemoryId.make(id(2)),
+        requesterEnvironmentId: remote,
+        sourceThread: { environmentId: local, threadId: M.ThreadId.make("synthetic-thread") },
+        sourceWatermark: {
+          fromEventId: M.EventId.make("e1"),
+          toEventId: M.EventId.make("e2"),
+          throughSequence: 2,
+        },
+        messageIds: [M.MessageId.make("synthetic-message")],
+        limit: 10,
+        authorizedScopes: ["memory:read", "orchestration:read"],
+        expiresAtHubTime: "1970-01-01T00:01:15.000Z",
+      });
+      const responses: M.MemoryHubSourceReadRespondInput[] = [];
+      let pushes = 0;
+      let permits = 0;
+      let reads = 0;
+      const client = peer({
+        collectSourceReads: () => Effect.succeed({ requests: [requested(801), requested(802)] }),
+        respondSourceRead: (_c, input) =>
+          Effect.sync(() => {
+            responses.push(input);
+            return { accepted: true };
+          }),
+        push: (_c, input) =>
+          Effect.sync(() => {
+            pushes++;
+            return {
+              receipts: input.operations.map((op) => ({
+                operationId: op.operationId,
+                memoryId: op.memoryId,
+                operationDigest: memoryOperationDigest(op),
+                hubSequence: 1,
+                outcome: "accepted" as const,
+              })),
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* enqueue(60);
+          const base = yield* Sync.MemorySyncRuntime;
+          const owner = Sync.MemorySyncRuntime.of({
+            ...base,
+            ownerPermit: (request) =>
+              Effect.suspend(() => {
+                if (request.requestId !== id(801)) return Effect.void;
+                permits++;
+                return boundary === "permit" || (boundary === "recheck" && permits === 2)
+                  ? Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }))
+                  : Effect.void;
+              }),
+            ownerReader: {
+              readCommitted: (request) => {
+                reads++;
+                return request.requestId === id(801) && boundary === "reader"
+                  ? Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }))
+                  : Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const);
+              },
+            },
+          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              yield* sync.syncOnce;
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, owner)),
+                ),
               ),
             ),
-          ),
-        );
-        assert.strictEqual(pushes, 1);
-        assert.deepStrictEqual(
-          responses.map((r) => r.requestId),
-          [id(802)],
-        );
-      }).pipe(Effect.provide(fixture(client))),
-    );
-  }),
+          );
+          assert.strictEqual(pushes, 1);
+          assert.deepStrictEqual(
+            responses.map((r) => r.requestId),
+            [id(801), id(802)],
+          );
+          assert.deepStrictEqual(responses[0]?.outcome, {
+            kind: "denied",
+            requiredPermission: "orchestration:read",
+          });
+          assert.deepStrictEqual(responses[1]?.outcome, {
+            kind: "unavailable",
+            code: "source_unavailable",
+          });
+          assert.strictEqual(reads, boundary === "permit" ? 1 : 2);
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
 );
 
 it.effect(
@@ -1671,6 +1696,107 @@ it.effect.each(["owner permit", "owner read"] as const)(
               yield* Deferred.await(cancelled);
               assert.strictEqual(yield* Clock.currentTimeMillis, 75000);
               assert.strictEqual(responses, 0);
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, owner)),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect.each(["denied", "epoch", "revoked"] as const)(
+  "owner refusal has terminal denial only while responder authority remains current: %s",
+  (mode) =>
+    Effect.gen(function* () {
+      let requested: M.MemorySourceReadRequest | undefined;
+      let completed: M.MemorySourceReadOutcome | undefined;
+      let attempted = 0;
+      let pushes = 0;
+      const client = peer({
+        requestSourceRead: (_c, { protocolVersion: _p, ...input }) =>
+          Effect.sync(() => {
+            requested = {
+              ...input,
+              requesterEnvironmentId: local,
+              expiresAtHubTime: "1970-01-01T00:01:15.000Z",
+            };
+            return { request: requested };
+          }),
+        collectSourceReads: () => Effect.succeed({ requests: requested ? [requested] : [] }),
+        respondSourceRead: (_c, input) =>
+          Effect.suspend(() => {
+            attempted++;
+            if (mode === "revoked") return Effect.fail(new M.MemoryHubUnauthorizedError({}));
+            completed = input.outcome;
+            return Effect.succeed({ accepted: true });
+          }),
+        resultSourceRead: () =>
+          Effect.succeed(
+            completed
+              ? { state: "completed" as const, outcome: completed }
+              : { state: "expired" as const, code: "source_unavailable" as const },
+          ),
+        push: (_c, input) =>
+          Effect.sync(() => {
+            pushes++;
+            return {
+              receipts: input.operations.map((op) => ({
+                operationId: op.operationId,
+                memoryId: op.memoryId,
+                operationDigest: memoryOperationDigest(op),
+                hubSequence: 1,
+                outcome: "accepted" as const,
+              })),
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const validated = yield* sourceFixture;
+          const base = yield* Sync.MemorySyncRuntime;
+          const owner = Sync.MemorySyncRuntime.of({
+            ...base,
+            ownerPermit: () =>
+              Effect.gen(function* () {
+                if (mode === "epoch")
+                  yield* changeHub(1, { ...member, secretName: "next-fixture" }).pipe(Effect.orDie);
+                return yield* new Service.MemoryAccessError({ code: "route_unavailable" });
+              }),
+            ownerReader: { readCommitted: () => Effect.die("denied source must never be read") },
+          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              const result = yield* Effect.result(sync.readSource(validated, Effect.void));
+              if (mode === "epoch") {
+                assert.strictEqual(result._tag, "Failure");
+                if (result._tag === "Failure")
+                  assert.deepStrictEqual(
+                    result.failure,
+                    new Service.MemoryAccessError({ code: "fenced" }),
+                  );
+                assert.strictEqual(attempted, 0);
+              } else {
+                assert.strictEqual(result._tag, "Success");
+                if (result._tag === "Success")
+                  assert.deepStrictEqual(
+                    result.success,
+                    mode === "denied"
+                      ? { kind: "denied", requiredPermission: "orchestration:read" }
+                      : { kind: "unavailable", code: "source_unavailable" },
+                  );
+                assert.strictEqual(attempted, 1);
+              }
+              assert.strictEqual(completed?.kind, mode === "denied" ? "denied" : undefined);
+              requested = undefined;
+              yield* enqueue(806);
+              yield* sync.syncOnce;
+              assert.strictEqual(pushes, 1);
             }).pipe(
               Effect.provide(
                 Layer.fresh(Sync.layer).pipe(
