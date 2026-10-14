@@ -19,6 +19,26 @@ const memory = M.MemoryId.make(id(2));
 const env = M.EnvironmentId.make("fixture");
 const now = "2026-10-14T00:00:00.000Z";
 const hash = "a".repeat(64);
+const fixtureCheckpointIdentity = {
+  memorySpaceId: space,
+  hubEnvironmentId: env,
+  checkpointId: "fixture",
+  expectedSnapshotToken: "synthetic-fixture",
+  expectedCheckpointSequence: 1,
+};
+const beginFixtureCheckpoint = Effect.gen(function* () {
+  const store = yield* Store.MemoryStore;
+  yield* store.transact(
+    store.advanceBootstrapTx({
+      ...fixtureCheckpointIdentity,
+      expectedState: "unbound",
+      nextState: "staging",
+      snapshotToken: fixtureCheckpointIdentity.expectedSnapshotToken,
+      checkpointSequence: fixtureCheckpointIdentity.expectedCheckpointSequence,
+      nextCursor: null,
+    }),
+  );
+});
 const encodeOperationJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryOperation));
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const encodeCheckpointPage = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage));
@@ -464,8 +484,10 @@ describe("MemoryStore", () => {
         revisionId: M.MemoryRevisionId.make(id(72)),
       };
       assert.isTrue((yield* Effect.exit(store.materializeLocalIntent(input)))._tag === "Failure");
-      yield* store.installCheckpointPage({ checkpointId: "fixture", page: checkpoint() });
+      yield* beginFixtureCheckpoint;
+      yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() });
       yield* store.completeCheckpoint({
+        ...fixtureCheckpointIdentity,
         memorySpaceId: space,
         hubEnvironmentId: env,
         checkpointId: "fixture",
@@ -516,8 +538,10 @@ describe("MemoryStore", () => {
           revisions: [{ revision, payload }],
           items: [{ ...item, revision, payload }],
         };
-        yield* store.installCheckpointPage({ checkpointId: "fixture", page });
+        yield* beginFixtureCheckpoint;
+        yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page });
         yield* store.completeCheckpoint({
+          ...fixtureCheckpointIdentity,
           memorySpaceId: space,
           hubEnvironmentId: env,
           checkpointId: "fixture",
@@ -531,7 +555,8 @@ describe("MemoryStore", () => {
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
       const sql = yield* SqlClient.SqlClient;
-      yield* store.installCheckpointPage({ checkpointId: "fixture", page: checkpoint() });
+      yield* beginFixtureCheckpoint;
+      yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() });
       assert.isUndefined((yield* store.loadAggregate(space, memory)).item);
       const forget = decodeOperation({
         protocolVersion: 1,
@@ -555,6 +580,7 @@ describe("MemoryStore", () => {
       yield* store.apply(decision(forget));
       assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 0);
       yield* store.completeCheckpoint({
+        ...fixtureCheckpointIdentity,
         memorySpaceId: space,
         hubEnvironmentId: env,
         checkpointId: "fixture",
@@ -887,8 +913,10 @@ describe("MemoryStore", () => {
         const store = yield* Store.MemoryStore;
         const sql = yield* SqlClient.SqlClient;
         const page = checkpoint();
-        yield* store.installCheckpointPage({ checkpointId: "fixture", page });
+        yield* beginFixtureCheckpoint;
+        yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page });
         yield* store.completeCheckpoint({
+          ...fixtureCheckpointIdentity,
           memorySpaceId: space,
           hubEnvironmentId: env,
           checkpointId: "fixture",
@@ -914,7 +942,8 @@ describe("MemoryStore", () => {
       const store = yield* Store.MemoryStore;
       const sql = yield* SqlClient.SqlClient;
       const page = checkpoint();
-      yield* store.installCheckpointPage({ checkpointId: "fixture", page });
+      yield* beginFixtureCheckpoint;
+      yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page });
       assert.isUndefined((yield* store.readAncestry(space, memory, [])).causalBoundary);
       yield* store.persistCompactReceipt({
         ...page.compactReceipts[0]!,
@@ -4469,7 +4498,14 @@ it.effect(
       );
       yield* store.transact(
         Effect.gen(function* () {
-          yield* store.installCheckpointPage({ checkpointId: "stage-old", page: checkpoint() });
+          yield* store.installCheckpointPage({
+            memorySpaceId: space,
+            hubEnvironmentId: env,
+            expectedSnapshotToken: "synthetic-old",
+            expectedCheckpointSequence: 1,
+            checkpointId: "stage-old",
+            page: checkpoint(),
+          });
           yield* store.advanceBootstrapTx({
             ...input,
             expectedState: "staging",
@@ -4758,7 +4794,14 @@ it.effect("discarding expired bootstrap preserves staged bodies adopted by canon
         nextCursor: null,
       }),
     );
-    yield* store.installCheckpointPage({ checkpointId: "adopted", page: checkpoint() });
+    yield* store.installCheckpointPage({
+      memorySpaceId: space,
+      hubEnvironmentId: env,
+      expectedSnapshotToken: "synthetic-adopted",
+      expectedCheckpointSequence: 1,
+      checkpointId: "adopted",
+      page: checkpoint(),
+    });
     yield* store.apply(approved());
     assert.isTrue(
       yield* store.transact(
@@ -5550,4 +5593,255 @@ it.effect(
         "MemoryStoreConflict",
       );
     }).pipe(Effect.provide(live)),
+);
+
+it.effect("late final checkpoint page cannot replace a newer bootstrap join", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const input = { memorySpaceId: space, hubEnvironmentId: env };
+    yield* store.transact(
+      store.advanceBootstrapTx({
+        ...input,
+        expectedState: "unbound",
+        nextState: "staging",
+        checkpointId: "old",
+        snapshotToken: "synthetic-old",
+        checkpointSequence: 1,
+        nextCursor: null,
+      }),
+    );
+    assert.isTrue(
+      yield* store.transact(
+        store.discardBootstrapTx({
+          ...input,
+          expectedSnapshotToken: "synthetic-old",
+          expectedCheckpointId: "old",
+          expectedCheckpointSequence: 1,
+        }),
+      ),
+    );
+    yield* store.transact(
+      store.advanceBootstrapTx({
+        ...input,
+        expectedState: "unbound",
+        nextState: "staging",
+        checkpointId: "new",
+        snapshotToken: "synthetic-new",
+        checkpointSequence: 2,
+        nextCursor: null,
+      }),
+    );
+    const before = yield* store.readBootstrap(input);
+    yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* store.installCheckpointPage({
+            memorySpaceId: space,
+            hubEnvironmentId: env,
+            expectedSnapshotToken: "synthetic-old",
+            expectedCheckpointSequence: 1,
+            checkpointId: "old",
+            page: checkpoint(),
+          });
+          yield* store.completeCheckpoint({
+            ...input,
+            checkpointId: "old",
+            expectedSnapshotToken: "synthetic-old",
+            expectedCheckpointSequence: 1,
+            pageCount: 1,
+          });
+        }),
+      )
+      .pipe(Effect.result);
+    assert.deepStrictEqual(yield* store.readBootstrap(input), before);
+    assert.isUndefined((yield* store.loadAggregate(space, memory)).item);
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='old'`).length,
+      0,
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE checkpoint_stage_id='old'`).length,
+      0,
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_compaction_state WHERE space=${space} AND published=1`)
+        .length,
+      0,
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("checkpoint ports reject mismatched stage identity before creating bodies", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* beginFixtureCheckpoint;
+    const before = yield* store.readBootstrap(fixtureCheckpointIdentity);
+    for (const identity of [
+      { ...fixtureCheckpointIdentity, hubEnvironmentId: M.EnvironmentId.make("other") },
+      { ...fixtureCheckpointIdentity, expectedSnapshotToken: "synthetic-other" },
+      { ...fixtureCheckpointIdentity, checkpointId: "other" },
+      { ...fixtureCheckpointIdentity, expectedCheckpointSequence: 2 },
+      { ...fixtureCheckpointIdentity, memorySpaceId: M.MemorySpaceId.make(id(90)) },
+    ]) {
+      assert.strictEqual(
+        (yield* store.installCheckpointPage({ ...identity, page: checkpoint() }).pipe(Effect.flip))
+          ._tag,
+        "MemoryStoreConflict",
+      );
+      assert.strictEqual(
+        (yield* store.completeCheckpoint({ ...identity, pageCount: 1 }).pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+    }
+    assert.deepStrictEqual(yield* store.readBootstrap(fixtureCheckpointIdentity), before);
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_payloads`).length, 0);
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE record_kind='checkpoint'`).length,
+      0,
+    );
+    yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() });
+    assert.deepStrictEqual(yield* sql`SELECT checkpoint_stage_id FROM memory_payloads`, [
+      { checkpoint_stage_id: "fixture" },
+    ]);
+    yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() });
+    assert.strictEqual((yield* store.readBootstrap(fixtureCheckpointIdentity)).pageCount, 1);
+    yield* store.completeCheckpoint({ ...fixtureCheckpointIdentity, pageCount: 1 });
+    const completed = yield* store.readBootstrap(fixtureCheckpointIdentity);
+    assert.strictEqual(completed.state, "ready");
+    assert.isNull(completed.snapshotToken);
+    assert.strictEqual(completed.afterSequence, 1);
+    assert.deepStrictEqual(yield* sql`SELECT checkpoint_stage_id FROM memory_payloads`, [
+      { checkpoint_stage_id: null },
+    ]);
+    assert.strictEqual(
+      (yield* store
+        .completeCheckpoint({ ...fixtureCheckpointIdentity, pageCount: 1 })
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    assert.strictEqual(
+      (yield* store
+        .installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() })
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    assert.deepStrictEqual(yield* store.readBootstrap(fixtureCheckpointIdentity), completed);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("checkpoint completion CAS failure rolls back final page and canonical publication", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* beginFixtureCheckpoint;
+    const before = yield* store.readBootstrap(fixtureCheckpointIdentity);
+    // Suppress only the final conditional transition after canonical writes ran.
+    yield* sql`CREATE TRIGGER reject_checkpoint_completion BEFORE UPDATE OF bootstrap_state ON memory_sync_cursors WHEN NEW.bootstrap_state='ready' BEGIN SELECT RAISE(IGNORE); END`;
+    const failure = yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() });
+          yield* store.completeCheckpoint({ ...fixtureCheckpointIdentity, pageCount: 1 });
+        }),
+      )
+      .pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.deepStrictEqual(yield* store.readBootstrap(fixtureCheckpointIdentity), before);
+    for (const table of [
+      "memory_payloads",
+      "memory_inbox_pending",
+      "memory_identity_ledger",
+      "memory_revisions",
+      "memory_items",
+      "memory_compaction_state",
+    ]) {
+      assert.strictEqual((yield* sql.unsafe(`SELECT 1 FROM ${table}`)).length, 0);
+    }
+    yield* sql`DROP TRIGGER reject_checkpoint_completion`;
+    yield* store.transact(
+      Effect.gen(function* () {
+        yield* store.installCheckpointPage({ ...fixtureCheckpointIdentity, page: checkpoint() });
+        yield* store.completeCheckpoint({ ...fixtureCheckpointIdentity, pageCount: 1 });
+      }),
+    );
+    assert.strictEqual((yield* store.readBootstrap(fixtureCheckpointIdentity)).state, "ready");
+    assert.isDefined((yield* store.loadAggregate(space, memory)).item);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("recovery closes a frozen cycle despite continuous frontier and orphan tails", () =>
+  Effect.gen(function* () {
+    const { store } = yield* seedResolutionConflict;
+    const sql = yield* SqlClient.SqlClient;
+    const item = (yield* store.loadAggregate(space, memory)).item;
+    if (item?.status !== "quarantined") throw new Error("fixture");
+    const appendItems = Effect.fnUntraced(function* (start: number, count: number) {
+      for (let n = start; n < start + count; n++) {
+        const other = M.MemoryId.make(id(2000 + n));
+        const copy = { ...item, memoryId: other, conflict: { ...item.conflict, memoryId: other } };
+        yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) SELECT space,${other},scope_json,scope_key,heads_json,status,projection_watermark,${JSON.stringify(copy)},availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      }
+    });
+    // Seed a real claim through recovery before copying its metadata for the orphan.
+    yield* store.recoverClaimCandidates(0);
+    yield* appendItems(0, 205);
+    yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) SELECT 'early-orphan',space,${id(1900)},kind,'pending',metadata_json,0 FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim' LIMIT 1`;
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE id='early-orphan'`).length, 1);
+    for (let n = 0; n < 205; n++) yield* store.enqueueWork(backgroundWork(`tail:${n}`));
+    yield* store.recoverClaimCandidates(0);
+    yield* sql`DELETE FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim'`;
+    yield* sql`UPDATE memory_outbox SET status='pending',terminal_at=NULL WHERE id='early-orphan'`;
+    for (let round = 1; round <= 8; round++) {
+      yield* appendItems(205 + (round - 1) * 100, 100);
+      for (let n = 0; n < 100; n++) yield* store.enqueueWork(backgroundWork(`tail:${round}:${n}`));
+      yield* store.recoverClaimCandidates(round);
+    }
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim' AND status='pending'`)
+        .length,
+      1,
+    );
+    assert.strictEqual(
+      (yield* sql<{ status: string }>`SELECT status FROM memory_outbox WHERE id='early-orphan'`)[0]!
+        .status,
+      "cancelled",
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("new checkpoint judgment bodies receive stage ownership at insertion", () =>
+  Effect.gen(function* () {
+    const { store, sql, submission } = yield* seedSubmission;
+    if (submission.operation.kind !== "resolve") throw new Error("fixture");
+    const op = submission.operation;
+    yield* beginFixtureCheckpoint;
+    yield* store.installCheckpointPage({
+      ...fixtureCheckpointIdentity,
+      page: {
+        ...checkpoint(),
+        revisions: [],
+        resolutions: [{ resolution: op.resolution, payload: op.resolutionPayload }],
+      },
+    });
+    assert.deepStrictEqual(
+      yield* sql`SELECT checkpoint_stage_id FROM memory_payloads WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`,
+      [{ checkpoint_stage_id: "fixture" }],
+    );
+    assert.isTrue(
+      yield* store.transact(
+        store.discardBootstrapTx({
+          ...fixtureCheckpointIdentity,
+          expectedCheckpointId: fixtureCheckpointIdentity.checkpointId,
+        }),
+      ),
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`)
+        .length,
+      0,
+    );
+    assert.isAbove((yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space}`).length, 0);
+  }).pipe(Effect.provide(live)),
 );

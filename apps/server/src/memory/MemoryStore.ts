@@ -43,6 +43,14 @@ export class MemoryStoreConflict extends Schema.TaggedError<MemoryStoreConflict>
     return "Memory storage state changed.";
   }
 }
+type CheckpointStageIdentity = {
+  readonly memorySpaceId: M.MemorySpaceId;
+  readonly hubEnvironmentId: M.EnvironmentId;
+  readonly checkpointId: string;
+  readonly expectedSnapshotToken: string;
+  readonly expectedCheckpointSequence: number;
+};
+
 export class MemoryCapacityError extends Schema.TaggedError<MemoryCapacityError>()(
   "MemoryCapacityError",
   {
@@ -1495,17 +1503,17 @@ export class MemoryStore extends Context.Service<
       materialized: MaterializedIntent;
       now: number;
     }) => InTx<void>;
-    readonly installCheckpointPage: (input: {
-      readonly checkpointId: string;
-      readonly page: M.MemoryHubCheckpointPage;
-    }) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
-    readonly completeCheckpoint: (input: {
-      readonly memorySpaceId: M.MemorySpaceId;
-      readonly hubEnvironmentId: M.EnvironmentId;
-      readonly checkpointId: string;
-      readonly pageCount: number;
-      readonly localEnvironmentId?: M.EnvironmentId;
-    }) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    readonly installCheckpointPage: (
+      input: CheckpointStageIdentity & {
+        readonly page: M.MemoryHubCheckpointPage;
+      },
+    ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    readonly completeCheckpoint: (
+      input: CheckpointStageIdentity & {
+        readonly pageCount: number;
+        readonly localEnvironmentId?: M.EnvironmentId;
+      },
+    ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
     readonly readDueClaimCandidates: (
       limit: number,
       now: number,
@@ -4242,22 +4250,39 @@ const make = Effect.gen(function* () {
   ) {
     yield* transact(
       Effect.gen(function* () {
-        // Rowid cursors bound discovery and orphan cleanup independently; one active
-        // resolver must never prevent discovering another memory's conflict.
-        const sweep = Effect.fnUntraced(function* (dimension: string) {
-          const rows = yield* stored(
-            "claim-sweep-cursor",
-            sql<{
-              value: number;
-            }>`SELECT value FROM memory_quota_counters WHERE space='_claim_recovery' AND dimension=${dimension} AND scope_key=''`,
-          );
-          return rows[0]?.value ?? 0;
-        });
+        // Each sweep freezes its tail for a cycle, so continuously appended rows
+        // cannot postpone revisiting an older frontier or orphan forever.
         const advance = (dimension: string, value: number) =>
           stored(
             "claim-sweep-advance",
             sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_claim_recovery',${dimension},'',${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`,
           );
+        const sweep = Effect.fnUntraced(function* (
+          dimension: string,
+          table: "memory_items" | "memory_outbox",
+        ) {
+          const rows = yield* stored(
+            "claim-sweep-cursor",
+            sql<{
+              dimension: string;
+              value: number;
+            }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_claim_recovery' AND dimension IN (${dimension},${`${dimension}_upper`}) AND scope_key=''`,
+          );
+          let after = rows.find((r) => r.dimension === dimension)?.value ?? 0;
+          let upper = rows.find((r) => r.dimension === `${dimension}_upper`)?.value ?? 0;
+          if (after >= upper) {
+            after = 0;
+            const tail = yield* stored(
+              "claim-sweep-upper",
+              sql.unsafe<{ rowid: number }>(
+                `SELECT rowid FROM ${table} ORDER BY rowid DESC LIMIT 1`,
+              ),
+            );
+            upper = tail[0]?.rowid ?? 0;
+            yield* advance(`${dimension}_upper`, upper);
+          }
+          return { after, upper };
+        });
         const cancel = Effect.fnUntraced(function* (id: string) {
           yield* clearTerminalSubmission(id);
           yield* stored(
@@ -4265,27 +4290,17 @@ const make = Effect.gen(function* () {
             sql`UPDATE memory_outbox SET status='cancelled',claimed_by=NULL,claimed_until=NULL,terminal_at=${now},sync_version=sync_version+CASE WHEN kind='claim' THEN 1 ELSE 0 END WHERE id=${id}`,
           );
         });
-        const after = yield* sweep("frontier");
-        let rows = yield* stored(
+        const frontier = yield* sweep("frontier", "memory_items");
+        const rows = yield* stored(
           "claim-frontiers",
           sql<{
             rowid: number;
             space: string;
             memory_id: string;
             item_json: string;
-          }>`SELECT rowid,space,memory_id,item_json FROM memory_items WHERE rowid>${after} ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
+          }>`SELECT rowid,space,memory_id,item_json FROM memory_items WHERE rowid>${frontier.after} AND rowid<=${frontier.upper} ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
         );
-        if (!rows.length && after > 0)
-          rows = yield* stored(
-            "claim-frontiers-wrap",
-            sql<{
-              rowid: number;
-              space: string;
-              memory_id: string;
-              item_json: string;
-            }>`SELECT rowid,space,memory_id,item_json FROM memory_items ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
-          );
-        yield* advance("frontier", rows.at(-1)?.rowid ?? 0);
+        yield* advance("frontier", rows.at(-1)?.rowid ?? frontier.upper);
         for (const row of rows) {
           const item = yield* projectionCodec.decode(row.item_json, strict);
           const unusable = item.localAvailability.reasons.some((r) =>
@@ -4303,7 +4318,7 @@ const make = Effect.gen(function* () {
             !(yield* readPending(item.memorySpaceId, item.memoryId));
           const work = yield* stored(
             "claim-frontier-work",
-            sql<WorkRow>`SELECT * FROM memory_outbox WHERE space=${row.space} AND memory_id=${row.memory_id} AND kind IN ('claim','resolve') AND status NOT IN ('completed','cancelled','failed')`,
+            sql<WorkRow>`SELECT * FROM memory_outbox WHERE space=${row.space} AND memory_id=${row.memory_id} AND kind IN ('claim','resolve') AND status NOT IN ('completed','cancelled','failed') ORDER BY id LIMIT ${M.MEMORY_WORK_MAX_PENDING_ITEMS}`,
           );
           for (const candidate of yield* workRows(work)) {
             const heads =
@@ -4358,16 +4373,16 @@ const make = Effect.gen(function* () {
             claimedUntil: null,
           });
         }
-        const orphanAfter = yield* sweep("orphan");
+        const orphan = yield* sweep("orphan", "memory_outbox");
         const work = yield* stored(
           "claim-gone",
           sql<{
             rowid: number;
             id: string;
             gone: number;
-          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphanAfter} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
+          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphan.after} AND o.rowid<=${orphan.upper} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
         );
-        yield* advance("orphan", work.at(-1)?.rowid ?? 0);
+        yield* advance("orphan", work.at(-1)?.rowid ?? orphan.upper);
         for (const row of work)
           if (row.gone) {
             const candidate = yield* readWork(row.id);
@@ -4581,13 +4596,28 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_report_outbox SET state='failed',failure_code=${failure},claimed_by=NULL,claimed_until=NULL WHERE report_id=${id} AND state!='delivered'`,
     );
   });
-  const installCheckpointPage = Effect.fn("MemoryStore.installCheckpointPage")(function* (input: {
-    checkpointId: string;
-    page: M.MemoryHubCheckpointPage;
-  }) {
+  // The writer lock is held by transact before reading the stage. A page from
+  // a discarded snapshot must not recreate its bodies or publish over a new join.
+  const requireCheckpointStage = Effect.fnUntraced(function* (input: CheckpointStageIdentity) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "checkpoint-stage-identity",
+      sql`SELECT 1 FROM memory_sync_cursors WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId} AND bootstrap_state='staging' AND snapshot_token=${input.expectedSnapshotToken} AND checkpoint_id=${input.checkpointId} AND checkpoint_sequence=${input.expectedCheckpointSequence}`,
+    );
+    if (!rows.length) return yield* new MemoryStoreConflict({ code: "revision_changed" });
+  });
+  const installCheckpointPage: MemoryStore["Service"]["installCheckpointPage"] = Effect.fn(
+    "MemoryStore.installCheckpointPage",
+  )(function* (input) {
     yield* transact(
       Effect.gen(function* () {
         const page = yield* stored("checkpoint-codec", decodeCheckpoint(input.page, strict));
+        if (
+          page.memorySpaceId !== input.memorySpaceId ||
+          page.checkpointSequence !== input.expectedCheckpointSequence
+        )
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        yield* requireCheckpointStage(input);
         const pageDigest = hashText(yield* checkpointCodec.encode(page));
         const existing = yield* stored(
           "checkpoint-page",
@@ -4667,15 +4697,12 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  const completeCheckpoint = Effect.fn("MemoryStore.completeCheckpoint")(function* (input: {
-    memorySpaceId: M.MemorySpaceId;
-    hubEnvironmentId: M.EnvironmentId;
-    checkpointId: string;
-    pageCount: number;
-    localEnvironmentId?: M.EnvironmentId;
-  }) {
+  const completeCheckpoint: MemoryStore["Service"]["completeCheckpoint"] = Effect.fn(
+    "MemoryStore.completeCheckpoint",
+  )(function* (input) {
     yield* transact(
       Effect.gen(function* () {
+        yield* requireCheckpointStage(input);
         const rows = yield* stored(
           "checkpoint-pages",
           sql<{
@@ -4690,7 +4717,10 @@ const make = Effect.gen(function* () {
           pages.length !== input.pageCount ||
           !pages.length ||
           pages.some(
-            (p, i) => p.pageOrdinal !== i || p.checkpointSequence !== pages[0]!.checkpointSequence,
+            (p, i) =>
+              p.pageOrdinal !== i ||
+              p.memorySpaceId !== input.memorySpaceId ||
+              p.checkpointSequence !== input.expectedCheckpointSequence,
           ) ||
           !pages.at(-1)?.bootstrapComplete ||
           !M.validateMemoryCheckpointRecords(pages)
@@ -4805,10 +4835,12 @@ const make = Effect.gen(function* () {
           "checkpoint-publish",
           sql`INSERT INTO memory_compaction_state (space,checkpoint_id,boundary_json,retained_revision_boundary,published) VALUES (${input.memorySpaceId},${input.checkpointId},${yield* boundaryCodec.encode(last.causalBoundary)},${last.retentionFloor},1) ON CONFLICT(space) DO UPDATE SET checkpoint_id=excluded.checkpoint_id,boundary_json=excluded.boundary_json,retained_revision_boundary=excluded.retained_revision_boundary,published=1`,
         );
-        yield* stored(
+        const completed = yield* stored(
           "checkpoint-cursor",
-          sql`INSERT INTO memory_sync_cursors (space,hub_environment_id,after_sequence,bootstrap_state,checkpoint_id,checkpoint_sequence) VALUES (${input.memorySpaceId},${input.hubEnvironmentId},${last.checkpointSequence},'ready',${input.checkpointId},${last.checkpointSequence}) ON CONFLICT(space,hub_environment_id) DO UPDATE SET after_sequence=excluded.after_sequence,bootstrap_state='ready',checkpoint_id=excluded.checkpoint_id,checkpoint_sequence=excluded.checkpoint_sequence,snapshot_token=NULL,checkpoint_cursor=NULL,checkpoint_page_count=0`,
+          sql`UPDATE memory_sync_cursors SET after_sequence=${last.checkpointSequence},bootstrap_state='ready',snapshot_token=NULL,checkpoint_cursor=NULL,checkpoint_page_count=0 WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId} AND bootstrap_state='staging' AND snapshot_token=${input.expectedSnapshotToken} AND checkpoint_id=${input.checkpointId} AND checkpoint_sequence=${input.expectedCheckpointSequence} RETURNING space`,
         );
+        if (completed.length !== 1)
+          return yield* new MemoryStoreConflict({ code: "revision_changed" });
         yield* stored(
           "checkpoint-adopt-bodies",
           sql`UPDATE memory_payloads SET checkpoint_stage_id=NULL WHERE space=${input.memorySpaceId} AND checkpoint_stage_id=${input.checkpointId}`,

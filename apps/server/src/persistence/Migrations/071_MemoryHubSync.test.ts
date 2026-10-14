@@ -163,3 +163,89 @@ it.effect("processing counter upgrade and refusal compaction count canonical rec
     assert.isFalse(plan.some((r) => r.detail.includes("SCAN")));
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it.effect(
+  "item processing seed and deltas match source rows without unchanged counter writes",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* memory;
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json,index_state,indexed_generation,generation,cleanup_pending,deferred_json) VALUES ('space','a','{}','user','[]','active',0,'{}','{"reasons":[]}','ready',1,1,0,'[]'),('space','b','{}','user','[]','quarantined',0,'{}','{"reasons":["secret_detected","scanner_pending","missing_parent"]}','held',NULL,0,1,'[{"state":"held"},{"state":"pending"},{"state":"ready"}]')`;
+      yield* hub;
+      const verify = Effect.gen(function* () {
+        const source = yield* sql<{
+          space: string;
+          quarantined: number;
+          eligible: number;
+          indexed: number;
+          cleanup: number;
+          scanner_held: number;
+          scanner_pending: number;
+          missing_parent: number;
+          deferred: number;
+        }>`SELECT space,
+        sum(status='quarantined') AS quarantined,sum(status='active') AS eligible,
+        sum(coalesce(status='active' AND index_state='ready' AND indexed_generation=generation,0)) AS indexed,
+        sum(cleanup_pending) AS cleanup,
+        sum(EXISTS(SELECT 1 FROM json_each(availability_json,'$.reasons') WHERE value='secret_detected')) AS scanner_held,
+        sum(EXISTS(SELECT 1 FROM json_each(availability_json,'$.reasons') WHERE value='scanner_pending')) AS scanner_pending,
+        sum(EXISTS(SELECT 1 FROM json_each(availability_json,'$.reasons') WHERE value='missing_parent')) AS missing_parent,
+        sum((SELECT count(*) FROM json_each(deferred_json) WHERE json_extract(value,'$.state')!='ready')) AS deferred
+        FROM memory_items GROUP BY space`;
+        for (const row of source) {
+          for (const dimension of [
+            "quarantined",
+            "eligible",
+            "indexed",
+            "cleanup",
+            "scanner_held",
+            "scanner_pending",
+            "missing_parent",
+            "deferred",
+          ] as const) {
+            const counters = yield* sql<{
+              value: number;
+            }>`SELECT value FROM memory_quota_counters WHERE space=${row.space} AND dimension=${`processing_${dimension}`} AND scope_key=''`;
+            assert.strictEqual(counters[0]?.value ?? 0, row[dimension]);
+          }
+        }
+      });
+      yield* verify;
+      yield* sql`CREATE TABLE counter_writes(dimension TEXT)`;
+      yield* sql`CREATE TRIGGER audit_counter_update AFTER UPDATE ON memory_quota_counters WHEN NEW.dimension LIKE 'processing_%' BEGIN INSERT INTO counter_writes VALUES (NEW.dimension); END`;
+      yield* sql`CREATE TRIGGER audit_counter_insert AFTER INSERT ON memory_quota_counters WHEN NEW.dimension LIKE 'processing_%' BEGIN INSERT INTO counter_writes VALUES (NEW.dimension); END`;
+      yield* sql`UPDATE memory_items SET status=status,index_state=index_state,indexed_generation=indexed_generation,generation=generation,cleanup_pending=cleanup_pending,deferred_json=deferred_json,availability_json=availability_json WHERE memory_id='a'`;
+      assert.strictEqual((yield* sql`SELECT 1 FROM counter_writes`).length, 0);
+      yield* sql`UPDATE memory_items SET cleanup_pending=1 WHERE memory_id='a'`;
+      assert.deepStrictEqual(yield* sql`SELECT dimension FROM counter_writes`, [
+        { dimension: "processing_cleanup" },
+      ]);
+      yield* verify;
+      yield* sql`UPDATE memory_items SET status='blocked',generation=2,availability_json='{"reasons":["scanner_pending"]}',deferred_json='[{"state":"pending"}]' WHERE memory_id='a'`;
+      yield* verify;
+      yield* sql`UPDATE memory_items SET space='other' WHERE memory_id='b'`;
+      yield* verify;
+      const before =
+        yield* sql`SELECT space,dimension,value FROM memory_quota_counters WHERE dimension LIKE 'processing_%' ORDER BY space,dimension`;
+      yield* sql
+        .withTransaction(
+          sql`UPDATE memory_items SET status='active',index_state='ready',indexed_generation=generation,cleanup_pending=0,deferred_json='[]',availability_json='{"reasons":[]}' WHERE memory_id='b'`.pipe(
+            Effect.andThen(Effect.fail("rollback")),
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(
+        yield* sql`SELECT space,dimension,value FROM memory_quota_counters WHERE dimension LIKE 'processing_%' ORDER BY space,dimension`,
+        before,
+      );
+      yield* verify;
+      yield* sql`DELETE FROM memory_items WHERE memory_id='b'`;
+      assert.isTrue(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space='other' AND dimension LIKE 'processing_%'`).every(
+          (r) => r.value === 0,
+        ),
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
