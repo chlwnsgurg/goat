@@ -1,10 +1,13 @@
-# 040 — WP4: memory MCP and provider injection (WP3 final re-anchor r1, reflection r1)
+# 040 — WP4: memory MCP and provider injection (independent audit r1 fix)
 
-Date: 2026-10-14. Status: **READY_FOR_REVIEW**, not implementation approval or runtime proof.
-Same-architect reflection r1 is folded below; independent A remains coordinator work.
-This re-anchor writes only 040 and one WP3-final consumption record in the WP4 cycle of 000. Source changes,
-other plans, tests, builds, push and PR creation are outside this pass. The explicit two-document
-commit request overrides AGENTS.md's default against committing plans.
+Date: 2026-10-14. Status: **READY_FOR_REAUDIT**, not implementation approval or runtime proof.
+Independent audit r1 (NO-GO) and coordinator dispositions are folded into this executable plan.
+Inputs: `/tmp/goat-wp4-audit-r1.md`, `/tmp/goat-wp4-reflection-r1.md`, 030 §8/rev 11f–11g,
+000 and actual code at `d80e80ea229552d26776d83f76fe8372c0c82948`.
+This pass changes only 040 and the current WP4 cycle in 000. No source edits, other worktree
+changes, tests/builds, push or PR. The explicit two-document commit request overrides the
+AGENTS.md default against committing plans. Reflection r1 is predecessor evidence; no fresh
+reflection or independent re-audit is claimed by this fix.
 
 ## 1. Baseline, outcome and stale check
 
@@ -17,12 +20,14 @@ commit request overrides AGENTS.md's default against committing plans.
   requires independent A on this reflected revision before B. No remote ref movement or push is authorized.
 - Scope: only 040 body and the WP4 cycle in 000; 030/050/060 are read-only.
   The explicit plan commit request overrides the general no-plan-commit default.
-- Loop: satisfy-spec; trigger: WP3 final integration; goal: executable MCP/injection/source
-  consumer plan; non-goals: implementation, tests/builds, push/PR. Verifier: static source
-  comparison and two-file diff check (not runtime proof). Stop: local commit and
-  `/tmp/goat-wp4-reflection-r1.md`. Outcomes: ALIGNED or MISALIGNED. The user has already
-  been asked about A versus A-lite; no duplicate question. A-lite is the planning default,
-  not a claimed user answer. Independent A and the final source-authorization choice precede L6 activation.
+- Loop: satisfy-spec; trigger: independent audit r1 NO-GO; goal: executable MCP/injection/source
+  plan incorporating the coordinator decisions; non-goals: implementation, tests/builds, push/PR.
+  Verifier: source comparison and two-file diff check (not runtime proof). Stop: local commit and
+  `/tmp/goat-wp4-auditfix-r1.md`. Outcome: READY_FOR_REAUDIT; unresolved source/contract drift
+  escalates to coordinator. Independent re-audit precedes B.
+- **Confirmed by Jun, 2026-10-14:** original relay authorization is A-lite; memory WP1–WP6 ship
+  together. L6 original relay is mandatory for this WP4 completion; no pending model choice or
+  relay-off branch. Base evidence can be reviewed separately but cannot close WP4/full c-5.
 
 Outcome: six providers consume the same environment-owned service, a bounded snapshot at real
 prompt start and explicitly granted MCP tools. Nine core memory tools remain; a separate
@@ -43,7 +48,7 @@ work absent, STALE means the preceding plan's claim is incompatible with the mer
 | R04 | Candidates retain list continuation already | MISSING | S/memory/MemoryService.ts:1100–1123 drops nextCursor; C/memory.ts:1179–1183 lacks it. L1 adds it before consumers. |
 | R05 | Exact revision read and snapshot renderer | MISSING | S/memory/MemoryService.ts:1124–1165 provides exact-ID reads, but no nextCursor; C/memory.ts:1172 still requires raw text substring. L1 fixes producer/schema and adds renderer/snapshot. |
 | R06 | No prepare/validate source ports | STALE | S/memory/MemoryService.ts:55–88,1200–1260 implements both. Public readSource remains absent; activation is WP4. |
-| R07 | WP3 supplies activated owner policy/reader | STALE | S/memory/MemorySyncRuntimeLive.ts:168–171 denies both. S/memory/MemorySyncService.ts:1350–1375 converts access failure to terminal denied. WP4 L6 owns policy and reader, with live attestation only for option A. |
+| R07 | WP3 supplies activated owner policy/reader | STALE | S/memory/MemorySyncRuntimeLive.ts:168–171 denies both. S/memory/MemorySyncService.ts:1350–1375 converts access failure to terminal denied. WP4 L6 owns policy and reader, with A-lite outbound policy revocation (§3.2). |
 | R08 | Source request proves caller rights | STALE | C/memory.ts:2247–2269 has scope snapshot and requester environment only; S/memory/MemoryService.ts:1211–1219 creates literal scopes. S/memory/MemoryStore.ts:7306–7345 stamps member environment/deadline, not caller identity. |
 | R09 | Sync wrappers are future / all return ServiceError | STALE | S/memory/MemorySyncService.ts:87–115 exports wrappers now; Error = Hub.MemoryHubServiceError (:28); update uses AdministrationError or AccessError (:111–112). No guessed casts. |
 | R10 | start/syncOnce/schedule are function calls | STALE | S/memory/MemorySyncService.ts:90–93 exports Effect values; shutdown is Effect<void>. readLocalReadiness/requireBootstrap are functions (:94–98). |
@@ -62,7 +67,9 @@ work absent, STALE means the preceding plan's claim is incompatible with the mer
 
 `M` = `@goat/contracts`; `Permit` = repeatable SQL-free
 `Effect.Effect<void, MemoryService.MemoryAccessError>`. Mutations, binding, changes,
-list/search/read/history and context reads retain their actual MemoryService signatures.
+list/search/read/history and context reads retain their public MemoryService signatures.
+Exception: L1 changes the internal Store.search array return to a search-page result (§6.2);
+MemoryService consumes examined-row continuation instead of deriving it from matching items.
 ServiceError = MemoryAccessError | MemoryStorageError | MemoryStoreConflict | MemoryCapacityError.
 StoredReceipt is the local store result; preserve forget base/expansion IDs and receipts.
 
@@ -132,89 +139,99 @@ fail-closed until the following chain and scenario g pass. WP3 already owns boun
 terminal denial, generation validation and retry/TTL; WP4 adds the committed original reader
 and delegates authorization through application-owned ports, not the Worker summary reader.
 
-### 3.1 Original relay: A-lite default, A executable alternative (reflection r1)
+### 3.1 Original relay: confirmed A-lite (D1–D2)
 
-All participating devices belong to the same user (000 M3; no multi-owner/team sharing).
-Current `authorizedScopes` is a literal snapshot, not caller proof (`C/memory.ts:2247–2269`,
-`S/memory/MemoryService.ts:1211–1219`). Hub already authenticates a member, stamps requester
-identity/deadline and binds retries to a digest (`MemoryStore.ts:7306–7345`). That is a useful
-transport foundation, not owner transcript permission. Public MemoryReadSourceInput stays
-unchanged: no arbitrary host/path/thread or caller-provided grant/attestation.
+All participating devices belong to the same user (000 M3; no team sharing).
+`authorizedScopes` is a literal snapshot, not caller proof (C/memory.ts:2247–2269;
+S/memory/MemoryService.ts:1211–1219). Public MemoryReadSourceInput remains unchanged:
+no arbitrary host/path/thread, caller-supplied grant or attestation.
 
-| Dimension | A-lite — planning default | A — live requester decision |
-| --- | --- | --- |
-| Trust / loss | Owner explicitly trusts listed same-user requester environments to enforce caller memory:read AND explicit orchestration:read locally. Owner cannot independently verify an unauthorized caller inside a trusted requester. A compromised requester process/member credential can act as that environment until removed/revoked. | Hub asks the pinned requester verifier for the bound subject's current grants; owner consumes verified subject/policy epoch. Distinguishes callers and live grant changes even when a relay request bypasses the ordinary requester entry point. A compromised requester verifier is still inside the trusted boundary. |
-| Owner authority | Versioned owner-local allowedRequesterEnvironmentIds, default empty = deny; settings:write installs/removes exact environment IDs. Membership alone never enrolls a device. | Same owner allowlist plus explicit managed same-owner subject↔requester binding and subject orchestration:read delegation, default deny. No derivation from hostname, shared space or membership. |
-| New endpoint / contracts | 0 endpoints; reuse relay paths. Add owner-policy read/update DTO/guard and hub-stamped digest/credential-version collect/result codec fields. No subject-proof schema or introspection API. | 1 narrow hub→requester validation endpoint, authenticated pinned hub; additionally decision reference, subject/epoch/binding schemas, validation request/result and administration contract. |
-| New state | 1 versioned owner-local allowlist committed Ref + persisted settings; existing bounded relay rows and caller-bound in-flight request association. No live grant-reference registry. | Above plus subject binding/policy epoch and bounded live decision-reference registry: max 32/environment, immutable <=75s expiry. Restart invalidates references. No bearer/session material in relay rows. |
-| Revocation | Local caller reauthorization before request/return; owner allowlist removal takes effect at the next read/response boundary immediately on committed policy publication; member credential revoke rejects hub collect/respond/result. Bytes already delivered cannot be recalled. | Additionally hub live validation at admission, before accepting available response and before returning result; session/grant/reference revoke invalidates pending decisions. Verifier outage denies, even if owner is online. |
-| Cost / connectivity | No reverse reachability from hub to requester; reuses each member's outbound hub connection. | Must supply authenticated hub→requester reachability in local/remote/tunnel deployments, not assume a member URL is routable. No fallback to A-lite on failure. |
+**D1:** Jun confirmed A-lite on 2026-10-14. Owner trusts explicitly listed requester environments
+of the same user to enforce live memory:read AND explicit orchestration:read locally. Owner cannot
+independently verify an unauthorized caller inside a compromised allowed requester. Membership,
+hostname or a shared memory space never enrolls an environment. Default-empty owner allowlist
+denies; settings:write installs/removes exact environment IDs with expectedVersion CAS.
+No reverse requester introspection, subject-binding registry or live decision-reference contract.
 
-**Decision D1:** A-lite is the smaller model for single-owner devices and the default for this
-plan. It differs from the rejected previous option C: caller compound authorization remains
-mandatory at the requester, and explicit owner enrollment is a separate settings:write action.
-This is a deliberate environment trust boundary, not end-to-end independent caller attestation.
-The user answer is pending externally. If A is selected, apply the delta below before L6 B;
-if relay is disabled, keep the WP3 denying reader/permit and omit L6. Neither outcome silently
-changes the other eight core tools or snapshot injection. Nine names remain catalogued;
-readSource is denied/unavailable with truthful capability, never a permissive placeholder.
-M16 original-read success and full c-5 source acceptance remain OPEN if L6 is deferred.
+**D2 / executable chain:** L1 owns strict internal stamp/policy/revoke contracts. L6 owns the
+reader and relay policy flow; L5 owns settings commit/publication and composition. Source policy
+read/update RPCs form a settings:write guarded administration group, separate from 14 core RPCs.
+Persist allowedRequesterEnvironmentIds, monotonic owner policy epoch and body-free pending
+revocation/ack metadata in owner settings; publish immutable committed Ref after settings commit.
+No sync join installs a policy. WP6 owns visible allowlist controls and propagation state.
 
-**D2 / A-lite executable chain.** L1 owns strict internal relay/policy contracts; L6 supplies
-policy/reader services; L5 installs policy settings and composes them once. An authorized
-settings RPC reads/replaces the owner-local allowlist with expectedVersion CAS, settings:write
-at execution and after waits. Persist only environment IDs/version; publish its immutable Ref
-only after settings commit. Removal/restart cannot resurrect an older policy. These policy read/update RPCs are a separate source-administration group, settings:write
-guarded in contracts/RpcAuthorization/client commands, not additions to the 14 core RPC count.
-Their optional activation follows L6; default base denies source access. No visible
-settings UI is needed in WP4; WP6 consumes this RPC. No policy entry is installed by sync join.
+Requester checks authenticated live compound grants before prepare/submission and after await;
+provider calls also require live owning run. A server-owned caller-bound request ID prevents two
+callers sharing results. Hub authenticates member, stamps requester environment/credential version,
+exact locator digest and immutable <=75s deadline. Retry preserves digest/deadline. Carry fields
+through C/memory.ts → HubClient/HubHttp/HubService → Store codecs → Sync owner permit/requester
+validator; legacy unstamped rows terminate denied/expired. Old scope literals are never proof.
 
-Requester MemoryAccess checks authenticated live memory:read + explicit orchestration:read
-before prepare/submission and after await before exposing bytes; provider calls also require a
-live owning run. Generate a server-owned caller-bound request ID (two callers cannot share a
-result), never accept a raw relay request as a public bypass. Prepare uses the existing
-locator/generation/watermark validation. Hub authenticates current member/credential, stamps
-requester environment, credential version, exact locator digest and immutable hub deadline
-<=75s, and validates the same binding on collect/respond/result. Retry preserves digest and
-deadline; membership revoke is authoritative at hub boundaries. Carry these fields through
-`C/memory.ts` → HubClient/HubHttp/HubService → Store locator codecs → Sync owner permit and
-requester validator. Legacy unstamped rows decode explicitly and terminate denied/expired.
-Do not treat old authorizedScopes literals as proof or extend expiry on restart/retry.
+Owner accepts only its authenticated pinned hub channel and checks allowlist, active member stamp,
+digest/deadline, locally owned existing nondeleted thread, nonforgotten memory, generation/watermark
+and selected completed committed messages at/below that watermark. Scan/bound before response;
+recheck policy/epoch and source state before read and response. Local owner=hub uses the same
+checks without HTTP or Effect.void fallback. Caller revoke is requester-local; member revoke is
+hub-authoritative; neither substitutes for owner-policy propagation below.
 
-Owner accepts only its authenticated pinned hub channel, checks env ∈ committed allowlist,
-active member stamp/epoch and exact digest/deadline, then checks sourceThread belongs locally,
-thread exists and is not deleted, memory is not forgotten, generation and watermark match,
-and selected IDs are completed committed messages at/below the evidence watermark. Apply
-scanner and existing page/response bounds. Recheck policy/epoch and source state before reading
-and before responding; the requester rechecks generation and compound grant before return.
-Local owner/hub takes the same checks without HTTP, with no Effect.void permit fallback.
-An owner offline when removal is committed cannot produce output until it resumes and reads
-the new policy. A race after final response cannot recall bytes already sent.
+### 3.2 Owner revocation reaches pending results (D3; audit A3)
 
-**D3 / A delta (not built speculatively).** L1 adds strict decision-reference/verified-subject,
-policy epoch and same-owner administration schemas plus legacy decoder rejection. A-only
-`POST /api/memory-source/v1/validate-requester` is implemented in NEW
-`S/memory/MemorySourceReadHttp.ts` / `.test.ts`, mounted by L5. Strict body-free input binds
-reference, caller/subject, requester/owner, digest and epochs; output is verified decision +
-expiry or typed denied. Authenticate the pinned hub principal, not a browser/provider token. L2 exports
-SQL-free live caller/grant/expiry resolution from SessionStore/provider registry, without
-changing ordinary OAuth consent. L6 adds `MemorySourceReadAccess.ts` and tests: create a
-body-free reference only after prepare, max 32 live/environment, <=75s fixed expiry, remove on
-completion/revoke/expiry/restart. The reference binds caller, requester/owner, locator digest,
-credential/policy/hub epochs and original deadline. Hub validates with a pinned authenticated
-requester endpoint at admission, before response acceptance and before result return; no
-reusable token crosses relay. Failed/unreachable verifier denies. L5 owns endpoint mounting,
-committed subject-policy configuration and layer wiring; L4/L3 stay unchanged. Prove hub→requester
-reachability with synthetic local/remote/tunnel fixtures before enabling A; if it is unavailable,
-leave L6 denied rather than add a second reverse tunnel. Subject binding is installed/revoked
-only through settings:write CAS, never inferred. Owner still executes all D2 source checks.
+Use the existing outbound `source-read/respond` path: extend its strict internal input to a tagged
+union preserving normal response and adding body-free `revoke` with memorySpaceId,
+requesterEnvironmentId and ownerPolicyEpoch. Owner identity comes only from authenticated member;
+no requestId/body/subject introspection is needed for revoke. HubClient/Http/Service and Sync use
+the same port; collect/result continue their existing jobs. No twelfth endpoint is planned.
 
-**D4 / SQL and outcomes.** Network verification for A is outside SQL; capture a decision/epoch
-then recheck SQL-free committed permits after lock acquisition. A-lite uses local Ref permits;
-neither mode waits on full settings cache/admin lock inside SQL. Denied is auth denial;
-offline owner/relay timeout is source_unavailable; forgotten/source_invalidated/secret_detected
-remain distinct. Relay bytes never enter canonical memory, FTS, provider snapshots, checkpoints,
-reports or durable client caches. Sync and forget progress independently of relay decisions.
+After owner settings commit and committed Ref publication (outside SQL Tx), L5 signals L6 Sync
+to send revoke. Persist a body-free pending entry in the same settings commit so restart/network
+failure retries it; key is (space, owner, requester, epoch). Hub's one transaction authenticates
+owner, advances the durable pair's revoked-through epoch monotonically, deletes the pair's
+pending available payloads at/below that epoch, and finalizes those requests (including still
+unanswered requests of the revoked enrollment) as typed denied. A duplicate/older revoke cannot
+touch responses from a later acknowledged re-enrollment epoch. Denied settlement is body-free
+relay state/codec metadata; result returns denied even with no payload row, and a late response
+cannot change that terminal decision to available.
+A bounded per-member pair epoch map is relay authority metadata, never a content archive.
+Retain its monotonic fence across restart and until old request deadlines have passed before
+pruning a retired member. L1 defines bounds/codecs; L6 returns relay metadata schema/migration
+patches to L1 for ordered Store migration/registration, without concurrent file ownership.
+Only committed hub ack settles the matching pending epoch; an older ack cannot settle a newer
+removal. Expose `revocationPropagation: pending|acknowledged` and pending target/epoch in the
+settings view. Until hub ack the status is **철회 전파 중**, not completed revocation.
+The local Ref blocks new owner reads immediately; remote pending results can still race before ack.
+
+Normal available responses carry the captured ownerPolicyEpoch, stamped by the authenticated hub
+on acceptance. Accept and result both compare it with the pair's revoked-through epoch in SQL:
+an epoch at/below the revocation fence is denied, its payload erased. Later re-enrollment increments
+policy epoch; delayed old responses/revokes cannot revive old requests or revoke a newer response.
+Duplicate revoke returns the same effective ack without regressing epoch. Result and revoke
+serialize on the existing Store transaction lane; after ack a not-yet-delivered result is denied.
+Bytes already delivered cannot be recalled. Ack/settings/network waits are outside SQL; only
+SQL-free committed permits may be rechecked after lock ownership. L6 owns relay Store/Sync edits
+only after sequential handoff from L1/L5; L1 owns contracts, L5 settings schema/view and publication.
+
+### 3.3 Bounded SQL relay and outcomes (D4; audit A2 disposition)
+
+030 §8/M16 was decided and reviewed in WP0: **no shared or accumulating original archive;
+the existing M16 maximum 75-second purgeable SQL relay buffer remains allowed**. Interview
+“share summary + original location; read original on its device when needed” prohibits an original
+archive, not all hub disk contact. A2 is therefore not accepted as a blocker. Its SQL INSERT
+observation (MemoryStore.ts:7461–7470) is correct; the demanded nonpersistent body was coordinator
+wording overreach, not the approved requirement. Keep existing SQL buffer, not a second RAM store.
+
+Guarantees: immutable <=75s first hub deadline; consume deletes payload in the result transaction;
+expiry purge on admission/maintenance and before result; forget/revoke also purge. At most 32
+live reads/requester, 128/hub, <=64 KiB encoded outcome, <=32/64 KiB collect; live body bound is
+at most 128 × 64 KiB (8 MiB), additionally charged to existing hub quota. Retry/restart never
+extends expiry. Choose the smaller existing behavior: an unconsumed body may survive hub restart
+until its original deadline; expired bodies cannot be served and are purged before service.
+This is bounded logical retention, not physical disk/WAL secure erasure or zero persistence.
+No body in canonical memory, FTS, checkpoint, log, event, report, provider snapshot or durable
+client cache. No payload in safe errors. Immediate freed-page reuse/physical-remanence hardening
+is **Low follow-up only**, outside this completion gate.
+
+Denied remains auth denial; offline/timeout is source_unavailable; forgotten/source_invalidated/
+secret_detected remain distinct. Relay failures cannot stall unrelated sync/forget.
 
 ## 4. Snapshot selection, framing and invalidation
 
@@ -235,7 +252,7 @@ For each real start, use short individual `MemoryStore.transact` reads
 (`MemoryStore.ts:426–429`) for readiness/binding and each candidate page, reusing the same SQL
 service/journal. Never hold the common transaction lane across multiple pages, rendering or
 provider preparation. No network inside a read transaction. Build a repeatable trusted internal
-read permit from the owning thread/run policy; this is not an MCP-token requirement and not an
+read permit from the §6.1 committed provider policy intersected with owning thread/run policy; this is not an MCP-token requirement and not an
 externally selectable bypass flag. Capture the initial space, binding and projection watermark;
 each page must match that view, and recheck readiness/binding/watermark at selection completion
 and the actual delivery boundary. On drift, discard the selection rather than combine views or
@@ -435,14 +452,77 @@ Complete the two credential producer chains, not just invocation types:
    authenticated client → McpHttpServer context grantedScopes + repeatable reauthorize. Current
    `S/auth/McpOAuth.ts:454,540` and `EnvironmentAuth.ts:91,1325,1367` still derive from access;
    WP4 must preserve explicit selected union instead. One-click approver must cover the entire
-   union (`mcpOAuthHttp.ts:130`). L4 owns the actual consent producer `apps/web/src/components/auth/ConnectAgentSurface.tsx` and its behavior test. `mcpOAuthHtml.ts` renders an error page and has no consent-producer assignment. Both browser-session and pairing-code proof arms send the explicitly selected memoryScopes (default empty); selection changes update payload and callback dependencies. The one-click predicate checks the entire access + memory scope union before choosing a proof arm. Carry selection through the existing decision schema, not a parallel API. Extend SessionStore with a token-free active-scope read using current revocation/expiry predicates for live checks. Preserve a memory-only write grant without inferring orchestration:operate or elevating the runtimeModeCeiling. Legacy codes/sessions get no new grants. No exchange escalation.
+   union (`mcpOAuthHttp.ts:130`). L4 owns the actual consent producer `apps/web/src/components/auth/ConnectAgentSurface.tsx` and its behavior test. `mcpOAuthHtml.ts` renders an error page and has no consent-producer assignment. Both browser-session and pairing-code proof arms send the explicitly selected memoryScopes (default empty); selection changes update payload and callback dependencies. The one-click predicate checks the entire access + memory scope union before choosing a proof arm. Carry selection through the existing decision schema, not a parallel API. Extend SessionStore with a token-free active-scope read using current revocation/expiry predicates for live checks. A selected memory:write grant never elevates runtimeModeCeiling. Read-only clients/sessions cannot use it: keep the existing write ceiling, with no independent memory-only write execution path. Non-read-only + explicit memory:write permits memory writes; thread-operate-free write issuance is outside this WP4 scope. Legacy codes/sessions get no new grants. No exchange escalation.
 2. Provider: `ProviderSessionManager.ts:474–533` prepare/reuse → McpCredentialRequest
    (`McpSessionRegistry.ts:15–25`) → issued token registry → resolve/context → live permit.
-   Add stored grantedScopes and internal readCurrentPolicy callback; issuance checks current
+   Consume the §6.1 policy producer; add stored grantedScopes and internal readCurrentPolicy callback. Issuance checks current
    thread/provider and installed policy before reuse, rotates on policy change, and invocation
    rechecks live caller/run/deletion. Thread read is independently granted orchestration:read,
    never inferred from memory:read. Preparing before activeRunId commits must not deadlock start;
    require active-run ownership at invocation. Do not put a callback or grants into agent input.
+
+### 6.1 Managed provider policy producer (audit A4–A5)
+
+Jun's confirmed requirement makes all GOAT-managed providers use the same memory through MCP and
+start injection. Explicit installed default policy: memory:read + memory:write; read-only sandbox
+or read-only thread/session gets read only. Existing read-only client ceiling still denies
+memory_upsert/forget/revert even if a stored memory:write grant exists. No handler bypass,
+ceiling elevation or independent memory-only write path. memory:read never implies
+orchestration:read: issue that explicit grant only when existing orchestration thread-read policy
+allows it; source needs both plus owner enrollment. runtimeMode/capability strings never create
+grants; read-only state only narrows this installed policy.
+
+L1 adds environment `enableAgentMemoryAccess` (Boolean, default on) beside existing agent-access
+settings in C/settings.ts, including persisted settings decode/default, update schema and tests.
+No new project override: environment setting is the upper bound, intersected with thread/session
+read-only and existing orchestration-read policy. Off removes memory grants and start injection.
+Schedule/delegation inherits a captured parent policy ceiling and intersects current destination
+policy; it cannot exceed parent grants or gain rights after parent revocation. External OAuth
+still uses explicitly selected scopes (default empty); owner allowlist is a separate policy.
+
+L5 extends S/serverSettings.ts management via existing settings:write update path, persistence
+and committed immutable policy Ref/version publication after commit. Snapshot and L2 callbacks
+read that SQL-free projection plus committed thread/session policy, never getSettings/admin lock
+in SQL. Absent/unready producer fails closed; a normally decoded missing setting means approved
+default on, not missing authorization. Invalid external file retains last valid committed view.
+On change publish new policy epoch, revoke/reissue existing provider credentials outside SQL;
+live resolve denies stale policy immediately while adapter attachment is refreshed. L5 signals
+L2's rotation hook, not a second registry. Availability cannot retain an old write/read claim.
+
+Chain and ownership: L1 settings contract creation → L5 settings serialization/decode/committed
+producer → L2 ProviderSessionManager prepare/reuse + McpCredentialRequest + registry stored
+explicit grants/live resolver → L3 packages/provider-core/src/server/mcpSession.ts typed
+availability config and every §5 native attachment/instruction consumer. Internal policy callback
+serialization is N/A (process-local); grant availability propagates through adapter configuration,
+never an agent prompt input authority field. L3 owns mcpSession.ts/tests and each native MCP
+configuration builder to derive read/write/source availability from actual issued grants.
+L1 snapshot consumes the same producer without requiring an MCP token. Preparing before
+activeRunId exists may issue a thread-bound credential; actual toolkit invocation still demands
+current live owning run/provider/thread and rechecks epoch/deletion.
+
+### 6.2 Search page port and cursor semantics (audit A6)
+
+L1 changes internal Store.search to return `{ items, examinedAfterMemoryId, exhausted }` rather
+than ReadonlyArray<MemoryItem> (MemoryStore.ts:1332–1339). Store creates this page in bounded SQL;
+MemoryService.search maps examined continuation into MemoryPage.nextCursor; existing strict
+MemoryPage serialization/decoder carries it; L2 MCP and L5 RPC pass the same page without
+recomputing cursor from matches. List retains its existing row cursor and public signatures.
+Search cursor is opaque/versioned and binds normalized query digest, mode, memorySpaceId and
+scope key (bounded canonical string within existing input/page wire fields, not MemoryId);
+L1 splits the current shared page cursor decode: search uses its versioned codec, list still
+uses MemoryId. No raw query/body in cursor;
+wrong kind/query/mode/scope or malformed cursor returns safe validation error, never silently
+restarts. Old search cursors without this binding are rejected; list cursors remain compatible.
+Cursor schema/decode and every MCP/RPC consumer are L1→L2/L5 owned; no body in cursor.
+
+For FTS and substring, first materialize an indexed memory-ID keyset window <=1,000 candidates
+in the requested scope, before FTS MATCH/instr, sort or payload read. Inspect actual query plan
+so optimizer cannot flatten the bound into a broad scan; final result LIMIT is not the bound.
+Walk ordered window until output limit/64-KiB page bound or window end. Continuation is the last
+actually examined candidate, not end of a preloaded window if output filled early, so remaining
+matches are not skipped. Empty window of matches can still have non-null continuation. Exhausted
+means keyset tail was proven reached (a short final window, or a later empty window), never
+items.length < limit. Bounded counter/backfill readiness and final drift/grant fences still apply.
 
 NEW shared `packages/client-runtime/src/state/memory.ts` uses createEnvironmentRpcCommand for
 mutations/binding/settings and permissionAtom for UI availability. Raw clients remain in rpc/.
@@ -480,30 +560,32 @@ On this Mac no bun/pnpm/vp test, vitest, e2e or full build; light targeted typec
 No repo-wide checks. This docs-only reflection runs only document checks. No shell-profile sourcing or sensitive data reads.
 
 Six lanes are file-responsibility slices inside one WP4, not six projects/PRs. L1–L5 form the
-MCP/injection base; L6 is an independently gateable original-relay extension. Keep all six
+MCP/injection base; L6 is a mandatory original-relay lane, independently reviewable before final WP4 closure. Keep all six
 provider decisions: dropping one loses c-5. Keep the small OAuth consent producer in L4:
 without it real external users cannot grant memory scopes, so MCP tests alone prove no usable
 path. Full memory screens, policy UI, disable/re-enable UI and diagnostics remain WP6. Guarded
 import command may exist but cannot activate import capability before WP5. No extra UI redesign,
-signed assertions, speculative A registry or second index/runtime is included.
+signed assertions or second index/runtime is included.
 
 | Lane | File owner (adjacent focused tests included) | Output / predecessor |
 | --- | --- | --- |
-| L1 contracts / domain / bounded Store | MODIFY C/{memory,rpc,clientRpcPermissions}.ts and tests; S/memory/{MemoryService,MemoryStore}.ts and tests; NEW MemorySnapshot.ts, MemoryAccess.ts and tests; NEW packages/provider-core/src/server/memoryContext.ts and test; MODIFY provider-core/package.json; Store counter migration/registration only if required | First contracts/access/renderer; then Store counters/keyset ports + domain consumption. Candidate nextCursor, S13, bounded snapshots/restore, all core guards, strict owner-policy/stamp DTOs. Public source method keeps denying authority until L6 proof. No hub runtime changes. |
-| L2 auth / MCP | MODIFY S/auth/{McpOAuth,EnvironmentAuth,SessionStore,mcpOAuthHttp}.ts; S/mcp/{McpInvocationContext,McpSessionRegistry,McpHttpServer}.ts; S/orchestration-v2/ProviderSessionManager.ts; NEW mcp/toolkits/memory/{tools,handlers}.ts and memoryAdministration/{tools,handlers}.ts, tests | Consume L1 contracts; produce explicit OAuth/provider grants, live permits, nine core tools + narrow disable registration. A-only live resolver port is conditional. No Store/relay edits. |
-| L3 provider delivery | MODIFY S/orchestration-v2/Adapters/{CodexAdapterV2,ClaudeAdapterV2,AntigravityAdapterV2}.ts; S/provider/CodexDeveloperInstructions.ts; packages/provider-core/src/server/ProviderAdapter.ts; packages/provider-{cursor,acp,grok}/src/server/adapter.ts; provider-opencode/src/server/{adapter,v2/adapter}.ts and tests incl NEW v2/adapter.memory.test.ts | L1 renderer + L2 truthful availability → all six §5 delivery/lifecycle paths, both ACP flavors, OpenCode v1/v2; preserve cloud observation-only attach. |
+| L1 contracts / domain / bounded Store | MODIFY C/{memory,rpc,clientRpcPermissions,settings}.ts and tests; S/memory/{MemoryService,MemoryStore}.ts and tests; NEW MemorySnapshot.ts, MemoryAccess.ts and tests; NEW packages/provider-core/src/server/memoryContext.ts and test; MODIFY provider-core/package.json; Store counter migration/registration only if required | First contracts/access/renderer; then Store counters/keyset ports + domain consumption. Candidate nextCursor, internal search-page/cursor chain, S13, bounded snapshots/restore, all core guards, provider settings default/decode/update, strict owner-policy/epoch/revoke stamp DTOs. Public source method keeps denying authority until L6 proof. No hub runtime changes. |
+| L2 auth / MCP | MODIFY S/auth/{McpOAuth,EnvironmentAuth,SessionStore,mcpOAuthHttp}.ts; S/mcp/{McpInvocationContext,McpSessionRegistry,McpHttpServer}.ts; S/orchestration-v2/ProviderSessionManager.ts; NEW mcp/toolkits/memory/{tools,handlers}.ts and memoryAdministration/{tools,handlers}.ts, tests | Consume L1 contracts and L5 committed provider policy; produce explicit OAuth/provider grants, live permits, nine core tools + narrow disable registration. No Store/relay edits. |
+| L3 provider delivery | MODIFY S/orchestration-v2/Adapters/{CodexAdapterV2,ClaudeAdapterV2,AntigravityAdapterV2}.ts; S/provider/CodexDeveloperInstructions.ts; packages/provider-core/src/server/{ProviderAdapter,mcpSession}.ts and tests; packages/provider-{cursor,acp,grok}/src/server/adapter.ts; provider-opencode/src/server/{adapter,v2/adapter}.ts and tests incl NEW v2/adapter.memory.test.ts | L1 renderer + L5 policy → L2 grants/rotation/live resolver → L3 truthful native config availability → all six §5 delivery/lifecycle paths, both ACP flavors, OpenCode v1/v2; preserve cloud observation-only attach. |
 | L4 shared client / OAuth consent only | NEW packages/client-runtime/src/state/memory.ts and tests; MODIFY rpc/client.ts/tests and package.json export; NEW apps/{web,mobile}/src/state/memory.ts wrappers; MODIFY apps/web/src/components/auth/ConnectAgentSurface.tsx and NEW behavior test | L1 contracts → guarded destination commands, body-free stream/reset and late-result fences; both OAuth proof arms/explicit scopes/full-union one-click. No full memory screens or server auth edits. |
-| L5 coordinator / settings integration | MODIFY S/{ws,server,serverSettings}.ts; S/auth/RpcAuthorization.ts; S/orchestration-v2/{RunExecutionService,runtimeLayer}.ts; S/environment/ServerEnvironment.ts; S/memory/MemorySyncService.ts and tests; owning 040/000 records | Consume L1–L4 → 14 core RPCs, disableHub wrapper, committed settings projections, one graph and actual turn insertion. Own policy settings CAS/publication and A-only endpoint mounting from L6 specification. Only coordinator runs integrated client verification; CI collection changes only if needed. |
-| L6 optional source relay | MODIFY S/memory/{MemorySyncRuntimeLive,MemoryHubService,MemoryHubClient,MemoryHubHttp}.ts and tests; MemoryHubSyncScenarios.test.ts; NEW MemoryOwnerSourceReader.ts/test; A-only NEW MemorySourceReadAccess.ts/test and MemorySourceReadHttp.ts/test | Consume frozen L1 contracts and L2 permits, D2 default or D3 selected alternative. Owner allowlist/reader and authenticated stamps/codecs, scenario g. After L1/L5 base lands, explicit sequential handoff of ONLY source-relay sections/tests of MemoryStore.ts and MemorySyncService.ts; no concurrent ownership. Return shared settings/composition patches to L5, contracts/public method patches to L1. No search/counter/disable ownership. |
+| L5 coordinator / settings integration | MODIFY S/{ws,server,serverSettings}.ts; S/auth/RpcAuthorization.ts; S/orchestration-v2/{RunExecutionService,runtimeLayer}.ts; S/environment/ServerEnvironment.ts; S/memory/MemorySyncService.ts and tests; MODIFY .github/workflows/goat-ci.yml; owning 040/000 records | After L1 contracts, first produce committed provider policy/rotation hook for L2; later consume L1–L4 → 14 core RPCs, disableHub wrapper, committed settings projections, one graph and actual turn insertion. Own provider and owner policy settings CAS/publication/propagation view and single L6 composition. Only coordinator runs integrated client verification; mandatory CI provider fixture collection change; record exact focused file list/counts/steps at final SHA. |
+| L6 mandatory source relay | MODIFY S/memory/{MemorySyncRuntimeLive,MemoryHubService,MemoryHubClient,MemoryHubHttp}.ts and tests; MemoryHubSyncScenarios.test.ts; NEW MemoryOwnerSourceReader.ts/test | Consume frozen L1 contracts/L2 permits/L5 policy, D2–D4 confirmed A-lite. Owner allowlist/reader, owner epoch/revoke respond union, hub pair fence/denied settlement and authenticated stamps/codecs; scenario g/restart/idempotent revocation. After L1/L5 base lands, explicit sequential handoff of ONLY source-relay sections/tests of MemoryStore.ts and MemorySyncService.ts; no concurrent ownership. Return shared settings/composition patches to L5, contracts/public method patches to L1. No search/counter/disable ownership. |
 
-Order: pin WP3 → L1 contracts/access/renderer → L1 bounded Store/domain + L2 grant chain +
-L4 consent/client → L3 delivery → L5 base composition and base verification. Within this DAG
-L2/L4 exercise the same consent payload contract; no cyclic prerequisite. Then, if relay stays
-in scope, L6 consumes the frozen base, selects D2/D3, obtains the named sequential file handoff,
-and L1/L5 consume its final ports/wiring → exact-head independent review + focused verification.
-No duplicate Store/Worker/runtime. Omitting L6 leaves production ownerPermit/reader denied;
-base can be reviewed independently but WP4/M16/full c-5 is not called complete. One WP4 PR
-only if later explicitly authorized; a lane is not permission to create a PR or push.
+Order: pin WP3 → L1 contracts/access/renderer/settings/search-page port → L5 committed provider
+policy producer (early slice) → L2 issuance/reuse/live resolver → L3 availability/native delivery.
+L1 Store/domain and L4 consent/client can run after frozen contracts; neither waits on final L5
+composition. Then L5 base integration consumes L1–L4 → L6 mandatory relay with named sequential
+Store/Sync handoff → L1/L5 consume final relay ports/settings/wiring → independent review and
+focused exact-head verification. L5 early producer and final integration are slices of one owner,
+not a cyclic dependency. Shared Store/Sync edits are sequential; return contract/settings patches
+to L1/L5, no concurrent edits. WP5 takes shared files only after final WP4/L6 handoff; its active
+planning worktree is untouched. No duplicate Store/Worker/runtime. Base-only evidence does not
+close WP4/M16/full c-5. WP1–WP6 ship together (Jun 2026-10-14); no PR/push authorized here.
 
 ## 8. Focused acceptance and evidence plan
 
@@ -517,12 +599,12 @@ inspect steps/logs at the final SHA; job conclusion without execution is insuffi
 | Owner / focused test targets                          | Activation → observable proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | L1 MemorySnapshot / provider-core memoryContext       | Page watermark and final readiness/binding fences → three scopes never mix committed views; concurrent change discards selection without unbounded retry; explicit/repository/unmapped project and foreign scoped IDs → only correct space entries, one watermark. Real-store first page entirely excluded, next page eligible → list nextCursor reaches the eligible row without repetition; exact-ID revision reads return null continuation. Pagination beyond 100 → deterministic selection. All excluded/all output-oversize items hit the 10-page/1,000-slot/640-KiB scan ceilings independently of output size; pre-filter encoded pages obey 64 KiB. Short page reads release the common transaction lane so forget/approved receive can commit between pages. Escaped special characters, emoji/combining text, exact cap/+1 → both framed budgets hold, whole facts only, altered frame rejected. Forget/conflict/hold/forget_pending between selection and restore → no stale body; FTS pending remains eligible. Candidate and list pages run no scope-wide coverage aggregate: a scope far larger than one page costs only the page reads, and a forget committed between pages proceeds. |
-| L1 MemoryService / MemoryAccess                       | L6-conditional real-store source seam: local owner and A/H/B relay succeed with no direct owner connection; offline/expiry → source_unavailable; denied → auth denial; forgotten/source_invalidated/secret_detected preserved. Deferred gates then revoke/forget before response or lock acquisition → no bytes/commit/outbox. Scanner/watermark/message selection enforced.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| L2 auth / ProviderSessionManager / McpSessionRegistry | Real prepare→issue→resolve→tool path for read/write/thread grants; reuse rotates on policy change; preparation before activeRunId succeeds, inactive/deleted caller invocation fails. OAuth browser and pairing proof→code→exchange→authenticated tool; unselected/legacy/access-only/reused/expired/escalated code cannot mint memory grants; approver union checked.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| L1 MemoryService / MemoryAccess                       | L6-required real-store source seam: local owner and A/H/B relay succeed with no direct owner connection; offline/expiry → source_unavailable; denied → auth denial; forgotten/source_invalidated/secret_detected preserved. Deferred gates then revoke/forget before response or lock acquisition → no bytes/commit/outbox. Scanner/watermark/message selection enforced.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| L2 auth / ProviderSessionManager / McpSessionRegistry | Actual settings input/default-on/off→committed policy→prepare→issue→adapter→real toolkit read/write/thread-grant path; read-only memory_upsert denied even with stored write grant, non-read-only explicit write allowed; off→no snapshot/tool rights; on→new credential; pending rotation never uses old grant; schedule/delegation cannot exceed parent policy; reuse rotates on policy change; preparation before activeRunId succeeds, inactive/deleted caller invocation fails. OAuth browser and pairing proof→code→exchange→authenticated tool; unselected/legacy/access-only/reused/expired/escalated code cannot mint memory grants; approver union checked.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | L2 toolkit / McpHttpServer                            | List exact nine core tools plus separately gated administration disable tool; readonly calls denied without explicit grants, writes denied on read-only ceiling; revoke during service transaction wait prevents mutation. Tool result is strict JSON with no undefined optional fields; safe capacity/deadline/code retained.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | L3 each provider adapter                              | Actual captured native payload contains bounded data on first and second ordinary prompt/resume/retry. Both ACP flavors covered. Claude query not restarted; native compact/compress unchanged; no synthetic wake. Codex restore Deferred + foreign-thread snapshot reuse, binding change followed by late compaction, run termination, permission loss, delete/revision change/duplicate completion → cleared memory or surviving exact items only, retry after failed inject. OpenCode v2 failed put → no prompt, successful empty put after forget → stale value cleared, cache updated only on success. External OpenCode snapshot succeeds without falsely advertising MCP.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | L4 client-runtime / rpc / clientRpcPermissions        | Selected remote/tunnel destination used; unavailable old environment never falls back locally. Real reset/forget/hold/dependency stream evicts affected bodies and derived edits; late response cannot resurrect; unrelated drafts/environment intact. Disconnect/downgrade/reset handshake fences exposure; write-only never subscribes. importProvider({ environmentId, input }) and permissionAtom require both memory:write and filesystem:read; either missing/revoked grant denies, unsupported destination is unavailable, selected destination is retained. ConnectAgentSurface behavior tests capture both proof-arm payloads through the existing schema, default empty scopes, changed selection and full-union one-click acceptance/rejection.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| L5 ws / RpcAuthorization / RunExecutionService        | All 14 core methods reach services (source success requires L6; otherwise source remains denied) with repeatable permits; binding change and useRepository reversal; settings CAS wrappers preserve semantics, configure-disabled reaches administrator, unbound status preserves counters/processing; settings:write for get/update/disable, memory:read for status. Deferred settings reload with concurrent SQL reauthorization completes without lock cycle. Revocation while update waits prevents commit. Ordinary start and explicit compact get snapshot; cloud reattach calls observation-only resume without launching or sending memory/user message. One Store/Worker/runtime and ready capability gate. L5 runs test-t3-app against the actual OAuth consent screen (both proof paths/selection changes), attaches before/after screenshots to the UI PR and satisfies goat-screenshot-gate; formatter/unit evidence alone cannot close this UI acceptance.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| L5 ws / RpcAuthorization / RunExecutionService        | All 14 core methods reach services (source success requires L6; until its proof source remains denied) with repeatable permits; binding change and useRepository reversal; settings CAS wrappers preserve semantics, configure-disabled reaches administrator, unbound status preserves counters/processing; settings:write for get/update/disable, memory:read for status. Deferred settings reload with concurrent SQL reauthorization completes without lock cycle. Revocation while update waits prevents commit. Ordinary start and explicit compact get snapshot; cloud reattach calls observation-only resume without launching or sending memory/user message. One Store/Worker/runtime and ready capability gate. L5 runs test-t3-app against the actual OAuth consent screen (both proof paths/selection changes), attaches before/after screenshots to the UI PR and satisfies goat-screenshot-gate; formatter/unit evidence alone cannot close this UI acceptance.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | L5 integrated M19/M20                                 | Local new mutation at capacity → safe capacity_exceeded; forget still uses deletion path; authenticated approved receive under local brake/scan/index/parent holds still persists receipt/cursor with deferred state. Search/status expose incomplete coverage and 1/7/30-day signed growth with partial/unavailable endpoints. Source/cache/provider preparation failure cannot stall sync. No new index/archive or unbounded snapshot cache.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 ### 8.1 Source relay scenario g and denial/revocation (L6)
@@ -530,7 +612,7 @@ inspect steps/logs at the final SHA; job conclusion without execution is insuffi
 Extend actual `MemoryHubSyncScenarios.test.ts` plus Access/OwnerReader/HubClient/HTTP/Store
 focused files. WP3's terminal-denial fixture (`:825–857`) is a baseline, not success evidence.
 
-- **g / default A-lite:** B owns a stopped thread with completed evidence messages; requester
+- **g / confirmed A-lite:** B owns a stopped thread with completed evidence messages; requester
   A has only summary/ScopedThreadRef/watermark. A's authenticated MCP/RPC caller has live
   memory:read + explicit orchestration:read. B administrator explicitly enrolls A's environment;
   empty allowlist denies. A cannot connect directly to B. Real prepare→local compound permit→
@@ -546,21 +628,27 @@ focused files. WP3's terminal-denial fixture (`:825–857`) is a baseline, not s
 - Deferred before read, response, hub accept/result and requester return: remove A from B's
   committed allowlist, revoke member credential/caller grant, disable hub, forget/invalidate or
   end run; resume → no newly exposed bytes at the corresponding authoritative boundary.
+  Owner-local removal is immediate for reads/response; hub result removal is guaranteed only
+  after revoke ack (§3.2). Never assert remote completion from Ref publication alone.
   Removal during owner read must fail its post-read permit; no pending request forever and
   unrelated sync/forget progresses. Caller revoke is enforced locally in A-lite, not asserted
   by an owner subject verifier. TestClock TTL/retry/restart cannot extend authorization.
-- **A-only delta:** scenario g additionally installs exact same-owner subject binding and
-  authenticates hub→requester validation. Missing/forged reference, wrong caller, changed grant
-  epoch, revoked subject/binding, verifier outage, 33rd live reference, 75s expiry and restart
-  invalidate without bytes. Assert endpoint calls at admission/response/result and no network
-  in SQL; exercise local/remote/tunnel reachability. A is never downgraded automatically.
+- Accept B's available response at H, hold A delivery with Deferred, commit B allowlist removal,
+  publish Ref, send body-free revoke and await hub ack, then release result → typed denied,
+  payload absent. Before ack assert propagation=pending, never completed. Restart owner after
+  commit/before send or ack, fail network, replay same revoke → monotonic identical ack/denied.
+  Delayed old available response after revoke is rejected by epoch; re-enroll at newer epoch,
+  delayed old revoke does not delete newer response. No network/admin lock in SQL.
+- Actual SQL relay fixture: deadline fixed <=75s on retry/restart; unconsumed body may survive
+  restart only within original deadline; consumption/expiry/forget/revoke deletes logical row.
+  Verify 32/environment, 128/hub, 64-KiB outcome/collect caps, quota/8-MiB live body bound and
+  absence from canonical/FTS/checkpoints/log/events/reports/injection. No zero-SQL-INSERT claim.
 - Offline owner/timeout stays source_unavailable; scanner/generation drift stays distinct.
   Use synthetic identities and fixture messages only, no real credentials/user databases.
-  Explicitly disabling L6 keeps the denying reader and a safe source tool result; this is an
-  intentional deferred M16/c-5 item, not a passed original-read success case.
+  L6 must pass original-read success before WP4 completion; no optional relay-off acceptance.
 
 Base L1 tests scoped counters under write/forget/approved receive/reindex/rollback, large-scope
-list/search examined-row limits, bounded substring empty-page continuation and FTS query plan.
+list/search examined-row limits, FTS/substring first 1,000 examined rows no match→non-null cursor→later match; 100 returned items with more matches in window→no skipped match; short final window→null, incompatible query/mode/scope cursor→validation error; actual FTS/window query plan and identical MCP/RPC page semantics (§6.2).
 L2/L5 prove MCP and RPC same cursor/error semantics. L2 tests disable handler→one L5-owned
 settings wrapper with settings:write; L4 tests guarded configure-disabled/status; L5 tests
 committed Ref CAS/reload-lock interleaving and one composition. L6 has no counter prerequisite
@@ -596,21 +684,24 @@ L6 alone closes original-read success/denial/revoke; without it c-5 is base-only
 | Web local + hosted, desktop | L4 shared runtime/destination behavior; L5 one real OAuth consent pass plus desktop shell smoke (same web screen, no new IPC). Capture before/after images for any later UI PR; satisfy goat-screenshot-gate. |
 | Mobile | L4 wrapper imports/shared command behavior for selected remote environment; L5 verifies remote reset/forget body eviction in native client via test-t3-mobile on authorized off-host fixture if exposed UI changes. No mobile consent screen invented; browser-based OAuth consent uses existing web entry. |
 | Settings / palette / keybindings | WP4 introduces no memory management screens or new shortcuts: visible entries remain WP6. New service/guard commands are shared, so WP6 must wire every applicable entry and reverse action. |
-| Local / remote relay / tunnel | Synthetic selected-environment fixtures ensure no localhost fallback; off-host client integration records remote/tunnel reset/revoke/forget results. A additionally proves hub→requester reachability. |
+| Local / remote relay / tunnel | Synthetic selected-environment fixtures ensure no localhost fallback; off-host client integration records remote/tunnel reset/revoke/forget results. A-lite uses outbound member→hub only; revoke ack/retry tested for remote/tunnel. |
 | Reverse / reconnection | Forget/revert, useRepository, disable/re-enable, allowlist add/remove and reconnect discard pending output/caches; services/RPC in WP4, visible controls in WP6. |
 
 Use TestClock/Deferred and real service/store fixtures; event-sourced milestones use worker drain
 or persisted event, never sleeps/polling. Light targeted package typechecks/lint may run locally; tests and exact focused collection
 run in PR CI and macmini-cf. Inspect executed steps/logs at the exact head; separate their receipts. Server tests belong to existing goat-ci shards; shared runtime
-cases belong to test-client-runtime; provider package tests require explicit collection in the
-existing root Vite config. Do not invent a new parallel runner or claim a broad glob covers new
+cases belong to test-client-runtime. L5 must change .github/workflows/goat-ci.yml:115–119
+to include the new cursor/acp/opencode adapter and OpenCode v2 memory fixtures, as well as any
+new Grok flavor fixture not otherwise executed. Existing provider-core/contracts/client-runtime/web
+steps (:113–131) remain distinct; root Vite collectability does not imply CI execution. Record
+each exact focused file, collected/executed test counts and actual step/log at final SHA. Do not invent a new parallel runner or claim a broad glob covers new
 files without checking collection. Every actual changed file must have an owner/CI collection
 entry before B closes. M19 packaged/off-host evidence remains separate from source CI.
 
 ## 9. Risks, surfaces and reflection handoff
 
 - WP3 final is the implemented dependency. Recheck the pinned signatures at B integration.
-  The optional source authorization/owner-reader activation and base bounded search counters remain WP4 work. A mismatch requires owner repair,
+  The mandatory source authorization/owner-reader activation and base bounded search counters remain WP4 work. A mismatch requires owner repair,
   not transport-side SQL or a guessed fallback.
 - Snapshot page/final watermark fences, conservative scan ceilings and transaction-lane release
   need real-store proof; no cross-page transaction is permitted. Recheck local
@@ -624,22 +715,21 @@ entry before B closes. M19 packaged/off-host evidence remains separate from sour
   test, not a claim of unbypassable enforcement (E7; 000 enforcement inventory).
 - Web local/hosted, desktop and mobile share client state; visible entry points and reverse
   actions remain WP6. Providers: six decisions in §5. Agents: nine core service-backed tools and settings-gated disable,
-  including scheduled/delegated callers. Contracts: S13, candidate nextCursor, internal source stamp/legacy codec and owner allowlist admin schemas (A adds subject-proof contracts); public readSource input stays unchanged and execution identity stays internal.
+  including scheduled/delegated callers. Contracts: S13, candidate nextCursor, internal source stamp/legacy codec and owner allowlist admin schemas; public readSource input stays unchanged and execution identity stays internal.
   Reverse states: forget/revert, binding useRepository and settings disable/revoke clear exposure.
   Connection modes: local, remote/relay and tunnel preserve destination and owner authority.
 - omo remains conditional OpenCode compatibility; no native integration or plugin inheritance
   proof. Cloud observation-only attach cannot retrofit memory into an already-running remote task.
-- **Pending human decision:** A-lite versus A was already asked by the coordinator; A-lite
-  remains the planning default. Relay-off is a separate scope decision and leaves M16 open.
-  Independent A on this reflected revision remains next; no passing CI/runtime claim.
+- **Confirmed scope:** A-lite and WP1–WP6 joint release (Jun 2026-10-14); mandatory L6.
+  Independent re-audit of this fix remains next; no passing CI/runtime claim.
 
 ### Cross-phase handoff ownership — accepted follow-ups, not edits in this pass
 
 | Recipient | Disposition / required WP4-facing reconciliation |
 | --- | --- |
-| 030 | ACCEPT scope/ownership correction: §8 prose must match rev 11g fail-closed ownerPermit/reader, with successful original relay in WP4 L6; A-only attestation is a future choice. Preserve rev 11f committed Ref/last-valid epoch and rev 11g terminal-denial evidence; correct §12 wrapper error unions to actual Sync signatures. No WP3 code rework or new c-4 success claim. |
+| 030 | ACCEPT scope/ownership correction: §8 prose must match rev 11g fail-closed ownerPermit/reader, with successful original relay in WP4 L6. Preserve rev 11f committed Ref/last-valid epoch and rev 11g terminal-denial evidence; correct §12 wrapper error unions to actual Sync signatures. No WP3 code rework or new c-4 success claim. |
 | 050 | ACCEPT dependency re-anchor only when WP4 head exists; consume live Permit and guarded importProvider command. WP5 retains import group/handler/capability and later ownership of MemoryService/Store after WP4 handoff. REJECT source attestation as import authority; filesystem:read remains separate. No WP5 implementation pulled into WP4. |
-| 060 | ACCEPT transfer of ONLY ConnectAgentSurface and behavior tests to WP4 L4 (both proof arms, selection/full-union one-click); L5 owns real-screen evidence/screenshots. WP6 retains all memory screens, visible disable/re-enable, owner allowlist add/remove (A subject controls only if selected), last-valid settings diagnostics, unbound status/reconciliation UI. It consumes WP4 public readSource and typed deny/offline/forgotten, never builds a second relay/reader. |
+| 060 | ACCEPT transfer of ONLY ConnectAgentSurface and behavior tests to WP4 L4 (both proof arms, selection/full-union one-click); L5 owns real-screen evidence/screenshots. WP6 retains all memory screens, visible disable/re-enable, owner allowlist add/remove and pending/acknowledged revocation state, memory-access on/off, last-valid settings diagnostics, unbound status/reconciliation UI. It consumes WP4 public readSource and typed deny/offline/forgotten, never builds a second relay/reader. |
 
 These are coordinator reconciliation items before the respective implementation B, not permission
 to edit 030/050/060 now. The prior report's all-macmini-only static-check rule is rejected;
@@ -648,7 +738,7 @@ to edit 030/050/060 now. The prior report's all-macmini-only static-check rule i
 Authoring verification: input HEAD/branch, clean status and current source ports were inspected.
 Only the two authorized documents change. node_modules is absent in this worktree, so vp fmt
 is skipped per the task; no formatter from another worktree and no dependency install. Fresh
-git diff --check and the local commit are recorded in `/tmp/goat-wp4-reflection-r1.md`.
+git diff --check and the local commit are recorded in `/tmp/goat-wp4-auditfix-r1.md`.
 Tests/builds/typechecks/lint/UI verification are NOT RUN; runtime success is not claimed.
 
 ## Folded revision correspondence
@@ -662,8 +752,14 @@ Tests/builds/typechecks/lint/UI verification are NOT RUN; runtime success is not
 | audit r1 A#1/A#3                                                     | §6–9: L4 actual consent producer and guarded import command; L5 UI proof; WP5/WP6 handoff                            |
 | prior snapshot/provider recipes                                      | §4–5 with current ports, cloud semantics and S13 correction                                                          |
 | rev 7 requirement 7 / M19 and audit fixes; rev 8 M20                 | §3–4, §6, §8–9; approved receive remains independent of local exposure                                               |
-| WP4 rev 1: WP3 final re-anchor (2026-10-14) | §1–3 replaces absent/future ports with actual wrappers/errors and rev 11g fail-closed source; §3.1 originally selected A; reflection r1 supersedes it with executable A-lite default / A alternative; §4/§6 bound list/search work; §6 consumes committed settings, exposes disable, read/status guards and prohibits SQL/settings lock cycles; §7–8 originally grouped source/counters; reflection r1 separates optional L6 and base L1 counters. Tests run PR CI/macmini-cf; local light static checks allowed. Prior A near-pass is historical; independent A on the reflected revision required. |
-| same-architect reflection r1 (2026-10-14) | D1–D4: A-lite default / A delta / pending human answer; §7 splits base Store from optional L6; §8.2 joins c-5 native payload and actual MCP evidence; local light static checks allowed, tests PR CI/macmini-cf; bounded consent-only WP4 UI and accepted 030/050/060 handoffs. |
+| re-anchor/reflection r1 history | Prior alternative model/optional relay discussion is superseded by Jun's 2026-10-14 A-lite decision and required L6. Source seam, provider lifecycle, consent ownership and local static-check rules retained. |
+| audit-fix A1 | §1/§3.1/§7–9/000 current cycle: A-lite confirmed; mandatory L6; WP1–WP6 joint release; alternative executable paths removed. |
+| audit-fix A2 — nonblocker | §3.3: 030 §8/M16 WP0-approved bounded purgeable SQL buffer is allowed; nonpersistent-original wording was coordinator overreach. Logical <=75s retention/consume/expiry bounds, not disk noncontact or secure erasure. Low hardening follow-up only. |
+| audit-fix A3 | §3.2/§8.1: respond union revoke, durable pending settings→Ref→outbound→same-Tx hub pair fence/delete/denied→ack; epoch-stamped responses, retry/restart and accepted-before-delivery test. |
+| audit-fix A4 | §6.1/§7/§8: approved managed default read/write narrowed by read-only, independent orchestration-read, settings:write memory on/off; L1→L5 producer→L2→L3 config; parent ceiling and rotation/revoke proof. |
+| audit-fix A5 | §6/§6.1/§8: keep read-only ceiling even with write grant; non-read-only writes require explicit memory grant; independent memory-only write/thread-operate-free path out of scope. |
+| audit-fix A6 | §2/§6.2/§7/§8: internal search-page examined continuation, full Store→Service→MemoryPage→MCP/RPC chain, cursor query/mode/scope binding and SQL window before match/final LIMIT. |
+| audit-fix CI collection | §7/§8.2: L5 must modify goat-ci provider execution list; exact files/counts/executed steps at final SHA, no root-glob assumption. |
 
 No superseded appendix remains an alternate instruction source. This document is the current WP4
 consumer plan; WP1/WP2 implementation and merged WP3 service ownership remain authoritative for their ports.
