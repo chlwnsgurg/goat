@@ -282,6 +282,7 @@ export class MemoryHubCommittedSettings extends Context.Service<
 export interface MemoryProviderPolicy {
   readonly policyReady: boolean;
   readonly enableAgentMemoryAccess: boolean;
+  /** Process-local; never a durable credential authority after a restart. */
   readonly epoch: number;
 }
 

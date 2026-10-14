@@ -2943,6 +2943,8 @@ it.effect("provider memory policy starts unready and publishes default-on only a
       enableAgentMemoryAccess: false,
       epoch: 2,
     });
+    yield* service.updateSettings({ enableAgentMemoryAccess: false });
+    assert.strictEqual((yield* policy.read).epoch, 2);
     yield* service.updateSettings({ standingInstructions: "synthetic policy test" });
     assert.strictEqual((yield* policy.read).epoch, 2);
     yield* service.updateSettings({ enableAgentMemoryAccess: true });
@@ -3057,4 +3059,31 @@ it.effect("invalid initial settings leave provider memory policy unready", () =>
     });
     assert.strictEqual((yield* service.getSettings).enableAgentMemoryAccess, false);
   }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("deleted provider settings retain the committed disabled policy and epoch", () =>
+  withRegisteredSettingsWatchers((awaitWatch, notify) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const policy = yield* ServerSettingsModule.MemoryProviderCommittedPolicy;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({ enableAgentMemoryAccess: false }),
+      );
+      yield* service.start;
+      yield* awaitWatch(path.dirname(config.settingsPath), 2);
+      const committed = yield* policy.read;
+      const changes = yield* service.subscribeChanges;
+      yield* fs.remove(config.settingsPath);
+      yield* notify(config.settingsPath);
+      yield* TestClock.adjust(100);
+      yield* changes.pipe(Stream.runHead);
+      assert.deepStrictEqual(yield* policy.read, committed);
+      assert.strictEqual((yield* service.getSettings).enableAgentMemoryAccess, false);
+      assert.strictEqual(yield* fs.exists(config.settingsPath), false);
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
 );

@@ -7397,8 +7397,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const adapter = yield* providerAdapters.get(run.providerInstanceId);
     const taskId = idAllocator.derive.delegatedTaskNode({ commandId: command.commandId });
     const task: OrchestrationV2Subagent = {
-      memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
       ...original,
+      memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
       createdBy: command.createdBy,
       driver: adapter.driver,
       id: taskId,
