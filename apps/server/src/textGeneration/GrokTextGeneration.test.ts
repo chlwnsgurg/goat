@@ -124,15 +124,40 @@ function readJsonRpcRequests(
 
 function waitForJsonRpcRequest(filePath: string, method: string) {
   return Effect.callback<void>((resume) => {
+    // The watcher must close as soon as the request is seen: the scope removes the
+    // fixture directory afterwards, and a live watcher would then read a missing file.
+    let settled = false;
+    let watcher: NodeFS.FSWatcher | undefined;
+    const close = () => {
+      settled = true;
+      watcher?.close();
+    };
     const check = () => {
-      if (readJsonRpcRequests(filePath).some((request) => request.method === method)) {
+      if (settled) return;
+      let requests: ReturnType<typeof readJsonRpcRequests>;
+      try {
+        requests = readJsonRpcRequests(filePath);
+      } catch (error) {
+        // A missing file or a half-written line resolves on a later change event.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) {
+          return;
+        }
+        throw error;
+      }
+      if (requests.some((request) => request.method === method)) {
+        close();
         resume(Effect.void);
       }
     };
-    const watcher = NodeFS.watch(filePath, check);
+    watcher = NodeFS.watch(filePath, check);
+    watcher.on("error", (error) => {
+      if (settled) return;
+      close();
+      resume(Effect.die(error));
+    });
     // Also check after subscribing so an already-written request cannot be missed.
     check();
-    return Effect.sync(() => watcher.close());
+    return Effect.sync(close);
   });
 }
 
