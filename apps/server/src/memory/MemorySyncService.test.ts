@@ -3571,6 +3571,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const submitted = yield* Deferred.make<void>();
+      const reconciled = yield* Deferred.make<void>();
       let saved: M.MemoryHubApplyResolutionInput | undefined;
       let deliver = false;
       let generated = 0;
@@ -3652,12 +3653,34 @@ it.effect(
           assert.deepStrictEqual(ticket.submission, saved);
           deliver = true;
           yield* TestClock.adjust("30 seconds");
+          const service = yield* Service.MemoryService;
           yield* Effect.scoped(
             Effect.gen(function* () {
               const restarted = yield* Sync.MemorySyncService;
               yield* restarted.syncOnce;
+              yield* Deferred.await(reconciled);
               yield* restarted.shutdown;
-            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(
+                    Layer.succeed(Service.MemoryService, {
+                      ...service,
+                      reconcileResolutionSubmission: (input) =>
+                        service
+                          .reconcileResolutionSubmission(input)
+                          .pipe(
+                            Effect.tap((result) =>
+                              result?.outcome === "admitted"
+                                ? Deferred.succeed(reconciled, undefined)
+                                : Effect.void,
+                            ),
+                          ),
+                    }),
+                  ),
+                ),
+              ),
+            ),
           );
           assert.strictEqual(generated, 1);
           assert.strictEqual(applies, 1);
@@ -3877,4 +3900,99 @@ it.effect.each(["pull", "ack"] as const)(
         }).pipe(Effect.provideContext(context));
       }).pipe(Effect.provide(NodeServices.layer)),
     ),
+);
+
+it.effect("resolution rearm passes 100 protected tickets to reach the next held ticket", () =>
+  Effect.gen(function* () {
+    const events = yield* PubSub.bounded<{
+      memorySpaceId: M.MemorySpaceId;
+      holdClass: Store.MemoryHoldClass;
+    }>(4);
+    const entered = yield* Deferred.make<void>();
+    const leases = new Map<string, M.MemoryResolutionLease>();
+    const client = peer({ renew: (_c, input) => Effect.succeed(leases.get(input.attemptId)!) });
+    let generated = 0;
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Effect.sync(() => {
+          generated++;
+        }).pipe(Effect.andThen(Deferred.succeed(entered, undefined)), Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const keys: Store.TicketKey[] = [];
+        for (let n = 1; n <= 101; n++) {
+          const memoryId = yield* conflict(n);
+          const aggregate = yield* store.loadAggregate(space, memoryId);
+          const ticket: M.MemoryResolutionLease = {
+            memorySpaceId: space,
+            memoryId,
+            conflictId: aggregate.conflicts[0]!.conflictId,
+            conflictHeadSet: aggregate.heads,
+            attemptId: M.MemoryOperationId.make(id(20000 + n)),
+            holderEnvironmentId: local,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            frozenDefaultModelSelection: selection,
+          };
+          leases.set(ticket.attemptId, ticket);
+          yield* store.persistResolutionTicket(ticket);
+          const key = { memorySpaceId: space, attemptId: ticket.attemptId };
+          keys.push(key);
+          if (n <= 100)
+            yield* store.transact(
+              store.acquireResolutionTicketTx({
+                key,
+                expectedVersion: 0,
+                owner: "protected-fixture-owner",
+                coordinatorEpoch: 1,
+                now: 0,
+                ownedUntil: 120000,
+              }),
+            );
+          // Synthetic scheduling state, with real live ownership and canonical frontiers.
+          yield* sql`UPDATE memory_outbox SET hold_class='authorization',failure_code='route_unavailable',next_attempt_at=${Number.MAX_SAFE_INTEGER} WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+        }
+        const base = yield* Sync.MemorySyncRuntime;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            yield* sync.start;
+            yield* PubSub.publish(events, {
+              memorySpaceId: space,
+              holdClass: "authorization" as const,
+            });
+            yield* Deferred.await(entered);
+            yield* sync.shutdown;
+            assert.strictEqual(generated, 1);
+            for (const key of keys.slice(0, 100))
+              assert.strictEqual(
+                (yield* store.readWorkHold(`resolve:${space}:${key.attemptId}`))?.holdClass,
+                "authorization",
+              );
+            assert.strictEqual(
+              (yield* store.readWorkHold(`resolve:${space}:${keys[100]!.attemptId}`))?.holdClass,
+              null,
+            );
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(
+                  Layer.succeed(Sync.MemorySyncRuntime, {
+                    ...base,
+                    rearmEvents: Stream.fromPubSub(events),
+                  }),
+                ),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
 );
