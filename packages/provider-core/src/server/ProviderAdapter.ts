@@ -417,6 +417,11 @@ export type ProviderAdapterV2CloudTaskMetadata = Pick<
 
 export interface ProviderAdapterV2TurnInput {
   readonly memoryContext?: MemoryContextSnapshot;
+  /** Process-local admission callback; never persisted or sent to a provider. */
+  readonly refreshMemoryContext?: () => Effect.Effect<
+    MemoryContextSnapshot | undefined,
+    ProviderAdapterTurnStartError
+  >;
   /** Initial launch only. Follow-up and attach must not require this checkout. */
   readonly cloudLaunchSource?: ProviderAdapterV2CloudLaunchSource;
   readonly cloudSource?: OrchestrationV2CloudTask["source"];
