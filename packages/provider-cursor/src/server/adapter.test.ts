@@ -1,3 +1,7 @@
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import * as Exit from "effect/Exit";
+import { MemoryId, MemoryRevisionId, MemorySpaceId } from "@goat/contracts";
+import { packMemoryContext, memoryContextText } from "@goat/provider-core/server/memoryContext";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import type { InteractionUpdate } from "@cursor/sdk";
@@ -363,6 +367,210 @@ describe("CursorAdapterV2", () => {
         Stream.runHead,
       );
       assert.equal(sentMessages[1], "/compress");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
+  it.effect("WP4 Cursor memory refresh, clear and tamper preserve native /compress", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-errors-" });
+      const hostContext = yield* Layer.build(TestProviderHost.layer({ cwd: workspace }));
+      const host = yield* Effect.service(ProviderHost.ProviderHost).pipe(
+        Effect.provide(hostContext),
+      );
+      yield* fileSystem.writeFileString(`${host.paths.attachmentsDir}/memory.png`, "fixture image");
+      const imageCounts: number[] = [];
+      const sentMessages: Array<string> = [];
+      const snapshot = wp4Snapshot();
+      let refreshes = 0;
+      let memory: typeof snapshot | undefined = snapshot;
+      let sendCalls = 0;
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-transport-error-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: workspace,
+      });
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        settings: yield* decodeCursorSettings({}),
+        environment: { HOME: workspace },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: () =>
+            Effect.succeed({
+              agentId: "native-cursor-error",
+              listMessages: Effect.succeed([]),
+              close: Effect.void,
+              send: (input) =>
+                Effect.sync(() => {
+                  sendCalls += 1;
+                  imageCounts.push(
+                    typeof input.message === "string" ? 0 : (input.message.images?.length ?? 0),
+                  );
+                  sentMessages.push(
+                    typeof input.message === "string" ? input.message : input.message.text,
+                  );
+                  const runId = `native-cursor-run-${sendCalls}`;
+                  return {
+                    agentId: "native-cursor-error",
+                    runId,
+                    wait: Effect.succeed({
+                      id: runId,
+                      requestId: `native-request-${sendCalls}`,
+                      status: "finished" as const,
+                      model: { id: "composer-2.5" },
+                      durationMs: 1,
+                      ...(sendCalls === 1
+                        ? { result: "Error: RetriableError: WritableIterable is closed" }
+                        : {}),
+                    }),
+                    cancel: Effect.void,
+                  };
+                }),
+            }),
+        }),
+        Effect.provide(hostContext),
+      );
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-error-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const appThread = {
+        id: threadId,
+        projectId: ProjectId.make("cursor-error-project"),
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        title: "Cursor transport failure",
+        providerInstanceId: instanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: providerThread.id,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+      const ordinaryInput: ProviderAdapter.ProviderAdapterV2TurnInput = {
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        memoryContext: snapshot,
+        refreshMemoryContext: () =>
+          Effect.sync(() => {
+            refreshes++;
+            return memory;
+          }),
+        runId: RunId.make("cursor-error-run"),
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make("cursor-error-attempt"),
+        rootNodeId: NodeId.make("cursor-error-root"),
+        appThread,
+        message: {
+          messageId: MessageId.make("cursor-error-message"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "continue",
+          attachments: [],
+        },
+      };
+      yield* runtime.startTurn(ordinaryInput);
+      const first = yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.isTrue(Option.isSome(first));
+      if (Option.isSome(first)) {
+        assert.equal(first.value.status, "failed");
+        assert.equal(first.value.failure?.class, "transport_error");
+      }
+
+      assert.include(sentMessages[0]!, memoryContextText(snapshot));
+      assert.equal(refreshes, 1);
+      assert.isDefined(runtime.compactThread);
+      yield* runtime.compactThread!({
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        refreshMemoryContext: ordinaryInput.refreshMemoryContext!,
+        runId: RunId.make("cursor-compact-run"),
+        runOrdinal: 2,
+        providerTurnOrdinal: 2,
+        attemptId: RunAttemptId.make("cursor-compact-attempt"),
+        rootNodeId: NodeId.make("cursor-compact-root"),
+        appThread,
+        message: {
+          messageId: MessageId.make("cursor-compact-message"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "ignored by compactThread",
+          attachments: [],
+        },
+      });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.equal(sentMessages[1], "/compress");
+      assert.equal(refreshes, 1);
+      memory = undefined;
+      yield* runtime.startTurn({
+        ...ordinaryInput,
+        runOrdinal: 3,
+        providerTurnOrdinal: 3,
+        message: {
+          ...ordinaryInput.message,
+          attachments: [
+            {
+              type: "image",
+              id: "memory.png",
+              name: "memory.png",
+              mimeType: "image/png",
+              sizeBytes: 13,
+            },
+          ],
+        },
+      });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.notInclude(sentMessages[2]!, "external_goat_memory");
+      assert.equal(refreshes, 2);
+      assert.deepEqual(imageCounts, [0, 0, 1]);
+      memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
+      const failed = yield* runtime
+        .startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(failed));
+      assert.equal(sentMessages.length, 3);
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -965,3 +1173,19 @@ describe("CursorAdapterV2", () => {
     );
   });
 });
+
+const wp4Snapshot = () =>
+  packMemoryContext({
+    memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <instruction> 'data'",
+      },
+    ],
+  })!;

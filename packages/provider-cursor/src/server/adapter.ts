@@ -43,6 +43,7 @@ import * as Stream from "effect/Stream";
 
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@goat/provider-core/server/mcpToolPresentation";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
 import { CursorTransportFailure } from "./transportFailure.ts";
@@ -838,6 +839,7 @@ interface ActiveCursorTurn {
 }
 
 interface CursorLiveAgent {
+  readonly mcpAuthorization: string | undefined;
   readonly nativeThreadId: string;
   readonly session: CursorAgentSdk.CursorAgentSdkSession;
 }
@@ -2075,10 +2077,12 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           readonly agentId?: string;
         }) {
           const existing = yield* Ref.get(liveAgent);
+          const mcpSession = yield* mcpSessions.read(openInput.threadId);
           if (
             existing !== null &&
             openInput.operation === "resume" &&
-            existing.nativeThreadId === openInput.agentId
+            existing.nativeThreadId === openInput.agentId &&
+            existing.mcpAuthorization === mcpSession?.authorizationHeader
           ) {
             return existing;
           }
@@ -2094,7 +2098,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               modelSelection: openInput.modelSelection,
               runtimePolicy: openInput.runtimePolicy,
               threadId: openInput.threadId,
-              mcpSession: yield* mcpSessions.read(openInput.threadId),
+              mcpSession,
             }),
             threadId: openInput.threadId,
             providerSessionId: input.providerSessionId,
@@ -2102,6 +2106,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           const next = {
             nativeThreadId: sdkSession.agentId,
             session: sdkSession,
+            mcpAuthorization: mcpSession?.authorizationHeader,
           } satisfies CursorLiveAgent;
           yield* Ref.set(liveAgent, next);
           return next;
@@ -2176,7 +2181,33 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               detail: "Cursor turn requires non-empty text or attachments.",
             });
           }
-          const text = `${userText}\n\n${buildRuntimeInstructions({ harness: "Cursor", model: turnInput.modelSelection.model })}`;
+          const snapshot = turnInput.refreshMemoryContext
+            ? yield* turnInput.refreshMemoryContext()
+            : turnInput.memoryContext;
+          const memory =
+            snapshot === undefined
+              ? undefined
+              : yield* Effect.try({
+                  try: () => MemoryContext.memoryContextText(snapshot),
+                  catch: () =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CursorAgentSdk.CURSOR_PROVIDER,
+                      detail: "Invalid memory context frame",
+                    }),
+                });
+          const config = yield* mcpSessions.read(turnInput.threadId);
+          const agent = yield* Ref.get(liveAgent);
+          const availability = McpProviderSession.memoryToolAvailability(
+            config?.authorizationHeader === agent?.mcpAuthorization ? config : undefined,
+          );
+          const text = [
+            userText,
+            buildRuntimeInstructions({ harness: "Cursor", model: turnInput.modelSelection.model }),
+            `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+            memory,
+          ]
+            .filter((part) => part !== undefined)
+            .join("\n\n");
           return images.length === 0
             ? text
             : ({
