@@ -74,6 +74,13 @@ import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { makeReplayServerConfig, withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
 
+const layerAdapterTest = Layer.mergeAll(
+  MemoryDerivedCache.layer,
+  IdAllocator.layer,
+  McpProviderSessions.layer,
+  NodeServices.layer,
+);
+
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerReplayTranscript);
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
@@ -895,17 +902,7 @@ describe("CodexAdapterV2 process spawning", () => {
         .pipe(Effect.scoped, Effect.exit);
 
       assert.deepEqual(spawnedCommands, [path.join(NodeOS.homedir(), "bin", "codex")]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-      Effect.provideService(HostProcess.Platform, "linux"),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest), Effect.provideService(HostProcess.Platform, "linux")),
   );
 });
 
@@ -1892,17 +1889,7 @@ describe("CodexAdapterV2 session initialize", () => {
         providerThreads.map((providerThread) => providerThread.nativeThreadRef?.nativeId),
         ["concurrent-first", "concurrent-second"],
       );
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("retries initialize after a failed handshake", () =>
@@ -1928,17 +1915,7 @@ describe("CodexAdapterV2 session initialize", () => {
       const providerThread = yield* session.ensureThread("thread-initialize-retry");
       assert.equal(providerThread.nativeThreadRef?.nativeId, "initialize-retry");
       assert.equal(session.initializeRequests(), 2);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("completes the handshake after a caller is interrupted mid-initialize", () =>
@@ -1981,17 +1958,7 @@ describe("CodexAdapterV2 session initialize", () => {
       const providerThread = yield* session.ensureThread("thread-initialize-interrupted");
       assert.equal(providerThread.nativeThreadRef?.nativeId, "initialize-interrupted");
       assert.equal(session.initializeRequests(), 2);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 });
 
@@ -2239,17 +2206,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(requests.filter((method) => method === "turn/start").length, 1);
         assert.isBelow(requests.indexOf("thread/inject_items"), requests.indexOf("turn/start"));
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("identifies sessions to Codex with the same client info as main", () =>
@@ -2285,17 +2242,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           },
         },
       ]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("unsubscribes from the native thread when it is unloaded", () =>
@@ -2333,17 +2280,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.isDefined(harness.runtime.unloadThread);
       yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
       assert.deepEqual(requests, ["initialize", "thread/start", "thread/unsubscribe"]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("keeps the app-server failure as the cause when an unload is rejected", () =>
@@ -2377,17 +2314,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(error._tag, "ProviderAdapterProtocolError");
       const cause = error._tag === "ProviderAdapterProtocolError" ? error.cause : undefined;
       assert.equal((cause as { _tag?: string } | undefined)?._tag, "CodexAppServerRequestError");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("waits for native start before interrupting an acknowledged queued turn", () =>
@@ -2481,17 +2408,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("settles Stop when a queued native turn fails before starting", () =>
@@ -2573,17 +2490,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(interruptSent, "A terminal native turn must not receive turn/interrupt");
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("bounds Stop when a queued native turn never starts", () =>
@@ -2643,17 +2550,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isFalse(interruptSent, "An unstarted native turn must not receive turn/interrupt");
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("sends currency-sigil skill mentions to Codex as $ mentions", () =>
@@ -2712,17 +2609,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           text: "then £ship it",
         },
       });
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   const assistantMessages = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
@@ -2872,16 +2759,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           });
         }
         assert.isEmpty(assistantMessages(harness.events));
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -2911,13 +2789,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 ...preamble.slice(0, 5),
                 { type: "expect_outbound", frame: { id: 3, method: "turn/start", params } },
                 ...preamble.slice(6),
+                ...(mode === "stop"
+                  ? [
+                      {
+                        type: "expect_outbound" as const,
+                        frame: {
+                          id: 4,
+                          method: "turn/interrupt",
+                          params: { threadId: nativeThreadId, turnId: "cache-turn" },
+                        },
+                      },
+                      { type: "emit_inbound" as const, frame: { id: 4, result: {} } },
+                    ]
+                  : []),
                 {
                   type: "emit_inbound",
                   frame: {
                     method: "turn/completed",
                     params: {
                       threadId: nativeThreadId,
-                      turn: makeCodexReplayTurn({ id: "cache-turn", status: "completed" }),
+                      turn: makeCodexReplayTurn({
+                        id: "cache-turn",
+                        status: mode === "stop" ? "interrupted" : "completed",
+                      }),
                     },
                   },
                 },
@@ -2935,7 +2829,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ...base,
             refreshMemoryContext: () => Effect.succeed(snapshot),
           });
-          yield* harness.firstTerminal;
+          if (mode === "ttl") yield* harness.firstTerminal;
           const cache = yield* MemoryDerivedCache.MemoryDerivedCache;
           assert.equal((yield* cache.usage).owners, 1);
           if (mode === "ttl") yield* TestClock.adjust(M.MEMORY_DERIVED_CACHE_TTL_MS);
@@ -2947,18 +2841,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 nativeTurnId: "cache-turn",
               }),
             });
+          if (mode === "stop") yield* harness.firstTerminal;
           assert.deepEqual(yield* cache.usage, { bytes: 0, owners: 0 });
         }),
-      ).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      ).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["availability", "resume-rotation"] as const)(
@@ -3132,16 +3018,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             yield* Queue.take(terminals);
           }
         }),
-      ).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      ).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -3263,16 +3140,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           });
           assert.equal(secondParams.additionalContext?.goat_memory?.value, "");
           assert.notInclude(JSON.stringify(firstParams.collaborationMode ?? {}), "untrusted&gt;");
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -3311,16 +3179,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           }).pipe(Effect.exit);
           assert.isTrue(Exit.isFailure(result));
           assert.equal(nativeSends, 0);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -3458,16 +3317,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             assert.equal(memoryItem?.role, "user");
             assert.include(memoryItem!.content[0]!.text, "&lt;untrusted&gt;");
           } else assert.isUndefined(memoryItem);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -3561,16 +3411,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         yield* harness.firstTerminal;
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3646,16 +3487,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(items[0]?.id, items[1]?.id);
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3703,16 +3535,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
         assert.equal(resumed.status, "idle");
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3867,16 +3690,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.equal(resumed.status, "idle");
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3958,16 +3772,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           restartContinuationOfRunId: RunId.make("run-before-restart"),
         });
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4115,16 +3920,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isAtLeast(recoveredIndex, 0);
         assert.isAbove(resumedCommandIndex, recoveredIndex);
         assert.isAbove(terminalIndex, resumedCommandIndex);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4223,16 +4019,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ["compaction", 1782622565000],
           ],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4396,16 +4183,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             );
           }
           assert.deepEqual(assistantMessages(harness.events), []);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -4534,16 +4312,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4586,16 +4355,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           })),
           [{ text: "CODEX_RECOVERY_OK", streaming: false }],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4639,16 +4399,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4767,16 +4518,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           new Set(assistantMessages(harness.events).map((event) => event.message.id)).size,
           1,
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4804,16 +4546,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           [""],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4842,16 +4575,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           [""],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4880,16 +4604,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["Working on it.", ""],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4918,16 +4633,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4956,16 +4662,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4994,16 +4691,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assistantMessages(harness.events).map((event) => event.message.text),
           ["", "CODEX_RECOVERY_OK"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5159,16 +4847,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -5323,16 +5002,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.equal(harness.terminalEvents()[0]?.status, "completed");
           assert.lengthOf(harness.continuationRequests, 0);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       );
     },
   );
@@ -5692,16 +5362,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(harness.continuationRequests, 0);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.terminalEvents(), 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5990,16 +5651,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.isAtLeast(commandUpdates.length, 2, "start + interrupt terminalization");
         assert.equal(commandUpdates[commandUpdates.length - 1]?.turnItem.status, "interrupted");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6227,16 +5879,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(harness.subagentUpdates().at(-1)?.subagent.status, "interrupted");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6321,16 +5964,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted root terminal");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6418,16 +6052,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted root terminal");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6538,16 +6163,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(lateChildUpdates.at(-1)?.providerTurn.status, "interrupted");
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6712,16 +6328,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assertChildProviderTerminalBeforeRoot(harness.events, harness.threadId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6986,16 +6593,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           commandUpdatesBeforeLateEvents.length,
           "late starts and completions must not project after timeout",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7102,16 +6700,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7283,16 +6872,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               .slice(0, outcome === "stop" ? 1 : 3)
               .map((retryDelayMs, index) => ({ attempt: index + 1, maxAttempts: 3, retryDelayMs })),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
 
@@ -7351,16 +6931,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           // The backoff timer that fires later must not start a second retry.
           yield* TestClock.adjust("10 minutes");
           assert.lengthOf(harness.terminalEvents(), 1);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
 
@@ -7425,16 +6996,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* harness.firstTerminal;
           assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
           assert.lengthOf(harness.terminalEvents(), 1);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
 
@@ -7473,16 +7035,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 event.turnItem.retry !== undefined,
             ),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
     );
   });
@@ -7719,16 +7272,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.isDefined(item);
         }
         if (scenario.name === "retry") assert.equal(terminal.retry?.attempt, 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7826,16 +7370,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7996,16 +7531,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.include(stored, "connect-src https://api.weather.test");
         assert.isBelow(stored.indexOf("Content-Security-Policy"), stored.indexOf("<script>"));
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8091,16 +7617,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const output = rows[0]!.turnItem.type === "dynamic_tool" ? rows[0]!.turnItem.output : null;
         assert.isUndefined((output as Record<string, unknown> | null)?.[MCP_APP_OUTPUT_KEY]);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8342,16 +7859,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8585,16 +8093,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ]);
         }
         assert.equal(metadataRequests, name === "current Codex Sol" ? 1 : 2);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8651,16 +8150,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* harness.firstTerminal;
           assert.equal(harness.subagentUpdates().at(-1)?.subagent.model, model);
           assert.deepEqual(metadataRequests, ["thread/read", "thread/resume"]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8759,16 +8249,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             { id: "reasoningEffort", value: "low" },
             { id: "serviceTier", value: "ultrafast" },
           ]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8830,16 +8311,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.terminalEvents(), 1);
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8919,16 +8391,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isNull(row?.completedAt);
         assert.isNotNull(row?.startedAt);
         assert.equal(DateTime.toEpochMillis(row!.startedAt!), 1782622470000);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9090,16 +8553,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               DateTime.toEpochMillis(first.subagent.completedAt!),
             );
           }
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9247,17 +8701,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         "thread/rollback",
         "thread/rollback must not be sent to a legacy Codex thread",
       );
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -9396,17 +8840,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.notEqual(forkedProviderThread.id, harness.providerThread.id);
         assert.equal(forkedProviderThread.forkedFrom?.providerTurnId, firstTurn.id);
         assert.deepEqual(outbound.slice(-2), ["thread/turns/list", "thread/revert"]);
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -9508,17 +8942,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           "thread/rollback",
           "thread/rollback must not be sent to a legacy Codex fork",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("propagates native thread/fork failures as typed fork errors", () =>
@@ -9574,17 +8998,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
 
       assert.instanceOf(error, ProviderAdapter.ProviderAdapterForkThreadError);
       assert.include(errorCauseChainText(error), "fork exploded");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   describe("native goals", () => {
@@ -9748,17 +9162,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ],
         );
         assert.equal(providerGoals(harness.events).at(-1), "complete");
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("settles /goal pause with a reply instead of a native turn", () =>
@@ -9802,17 +9206,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           "Goal paused. Send /goal resume to continue.",
         );
         assert.equal(providerGoals(harness.events).at(-1), "paused");
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("settles a run held for the next goal turn when Stop arrives in between", () =>
@@ -9903,17 +9297,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("moves a Stop that names an earlier goal turn to the turn Codex continued with", () =>
@@ -9992,17 +9376,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("stops a held goal run's background command when Stop arrives between turns", () =>
@@ -10104,17 +9478,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           "the background command to be interrupted",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("moves Stop to a continuation Codex starts while the goal pause is in flight", () =>
@@ -10196,17 +9560,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("stops a subagent an earlier goal turn left running when Stop settles the run", () =>
@@ -10303,17 +9657,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           "the subagent turn to be interrupted",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("stops an earlier goal turn's subagent when the run settles during the pause", () =>
@@ -10426,17 +9770,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           "the subagent turn to be interrupted",
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("pauses an active goal before Stop interrupts its turn", () =>
@@ -10500,17 +9834,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           harness.terminalEvents().map((event) => event.status),
           ["interrupted"],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
   });
 });

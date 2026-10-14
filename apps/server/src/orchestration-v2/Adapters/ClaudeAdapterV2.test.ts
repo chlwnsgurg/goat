@@ -104,6 +104,13 @@ import {
   projectionFor,
 } from "../testkit/fixtures/shared.ts";
 
+const layerAdapterTest = Layer.mergeAll(
+  MemoryDerivedCache.layer,
+  IdAllocator.layer,
+  McpProviderSessions.layer,
+  NodeServices.layer,
+);
+
 const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
 const AUTO_COMPACT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({
   autoCompactWindow: "300000",
@@ -1139,16 +1146,7 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
           decision: "accept",
         });
         assert.equal((yield* Fiber.join(decision))?.behavior, "allow");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 });
@@ -1291,14 +1289,7 @@ describe("ClaudeAdapterV2 executable path", () => {
       }),
     ).pipe(
       Effect.provideService(HostProcess.Environment, testCase.hostEnvironment),
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
+      Effect.provide(layerAdapterTest),
     ),
   );
 
@@ -1315,16 +1306,7 @@ describe("ClaudeAdapterV2 executable path", () => {
 
         assert.deepEqual(executablePaths, [packageExe]);
       }),
-    ).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    ).pipe(Effect.provide(layerAdapterTest)),
   );
 });
 
@@ -1543,16 +1525,7 @@ describe("ClaudeAdapterV2 resume compaction", () => {
           ),
           { behavior: "cancelled" },
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 });
@@ -1697,16 +1670,7 @@ describe("ClaudeAdapterV2 attachments", () => {
             text: `Ultrathink:\nFocus on the diagram labels.\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]\n\n[Attached file "requirements.pdf" is saved at: ${expectedDocumentPath}]`,
           },
         ]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -1789,16 +1753,7 @@ describe("ClaudeAdapterV2 attachments", () => {
         assert.equal(error._tag, "ProviderAdapterTurnStartError");
         assert.include(String(error.cause), "Unsupported Claude image attachment type");
         assert.equal(openCount, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 });
@@ -1978,16 +1933,7 @@ describe("ClaudeAdapterV2 native fork", () => {
 
         assert.equal(openedQueries[0]?.options.resume, "forked-native-session");
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 });
@@ -2172,16 +2118,7 @@ describe("ClaudeAdapterV2 native session identity", () => {
           }),
         );
         return openedQueries;
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     );
 
   it.effect("creates the native session on the first provider turn", () =>
@@ -2689,17 +2626,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.deepEqual(item.input, { city: "Berlin" });
       }
       assert.equal(new Set(items.map((item) => item.id)).size, 1);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -2760,16 +2687,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.strictEqual(harness.getOpenedOptions(), originalOptions);
           assert.lengthOf(harness.offeredMessages, 2);
           assert.isTrue(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -2888,17 +2806,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         for (const item of latest.values()) assert.notInclude(item.text, "secret-signature");
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each([
@@ -2962,17 +2870,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             [expected, "Found it: the memory file is the cause."],
           ],
         );
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["cancelled", "denied", "permission_denied", undefined])(
@@ -3042,16 +2940,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "tool-error",
           );
           assert.equal(node?.type === "node.updated" ? node.node.status : undefined, failed.status);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -3124,16 +3013,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
         }
         assert.lengthOf(harness.terminalEvents(), 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -3199,16 +3079,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* Queue.take(harness.terminalReceipts);
       assert.lengthOf(notices(), 3);
       assert.notEqual(notices()[0]?.id, notices()[2]?.id);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("keeps usage warnings and provisioned overage silent", () =>
@@ -3255,16 +3126,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
         ),
       );
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("names an expired Claude login instead of the terminal API error", () =>
@@ -3311,16 +3173,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       // The message quotes its paths, which escapes Windows separators.
       assert.include(terminal.failure.message, JSON.stringify(cwd));
       assert.notInclude(terminal.failure.message, "repeated API errors");
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each([
@@ -3374,16 +3227,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       if (terminal.status !== "failed") return;
       assert.include(terminal.failure.message, expected);
       assert.equal(terminal.failure.class, recovered ? "provider_error" : "usage_limit");
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each([
@@ -3443,16 +3287,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ? "Claude usage limit reached. Send the message again once the limit resets."
           : "Claude gave up after repeated API errors.",
       );
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each([
@@ -3506,16 +3341,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       } else {
         assert.isUndefined(terminal.failure.resetAt);
       }
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each([429, 401, 503, 529])(
@@ -3559,16 +3385,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         if (apiErrorStatus !== 429)
           assert.notInclude(terminal.failure.message.toLowerCase(), "usage limit");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("keeps the measured context when a usage limit ends the turn", () =>
@@ -3632,16 +3449,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           : [],
       );
       assert.deepEqual(reportedContext, [2]);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["refresh", "tamper", "offer", "prior-success"] as const)(
@@ -3738,16 +3546,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           });
           assert.equal(harness.offeredMessages.length, failure === "prior-success" ? 3 : 2);
         }),
-      ).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      ).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("surfaces a Claude safety model fallback without failing the turn", () =>
@@ -3806,17 +3605,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
         ),
       );
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          NodeServices.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect(
@@ -3888,17 +3677,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             cacheCreationTokens: 0,
           });
         }
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            NodeServices.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("titles Claude reads, searches, and skills on tool completion", () =>
@@ -3996,17 +3775,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       );
       for (const item of items.filter((item) => item.nativeItemRef?.nativeId !== "image"))
         assert.notProperty(item, "viewedImagePath");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          NodeServices.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves typed Claude plans and todos through generic tool completion", () =>
@@ -4215,16 +3984,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         // The second prompt reuses the live process, which is still in the
         // plan mode Claude entered, so it is put back in the thread's mode.
         assert.deepEqual(harness.permissionModeChanges, ["bypassPermissions"]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4447,17 +4207,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           { id: "task-1", text: "Inspected", status: "completed" },
           { id: "task-2", text: "Implement", status: "pending" },
         ]);
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("removes deleted tasks without resurrecting them on later updates or turns", () =>
@@ -4483,17 +4233,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       for (const plan of harness.plans().slice(2)) {
         assert.isFalse(plan.steps.some((step) => step.id === "task-1"));
       }
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["success false", "error result", "unknown id"] as const)(
@@ -4515,17 +4255,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.deepEqual(harness.plans()[0]?.steps, [
           { id: "task-1", text: "Inspect", status: "pending" },
         ]);
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("replaces task state with TaskList, including an empty list", () =>
@@ -4562,17 +4292,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         { id: "task-4", text: "Done", status: "completed" },
       ]);
       assert.deepEqual(plans[3]?.steps, []);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("keeps subagent TaskCreate, TaskUpdate and TaskList out of the main plan", () =>
@@ -4590,17 +4310,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.deepEqual(harness.plans().at(-1)?.steps, [
         { id: "task-1", text: "Main task", status: "running" },
       ]);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("does not associate structured task output with multiple tool results", () =>
@@ -4610,17 +4320,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* harness.call(createTask("1", "Ambiguous"), { extraToolResult: true });
       yield* harness.finishTurn();
       assert.deepEqual(harness.plans(), []);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          MemoryDerivedCache.layer,
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-        ),
-      ),
-    ),
+    }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
   );
 
   it.effect("resolves API retries on resumed assistant activity", () =>
@@ -4693,16 +4393,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "recovered Claude turn");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4756,16 +4447,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         });
         assert.isDefined(terminal.retryStartedAt);
         assert.equal(terminal.failure.code, "api_error_529");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4827,16 +4509,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           terminal.failure.code,
           terminalReason === "overloaded_status" ? "api_error_529" : terminalReason,
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -4901,16 +4574,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "empty roster clear",
           );
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -5045,16 +4709,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.deepEqual(roster, [
           { taskId: longRunning.taskId, kind: "monitor", description: "Monitor 0" },
         ]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5104,16 +4759,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5158,16 +4804,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5350,16 +4987,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* awaitUntil(() => continuationRequests.length === 1, "replacement wake");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5417,16 +5045,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const afterFailure = providerThreadRosterEvents(harness.events).at(-1);
         assert.deepEqual(afterFailure?.providerThread.pendingBackgroundTasks ?? [], []);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5689,16 +5308,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadA));
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -5918,16 +5528,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             userRunItems.map((item) => item.type),
             ["assistant_message"],
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -6010,16 +5611,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             : undefined,
           "On branch main\nwarning: dirty",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6148,16 +5740,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         });
         const result = yield* Fiber.join(permission);
         assert.equal(result?.behavior, "allow");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6253,16 +5836,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               event.message.text === STALE_TASK_NOTIFICATION_RESULT_TEXT,
           ),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6340,16 +5914,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "second turn terminal");
         assert.deepEqual(assistantTexts(), ["One.", "Two."]);
         assert.equal(harness.terminalEvents()[1]?.status, "failed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6375,16 +5940,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
         }
         assert.notEqual(original.promptUuid(0), copy.promptUuid(0));
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6421,16 +5977,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         if (terminal?.status !== "failed") return;
         assert.equal(terminal.threadDisposition, "reusable");
         assert.include(terminal.failure.message, "never started a turn");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6479,16 +6026,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6534,16 +6072,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.lengthOf(harness.continuationRequests, 1);
         assert.lengthOf(harness.terminalEvents(), 1);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6600,16 +6129,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             (event) => event.type === "message.updated" && event.message.text === WAKE_RESULT_TEXT,
           ),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6660,16 +6180,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
         assert.lengthOf(harness.offeredMessages, 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6757,16 +6268,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(pause.turnItem.type, "system_notice");
         if (pause.turnItem.type !== "system_notice") return;
         assert.include(pause.turnItem.message, "This turn is paused until the 5-hour limit");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6857,16 +6359,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6928,16 +6421,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "queued turn terminal");
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -6975,16 +6459,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             (event) => event.type === "message.updated" && event.message.text === fallbackText,
           ),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7067,16 +6542,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
         assert.isTrue(hasMessageText(recoveryAssistantText));
         assert.isFalse(hasMessageText(staleResultText));
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7126,16 +6592,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7195,16 +6652,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.isTrue(terminalized);
           assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
           assert.lengthOf(harness.terminalEvents(), 1);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -7264,16 +6712,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             (event) => event.type === "message.updated" && event.message.text === staleText,
           ),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7307,16 +6746,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "failed");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7342,16 +6772,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "spurious terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
         assert.lengthOf(harness.offeredMessages, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7548,16 +6969,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           harness.continuationRequests[1]?.notification?.summary,
           `Command "${WAKE_TASK_DESCRIPTION}" finished`,
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7618,16 +7030,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           harness.continuationRequests[0]?.notification?.summary,
           `Command "${WAKE_TASK_DESCRIPTION}" finished`,
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7783,16 +7186,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             : [],
         );
         assert.deepEqual([...new Set(userRunItems)], ["assistant_message"]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -7898,16 +7292,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           finalSubagent?.type === "subagent.updated" && finalSubagent.subagent.status,
           "completed",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8068,16 +7453,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           finalSubagent?.type === "subagent.updated" && finalSubagent.subagent.status,
           "completed",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8265,16 +7641,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           subagentRouting(harness.events, []).assistantTexts(outer?.childThreadId ?? undefined),
           ["OUTER_WORKING", "OUTER_DONE"],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8404,16 +7771,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.equal(nested?.type === "subagent.updated" && nested.subagent.status, "completed");
         assert.lengthOf(harness.continuationRequests, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8465,16 +7823,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Queue.shutdown(harness.sdkMessages);
         yield* awaitUntil(() => bashStatuses().length === 2, "call ended");
         assert.deepEqual(bashStatuses(), ["command_execution:running", "command_execution:failed"]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8536,16 +7885,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           "command_execution:running",
           "command_execution:interrupted",
         ]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -8711,16 +8051,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             `command_execution:running:${input}`,
             `command_execution:completed:${input}`,
           ]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8876,16 +8207,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             `dynamic_tool:running:${input}`,
             `dynamic_tool:completed:${input}`,
           ]);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -8962,16 +8284,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           "Part two.",
         ]);
         assert.deepEqual(routing.assistantTexts(harness.threadId), ["The auditor finished."]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9146,16 +8459,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
           );
           assert.lengthOf(harness.continuationRequests, 1);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9216,16 +8520,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             : [],
         );
         assert.deepEqual(retryStatuses, ["running"]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9314,16 +8609,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           FINAL_REPORT,
         ]);
         assert.deepEqual(routing.assistantTexts(harness.threadId), ["The auditor finished."]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9420,16 +8706,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* stop!({ providerThread: harness.providerThread, nativeTaskId: "agent-stop" });
           assert.deepEqual(stopped, ["agent-stop"]);
           assert.equal(closes, 0);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9538,16 +8815,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           const child = harness.events.find((event) => event.type === "app_thread.created");
           assert.equal(child?.appThread.modelSelection?.model, initialModel ?? parentModel);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9657,16 +8925,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             subagents.map((event) => event.subagent.modelSelection),
             subagents.map(() => subagentSelection),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9766,16 +9025,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           // The custom slug is not resolved to the built-in model it shadows.
           [`task-${SHADOW_TOOL_USE_ID}`]: { instanceId, model: "opus" },
         });
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9891,16 +9141,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             : [],
         );
         assert.deepEqual(childEfforts, ["low", "low", "max"]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9985,16 +9226,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -10087,16 +9319,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         assert.equal(subagentEvents().at(-1)?.subagent.status, "cancelled");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -10382,16 +9605,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.lengthOf(resumedWorkIndexes, 1);
         assert.isAbove(resumedWorkIndexes[0] ?? -1, reopenIndex);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -10575,16 +9789,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           () => events.filter((event) => event.type === "turn.terminal").length === 2,
           "second turn terminal",
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -10773,16 +9978,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
           );
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -11033,16 +10229,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.equal(subagentNodeEvents.at(-1)?.node.status, "completed");
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -11209,16 +10396,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         assert.lengthOf(processQueues, 3);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -11348,16 +10526,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           // no replacement is opened.
           assert.equal(openCount, 1);
           assert.isTrue(yield* hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -11559,16 +10728,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "continuation request after retry",
           );
           assert.equal(continuationRequests[1]?.detail, "Retry build completed successfully");
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -11643,16 +10803,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.isTrue(Exit.isFailure(failedStart));
         // No live process ever existed: do not emit a fabricated empty roster.
         assert.lengthOf(providerThreadRosterEvents(events), 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -11927,16 +11078,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "completed",
           );
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -12001,16 +11143,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           memberArtifacts[0]?.filter((id) => memberArtifacts[1]?.includes(id)),
           [],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -12114,16 +11247,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.deepEqual(stoppedTasks, [WORKFLOW_TASK_ID]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -12377,16 +11501,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.isNull(
           stoppedRoot?.type === "node.updated" ? stoppedRoot.node.startedAt : undefined,
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -12453,16 +11568,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               event.appThread.id === coordinator?.childThreadId,
           ),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -12526,16 +11632,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           "between-turn workflow snapshot",
         );
         assert.equal(coordinatorCount(), betweenTurnCount + 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -12661,16 +11758,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
           }),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -12836,16 +11924,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 }),
             }),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -12984,16 +12063,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 }),
             }),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -13223,16 +12293,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }),
           }),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -13352,16 +12413,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }),
           }),
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -13439,16 +12491,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               settled,
             );
           }
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -13748,16 +12791,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             );
             assert.equal(root?.type === "node.updated" ? root.node.status : null, expected);
           }
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              MemoryDerivedCache.layer,
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-            ),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -13821,16 +12855,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           makeResultFrame({ uuid: "00000000-0000-4000-8000-000000001034", result: "Done." }),
         );
         yield* Queue.take(harness.terminalReceipts);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -14055,16 +13080,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           "empty retry answer",
         );
         assert.deepEqual(currentAssistantAnswers(), ["No answer from this workflow attempt."]);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -14145,17 +13161,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           },
           { objective: condition, status: "complete", checks: 1 },
         ]);
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("keeps a goal active when a hook stops the turn before the goal passes", () =>
@@ -14189,17 +13195,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           status: "active",
           checks: 0,
         });
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
 
     it.effect("keeps a goal active after a command turn with no model output", () =>
@@ -14233,17 +13229,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           status: "active",
           checks: 2,
         });
-      }).pipe(
-        Effect.scoped,
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.scoped, Effect.provide(layerAdapterTest)),
     );
   });
 });
@@ -14331,6 +13317,19 @@ describe("Claude WP4 memory delivery", () => {
         const registrations: unknown[] = [];
         const opened: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions[] = [];
         let closes = 0;
+        let registryValid = true;
+        const registry = McpSessionRegistry.McpSessionRegistry.of({
+          issue: () => Effect.die("unused"),
+          resolve: () => Effect.succeed(undefined),
+          touch: () => Effect.void,
+          revokeProviderSession: () => Effect.void,
+          revokeThread: () => Effect.void,
+          revokeAll: Effect.void,
+          currentMemoryPolicy: () =>
+            Effect.sync(() =>
+              registryValid ? { grant: "read_write" as const, policyEpoch: 1 } : undefined,
+            ),
+        });
         const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
           instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
           settings: DEFAULT_CLAUDE_SETTINGS,
@@ -14368,7 +13367,7 @@ describe("Claude WP4 memory delivery", () => {
             subagentLaunchToolUseId: () => Effect.succeed(null),
             assertComplete: Effect.void,
           },
-        });
+        }).pipe(Effect.provideService(McpSessionRegistry.McpSessionRegistry, registry));
         const threadId = ThreadId.make("wp4-claude");
         const sessions = yield* McpProviderSessions.McpProviderSessions;
         const config: McpProviderSession.McpProviderSessionConfig = {
@@ -14395,8 +13394,14 @@ describe("Claude WP4 memory delivery", () => {
           yield* Deferred.make<void>(),
         ];
         let terminals = 0;
+        const approvalRequested = yield* Deferred.make<void>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) => {
+            if (
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.status === "pending"
+            )
+              return Deferred.succeed(approvalRequested, undefined);
             if (event.type !== "turn.terminal") return Effect.void;
             const signal = terminalSignals[terminals++];
             return signal ? Deferred.succeed(signal, undefined) : Effect.void;
@@ -14543,15 +13548,20 @@ describe("Claude WP4 memory delivery", () => {
             refreshMemoryContext,
           });
           for (const tool of ClaudeAdapterV2.CLAUDE_MEMORY_READ_TOOLS) {
-            const permission = yield* Effect.promise(() =>
-              opened[0]!.canUseTool!(
-                tool,
-                {},
-                {
-                  signal: new AbortController().signal,
-                  toolUseID: `fixture-${tool}`,
-                  requestId: `fixture-${tool}`,
-                },
+            const permission = yield* Effect.raceFirst(
+              Effect.promise((signal) =>
+                opened[0]!.canUseTool!(
+                  tool,
+                  {},
+                  {
+                    signal,
+                    toolUseID: `fixture-${tool}`,
+                    requestId: `fixture-${tool}`,
+                  },
+                ),
+              ),
+              Deferred.await(approvalRequested).pipe(
+                Effect.as({ behavior: "unexpected-approval" as const }),
               ),
             );
             assert.equal(permission?.behavior, "allow");
@@ -14569,6 +13579,40 @@ describe("Claude WP4 memory delivery", () => {
               ),
             );
             assert.equal(permission?.behavior, "deny");
+          }
+          if (offset === 0) {
+            registryValid = false;
+            const staleRead = yield* Effect.promise((signal) =>
+              opened[0]!.canUseTool!(
+                "mcp__goat__memory_read",
+                {},
+                {
+                  signal,
+                  toolUseID: "stale-read",
+                  requestId: "stale-read",
+                },
+              ),
+            );
+            assert.equal(staleRead?.behavior, "deny");
+            registryValid = true;
+            yield* sessions.set({
+              ...config,
+              providerSessionId: credential,
+              authorizationHeader: `Bearer fixture-${credential}`,
+              grantedScopes: ["memory:read"],
+            });
+            const source = yield* Effect.promise((signal) =>
+              opened[0]!.canUseTool!(
+                "mcp__goat__memory_read_source",
+                {},
+                {
+                  signal,
+                  toolUseID: "source-without-orchestration",
+                  requestId: "source-without-orchestration",
+                },
+              ),
+            );
+            assert.equal(source?.behavior, "deny");
           }
           const offered = offers[offset + 3]!;
           assert.include(JSON.stringify(offered.message.content), "&lt;untrusted&gt;");
@@ -14596,25 +13640,7 @@ describe("Claude WP4 memory delivery", () => {
         });
         assert.equal(offers.length, 6);
         assert.notInclude(JSON.stringify(offers[5]?.message.content), "external_goat_memory");
-      }).pipe(
-        Effect.provideService(McpSessionRegistry.McpSessionRegistry, {
-          issue: () => Effect.die("unused"),
-          resolve: () => Effect.succeed(undefined),
-          touch: () => Effect.void,
-          revokeProviderSession: () => Effect.void,
-          revokeThread: () => Effect.void,
-          revokeAll: Effect.void,
-          currentMemoryPolicy: () => Effect.succeed({ grant: "read_write", policyEpoch: 1 }),
-        }),
-        Effect.provide(
-          Layer.mergeAll(
-            MemoryDerivedCache.layer,
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-          ),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
   it("preapproves the six granted reads and never any memory write on read-only policy", () => {

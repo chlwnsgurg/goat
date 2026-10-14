@@ -63,6 +63,7 @@ const make = Effect.sync(() => {
             if (expired) yield* expired.release;
           }),
         ),
+        Effect.interruptible,
         Effect.forkIn(scope),
       );
     }
