@@ -299,6 +299,8 @@ const make = Effect.gen(function* () {
   // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
   const recoveries = new Map<Store.MemoryHoldClass, { route: Route; delay: number; due: number }>();
   let recoveryFiber: Fiber.Fiber<void, never> | null = null;
+  let recoveryChanged = yield* Deferred.make<void>();
+  const wakeRecovery = Effect.suspend(() => Deferred.succeed(recoveryChanged, undefined));
   const scheduleRecovery = (
     r: Route,
     c: Store.MemoryHoldClass | null,
@@ -312,7 +314,10 @@ const make = Effect.gen(function* () {
           delay: 30000,
           due: (yield* Clock.currentTimeMillis) + 30000,
         });
-      if (recoveryFiber) return;
+      if (recoveryFiber) {
+        yield* wakeRecovery;
+        return;
+      }
       const ready = yield* Deferred.make<void>();
       recoveryFiber = yield* Deferred.await(ready).pipe(
         Effect.andThen(Effect.suspend(() => recoveryLoop)),
@@ -1499,7 +1504,11 @@ const make = Effect.gen(function* () {
       pending.resolutionDone ||= !page.resolution.more;
       pending.syncAfter = page.sync.next ?? pending.syncAfter;
       pending.resolutionAfter = page.resolution.next ?? pending.resolutionAfter;
-      if (pending.syncDone && pending.resolutionDone) rearms.delete(c);
+      if (pending.syncDone && pending.resolutionDone) {
+        rearms.delete(c);
+        recoveries.delete(c);
+        yield* wakeRecovery;
+      }
     }
     if (rearms.size) pendingSync = true;
   });
@@ -1610,7 +1619,15 @@ const make = Effect.gen(function* () {
   const recoveryLoop: Effect.Effect<void> = Effect.gen(function* () {
     while (!stopped && recoveries.size) {
       const next = Math.min(...[...recoveries.values()].map((p) => p.due));
-      yield* Effect.sleep(Math.max(0, next - (yield* Clock.currentTimeMillis)));
+      const signal = recoveryChanged;
+      const elapsed = yield* Effect.raceFirst(
+        Effect.sleep(Math.max(0, next - (yield* Clock.currentTimeMillis))).pipe(Effect.as(true)),
+        Deferred.await(signal).pipe(Effect.as(false)),
+      );
+      if (!elapsed) {
+        if (signal === recoveryChanged) recoveryChanged = yield* Deferred.make<void>();
+        continue;
+      }
       for (const [c, pending] of recoveries) {
         if (pending.due > (yield* Clock.currentTimeMillis)) continue;
         const r = pending.route;

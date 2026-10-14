@@ -4778,9 +4778,9 @@ it.effect.each(["stale-candidate", "ticket-write-failure"] as const)(
     }),
 );
 
-it.effect(
-  "first null-space hub configure bootstraps its own replica without HTTP and exchanges writes",
-  () =>
+it.effect.each(["bootstrap", "exchange"] as const)(
+  "first null-space hub configure bootstraps its own replica without HTTP: %s",
+  (phase) =>
     Effect.scoped(
       Effect.gen(function* () {
         const settingsLayer = Settings.layer.pipe(
@@ -4863,6 +4863,10 @@ it.effect(
             memorySpaceId: allocated,
             bootstrap: "ready",
           });
+          if (phase === "bootstrap") {
+            yield* sync.shutdown;
+            return;
+          }
           // Both directions cross authoritative HubService admission; no ready seed or SQL membership seed.
           const hub = yield* Hub.MemoryHubService;
           const service = yield* Service.MemoryService;
@@ -4903,56 +4907,141 @@ it.effect(
             credentialVersion: 1,
             scopes: ["memory:sync"],
           };
-          const page = yield* hub.pull(
-            {
-              protocolVersion: 1,
-              memorySpaceId: allocated,
-              environmentId: remote,
-              afterSequence: 0,
-              limit: 100,
-            },
-            principal,
-          );
-          assert.isTrue(
-            page.entries.some(
-              (e) => e.kind === "operation" && e.operation.memoryId === hOp.memoryId,
+          const aSettings = Settings.layerTest({
+            memoryHub: { ...member, memorySpaceId: allocated, hubEnvironmentId: local },
+            memoryHubVersion: 1,
+            defaultModelSelection: selection,
+          });
+          const aCommitted = Layer.effect(
+            Settings.MemoryHubCommittedSettings,
+            Effect.serviceOption(Settings.MemoryHubCommittedSettings).pipe(
+              Effect.map(Option.getOrThrow),
+            ),
+          ).pipe(Layer.provide(aSettings));
+          const aCore = Service.layer.pipe(
+            Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Layer.fresh(storage)))),
+            Layer.provideMerge(Layer.merge(aSettings, aCommitted)),
+            Layer.provideMerge(
+              Layer.succeed(Environment.ServerEnvironmentIdentity, {
+                getEnvironmentId: Effect.succeed(remote),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+                resolve: () => Effect.succeed(null),
+              }),
             ),
           );
-          const a = operation(98004, M.MemoryId.make(id(98005)));
-          if (a.kind !== "upsert") throw new Error("fixture upsert");
-          const aOp = {
-            ...a,
-            memorySpaceId: allocated,
-            originEnvironmentId: remote,
-            revision: {
-              ...a.revision,
-              memorySpaceId: allocated,
-              provenance: { environmentId: remote },
-            },
-          };
-          yield* hub.push(
-            {
-              protocolVersion: 1,
-              memorySpaceId: allocated,
-              environmentId: remote,
-              operations: [aOp],
-            },
-            principal,
+          const aHub = Hub.layer.pipe(
+            Layer.provideMerge(Hub.activityLayer),
+            Layer.provide(
+              Layer.succeed(Hub.MemoryHubConfiguration, { read: Effect.succeed(null) }),
+            ),
+            Layer.provide(aCore),
           );
-          yield* sync.syncOnce;
-          const received = (yield* service.list(
-            {
+          // A has a separate real SQLite replica and coordinator. Only its transport is an in-process bridge.
+          const aClient = peer({
+            join: (_c, input) =>
+              hub
+                .join(input, principal)
+                .pipe(
+                  Effect.mapError((e) =>
+                    e._tag === "MemoryHubError" ||
+                    e._tag === "MemoryHubUnauthorizedError" ||
+                    e._tag === "MemoryHubForbiddenError"
+                      ? e
+                      : new M.MemoryHubError({ code: "storage_failed" }),
+                  ),
+                ),
+            pull: (_c, input) =>
+              hub
+                .pull(input, principal)
+                .pipe(
+                  Effect.mapError((e) =>
+                    e._tag === "MemoryHubError" ||
+                    e._tag === "MemoryHubUnauthorizedError" ||
+                    e._tag === "MemoryHubForbiddenError"
+                      ? e
+                      : new M.MemoryHubError({ code: "storage_failed" }),
+                  ),
+                ),
+            push: (_c, input) =>
+              hub
+                .push(input, principal)
+                .pipe(
+                  Effect.mapError((e) =>
+                    e._tag === "MemoryHubError" ||
+                    e._tag === "MemoryHubUnauthorizedError" ||
+                    e._tag === "MemoryHubForbiddenError"
+                      ? e
+                      : new M.MemoryHubError({ code: "storage_failed" }),
+                  ),
+                ),
+          });
+          const aApp = Sync.layer.pipe(
+            Layer.provideMerge(
+              Layer.mergeAll(
+                aCore,
+                aHub,
+                runtimeBase.pipe(Layer.provide(aCore)),
+                realGeneration({ resolveMemoryConflict: () => Effect.never }),
+                aClient,
+              ),
+            ),
+          );
+          const aContext = yield* Layer.build(aApp);
+          yield* Effect.gen(function* () {
+            const aSync = yield* Sync.MemorySyncService;
+            const aService = yield* Service.MemoryService;
+            const aStore = yield* Store.MemoryStore;
+            assert.notStrictEqual(aStore, store);
+            yield* aSync.start;
+            assert.deepStrictEqual(yield* aSync.readLocalReadiness(), {
               memorySpaceId: allocated,
-              scope: { kind: "user" },
-              limit: 20,
-              includeQuarantined: false,
-            },
-            Effect.void,
-          )).items.find((i) => i.memoryId === aOp.memoryId);
-          assert.strictEqual(received?.status, "active");
-          if (received?.status !== "active") throw new Error("fixture active memory");
-          assert.strictEqual(received.payload.text, "synthetic fact 98004");
-          assert.isAtLeast(yield* store.readCursor(allocated, local), 2);
+              bootstrap: "ready",
+            });
+            const fromH = (yield* aService.list(
+              {
+                memorySpaceId: allocated,
+                scope: { kind: "user" },
+                limit: 20,
+                includeQuarantined: false,
+              },
+              Effect.void,
+            )).items.find((i) => i.memoryId === hOp.memoryId);
+            if (fromH?.status !== "active") throw new Error("H write missing from A replica");
+            assert.strictEqual(fromH.payload.text, "synthetic fact 98001");
+            const aMemory = M.MemoryId.make(id(98005));
+            yield* aService.upsert(
+              {
+                memorySpaceId: allocated,
+                memoryId: aMemory,
+                operationId: M.MemoryOperationId.make(id(98004)),
+                expectedHeads: [],
+                scope: { kind: "user" },
+                assertionKind: "inference",
+                payload: { text: "A local write", evidence: [], derivedFromMemoryRevisions: [] },
+                baseBoundary: null,
+              },
+              Effect.void,
+            );
+            yield* aSync.syncOnce;
+            const before = yield* store.readCursor(allocated, local);
+            yield* sync.syncOnce;
+            assert.isAbove(yield* store.readCursor(allocated, local), before);
+            const received = (yield* service.list(
+              {
+                memorySpaceId: allocated,
+                scope: { kind: "user" },
+                limit: 20,
+                includeQuarantined: false,
+              },
+              Effect.void,
+            )).items.find((i) => i.memoryId === aMemory);
+            if (received?.status !== "active") throw new Error("A write missing from H replica");
+            assert.strictEqual(received.payload.text, "A local write");
+            yield* aSync.shutdown;
+          }).pipe(Effect.provideContext(aContext));
           yield* sync.shutdown;
         }).pipe(Effect.provideContext(context));
       }),
@@ -5166,4 +5255,54 @@ it.effect.each(["epoch", "shutdown"] as const)(
         }).pipe(Effect.provide(fixture(client, undefined, false, true))),
       );
     }),
+);
+
+it.effect("a real permanent pull failure recovers in the same epoch through preflight", () =>
+  Effect.gen(function* () {
+    let healthy = false;
+    let probes = 0;
+    let pulls = 0;
+    const resumed = yield* Deferred.make<void>();
+    const client = peer({
+      preflight: () =>
+        Effect.sync(() => {
+          probes++;
+          return recoveredDescriptor;
+        }),
+      pull: () =>
+        Effect.gen(function* () {
+          pulls++;
+          if (!healthy) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+          yield* Deferred.succeed(resumed, undefined);
+          return { highWatermark: 0, throughSequence: 0, hasMore: false, entries: [] };
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const store = yield* Store.MemoryStore;
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.start;
+        assert.strictEqual(pulls, 1);
+        assert.strictEqual(
+          (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+            .holdClass,
+          "availability",
+        );
+        healthy = true;
+        yield* sync.syncOnce;
+        assert.strictEqual(pulls, 1, "manual cycle alone cannot fabricate recovery");
+        yield* TestClock.adjust(30000);
+        assert.strictEqual(probes, 1);
+        yield* Deferred.await(resumed);
+        yield* sync.syncOnce;
+        assert.isAbove(pulls, 1);
+        assert.isNull(
+          (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+            .holdClass,
+        );
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(client))),
+    );
+  }),
 );
