@@ -186,6 +186,7 @@ describe("memory canonical contracts", () => {
     for (const [schema, rpc] of [
       [M.MemorySyncStatusInput, M.WsMemorySyncStatusRpc],
       [M.MemoryHubSettingsGetInput, M.WsMemoryHubSettingsGetRpc],
+      [M.MemoryOwnerSourceReadPolicyGetInput, M.WsMemoryOwnerSourceReadPolicyGetRpc],
     ] as const) {
       const encode = Schema.encodeUnknownSync(schema);
       const rpcDecode = Schema.decodeUnknownSync(Schema.toCodecJson(rpc.payloadSchema));
@@ -1739,6 +1740,19 @@ describe("WP4 cursor, owner policy and relay contracts", () => {
       enrollments: [{ ...pair, state: "active", ownerPolicyEpoch: 8 }],
       allowedRequesterEnvironmentIds: ["reader"],
     });
+    rejects(M.MemoryOwnerSourceReadPolicy, {
+      ...blocked,
+      removals: [{ ...pending, state: "acknowledged", ack: { ...ack, revokedThroughEpoch: 9 } }],
+      enrollments: [{ ...pair, state: "active", ownerPolicyEpoch: 8 }],
+      allowedRequesterEnvironmentIds: ["reader"],
+    });
+    round(M.MemoryOwnerSourceReadPolicy, {
+      ...blocked,
+      ownerPolicyEpoch: 10,
+      removals: [{ ...pending, state: "acknowledged", ack: { ...ack, revokedThroughEpoch: 9 } }],
+      enrollments: [{ ...pair, state: "active", ownerPolicyEpoch: 10 }],
+      allowedRequesterEnvironmentIds: ["reader"],
+    });
     rejects(M.MemoryOwnerSourceReadPolicy, { ...blocked, removals: [pending, pending] });
     rejects(M.MemorySourceReadPairFences, [
       { ...pair, revokedThroughEpoch: 7 },
@@ -1758,6 +1772,12 @@ describe("WP4 cursor, owner policy and relay contracts", () => {
       ownerPolicyEpoch: 99,
     });
     round(M.MemoryHubDisableInput, { requestId: id(), expectedVersion: 0 });
+    round(M.MemoryHubDisableResult, { settings: { mode: "disabled" }, version: 1 });
+    rejects(M.MemoryHubDisableResult, {
+      settings: { mode: "disabled" },
+      version: 1,
+      credential: "forged",
+    });
     rejects(M.MemoryHubDisableInput, { requestId: id(), expectedVersion: 0, credential: "forged" });
     expect(M.MEMORY_MCP_TOOLS).toHaveLength(9);
     expect(M.MEMORY_ADMINISTRATION_MCP_TOOLS).toEqual(["memory_hub_disable"]);

@@ -1620,7 +1620,8 @@ export const MemoryOwnerSourceReadPolicy = struct({
           (e.state === "pending"
             ? removal?.state === "pending" && removal.removalEpoch === e.removalEpoch
             : removal === undefined ||
-              (removal.state === "acknowledged" && e.ownerPolicyEpoch > removal.removalEpoch))
+              (removal.state === "acknowledged" &&
+                e.ownerPolicyEpoch > removal.ack.revokedThroughEpoch))
         );
       }) && v.removals.every((r) => r.removalEpoch <= v.ownerPolicyEpoch)
     );
@@ -1669,6 +1670,11 @@ export const MemoryHubSettingsView = struct({
   version: NonNegativeInt,
 });
 export type MemoryHubSettingsView = typeof MemoryHubSettingsView.Type;
+/** The narrow disable tool cannot return provisioning credentials or an enabled mode. */
+export const MemoryHubDisableResult = MemoryHubSettingsView.check(
+  Schema.makeFilter((view) => view.settings.mode === "disabled"),
+);
+export type MemoryHubDisableResult = typeof MemoryHubDisableResult.Type;
 
 export const MemoryHubSettingsUpdateInput = bounded(
   Schema.Union([
