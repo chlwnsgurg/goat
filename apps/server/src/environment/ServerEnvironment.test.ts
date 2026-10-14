@@ -1,5 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { MemoryOperationId, MemorySpaceId, ORCHESTRATION_PROTOCOL_VERSION } from "@goat/contracts";
+import {
+  MemoryOperationId,
+  MemorySpaceId,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  supportsMemoryProtocol,
+} from "@goat/contracts";
 import { SSH_RUNTIME_PROTOCOL_VERSION } from "@goat/shared/sshRuntimeProtocol";
 import { expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
@@ -116,6 +121,32 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         }).pipe(Effect.provide(Layer.fresh(layerServerEnvironment(baseDir))));
         expect(yield* observe).not.toBe(yield* observe);
       }),
+  );
+  it.effect("advertises core memory without provider import in web and desktop modes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped();
+      const config = yield* makeServerConfig(baseDir);
+      yield* fs.makeDirectory(config.stateDir, { recursive: true });
+      for (const mode of ["web", "desktop"] as const) {
+        const descriptor = yield* ServerEnvironment.ServerEnvironment.use(
+          (environment) => environment.getDescriptor,
+        ).pipe(
+          Effect.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(layerEmptySecretStore),
+              Layer.provide(ServerConfig.layer({ ...config, mode })),
+            ),
+          ),
+        );
+        expect(descriptor.capabilities.memory?.protocolVersion).toBe(1);
+        expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
+        expect(descriptor.capabilities.memory?.importProvider).toBeUndefined();
+        expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
+        expect(descriptor.capabilities.memory?.hub).toBeUndefined();
+        expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
+      }
+    }),
   );
   it.effect("advertises the Slack channel in the assembled server descriptor", () =>
     Effect.gen(function* () {
@@ -476,9 +507,11 @@ it.effect("hub advertisement follows registered routes and live disable/re-enabl
     yield* Effect.gen(function* () {
       yield* update("hub");
       const environment = yield* ServerEnvironment.ServerEnvironment;
-      expect(
-        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
-      ).toBeUndefined();
+      const descriptor = yield* environment.getDescriptor;
+      expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
+      expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
+      expect(descriptor.capabilities.memory?.hub).toBeUndefined();
+      expect(descriptor.capabilities.memoryHubProtocolVersion).toBeUndefined();
     }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(dependencies))));
     const auth = HubAuth.layer.pipe(Layer.provide(Store.layer));
     const routes = Hub.layer.pipe(
@@ -492,22 +525,23 @@ it.effect("hub advertisement follows registered routes and live disable/re-enabl
     );
     yield* Effect.gen(function* () {
       const environment = yield* ServerEnvironment.ServerEnvironment;
+      const expectCapabilities = Effect.fn(function* (hubVersion: 1 | undefined) {
+        const descriptor = yield* environment.getDescriptor;
+        expect(supportsMemoryProtocol(descriptor.capabilities)).toBe(true);
+        expect(descriptor.capabilities.memory?.importProvider === true).toBe(false);
+        expect(descriptor.capabilities.memory?.hub).toBeUndefined();
+        expect(descriptor.capabilities.memoryHubProtocolVersion).toBe(hubVersion);
+      });
       yield* update("disabled");
-      expect(
-        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
-      ).toBeUndefined();
+      yield* expectCapabilities(undefined);
       yield* update("hub", null);
-      expect(
-        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
-      ).toBeUndefined();
+      yield* expectCapabilities(undefined);
       yield* update("hub");
-      expect((yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion).toBe(1);
+      yield* expectCapabilities(1);
       yield* update("disabled");
-      expect(
-        (yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion,
-      ).toBeUndefined();
+      yield* expectCapabilities(undefined);
       yield* update("hub");
-      expect((yield* environment.getDescriptor).capabilities.memoryHubProtocolVersion).toBe(1);
+      yield* expectCapabilities(1);
     }).pipe(Effect.provide(ServerEnvironment.layer.pipe(Layer.provideMerge(routes))));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
