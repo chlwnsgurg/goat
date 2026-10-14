@@ -797,17 +797,37 @@ const withCheckpointClient = <A, E>(
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
 // Resolves once the worker has handled a request sent now, after every
-// statement so far. Earlier requests from the writer reply with null.
+// statement so far. Earlier requests from the writer reply with null. A worker
+// that dies first fails the wait with its reason instead of leaving it hanging.
 const checkpointWorkerReply = (worker: NodeWorkerThreads.Worker) =>
   Effect.promise(
     () =>
-      new Promise<void>((resolve) => {
+      new Promise<void>((resolve, reject) => {
+        const stop = () => {
+          worker.off("message", onReply);
+          worker.off("error", onError);
+          worker.off("exit", onExit);
+        };
         const onReply = (reply: unknown) => {
           if (reply !== "barrier") return;
-          worker.off("message", onReply);
+          stop();
           resolve();
         };
+        const onError = (cause: Error) => {
+          stop();
+          reject(new Error(`checkpoint worker failed: ${cause.message}`));
+        };
+        const onExit = (code: number) => {
+          stop();
+          reject(new Error(`checkpoint worker exited with code ${code}`));
+        };
+        if (worker.threadId === -1) {
+          reject(new Error("checkpoint worker had already exited"));
+          return;
+        }
         worker.on("message", onReply);
+        worker.on("error", onError);
+        worker.on("exit", onExit);
         // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
         worker.postMessage("barrier");
       }),
