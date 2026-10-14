@@ -13720,7 +13720,12 @@ describe("Claude WP4 memory delivery", () => {
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
-        const terminalSignals = [yield* Deferred.make<void>(), yield* Deferred.make<void>()];
+        const terminalSignals = [
+          yield* Deferred.make<void>(),
+          yield* Deferred.make<void>(),
+          yield* Deferred.make<void>(),
+          yield* Deferred.make<void>(),
+        ];
         let terminals = 0;
         yield* runtime.events.pipe(
           Stream.runForEach((event) => {
@@ -13841,6 +13846,33 @@ describe("Claude WP4 memory delivery", () => {
         assert.notInclude(JSON.stringify(offers[2]?.message.content), "external_goat_memory");
         yield* finish(offers[2]!);
         yield* Deferred.await(terminalSignals[1]!);
+        for (const [offset, grant] of (["read", "read_write"] as const).entries()) {
+          const credential = `restored-${grant}`;
+          yield* sessions.set({
+            ...config,
+            providerSessionId: credential,
+            authorizationHeader: `Bearer fixture-${credential}`,
+            grantedScopes:
+              grant === "read"
+                ? ["memory:read", "orchestration:read"]
+                : ["memory:read", "memory:write", "orchestration:read"],
+          });
+          yield* runtime.startTurn({
+            ...base,
+            attemptId: RunAttemptId.make(`wp4-claude-${grant}`),
+            providerTurnOrdinal: offset + 3,
+            message: { ...base.message, text: grant },
+            refreshMemoryContext,
+          });
+          const offered = offers[offset + 3]!;
+          assert.include(JSON.stringify(offered.message.content), "&lt;untrusted&gt;");
+          assert.include(JSON.stringify(registrations[offset + 1]), `fixture-${credential}`);
+          assert.equal(opened.length, 1);
+          assert.equal(closes, 0);
+          assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+          yield* finish(offered);
+          yield* Deferred.await(terminalSignals[offset + 2]!);
+        }
         const rejected = yield* runtime
           .startTurn({
             ...base,
@@ -13849,15 +13881,15 @@ describe("Claude WP4 memory delivery", () => {
           })
           .pipe(Effect.exit);
         assert.isTrue(Exit.isFailure(rejected));
-        assert.equal(offers.length, 3);
-        assert.equal(refreshes, 3);
+        assert.equal(offers.length, 5);
+        assert.equal(refreshes, 5);
         yield* runtime.compactThread!({
           ...base,
           attemptId: RunAttemptId.make("wp4-claude-compact"),
           refreshMemoryContext: () => Effect.die("native control must not refresh"),
         });
-        assert.equal(offers.length, 4);
-        assert.notInclude(JSON.stringify(offers[3]?.message.content), "external_goat_memory");
+        assert.equal(offers.length, 6);
+        assert.notInclude(JSON.stringify(offers[5]?.message.content), "external_goat_memory");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

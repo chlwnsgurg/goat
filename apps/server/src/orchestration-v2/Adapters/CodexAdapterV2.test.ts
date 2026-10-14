@@ -92,6 +92,50 @@ const wp4Memory = () =>
       },
     ],
   })!;
+describe("Codex WP4 native MCP grant configuration", () => {
+  it("disables and reallows exact memory tools with each issued credential", () => {
+    const grants = [
+      ["memory:read", "memory:write", "orchestration:read"],
+      [],
+      ["memory:read", "orchestration:read"],
+      ["memory:read", "memory:write", "orchestration:read"],
+    ] as const;
+    for (const [index, grantedScopes] of grants.entries()) {
+      const credential = `Bearer fixture-${index}`;
+      const params = CodexAdapterV2.codexThreadRuntimeParams({
+        mcpSession: {
+          environmentId: EnvironmentId.make("fixture"),
+          threadId: ThreadId.make("fixture"),
+          providerSessionId: `fixture-${index}`,
+          providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          endpoint: "http://127.0.0.1:1/mcp",
+          authorizationHeader: credential,
+          browserToolsAvailable: false,
+          grantedScopes,
+        },
+      });
+      const servers = params.config.mcp_servers as {
+        readonly goat: {
+          readonly disabled_tools: ReadonlyArray<string>;
+          readonly http_headers: { readonly Authorization: string };
+        };
+      };
+      assert.equal(servers.goat.http_headers.Authorization, credential);
+      for (const name of ["memory_upsert", "memory_forget", "memory_revert_resolution"])
+        assert.equal(servers.goat.disabled_tools.includes(name), index === 1 || index === 2);
+      for (const name of [
+        "memory_list",
+        "memory_search",
+        "memory_read",
+        "memory_history",
+        "memory_sync_status",
+        "memory_read_source",
+      ])
+        assert.equal(servers.goat.disabled_tools.includes(name), index === 1);
+    }
+  });
+});
+
 describe("Codex context usage compatibility", () => {
   const previous: ModelSelection = {
     instanceId: ProviderInstanceId.make("codex"),
