@@ -1642,7 +1642,14 @@ describe("WP4 cursor, owner policy and relay contracts", () => {
   it("binds search continuation to query, mode, space and canonical scope digest", () => {
     const cursor = M.encodeMemorySearchCursor(binding, M.MemoryId.make(id(2)));
     expect(cursor.length).toBeLessThanOrEqual(1024);
-    expect(cursor).not.toContain("raw query");
+    const wire = JSON.parse(decodeURIComponent(cursor.slice(4)));
+    expect(Object.keys(wire).sort()).toEqual(["afterMemoryId", "binding", "kind", "version"]);
+    expect(Object.keys(wire.binding).sort()).toEqual([
+      "memorySpaceId",
+      "mode",
+      "queryDigest",
+      "scopeKey",
+    ]);
     expect(M.decodeMemorySearchCursor(cursor, binding)).toBe(id(2));
     round(M.MemorySearchInput, { memorySpaceId: id(), query: "raw query", cursor });
     for (const change of [
@@ -1663,6 +1670,18 @@ describe("WP4 cursor, owner policy and relay contracts", () => {
     rejects(M.MemorySearchCursor, { ...decoded, query: "raw query" });
     rejects(M.MemorySearchCursor, { ...decoded, kind: "memory_list" });
     round(M.MemoryListInput, { memorySpaceId: id(), includeQuarantined: false, cursor: id(2) });
+  });
+  it("rejects overlong valid JSON cursors through public input and the direct helper", () => {
+    const cursor = M.encodeMemorySearchCursor(binding, M.MemoryId.make(id(2)));
+    const overlong =
+      "ms1:" + encodeURIComponent(" ".repeat(1024) + decodeURIComponent(cursor.slice(4)));
+    expect(Array.from(overlong).length).toBeGreaterThan(1024);
+    expect(JSON.parse(decodeURIComponent(overlong.slice(4))).afterMemoryId).toBe(id(2));
+    rejects(M.MemorySearchInput, { memorySpaceId: id(), query: "query", cursor: overlong });
+    for (const value of [overlong, "ms1:%broken", "ms2:bad", ""])
+      expect(() => M.decodeMemorySearchCursor(value, binding)).toThrow(
+        expect.objectContaining({ code: "invalid_cursor" }),
+      );
   });
   it("extends v1 normal responses and Boolean results with strict revoke arms", () => {
     const normal = round(M.MemoryHubSourceReadRespondInput, {

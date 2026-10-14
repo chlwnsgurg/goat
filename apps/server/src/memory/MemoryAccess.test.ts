@@ -75,6 +75,64 @@ describe("memory authority intersection", () => {
         );
     }),
   );
+  it.effect("blocks an ended live caller before reauthorization on repeated permits", () =>
+    Effect.gen(function* () {
+      let active = true;
+      let reauthorizations = 0;
+      const permit = memoryAccessPermit(
+        {
+          readOnly: false,
+          grantedScopes: ["memory:read", "orchestration:read"],
+          liveCaller: Effect.suspend(() =>
+            active ? Effect.void : Effect.fail(new MemoryAccessError({ code: "unavailable" })),
+          ),
+          reauthorize: () =>
+            Effect.sync(() => {
+              reauthorizations++;
+            }),
+        },
+        "source",
+      );
+      yield* permit;
+      expect(reauthorizations).toBe(1);
+      active = false;
+      expect((yield* Effect.flip(permit)).code).toBe("unavailable");
+      expect(reauthorizations).toBe(1);
+    }),
+  );
+  it.effect("denies each missing compound source scope and absent reauthorization", () =>
+    Effect.gen(function* () {
+      for (const grantedScopes of [["memory:read"], ["orchestration:read"]] as const) {
+        let checks = 0;
+        const denial = yield* Effect.flip(
+          memoryAccessPermit(
+            {
+              readOnly: false,
+              grantedScopes,
+              reauthorize: () =>
+                Effect.sync(() => {
+                  checks++;
+                }),
+            },
+            "source",
+          ),
+        );
+        expect(denial.code).toBe("unavailable");
+        expect(checks).toBe(0);
+      }
+      expect(
+        (yield* Effect.flip(
+          memoryAccessPermit(
+            {
+              readOnly: false,
+              grantedScopes: ["memory:read", "orchestration:read"],
+            },
+            "source",
+          ),
+        )).code,
+      ).toBe("unavailable");
+    }),
+  );
   it.effect("denies writes even with stored grants on a read-only caller", () =>
     Effect.gen(function* () {
       const denial = yield* Effect.flip(

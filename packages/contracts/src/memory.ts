@@ -1431,9 +1431,10 @@ export function decodeMemorySearchCursor(
   cursor: string,
   expected: MemorySearchCursorBinding,
 ): MemoryId {
-  if (!cursor.startsWith("ms1:")) throw new MemoryRpcError({ code: "invalid_cursor" });
   let decoded: MemorySearchCursor;
   try {
+    decodeCursorString(cursor);
+    if (!cursor.startsWith("ms1:")) throw new MemoryRpcError({ code: "invalid_cursor" });
     decoded = decodeSearchCursor(decodeURIComponent(cursor.slice(4)));
     decodeSearchBinding(expected);
   } catch {
@@ -2554,6 +2555,7 @@ export const MemoryHubSourceReadRevokeInput = struct({
   ownerPolicyEpoch: MemoryOwnerPolicyEpoch,
 });
 export type MemoryHubSourceReadRevokeInput = typeof MemoryHubSourceReadRevokeInput.Type;
+// Hub v1 is unreleased before the joint launch; its first release includes kind and epoch.
 export const MemoryHubSourceReadRespondInput = Schema.Union([
   MemoryHubSourceReadNormalRespondInput,
   MemoryHubSourceReadRevokeInput,

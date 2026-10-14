@@ -1,6 +1,11 @@
 import * as RpcSchema from "effect/rpc/RpcSchema";
 import * as Memory from "./memory.ts";
-import { WsMemoryRpcGroup, WsMemoryCoreRpcGroup, WsMemoryImportRpcGroup } from "./rpc.ts";
+import {
+  WsMemoryRpcGroup,
+  WsMemoryCoreRpcGroup,
+  WsMemoryImportRpcGroup,
+  WsMemoryAdministrationRpcGroup,
+} from "./rpc.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
@@ -183,10 +188,15 @@ it.effect("applies scope middleware to SSH workspace RPCs", () =>
 );
 
 describe("staged memory RPC", () => {
-  it("declares fifteen memory methods with typed inputs and authorization middleware", () => {
-    expect(WsMemoryRpcGroup.requests.size).toBe(15);
+  it("declares seventeen memory methods with typed inputs and authorization middleware", () => {
+    expect(WsMemoryRpcGroup.requests.size).toBe(17);
     expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
     expect(WsMemoryImportRpcGroup.requests.size).toBe(1);
+    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(2);
+    expect([...WsMemoryAdministrationRpcGroup.requests.keys()]).toEqual([
+      "memory.ownerSourceReadPolicy.get",
+      "memory.ownerSourceReadPolicy.update",
+    ]);
     for (const rpc of WsMemoryRpcGroup.requests.values()) {
       expect(rpc.middlewares.has(RpcScopeAuthorization)).toBe(true);
       expect(rpc.payloadSchema).toBeDefined();
