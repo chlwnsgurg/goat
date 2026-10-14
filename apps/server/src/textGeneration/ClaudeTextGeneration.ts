@@ -92,23 +92,47 @@ const ClaudeOutputMessage = Schema.Struct({
 });
 
 const hasClaudeToolAttempt = (
-  message: typeof ClaudeOutputMessage.Type | typeof ClaudeOutputEnvelope.Type,
+  messages: ReadonlyArray<typeof ClaudeOutputMessage.Type | typeof ClaudeOutputEnvelope.Type>,
 ) => {
-  const isToolBlock = (block: unknown) =>
-    block !== null &&
-    typeof block === "object" &&
-    "type" in block &&
-    (block.type === "tool_use" || block.type === "tool_result");
-  return (
-    (message.permission_denials?.length ?? 0) > 0 ||
-    message.type === "tool_use" ||
-    message.type === "tool_result" ||
-    message.type === "permission_request" ||
-    message.subtype === "permission_denied" ||
-    message.subtype === "permission_denial" ||
-    (message.content ?? []).some(isToolBlock) ||
-    (message.message?.content ?? []).some(isToolBlock)
-  );
+  const structuredCalls = new Set<string>();
+  for (const message of messages) {
+    if (
+      (message.permission_denials?.length ?? 0) > 0 ||
+      message.type === "tool_use" ||
+      message.type === "tool_result" ||
+      message.type === "permission_request" ||
+      message.subtype === "permission_denied" ||
+      message.subtype === "permission_denial"
+    )
+      return true;
+    for (const block of [...(message.content ?? []), ...(message.message?.content ?? [])]) {
+      if (block === null || typeof block !== "object" || !("type" in block)) continue;
+      if (block.type === "tool_use") {
+        // Claude delivers --json-schema results through this built-in, non-executable tool.
+        if (
+          message.type !== "assistant" ||
+          !("name" in block) ||
+          block.name !== "StructuredOutput" ||
+          !("id" in block) ||
+          typeof block.id !== "string" ||
+          block.id.length === 0 ||
+          structuredCalls.has(block.id)
+        )
+          return true;
+        structuredCalls.add(block.id);
+      } else if (block.type === "tool_result") {
+        if (
+          message.type !== "user" ||
+          !("tool_use_id" in block) ||
+          typeof block.tool_use_id !== "string" ||
+          ("is_error" in block && block.is_error !== false) ||
+          !structuredCalls.delete(block.tool_use_id)
+        )
+          return true;
+      }
+    }
+  }
+  return structuredCalls.size > 0;
 };
 const isClaudeOutputEnvelope = Schema.is(ClaudeOutputEnvelope);
 
@@ -235,6 +259,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* () {
       if (TextGenerationOperations.isMemoryOperation(operation))
         yield* verifyClaudeMemoryHooks(operation, claudeEnvironment).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
           Effect.provideService(HostProcess.Platform, platform),
@@ -363,10 +388,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       }),
     );
     const messages = isClaudeOutputEnvelope(output) ? [output] : output;
-    if (
-      TextGenerationOperations.isMemoryOperation(operation) &&
-      messages.some(hasClaudeToolAttempt)
-    )
+    if (TextGenerationOperations.isMemoryOperation(operation) && hasClaudeToolAttempt(messages))
       return yield* new TextGenerationError({
         operation,
         detail: "Claude attempted a tool or permission request during memory generation.",
