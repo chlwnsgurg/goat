@@ -7,6 +7,7 @@ import {
   ScheduledTaskId,
   ThreadId,
   ScheduledTaskWebhookDeliveryId,
+  type MemoryTaskGrantCeiling,
   type ScheduledTaskDeleteInput,
   type ScheduledTaskDeleteResult,
   type ScheduledTaskGetWebhookDeliveryInput,
@@ -177,7 +178,13 @@ const decodeMissingFieldsJson = Schema.decodeUnknownOption(MissingFieldsJson);
 const encodeHeadersJson = Schema.encodeSync(HeadersJson);
 const encodeMissingFieldsJson = Schema.encodeSync(MissingFieldsJson);
 
+/** Server-captured authority; never decoded from a public task mutation. */
+export interface CapturedTaskMemoryGrant {
+  readonly memoryGrantCeiling: MemoryTaskGrantCeiling;
+}
+
 interface ScheduledTaskRow {
+  readonly memory_grant_ceiling?: MemoryTaskGrantCeiling;
   readonly task_id: string;
   readonly title: string;
   readonly prompt: string;
@@ -227,10 +234,12 @@ export class ScheduledTaskService extends Context.Service<
     readonly subscribeList: () => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
     readonly upsert: (
       input: ScheduledTaskUpsertInput,
+      captured?: CapturedTaskMemoryGrant,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
-    /** Partial update flipping only the enabled flag; never touches other fields. */
+    /** Recaptures authority while changing the enabled flag. */
     readonly setEnabled: (
       input: ScheduledTaskSetEnabledInput,
+      captured?: CapturedTaskMemoryGrant,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
     readonly delete: (
       input: ScheduledTaskDeleteInput,
@@ -331,6 +340,7 @@ const decodeRow = (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) =
       threadId: row.thread_id,
       workspaceStrategy,
       modelSelection,
+      memoryGrantCeiling: row.memory_grant_ceiling ?? "none",
       runtimeMode: row.runtime_mode,
       interactionMode: row.interaction_mode,
       createdBy: row.created_by,
@@ -429,6 +439,7 @@ export const layer = Layer.effect(
         thread_id,
         workspace_strategy_json,
         model_selection_json,
+        memory_grant_ceiling,
         runtime_mode,
         interaction_mode,
         created_by,
@@ -464,6 +475,7 @@ export const layer = Layer.effect(
         thread_id,
         workspace_strategy_json,
         model_selection_json,
+        memory_grant_ceiling,
         runtime_mode,
         interaction_mode,
         created_by,
@@ -544,6 +556,7 @@ export const layer = Layer.effect(
           thread_id,
           workspace_strategy_json,
           model_selection_json,
+          memory_grant_ceiling,
           runtime_mode,
           interaction_mode,
           created_by,
@@ -568,6 +581,7 @@ export const layer = Layer.effect(
           ${task.threadId},
           ${JSON.stringify(task.workspaceStrategy)},
           ${JSON.stringify(task.modelSelection)},
+          ${task.memoryGrantCeiling ?? "none"},
           ${task.runtimeMode},
           ${task.interactionMode},
           ${task.createdBy},
@@ -593,6 +607,7 @@ export const layer = Layer.effect(
           thread_id = excluded.thread_id,
           workspace_strategy_json = excluded.workspace_strategy_json,
           model_selection_json = excluded.model_selection_json,
+          memory_grant_ceiling = excluded.memory_grant_ceiling,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           creation_source = excluded.creation_source,
@@ -1005,7 +1020,7 @@ export const layer = Layer.effect(
         }),
       );
 
-    const upsert: ScheduledTaskService["Service"]["upsert"] = (input) =>
+    const upsert: ScheduledTaskService["Service"]["upsert"] = (input, captured) =>
       Effect.gen(function* () {
         const now = yield* localNow;
         const uuid =
@@ -1095,6 +1110,7 @@ export const layer = Layer.effect(
           threadId: input.threadId ?? null,
           workspaceStrategy: input.workspaceStrategy,
           modelSelection: input.modelSelection,
+          memoryGrantCeiling: captured?.memoryGrantCeiling ?? "none",
           runtimeMode: input.runtimeMode,
           interactionMode: input.interactionMode,
           createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
@@ -1114,17 +1130,26 @@ export const layer = Layer.effect(
         return { task: (yield* findTask(id)) ?? task };
       });
 
-    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input) =>
+    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input, captured) =>
       Effect.gen(function* () {
         const existing = yield* loadTask(input.id);
-        if (existing.enabled === input.enabled) return { task: existing };
+        const memoryGrantCeiling = captured?.memoryGrantCeiling ?? "none";
+        if (
+          existing.enabled === input.enabled &&
+          (existing.memoryGrantCeiling ?? "none") === memoryGrantCeiling
+        )
+          return { task: existing };
         const now = yield* localNow;
-        const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
+        const next =
+          existing.enabled === input.enabled
+            ? existing.nextRunAt
+            : nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
         // RETURNING so a task deleted between the load and this UPDATE is a
         // visible not-found error, not a false success.
         const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET enabled = ${input.enabled ? 1 : 0},
+              memory_grant_ceiling = ${memoryGrantCeiling},
               next_run_at = ${next},
               updated_at = ${iso(now)}
           WHERE task_id = ${input.id}
@@ -1139,7 +1164,13 @@ export const layer = Layer.effect(
         }
         yield* notifyChanged;
         return {
-          task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
+          task: {
+            ...existing,
+            enabled: input.enabled,
+            memoryGrantCeiling,
+            nextRunAt: next,
+            updatedAt: iso(now),
+          },
         };
       });
 

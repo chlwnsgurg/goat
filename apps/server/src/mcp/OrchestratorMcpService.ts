@@ -2165,13 +2165,13 @@ const make = Effect.gen(function* () {
                 }),
               }),
         };
-        yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+        const memoryGrantCeiling = yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
           Effect.mapError(() =>
             failure("invalid_request", "Caller memory authority is no longer available."),
           ),
         );
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, { memoryGrantCeiling })
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not schedule task: ${error.message}`),
@@ -2241,13 +2241,13 @@ const make = Effect.gen(function* () {
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
         };
-        yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+        const memoryGrantCeiling = yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
           Effect.mapError(() =>
             failure("invalid_request", "Caller memory authority is no longer available."),
           ),
         );
         const { task } = yield* scheduledTasks
-          .upsert(upsertInput)
+          .upsert(upsertInput, { memoryGrantCeiling })
           .pipe(
             Effect.mapError((error) =>
               failure("orchestration_error", `Could not update scheduled task: ${error.message}`),
@@ -2530,11 +2530,6 @@ const make = Effect.gen(function* () {
           });
           const register = Effect.gen(function* () {
             yield* authorizeRemoteWrite(scope, parentRun.id);
-            yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
-              Effect.mapError(() =>
-                failure("invalid_request", "Caller memory authority is no longer available."),
-              ),
-            );
             const records = yield* remoteDispatch
               .listForOrigin(scope.thread.threadId)
               .pipe(
@@ -2553,7 +2548,7 @@ const make = Effect.gen(function* () {
             yield* threadManagement
               .dispatch({
                 type: "delegated_task.remote.register",
-                memoryGrantCeiling,
+                memoryGrantCeiling: record.memoryGrantCeiling,
                 commandId,
                 parentThreadId: scope.thread.threadId,
                 parentRunId: parentRun.id,

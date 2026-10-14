@@ -2183,11 +2183,17 @@ const layerWsRpc = (
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) =>
-          captureTaskMemoryCeiling.pipe(Effect.andThen(scheduledTasks.upsert(input))),
+          captureTaskMemoryCeiling.pipe(
+            Effect.flatMap((memoryGrantCeiling) =>
+              scheduledTasks.upsert(input, { memoryGrantCeiling }),
+            ),
+          ),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(captureTaskMemoryCeiling),
-            Effect.andThen(scheduledTasks.setEnabled(input)),
+            Effect.flatMap((memoryGrantCeiling) =>
+              scheduledTasks.setEnabled(input, { memoryGrantCeiling }),
+            ),
           ),
         [WS_METHODS.scheduledTasksDelete]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(

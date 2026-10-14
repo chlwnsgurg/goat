@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import {
+  MemoryTaskGrantCeiling,
   CommandId,
   MessageId,
   NodeId,
@@ -75,6 +76,7 @@ export class RemoteDispatchError extends Schema.TaggedError<RemoteDispatchError>
   }
 }
 const Row = Schema.Struct({
+  memory_grant_ceiling: Schema.optional(MemoryTaskGrantCeiling),
   correlation_id: Schema.String,
   kind: Schema.Literals(["thread", "task"]),
   origin_thread_id: ThreadId,
@@ -117,6 +119,7 @@ const MISSING_RUN_GRACE_MS = 300_000;
 /** What the launcher is told about one relayed send, and whether it is woken for it. */
 type RelayOutcome = { readonly wake: boolean; readonly text: string };
 export interface RemoteDispatchRecord {
+  readonly memoryGrantCeiling: MemoryTaskGrantCeiling;
   readonly correlationId: string;
   readonly kind: "thread" | "task";
   readonly originThreadId: ThreadId;
@@ -142,6 +145,7 @@ export interface RemoteDispatchRecord {
   readonly updatedAt: string;
 }
 const publicRow = (r: Row): RemoteDispatchRecord => ({
+  memoryGrantCeiling: r.memory_grant_ceiling ?? "none",
   correlationId: r.correlation_id,
   kind: r.kind,
   originThreadId: r.origin_thread_id,
@@ -951,8 +955,8 @@ const make = Effect.gen(function* () {
       const readKey = NodeCrypto.randomBytes(32).toString("hex");
       const at = yield* now;
       const acquired = yield* db(sql`INSERT INTO remote_dispatches
-        (correlation_id, kind, origin_thread_id, host, read_key, delivery, state, task_id, parent_run_id, relay_send, created_at, updated_at)
-        VALUES (${id}, ${input.kind}, ${input.originThreadId}, ${input.launch.host}, ${readKey}, ${input.delivery}, 'launching', ${input.task?.taskId ?? null}, ${input.task?.parentRunId ?? null}, ${input.kind === "thread" ? 1 : 0}, ${at}, ${at})`).pipe(
+        (correlation_id, kind, origin_thread_id, host, read_key, delivery, state, task_id, parent_run_id, relay_send, created_at, updated_at, memory_grant_ceiling)
+        VALUES (${id}, ${input.kind}, ${input.originThreadId}, ${input.launch.host}, ${readKey}, ${input.delivery}, 'launching', ${input.task?.taskId ?? null}, ${input.task?.parentRunId ?? null}, ${input.kind === "thread" ? 1 : 0}, ${at}, ${at}, ${input.launch.memoryGrantCeiling ?? "none"})`).pipe(
         Effect.result,
       );
       if (acquired._tag === "Failure") {
@@ -969,11 +973,17 @@ const make = Effect.gen(function* () {
         yield* Deferred.await(pending);
         return yield* new RemoteDispatchError({ stage: "launch", reason: "duplicate_task" });
       }
+      const stored = yield* load(id);
+      if (stored === null) return yield* new RemoteDispatchError({ stage: "not_found" });
+      const storedLaunch = {
+        ...input.launch,
+        memoryGrantCeiling: stored.memory_grant_ceiling ?? "none",
+      };
       const register = beforeLaunch.pipe(Effect.tap(() => Deferred.succeed(owner, undefined)));
       const result = yield* ssh
         .launchThread(
           {
-            ...input.launch,
+            ...storedLaunch,
             reportNote: REPORTING_NOTE,
             report: {
               correlationId: id,
@@ -997,7 +1007,7 @@ const make = Effect.gen(function* () {
             ) {
               return Effect.fail(error);
             }
-            const legacyLaunch = { ...input.launch };
+            const legacyLaunch = { ...storedLaunch };
             delete legacyLaunch.report;
             return ssh
               .launchThread(legacyLaunch, register)

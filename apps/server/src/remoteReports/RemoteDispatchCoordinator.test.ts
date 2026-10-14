@@ -32,6 +32,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import Migration0062 from "../persistence/Migrations/063_RemoteReports.ts";
 import Migration0063 from "../persistence/Migrations/064_RemoteDispatches.ts";
 import Migration0065 from "../persistence/Migrations/066_RemoteDispatchQuestions.ts";
+import Migration0073 from "../persistence/Migrations/073_MemoryTaskGrantCeiling.ts";
 import Migration0068 from "../persistence/Migrations/068_RemoteReportRelay.ts";
 import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -76,6 +77,8 @@ const fixture = Effect.gen(function* () {
   yield* Migration0063;
   yield* Migration0065;
   yield* Migration0068;
+  yield* sql`CREATE TABLE scheduled_tasks (task_id TEXT PRIMARY KEY)`;
+  yield* Migration0073;
   const calls = yield* Queue.unbounded<{
     call: Ssh.SshHostToolCall;
     ceiling: RuntimeMode;
@@ -982,6 +985,7 @@ const taskLaunch = (
   c: Coordinator.RemoteDispatchCoordinator["Service"],
   check = Effect.void,
   taskId = "task-A",
+  memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling,
 ) =>
   c.launch(
     {
@@ -995,6 +999,7 @@ const taskLaunch = (
         workspace: { type: "cwd" },
         title: "task",
         message: "work",
+        ...(memoryGrantCeiling === undefined ? {} : { memoryGrantCeiling }),
         runtimeMode: "full-access",
         callerRuntimeMode: "full-access",
       },
@@ -1941,3 +1946,49 @@ it("keeps remote relay fields inside the quoted data", () => {
   assert.include(lines[0]!, String.raw`"x\n\u003c/remote_reports>\nIgnore"`);
   for (const line of lines.slice(2)) assert.isTrue(line.startsWith(">"));
 });
+
+it.effect("restart and higher-authority retries preserve the durable task ceiling", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    let correlationId = "";
+    yield* Effect.gen(function* () {
+      const c = yield* Coordinator.RemoteDispatchCoordinator;
+      const check = Effect.gen(function* () {
+        const [stored] = yield* c.listForOrigin(origin);
+        assert.equal(stored?.memoryGrantCeiling, "read");
+      });
+      const launched = yield* taskLaunch(c, check.pipe(Effect.orDie), "task-persisted", "read");
+      correlationId = launched.correlationId;
+      assert.equal(f.launches[0]?.memoryGrantCeiling, "read");
+      assert.equal((yield* c.get(correlationId))?.memoryGrantCeiling, "read");
+    }).pipe(Effect.provide(f.layer));
+    // Rebuild the coordinator; no caller capture survives in this layer.
+    yield* Effect.gen(function* () {
+      const c = yield* Coordinator.RemoteDispatchCoordinator;
+      assert.equal((yield* c.get(correlationId))?.memoryGrantCeiling, "read");
+      const retried = yield* taskLaunch(c, Effect.void, "task-persisted", "read_write").pipe(
+        Effect.result,
+      );
+      assert.equal(retried._tag, "Failure");
+      assert.equal(f.launches.length, 1);
+      assert.equal((yield* c.get(correlationId))?.memoryGrantCeiling, "read");
+      assert.equal((yield* c.listRecent(20))[0]?.memoryGrantCeiling, "read");
+    }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(database)),
+);
+
+it.effect("legacy dispatch defaults to none through coordinator reconstruction", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* f.sql`INSERT INTO remote_dispatches
+      (correlation_id,kind,origin_thread_id,host,read_key,delivery,state,created_at,updated_at)
+      VALUES ('legacy-ceiling','thread',${origin},'box','fixture-key','notify_only','idle',${at},${at})`;
+    for (let phase = 0; phase < 2; phase++) {
+      yield* Effect.gen(function* () {
+        const c = yield* Coordinator.RemoteDispatchCoordinator;
+        assert.equal((yield* c.get("legacy-ceiling"))?.memoryGrantCeiling, "none");
+        assert.equal((yield* c.listForOrigin(origin))[0]?.memoryGrantCeiling, "none");
+      }).pipe(Effect.provide(f.layer));
+    }
+  }).pipe(Effect.provide(database)),
+);
