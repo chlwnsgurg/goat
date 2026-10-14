@@ -511,6 +511,10 @@ export const makeAdministrator = Effect.gen(function* () {
               );
             action = { ...request, settings: { mode: "hub", memorySpaceId } };
           } else action = request;
+          const internalSpace =
+            action.action === "configure" && action.settings.mode === "hub"
+              ? action.settings.memorySpaceId
+              : null;
           record = yield* tx(
             permit,
             store.writeHubAdminTx({
@@ -523,8 +527,8 @@ export const makeAdministrator = Effect.gen(function* () {
                 memberVersion: null,
                 result: null,
                 secretName:
-                  request.action === "configure" && request.settings.mode === "hub"
-                    ? `memory-hub-internal-${request.requestId}`
+                  internalSpace !== null
+                    ? `memory-hub-internal-${internalSpace}`
                     : outgoing || request.action === "installCredential"
                       ? `memory-hub-${request.action === "installCredential" ? "installed" : "outgoing"}-${request.requestId}`
                       : null,

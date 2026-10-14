@@ -2585,3 +2585,40 @@ it.effect(
       );
     }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect(
+  "administration refuses an activated hub with unresolved space and preserves disabled settings",
+  () =>
+    Effect.gen(function* () {
+      const admin = yield* ServerSettingsModule.MemoryHubAdminSettings;
+      const requestId = MemoryOperationId.make("00000000-0000-4000-8000-000000009006");
+      const error = yield* admin
+        .withLock(
+          admin.apply(
+            {
+              requestId,
+              requestDigest: "b".repeat(64),
+              expectedVersion: 0,
+              action: {
+                requestId,
+                expectedVersion: 0,
+                action: "configure",
+                settings: { mode: "hub", memorySpaceId: null },
+              },
+              stage: "activated",
+              memberVersion: null,
+              secretName: null,
+              result: null,
+            },
+            Effect.void,
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryHubError");
+      if (error._tag === "MemoryHubError") assert.strictEqual(error.code, "bootstrap_required");
+      assert.deepStrictEqual((yield* admin.read).settings, { mode: "disabled" });
+      assert.strictEqual((yield* admin.read).version, 0);
+    }).pipe(
+      Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
+    ),
+);
