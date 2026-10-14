@@ -1,12 +1,12 @@
-# 030 — WP3: hub synchronization and conflict leases (rev 11a)
+# 030 — WP3: hub synchronization and conflict leases (rev 11b)
 
 Committed GOAT memories converge through one configured hub. Every environment, including
 the hub, writes on equal terms. Conflicts quarantine only the affected memory; the first
 successful hub claimant resolves it using that environment's frozen default provider and
 applies the approved result immediately. Forget propagates before pending content is sent.
 
-- Date: 2026-10-14. Status: current P correction plan after reflection r1 MISALIGNED and audit r1 FAIL
-  on `e74d1e7b3`; their findings are folded below. Repeat reflection and independent A
+- Date: 2026-10-14. Status: current P correction plan after reflection r2 MISALIGNED (G-4 Medium) and audit r2 FAIL
+  (A2 #1 High, #2 Medium) on `dbf5c77bc`; r1 and r2 findings are folded below. Repeat reflection and independent A
   remain coordinator work; implementation and runtime closure are not claimed.
 - Baseline: branch `goat/memory-wp3-hub-sync`, integrated WP2 HEAD `637b30327`
   (`637b3032772c50b7d3bc1d53f4ef90387768358a`); dev `637a98351` (#171) is an ancestor.
@@ -28,7 +28,7 @@ provider cloud launch/resume changes, client UI and WP4 RPC/MCP activation.
 Verifier: this rewrite uses only the two-file formatting check, manual links/anchors and
 `git diff --check`; implementation focused behavior tests run in PR CI only (NOT RUN here).
 Stop for this authoring slice: commit the two requested plans once without pushing, then
-hand rev 11a to the coordinator for repeat reflection and independent A. Memory artifact: this file and the
+hand rev 11b to the coordinator for repeat reflection and independent A. Memory artifact: this file and the
 [WP3 cycle](000_plan.md#wp3-cycle-hub-sync). Terminal outcomes: READY_FOR_REVIEW or
 BLOCKED on a concrete unresolved interface/requirement. Escalation: source changes that
 invalidate frozen interfaces or require a product decision go to the coordinator before lanes
@@ -252,8 +252,10 @@ prepareClaimAttemptTx: (input: {
   candidateId: string;
   expectedGeneration: number;
   conflictHeads: readonly M.MemoryRevisionId[];
-  proposedAttemptId: OpId;
-}) => InTx<{ attemptId: OpId; generation: number } | null>;
+  // Absent: recover existing input before reading current default provider availability.
+  // Present: insert only if no attempt exists; never overwrite a stored claim.
+  proposedClaim?: M.MemoryHubClaimInput;
+}) => InTx<{ claim: M.MemoryHubClaimInput; generation: number } | null>;
 readEligibleOutbox: (space: Space, now: number, limit: number) =>
   Effect.Effect<readonly SyncWorkCandidate[], StorageError>;
 acquireSyncWorkTx: (input: {
@@ -484,9 +486,14 @@ in the admission transaction; replay does not reserve twice. All mutation deltas
 ledger/refusal/admin/member/lease growth, payload replacement and redaction) use these counters.
 Checkpoint prepare/publish moves the existing reservation between staging/published/pinned categories;
 cleanup releases unique retained bytes once. Failed transaction rolls back counters with state.
-prepareClaimAttemptTx CASes due candidate generation/current heads/forget fence, persists the
-first attemptId and returns that same ID on restart; stale candidate returns null. Ticket
-persistence follows claim, never supplies the first durable attempt ID.
+prepareClaimAttemptTx CASes due candidate generation/current heads/forget fence and atomically
+persists the entire first MemoryHubClaimInput, including its attemptId and
+frozenDefaultModelSelection (provider instance/model/options). It returns the stored claim
+and generation on restart; proposedClaim must match space/candidate conflict/current heads
+and holder. Existing input wins unchanged over any proposal. With no stored input and no
+proposal, or a stale candidate, return null without starting network work; a fresh proposal
+must recheck the same CAS. Ticket persistence follows claim, never supplies the first durable
+attempt ID or frozen selection. Saved claims remain bounded work metadata, not another queue.
 acquireSyncWorkTx owns only sync/revert_intent rows using version + digest + expiry CAS;
 retrySyncWorkTx updates retry/next_attempt_at and releases matching ownership atomically,
 returning false on stale ownership. Neither changes operation ID/digest/payload. Restart can
@@ -557,35 +564,64 @@ revertDeadlineUtc: MemoryUtcTimestamp }`, requiring exactly
 Add `resolutionApproval: Schema.optionalKey(MemoryResolutionApproval)` to MemoryHubReceipt.
 Receipt filter forbids it on rejected/deleted outcomes; operation-aware MemoryHubEntry,
 MemoryCompactReceipt and ACK validation require it for approved resolve and forbid it for
-other operation kinds. An approved revert carries no new window. MemoryHubEntry's operation
-arm cross-checks resolve kind/result resolutionId; its metadata arm preserves the original approval without requiring
-purged bodies. MemoryCompactReceipt checks operationKind/resolutionId against approval,
-including checkpoint records using that schema. Tighten the approved revert reportGuard check
-to resolvingEnvironmentId === originEnvironmentId as for resolve; rejected guards stay null.
-validateMemoryCheckpointRecords cross-checks
-each retained resolution's times against its originating compact approval (purged resolutions
-need only the body-free receipt). Increase MEMORY_COMPACT_RECEIPT_MAX_BYTES from 256 to 1024
-in this same contract commit: the bounded approval adds UTC/id metadata that cannot safely
-fit the old per-record allowance. Keep the 128 MiB permanent-metadata global budget and
-receipt-count cap unchanged; L1 charges actual encoded bytes and reserves checkpoint deltas.
-Add compact-receipt encoded equality/+1 fixtures; no unbounded metadata exception.
-Tighten MemoryResolution's timestamp check
-to the same exact interval; its projected times come from receipt approval, never operation
-submission timestamps. Do not change MemoryOperation, canonical digest or apply input.
+other operation kinds. An approved revert carries no new window. Add required body-free
+`operationKind: "upsert" | "forget" | "resolve" | "revert"` to MemoryHubEntry's metadata arm,
+and `resolutionId: MemoryResolutionId` required for resolve and forbidden for other kinds.
+Its codec independently checks receipt identity and, for approved resolve, mandatory approval
+with matching resolutionId; rejected resolve has no approval. Metadata upsert/forget/revert
+forbid approval. The operation arm checks kind and result resolutionId against receipt
+approval. These checks need no revision body or assertionKind inference. MemoryCompactReceipt
+checks operationKind/resolutionId against approval, including checkpoint records using that
+schema. Tighten the approved revert reportGuard check to resolvingEnvironmentId ===
+originEnvironmentId as for resolve; rejected guards stay null.
+validateMemoryCheckpointRecords cross-checks each retained approved resolution's projected
+times against its originating compact approval; purged resolutions need only body-free
+metadata and receipt. Exact 30 days is an approval-boundary invariant: enforce when the hub
+creates resolutionApproval and when a receiver validates it before approval projection
+through ACK/pull/checkpoint. Keep MemoryResolution's storage/decode schema unchanged
+(`revertDeadlineUtc >= appliedAtUtc`); never add exact-interval validation to aggregate decode.
+Do not change MemoryOperation, canonical digest or apply input. Project new approved times
+from validated receipt approval, never operation submission timestamps.
+
+Do not preselect 1024 bytes for MEMORY_COMPACT_RECEIPT_MAX_BYTES. L1 measures the real maximum
+of the approval-bearing binary encodeCompactReceipt codec, including its version byte,
+maximum-width numeric/ordinal fields, null markers and every legal guard/capacity combination.
+Use existing resolutionId and the exact 30-day relation to avoid redundant encoding while
+preserving lossless approval round trips. Freeze the constant from that measured maximum plus
+small explicitly justified headroom, not JSON size or an assumed fourfold increase. The
+coordinator obtains this L1 codec measurement before freezing the L1-0 constant; L1 commits
+the matching codec/fixtures before consumers. Keep the 128 MiB permanent-metadata global
+budget and receipt-count cap unchanged: the count cap is not a guaranteed capacity. Charge
+actual per-version encoded bytes, including existing approval-free receipt rows, rather than
+retroactively charging every row the new maximum. Versioned decode accepts old approval-free
+binary rows and mixed old/new rows for local storage/accounting; an old resolve receipt
+without authoritative approval cannot become an approval merely because it decodes.
+Fixtures measure and assert the legal maximum equals the derived encoding bound, record
+headroom separately and assert maximum + headroom equals the contract cap; include byte
+admission equality/+1, old/new decode, exact historical accounting and approval round trips.
 
 Producer chain: L2 reads post-lock Hub Clock once at first approval; L1 append/store persists
-approval in receipt/compact ledger; WP1 push/apply/pull/checkpoint codecs serialize and decode
-that same receipt; L1 settlement/checkpoint install populates MemoryResolution; L1 MemoryDecider
-uses persisted approval deadline instead of revision.createdAtUtc; L2 compactor and WP6 history
-consume those times. Replay returns original approval, including after body purge; forget
-releases protection immediately while retaining body-free dedup approval. Operation-supplied
-legacy times remain immutable but are never authority. Fixtures reject missing/mismatched
-approval, extra fields, non-30-day windows and invented windows on revert/refusal; cover
-ACK/pull/checkpoint round trips and off-clock submissions. No legacy approved resolution may silently invent a window: migrate only from stored
-authoritative approval if available; otherwise refuse activation with unsupported_protocol
-until a compatible authoritative checkpoint is available. Since hub v1 is not activated on
-the stated baseline, L1-0 must land before first advertisement; mixed old v1 codecs are not
-claimed compatible.
+approval in receipt/compact ledger plus operationKind/resolutionId in metadata; WP1
+push/apply/pull/checkpoint codecs serialize and independently validate them; L1
+settlement/checkpoint install populates approved MemoryResolution projection. L1
+MemoryDecider uses persisted approval deadline instead of revision.createdAtUtc; L2 compactor
+and WP6 history consume those times. Replay returns original approval, including after body
+purge; forget releases protection immediately while retaining body-free dedup approval.
+Operation-supplied legacy times remain immutable but are never authority. Fixtures reject
+missing/mismatched approval, extra fields, non-30-day approval windows and invented windows
+on revert/refusal; cover ACK/pull/checkpoint round trips and off-clock submissions.
+
+070 is undeployed (Jun's stated rollout fact). WP2 routes resolve execution only through the
+not-yet-implemented WP3 registry, so its normal 070 database cannot contain resolution rows.
+No resolution-data migration is needed; 071 still adds the hub tables/recovery fields in §5.1.
+Nevertheless inject a legacy resolution with a non-exact-30-day interval valid under the
+existing storage schema: aggregate read, local forget and physical purge must succeed across
+upgrade. Hub activation/approval paths must not treat this row or an approval-free resolve
+receipt as authoritative evidence; refuse activation with unsupported_protocol until a
+compatible authoritative checkpoint is available, without blocking local read/delete.
+Never invent approval timestamps or mutate operation/digest to repair such data. Since hub
+v1 is not activated on this baseline, L1-0 lands before first advertisement; mixed old hub
+wire codecs are not claimed compatible with the new approval/metadata contract.
 
 ## 5. Hub persistence, admission and authority
 
@@ -608,7 +644,9 @@ Persist checkpoint_bytes and published_pinned_bytes in memory_hub_retention; adm
 exact deterministic encoding deltas for changed records/pages rather than scanning all payloads.
 Initialize counters from a consistent state before admission is enabled. Add sync_version and
 operation_digest to existing sync/revert_intent work metadata/columns; readEligibleOutbox returns
-those CAS fields and due expired ownership is recoverable. Do not add a second queue.
+those CAS fields and due expired ownership is recoverable. Persist the frozen claim input
+with candidate generation/attempt metadata in the existing work rows; no second queue or
+resolution-data rewrite.
 Any extra local recovery/admin/registry columns or private staging discriminators are L1-owned
 extensions to existing WP2 tables in this migration. Migration test validates upgrade from
 070, restart and ID reconciliation. Secrets stay outside SQL; source payloads live only in
@@ -722,7 +760,9 @@ Settings epoch cancels previous coordinator; late old-epoch response cannot upda
 Claim key is (space,memory,canonical sorted distinct conflict heads). First successful atomic
 hub claim wins; this does not establish globally earliest observation. Claim stores attemptId,
 current credential version, holder and frozen raw defaultModelSelection including options.
-Null/unavailable default returns typed failure before claim, no title-generator fallback.
+For a new attempt only, null/unavailable default returns typed failure before claim, no
+title-generator fallback. Recovery first reads/replays a saved claim without consulting the
+current default; a changed or null default cannot prevent recovery of an existing lease.
 Post-lock Hub Clock alone controls 120s lease, 30s renewal and fixed 600s attempt cap; member clock only
 schedules. Strict now < expiry; renewal min(now+120s, original deadline). New head, forget,
 rotation/revoke invalidate ownership and monotonically advance highest token in BOTH hub row
@@ -736,16 +776,26 @@ atomically. Record requested/effective model, provider instance, resolving envir
 judgment and originals; fix approval.appliedAtUtc at this hub instant and its deadline exactly
 30 days later (§4.3), retaining revert inputs until that deadline unless forget. Replay reuses
 stored approval even if the retry clock differs. Replace the decider revision.createdAtUtc
-guard with this authoritative approval deadline; strict now < deadline, equality expires. Validated accepted
+guard with this authoritative approval deadline; strict now < deadline, equality expires.
+L1 also removes the local device-clock expiry rejection in MemoryService.revertResolution
+(current MemoryService.ts:608): local staging retains identity/head/original/delete checks
+but cannot reject solely on device time. Hub post-lock time decides admission; approved
+receive never repeats expiry admission. Validated accepted
 result applies immediately; local index/report deferral does not delay canonical application.
 
 MemoryResolutionRegistry is app-scoped ownership INSIDE MemorySyncService, not a second service
 or Worker. start recovers durable candidates/tickets and runs immediate syncOnce. Every syncOnce,
 even empty push, sweeps candidates after receive. Wakeups are hints; SQL/restart sweep authoritative.
-Reload heads/forget_pending/generation, call prepareClaimAttemptTx and commit its attemptId,
-then reserve slot, claim using that stored ID/frozen default, persist ticket, CAS ownership
-and register runClaimedResolution. Hub success then crash before local ticket retries the
-same persisted claim ID to recover the same lease; never generate a replacement ID.
+Reload heads/forget_pending/generation and call prepareClaimAttemptTx without a proposal to
+recover a saved claim BEFORE current default provider availability checks. Only if there is
+no saved attempt and the candidate is still eligible, validate the current default, construct
+the full MemoryHubClaimInput with a proposed attemptId/frozen selection, then call the same
+CAS port to persist and return the winning claim. Commit before network; reserve a slot,
+replay that exact stored claim, persist ticket, CAS ownership and register
+runClaimedResolution. Hub success then crash before ticket storage must recover the same
+claim and lease even if the default changes to another provider or null; never regenerate
+input from current settings or replace the ID. Execution uses the recovered lease's frozen
+selection; unavailable execution provider remains a typed failure without fallback.
 scheduleConflictResolution returns after persistence + registration, never model completion.
 
 At most four reserved/running/finalizing executions/environment, one per memory. Candidate
@@ -1012,7 +1062,16 @@ read-only in WP3; joint-start test consumes actual Worker unchanged.
 | L5 integration                   | MODIFY S/server.ts; NEW S/memory/MemoryHubScenarios.test.ts; MODIFY this 030 and 000 WP3 cycle only; structure/{INDEX.md,server.md,manifest.json} only if module boundary changes, subject to coordinator scope                                                                                 | Coordinator after L1–L4; one core instance/startup/source-reader injection/CloudTaskSource and real H/A/B fixtures. Risks: duplicated layers, initial hub readiness, confusing source CI with packaged evidence.               |
 
 For this rewrite ONLY 030 and 000 are writable; the above map describes future authorized
-implementation, not permission to touch source/structure now. Contracts remain WP1-owned; §4.3 specifies the prerequisite L1-0 contract commit,
+implementation, not permission to touch source/structure now. L1's concrete work list includes the versioned approval binary codec and maximum-size fixture
+in MemoryStore.ts/.test.ts; unchanged aggregate resolution decode plus legacy read/forget/purge
+fixtures; metadata approval settlement/checkpoint validation; frozen whole-claim persistence;
+MemoryService.ts/.test.ts removal of local device-clock revert expiry (current line 608), with
+skewed device clocks on both sides of the hub deadline; and MemoryQuotaService.test.ts
+readEligibleOutbox consumers (current lines 416–418,478), changing `.id` to `.work.id` for
+SyncWorkCandidate[]. L2 produces body-free operationKind/resolutionId metadata and hub-time
+approval; L3's existing WP1 codec consumers validate it; L4 replays saved full claims before
+current-default checks. These changes stay with the exclusive file owners above.
+Contracts remain WP1-owned; §4.3 specifies the prerequisite L1-0 contract commit,
 not lane permission to invent competing DTOs. Coordinator owns its integration before L1.
 
 Integration order:
@@ -1033,18 +1092,22 @@ Integration order:
 Paths below are exact future test targets; existing files are extended, new files collected by
 server test shards. Use real SQLite/service logic and controlled auth/network/provider seams.
 Race milestones use Deferred, persisted events, drain and TestClock; no sleep/poll/timeouts as
-success evidence, no real provider/network/live state. All new rows are NOT RUN here. Additional rev 11a activation rows below belong to the same
+success evidence, no real provider/network/live state. All new rows are NOT RUN here. Additional rev 11a/11b activation rows below belong to the same
 focused files and CI collection, not local execution.
 
-| Owner / focused file                                       | Activation -> observable assertion                                                                                                                                                                                                                                                                       |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L1 MemoryQuotaService.test.ts + L2 MemoryCompactor.test.ts | Combined live/history/permanent-ledger encoded bytes at equality/+1; old published + new publication + pinned old pages coexist. Reject only new admission atomically; previously approved recovery and reserved forget succeed; rollback/replay never drift counters.                                   |
-| L1 MemoryService.test.ts                                   | Null-sequence capacity refusal for forget and revert, crash/restart before/after settlement: correlated terminal refusal/retry policy persists, no synthesized sequence, DAG/report approval or cursor movement.                                                                                         |
-| L1 MemoryStore.test.ts + L4 MemorySyncService.test.ts      | More than 100 ordinary due rows precede base forget + extension; actual HubClient sends base then extension before ordinary content. Fail transmission, restart, honor backoff and show unrelated due rows progress. Revert response lost -> durable retry -> restart sends identical ID/digest/payload. |
-| L1 MemoryStore.test.ts + L4 MemorySyncService.test.ts      | Hub claim succeeds but no local ticket persists; restart reads candidate attemptId and replays same claim/lease, registers once. Candidate CAS loss never starts network.                                                                                                                                |
-| L2 MemoryHubService.test.ts + L1 MemoryDecider.test.ts     | Deferred SQL lock wait crosses lease/deadline, then hub Clock read rejects expiry. Skewed/offline createdAtUtc cannot alter exact 30-day approval; replay/ACK/pull/checkpoint preserve times; forget immediately removes protected inputs.                                                               |
-| L1 static type fixtures in focused CI                      | transact/withReceivedCursor discharge Transaction while preserving unrelated service R; runtime tag stays private.                                                                                                                                                                                       |
-| L5 MemoryHubScenarios.test.ts                              | A resolves, B reverts: only B delivers reverted report once across ACK/pull/checkpoint/restart; A keeps guard only; pending/rejected revert delivers none.                                                                                                                                               |
+| Owner / focused file                                                         | Activation -> observable assertion                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L1 MemoryQuotaService.test.ts + L2 MemoryCompactor.test.ts                   | Combined live/history/permanent-ledger encoded bytes at equality/+1; old published + new publication + pinned old pages coexist. Reject only new admission atomically; previously approved recovery and reserved forget succeed; rollback/replay never drift counters.                                   |
+| L1 MemoryService.test.ts                                                     | Null-sequence capacity refusal for forget and revert, crash/restart before/after settlement: correlated terminal refusal/retry policy persists, no synthesized sequence, DAG/report approval or cursor movement.                                                                                         |
+| L1 MemoryStore.test.ts + L4 MemorySyncService.test.ts                        | More than 100 ordinary due rows precede base forget + extension; actual HubClient sends base then extension before ordinary content. Fail transmission, restart, honor backoff and show unrelated due rows progress. Revert response lost -> durable retry -> restart sends identical ID/digest/payload. |
+| L1 MemoryStore.test.ts + L4 MemorySyncService.test.ts                        | Hub claim succeeds then crashes before local ticket storage; change current default P to Q or null, restart and recover identical full claim/attemptId/frozen provider/model/options and same lease before availability checks, register once. Candidate CAS loss never starts network.                  |
+| L2 MemoryHubService.test.ts + L1 MemoryDecider.test.ts                       | Deferred SQL lock wait crosses lease/deadline, then hub Clock read rejects expiry. Skewed/offline createdAtUtc cannot alter exact 30-day approval; replay/ACK/pull/checkpoint preserve times; forget immediately removes protected inputs.                                                               |
+| L1 MemoryStore.test.ts + MemoryService.test.ts + L2 MemoryHubService.test.ts | Inject non-exact-30-day legacy resolution in a 070 DB; upgrade, aggregate read, forget and purge succeed. Hub activation refuses unsupported_protocol and approval cannot use the legacy row; no invented timestamps or changed operation/digest.                                                        |
+| WP1 C/memory.test.ts + L1 MemoryService.test.ts                              | Purged approved resolve metadata missing approval or with mismatched resolutionId rejects independently; metadata upsert/revert carrying approval rejects. ACK/pull/checkpoint validate the same rules without bodies.                                                                                   |
+| L1 MemoryStore.test.ts + MemoryQuotaService.test.ts                          | Measure approval-bearing binary codec maximum including version and worst legal fields, assert maximum equals encoding bound and cap equals maximum plus recorded headroom. Old approval-free/mixed rows decode and retain actual byte charges; approval round trip and cap equality/+1 hold.            |
+| L1 MemoryService.test.ts + L2 MemoryHubService.test.ts                       | Device clock beyond the deadline while hub time is still valid stages revert and hub accepts; device clock before the deadline while hub time is expired stages intent but hub rejects at equality/after. Local staging never device-clock rejects; approved receive never re-admits expiry.             |
+| L1 static type fixtures in focused CI                                        | transact/withReceivedCursor discharge Transaction while preserving unrelated service R; runtime tag stays private.                                                                                                                                                                                       |
+| L5 MemoryHubScenarios.test.ts                                                | A resolves, B reverts: only B delivers reverted report once across ACK/pull/checkpoint/restart; A keeps guard only; pending/rejected revert delivers none.                                                                                                                                               |
 
 | Lane / focused test files                                                                                                                                              | Activation -> observable assertion                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1091,11 +1154,11 @@ status, accepted vs local processing, revert within 30 days and dedicated settin
 Remaining implementation risks: dual domain/hub ledger atomicity and hub-local precommits;
 partial administration across secret/SQL/settings; consistent staged checkpoint under forget;
 registry uncertain submission/ownership recovery; exact checkpoint-delta sizing and compact-receipt
-1024-byte codec coverage; actual global tail admission vs samples;
+measured binary codec maximum/version compatibility and approval preservation; actual global tail admission vs samples;
 packaged SQLite feature support. None needs a new product decision. Repeat reflection must scrutinize
 these corrected frozen interfaces before parallel implementation; independent A and CI remain mandatory.
 
-This rewrite changes only 030 and the WP3 cycle/minimal relevant decision rows in 000.
+This rewrite changes only 030 and one r2 correction record in the WP3 cycle of 000.
 Manual relative-file/anchor review and two-file fmt/check are the authoring verifiers, not
 TypeScript or runtime proof. No PR creation, push, live server or provider state access.
 Other plans are read-only: coordinator amends these exact current-baseline assumptions in the
@@ -1118,37 +1181,41 @@ This table maps 26 prior rule groups to their current normative sections; it is 
 narrative. The body above is the sole WP3 implementation plan. Unlisted unchanged requirement
 IDs remain governed by 000 M1–M20, not by a restored historical appendix.
 
-| Previous revision item                      | Current rule / section                                                                                         |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| rev 2 competing DTOs / WP1 ownership        | §3–4, §8: existing wire schemas only, private server ports explicitly proposed.                                |
-| rev 2 cursor/UTC/checkpoint/metadata fields | §4–5, §7: UTC wire/integer hub SQL, complete canonical cursor settlement and metadata ingest.                  |
-| rev 2 administration/identity/readiness     | §5.3, §8: dedicated versioned settings, independent hub advertisement.                                         |
-| rev 2 resolver-only report repair           | §4.1, §6: one existing report-key algorithm, body-free guards and resolver-local delivery.                     |
-| rev 3 G3 foreign change publication         | §7.2–7.3: body-free post-commit signals, reset/restart recovery, no second publisher.                          |
-| rev 3 G4 source SQL/lifecycle               | §4, §5.1, §8: transient purgeable bounded relay, permanent ledgers untouched.                                  |
-| rev 3 G4 four routes/authority/reader       | §4.2, §8: eleven bearer paths, injected committed owner reader + live compound grant.                          |
-| rev 3 G4 per-read failure/forget races      | §7.3, §8, §11: 75s cap, late discard; sync continues.                                                          |
-| rev 4 B2 automatic claim scheduling         | §6–7, §11: start/syncOnce public activation, durable candidates and recovery.                                  |
-| rev 4 B2 backoff/epoch/slots                | §6: bounded persisted retry, app-scope epoch/CAS, four slots through finalizer.                                |
-| rev 4 B4 pull-before-push divergence        | §5.2, §7.2, §11: approved ancestry merged, local unsent frontier quarantined.                                  |
-| rev 4 B5 generic settings rejection         | §5.3, §11: two runtime entry points/shared merge, declared WS error, dedicated internal CAS.                   |
-| rev 4 B7 enforcement wording                | §9 and 000 inventory: E6 admission/E7 grants/E5 exposure, no E8 promise.                                       |
-| rev 4 B8 static coverage receipt            | §10–11: actual diff/collection checked in implementation CI; historical 25-path count replaced.                |
-| rev 5 G1 pending revert receipt             | §4, §6–7, §11: common ACK/pull settlement, rejected intent never DAG/report success.                           |
-| rev 5 G2 registration-before-completion     | §6: schedule returns ticket+registration, no model wait, bounded shutdown/finalizer.                           |
-| rev 7 M19 checkpoint/floor/tail             | §5.1, §7.1, §9: first-release real compactor, finite tail, safe publication and cursor equality.               |
-| rev 7 M19 token/member/staging/relay caps   | §5.1, §7.1, §8–9: immutable expiry, pin, global bounded admission.                                             |
-| rev 7 M19 approved vs unapproved            | §5.2, §7.2, §9: hub-only admission, replica accounts without reapproval, base_compacted review.                |
-| rev 7 N1 registry-only recovery             | §3–4, §6, §11: new registry CAS/submission ports; Worker pinned-resolve assumption replaced by TextGeneration. |
-| rev 7 N1 bypass inventory                   | §9, §11: every direct/generic/manual/transport entry reviewed and joint-start tested.                          |
-| rev 7 N2 status/growth                      | §3–4, §9: new assembler replaces nonexistent WP2 readStorageStatus; existing samples/growth/FTS reused.        |
-| rev 7 N2 source/packaged evidence           | §1, §11: exact-head source CI AND same-SHA actual packaged backend off-host; no completion claim.              |
-| rev 7 audit cursor-stop + rev 8 M20         | §7.2, §9, §11: normal sequential braked upsert→forget replaces replica capacity refusal/drain barrier.         |
-| rev 10 R6 fairness                          | §7.2, §11: SQL order/caps/backoff/restart; healthy row behind failures/holds completes.                        |
-| rev 10 R7 hold release                      | §7.2, §11: only policy-version rescan; no per-item explicit rescan API.                                        |
-| rev 11a: R1 G-1 checkpoint reservation      | §4–5.1, §7.1, §9, §11: encoded combined state and retained old/new pages reserved atomically.                  |
-| rev 11a: R1 G-2 authoritative time          | §4, §4.3, §5.2, §6, §11: post-lock clock, immutable receipt approval, L1-0 and decider replacement.            |
-| rev 11a: R1 G-3 / A1 #3 forget priority     | §4.1, §7, §11: LIMIT-before selection priority, persisted retry and restart transport proof.                   |
-| rev 11a: A1 #1 / #2 ACK and retry           | §4–4.1, §7, §11: receipt/reference ACK, null-sequence refusal and sync/revert ownership retry.                 |
-| rev 11a: A1 #4 / #5 Tx and claim            | §4–4.1, §6, §11: Transaction discharge and pre-claim candidate attempt CAS.                                    |
-| rev 11a: A1 #6 / R1 relay clarification     | §6, §8, §12: precise phase handoffs/revert report owner and bounded M16 relay interpretation.                  |
+| Previous revision item                            | Current rule / section                                                                                                                                                                           |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| rev 2 competing DTOs / WP1 ownership              | §3–4, §8: existing wire schemas only, private server ports explicitly proposed.                                                                                                                  |
+| rev 2 cursor/UTC/checkpoint/metadata fields       | §4–5, §7: UTC wire/integer hub SQL, complete canonical cursor settlement and metadata ingest.                                                                                                    |
+| rev 2 administration/identity/readiness           | §5.3, §8: dedicated versioned settings, independent hub advertisement.                                                                                                                           |
+| rev 2 resolver-only report repair                 | §4.1, §6: one existing report-key algorithm, body-free guards and resolver-local delivery.                                                                                                       |
+| rev 3 G3 foreign change publication               | §7.2–7.3: body-free post-commit signals, reset/restart recovery, no second publisher.                                                                                                            |
+| rev 3 G4 source SQL/lifecycle                     | §4, §5.1, §8: transient purgeable bounded relay, permanent ledgers untouched.                                                                                                                    |
+| rev 3 G4 four routes/authority/reader             | §4.2, §8: eleven bearer paths, injected committed owner reader + live compound grant.                                                                                                            |
+| rev 3 G4 per-read failure/forget races            | §7.3, §8, §11: 75s cap, late discard; sync continues.                                                                                                                                            |
+| rev 4 B2 automatic claim scheduling               | §6–7, §11: start/syncOnce public activation, durable candidates and recovery.                                                                                                                    |
+| rev 4 B2 backoff/epoch/slots                      | §6: bounded persisted retry, app-scope epoch/CAS, four slots through finalizer.                                                                                                                  |
+| rev 4 B4 pull-before-push divergence              | §5.2, §7.2, §11: approved ancestry merged, local unsent frontier quarantined.                                                                                                                    |
+| rev 4 B5 generic settings rejection               | §5.3, §11: two runtime entry points/shared merge, declared WS error, dedicated internal CAS.                                                                                                     |
+| rev 4 B7 enforcement wording                      | §9 and 000 inventory: E6 admission/E7 grants/E5 exposure, no E8 promise.                                                                                                                         |
+| rev 4 B8 static coverage receipt                  | §10–11: actual diff/collection checked in implementation CI; historical 25-path count replaced.                                                                                                  |
+| rev 5 G1 pending revert receipt                   | §4, §6–7, §11: common ACK/pull settlement, rejected intent never DAG/report success.                                                                                                             |
+| rev 5 G2 registration-before-completion           | §6: schedule returns ticket+registration, no model wait, bounded shutdown/finalizer.                                                                                                             |
+| rev 7 M19 checkpoint/floor/tail                   | §5.1, §7.1, §9: first-release real compactor, finite tail, safe publication and cursor equality.                                                                                                 |
+| rev 7 M19 token/member/staging/relay caps         | §5.1, §7.1, §8–9: immutable expiry, pin, global bounded admission.                                                                                                                               |
+| rev 7 M19 approved vs unapproved                  | §5.2, §7.2, §9: hub-only admission, replica accounts without reapproval, base_compacted review.                                                                                                  |
+| rev 7 N1 registry-only recovery                   | §3–4, §6, §11: new registry CAS/submission ports; Worker pinned-resolve assumption replaced by TextGeneration.                                                                                   |
+| rev 7 N1 bypass inventory                         | §9, §11: every direct/generic/manual/transport entry reviewed and joint-start tested.                                                                                                            |
+| rev 7 N2 status/growth                            | §3–4, §9: new assembler replaces nonexistent WP2 readStorageStatus; existing samples/growth/FTS reused.                                                                                          |
+| rev 7 N2 source/packaged evidence                 | §1, §11: exact-head source CI AND same-SHA actual packaged backend off-host; no completion claim.                                                                                                |
+| rev 7 audit cursor-stop + rev 8 M20               | §7.2, §9, §11: normal sequential braked upsert→forget replaces replica capacity refusal/drain barrier.                                                                                           |
+| rev 10 R6 fairness                                | §7.2, §11: SQL order/caps/backoff/restart; healthy row behind failures/holds completes.                                                                                                          |
+| rev 10 R7 hold release                            | §7.2, §11: only policy-version rescan; no per-item explicit rescan API.                                                                                                                          |
+| rev 11a: R1 G-1 checkpoint reservation            | §4–5.1, §7.1, §9, §11: encoded combined state and retained old/new pages reserved atomically.                                                                                                    |
+| rev 11a: R1 G-2 authoritative time                | §4, §4.3, §5.2, §6, §11: post-lock clock, immutable receipt approval, L1-0 and decider replacement.                                                                                              |
+| rev 11a: R1 G-3 / A1 #3 forget priority           | §4.1, §7, §11: LIMIT-before selection priority, persisted retry and restart transport proof.                                                                                                     |
+| rev 11a: A1 #1 / #2 ACK and retry                 | §4–4.1, §7, §11: receipt/reference ACK, null-sequence refusal and sync/revert ownership retry.                                                                                                   |
+| rev 11a: A1 #4 / #5 Tx and claim                  | §4–4.1, §6, §11: Transaction discharge and pre-claim candidate attempt CAS.                                                                                                                      |
+| rev 11a: A1 #6 / R1 relay clarification           | §6, §8, §12: precise phase handoffs/revert report owner and bounded M16 relay interpretation.                                                                                                    |
+| rev 11b: A2 #1 storage compatibility              | §4.3, §5.1, §10–11: unchanged MemoryResolution decode; exact 30 days only at approval boundaries; undeployed 070 needs no resolution migration; synthetic legacy read/forget/purge remains safe. |
+| rev 11b: A2 #2 metadata validation                | §4.3, §10–11: required body-free operationKind and resolve-only resolutionId; independent approval presence/kind/id checks after purge.                                                          |
+| rev 11b: R2 G-4 frozen claim recovery             | §4–4.1, §5.1, §6, §10–11: persist/return full MemoryHubClaimInput; saved claim replay precedes current-default checks; P→Q/null crash fixture.                                                   |
+| rev 11b: R2 codec/local revert; A2 quota consumer | §4.3, §6, §10–12: measured versioned binary maximum/headroom, old-row accounting/mixed decode, local device-time guard removal and SyncWorkCandidate.work.id test consumers.                     |
