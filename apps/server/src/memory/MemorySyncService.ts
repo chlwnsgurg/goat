@@ -162,6 +162,7 @@ const make = Effect.gen(function* () {
   const client = yield* Client.MemoryHubClient;
   const hub = yield* Hub.MemoryHubService;
   const settings = yield* Settings.ServerSettingsService;
+  const committedSettings = yield* Settings.MemoryHubCommittedSettings;
   const runtime = yield* MemorySyncRuntime;
   const quota = yield* Quota.MemoryQuotaService;
   const generation = yield* Generation.TextGeneration;
@@ -239,9 +240,9 @@ const make = Effect.gen(function* () {
     }
   };
   const ensureEpoch = (epoch: number): Permit =>
-    readSettings.pipe(
+    committedSettings.read.pipe(
       Effect.flatMap((s) =>
-        s.memoryHubVersion === epoch && !stopped
+        s.version === epoch && s.settings.mode !== "disabled" && !stopped
           ? Effect.void
           : Effect.fail(new Service.MemoryAccessError({ code: "fenced" })),
       ),
@@ -459,12 +460,15 @@ const make = Effect.gen(function* () {
       if (!row.submission) {
         yield* transition("running");
         yield* refreshLease();
-        yield* eligibility(row.ticket);
+        const snapshot = yield* eligibility(row.ticket);
         yield* runtime.available(row.ticket.frozenDefaultModelSelection);
         const revisions = yield* store.readResolutionHeads({
           memorySpaceId: row.ticket.memorySpaceId,
           memoryId: row.ticket.memoryId,
           heads: row.ticket.conflictHeadSet,
+          expectedGeneration: snapshot.generation,
+          maxItems: 100,
+          maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
         });
         if (
           revisions.length !== row.ticket.conflictHeadSet.length ||
@@ -929,6 +933,7 @@ const make = Effect.gen(function* () {
                 memorySpaceId: r.space,
                 candidateId: work.id,
                 expectedGeneration: prepared.value.generation,
+                expectedAttempt: work.attempt + 1,
                 attemptId: prepared.value.claim.attemptId,
                 coordinatorEpoch: r.settings.memoryHubVersion,
                 now: yield* Clock.currentTimeMillis,
@@ -1335,12 +1340,19 @@ const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const page = yield* store.transact(
         Effect.gen(function* () {
+          yield* ensureEpoch(pending.epoch);
           const input = { memorySpaceId: pending.space, holdClass: c, now, limit: 100 };
+          const empty: Store.HoldRearmPage = {
+            changedIds: [],
+            inspected: 0,
+            next: null,
+            more: false,
+          };
           const sync = pending.syncDone
-            ? []
+            ? empty
             : yield* store.rearmSyncHoldsTx({ ...input, afterId: pending.syncAfter });
           const resolution = pending.resolutionDone
-            ? []
+            ? empty
             : yield* store.rearmResolutionHoldsTx({ ...input, afterId: pending.resolutionAfter });
           const key = { memorySpaceId: pending.space, hubEnvironmentId: r.hubId };
           const retry = yield* store.readPullRetry(key);
@@ -1362,10 +1374,10 @@ const make = Effect.gen(function* () {
         continue;
       }
       yield* wakePullRetry;
-      pending.syncDone ||= page.sync.length < 100;
-      pending.resolutionDone ||= page.resolution.length < 100;
-      pending.syncAfter = page.sync.at(-1) ?? pending.syncAfter;
-      pending.resolutionAfter = page.resolution.at(-1) ?? pending.resolutionAfter;
+      pending.syncDone ||= !page.sync.more;
+      pending.resolutionDone ||= !page.resolution.more;
+      pending.syncAfter = page.sync.next ?? pending.syncAfter;
+      pending.resolutionAfter = page.resolution.next ?? pending.resolutionAfter;
       if (pending.syncDone && pending.resolutionDone) rearms.delete(c);
     }
     if (rearms.size) pendingSync = true;

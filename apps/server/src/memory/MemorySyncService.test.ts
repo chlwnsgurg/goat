@@ -224,6 +224,9 @@ const changingSettings = (disabled: boolean) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const base = yield* Settings.ServerSettingsService;
+      const committed = Option.getOrThrow(
+        yield* Effect.serviceOption(Settings.MemoryHubCommittedSettings),
+      );
       const transitions = Option.getOrThrow(
         yield* Effect.serviceOption(Settings.MemoryHubSettingsTransitions),
       );
@@ -233,6 +236,7 @@ const changingSettings = (disabled: boolean) =>
         >(16);
       const publish = base.getSettings.pipe(Effect.flatMap((s) => PubSub.publish(changes, s)));
       return Layer.mergeAll(
+        Layer.succeed(Settings.MemoryHubCommittedSettings, committed),
         Layer.succeed(Settings.ServerSettingsService, {
           ...base,
           subscribeChanges: PubSub.subscribe(changes).pipe(Effect.map(Stream.fromSubscription)),
@@ -267,8 +271,13 @@ const fixture = (
         memoryHubVersion: 1,
         defaultModelSelection: selection,
       });
+  // layerTest supplies this tag at runtime but its declared output still hides it (L5 handoff).
+  const committed = Layer.effect(
+    Settings.MemoryHubCommittedSettings,
+    Effect.serviceOption(Settings.MemoryHubCommittedSettings).pipe(Effect.map(Option.getOrThrow)),
+  ).pipe(Layer.provide(sharedSettings));
   const shared = Layer.mergeAll(hub, runtime, identity, generation).pipe(
-    Layer.provideMerge(sharedSettings),
+    Layer.provideMerge(Layer.merge(sharedSettings, committed)),
   );
   return Sync.layer.pipe(Layer.provideMerge(client.pipe(Layer.provideMerge(shared))));
 };
