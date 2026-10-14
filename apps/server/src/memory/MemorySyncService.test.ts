@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -124,6 +125,9 @@ const runtime = Layer.effect(
             (cause) => new Store.MemoryStorageError({ stage: "fixture-discard", cause }),
           ),
         ),
+      readUnboundStorage: Effect.fail(
+        new Store.MemoryStorageError({ stage: "fixture-status", cause: "pending L1 adapter" }),
+      ),
       readProcessing: () =>
         Effect.fail(
           new Store.MemoryStorageError({
@@ -222,21 +226,59 @@ const realGeneration = (overrides: Partial<Generation.TextGeneration["Service"]>
     ),
   );
 };
+// Preserve real settings CAS/normalization, adding the production-style subscribed stream.
+const changingSettings = (disabled: boolean) =>
+  Layer.unwrap(
+    Effect.gen(function* () {
+      const base = yield* Settings.ServerSettingsService;
+      const transitions = Option.getOrThrow(
+        yield* Effect.serviceOption(Settings.MemoryHubSettingsTransitions),
+      );
+      const changes =
+        yield* PubSub.bounded<
+          Effect.Success<Settings.ServerSettingsService["Service"]["getSettings"]>
+        >(16);
+      const publish = base.getSettings.pipe(Effect.flatMap((s) => PubSub.publish(changes, s)));
+      return Layer.mergeAll(
+        Layer.succeed(Settings.ServerSettingsService, {
+          ...base,
+          subscribeChanges: PubSub.subscribe(changes).pipe(Effect.map(Stream.fromSubscription)),
+          streamChanges: Stream.fromPubSub(changes),
+          updateSettings: (patch) => base.updateSettings(patch).pipe(Effect.tap(() => publish)),
+        }),
+        Layer.succeed(Settings.MemoryHubSettingsTransitions, {
+          applyMemoryHubTransition: (input, permit) =>
+            transitions.applyMemoryHubTransition(input, permit).pipe(Effect.tap(() => publish)),
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        Settings.layerTest({
+          memoryHub: disabled ? { mode: "disabled" } : member,
+          memoryHubVersion: 1,
+          defaultModelSelection: selection,
+        }),
+      ),
+    ),
+  );
 const fixture = (
   client: Layer.Layer<Client.MemoryHubClient, never, Settings.ServerSettingsService> = peer(),
   generation = realGeneration({ resolveMemoryConflict: () => Effect.never }),
   disabled = false,
+  changing = false,
 ) => {
   const shared = Layer.mergeAll(
     hub,
     runtime,
     identity,
     generation,
-    Settings.layerTest({
-      memoryHub: disabled ? { mode: "disabled" } : member,
-      memoryHubVersion: 1,
-      defaultModelSelection: selection,
-    }),
+    changing
+      ? changingSettings(disabled)
+      : Settings.layerTest({
+          memoryHub: disabled ? { mode: "disabled" } : member,
+          memoryHubVersion: 1,
+          defaultModelSelection: selection,
+        }),
   );
   return Sync.layer.pipe(Layer.provideMerge(client.pipe(Layer.provideMerge(shared))));
 };
@@ -1297,6 +1339,178 @@ it.effect("expired recovered lease never exposes input to the provider", () =>
         yield* sync.shutdown;
         assert.strictEqual(renews, 1);
         assert.strictEqual(executions, 0);
+        assert.strictEqual(yield* sync.activeResolutions, 0);
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
+);
+
+const changeHub = (expectedVersion: number, settings: M.MemoryHubSettings) =>
+  Effect.gen(function* () {
+    const transitions = Option.getOrThrow(
+      yield* Effect.serviceOption(Settings.MemoryHubSettingsTransitions),
+    );
+    yield* transitions.applyMemoryHubTransition(
+      {
+        requestId: M.MemoryOperationId.make(id(9000 + expectedVersion)),
+        expectedVersion,
+        settings,
+      },
+      Effect.void,
+    );
+  });
+
+it.effect.each(["pull", "owner relay", "claim"] as const)(
+  "settings listener interrupts blocked %s and the model before the next epoch cycle",
+  (kind) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const modelCancelled = yield* Deferred.make<void>();
+      const transportEntered = yield* Deferred.make<void>();
+      const transportCancelled = yield* Deferred.make<void>();
+      const oldResponse = yield* Deferred.make<void>();
+      const newCycle = yield* Deferred.make<number>();
+      const finishNew = yield* Deferred.make<void>();
+      let phase = 0;
+      let calls = 0;
+      let sync: Sync.MemorySyncService["Service"] | undefined;
+      const block = Deferred.succeed(transportEntered, undefined).pipe(
+        Effect.andThen(Deferred.await(oldResponse)),
+        Effect.ensuring(Deferred.succeed(transportCancelled, undefined)),
+      );
+      const empty = (i: M.MemoryHubPullInput): M.MemoryHubPullResult => ({
+        highWatermark: i.highWatermark ?? i.afterSequence,
+        throughSequence: i.afterSequence,
+        hasMore: false,
+        entries: [],
+      });
+      const client = peer({
+        pull: (c, i) =>
+          Effect.gen(function* () {
+            if (c.epoch === 3) {
+              yield* Deferred.succeed(newCycle, yield* sync!.activeResolutions);
+              yield* Deferred.await(finishNew);
+            }
+            if (phase === 1 && kind === "pull") {
+              yield* block;
+              return {
+                highWatermark: 1,
+                throughSequence: 1,
+                hasMore: false,
+                entries: tailEntries(0, 1),
+              };
+            }
+            return empty(i);
+          }),
+        collectSourceReads: () =>
+          phase === 1 && kind === "owner relay"
+            ? block.pipe(Effect.as({ requests: [] }))
+            : Effect.succeed({ requests: [] }),
+        claim: (_c, input) =>
+          Effect.gen(function* () {
+            if (phase === 1 && kind === "claim") yield* block;
+            const { protocolVersion: _protocol, ...claim } = input;
+            return {
+              ...claim,
+              fencingToken: 1,
+              claimedAtHubTime: timestamp,
+              expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+              attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            };
+          }),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: () =>
+          Effect.sync(() => {
+            calls++;
+          }).pipe(
+            Effect.andThen(Deferred.succeed(entered, undefined)),
+            Effect.andThen(Effect.never),
+            Effect.ensuring(Deferred.succeed(modelCancelled, undefined)),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          sync = yield* Sync.MemorySyncService;
+          yield* sync.start;
+          yield* Deferred.await(entered);
+          phase = 1;
+          if (kind === "claim") yield* conflict(2);
+          const manual = yield* sync.syncOnce.pipe(Effect.forkScoped);
+          yield* Deferred.await(transportEntered);
+          // Only the Settings stream triggers cancellation; no direct sync/shutdown call.
+          yield* changeHub(1, { mode: "disabled" });
+          yield* Deferred.await(transportCancelled);
+          yield* Deferred.await(modelCancelled);
+          yield* Fiber.join(manual);
+          phase = 2;
+          yield* changeHub(2, member);
+          assert.strictEqual(yield* Deferred.await(newCycle), 0);
+          yield* Deferred.succeed(oldResponse, undefined);
+          const store = yield* Store.MemoryStore;
+          assert.strictEqual(yield* store.readCursor(space, remote), 0);
+          assert.strictEqual(calls, 1);
+          assert.strictEqual(yield* sync.activeResolutions, 0);
+          yield* Deferred.succeed(finishNew, undefined);
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client, model, false, true))),
+      );
+    }),
+);
+
+it.effect("periodic renewal failure preserves the renewed expiry retry floor", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const cancelled = yield* Deferred.make<void>();
+    const released = yield* Deferred.make<void>();
+    let renews = 0;
+    let issued: M.MemoryResolutionLease | undefined;
+    const client = peer({
+      claim: (_c, { protocolVersion: _p, ...claim }) =>
+        Effect.sync(() => {
+          issued = {
+            ...claim,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          };
+          return issued;
+        }),
+      renew: () =>
+        Effect.gen(function* () {
+          renews++;
+          if (renews === 1) return { ...issued!, expiresAtHubTime: "1970-01-01T00:03:00.000Z" };
+          return yield* new M.MemoryHubError({ code: "unavailable" });
+        }),
+      release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: false })),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(cancelled, undefined)),
+        ),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("30 seconds");
+        yield* Deferred.await(cancelled);
+        yield* Deferred.await(released);
+        yield* sync.shutdown;
+        const tickets = yield* (yield* Store.MemoryStore).readRecoverableResolutionTickets({
+          now: 180000,
+          limit: 100,
+        });
+        assert.strictEqual(renews, 2);
+        assert.strictEqual(tickets[0]?.nextAttemptAt, 180000);
         assert.strictEqual(yield* sync.activeResolutions, 0);
       }).pipe(Effect.provide(fixture(client, model))),
     );

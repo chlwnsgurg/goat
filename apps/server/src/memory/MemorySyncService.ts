@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
 import * as Clock from "effect/Clock";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -48,8 +49,8 @@ export class MemorySyncRuntime extends Context.Service<
       token: string,
     ) => Effect.Effect<void, Service.MemoryServiceError>;
     readonly readProcessing: (
-      space: M.MemorySpaceId,
-      hub: M.EnvironmentId,
+      space: M.MemorySpaceId | null,
+      hub: M.EnvironmentId | null,
     ) => Effect.Effect<
       {
         processing: M.MemoryProcessingStatus;
@@ -59,6 +60,8 @@ export class MemorySyncRuntime extends Context.Service<
       },
       Store.MemoryStorageError
     >;
+    /** Counter-backed global/local storage snapshot when no space is bound. */
+    readonly readUnboundStorage: Effect.Effect<M.MemoryStorageStatus, Store.MemoryStorageError>;
     readonly available: (
       selection: M.MemoryModelSelection,
     ) => Effect.Effect<void, M.MemoryHubError>;
@@ -138,6 +141,11 @@ const make = Effect.gen(function* () {
   const local = yield* identity.getEnvironmentId;
   const scope = yield* Scope.Scope;
   const mutex = yield* Semaphore.make(1);
+  const coordinator = yield* Semaphore.make(1);
+  let cycle: Fiber.Fiber<void, Error> | null = null;
+  let pendingSweep = false;
+  let cancelling = false;
+  let statusEpoch: number | null = null;
   const registryMutex = yield* Semaphore.make(1);
   const owner = uuid();
   let stopped = false;
@@ -163,6 +171,23 @@ const make = Effect.gen(function* () {
       ),
       Effect.mapError(() => new Service.MemoryAccessError({ code: "fenced" })),
     );
+  const resetStatus = (epoch: number) => {
+    if (statusEpoch !== epoch) {
+      statusEpoch = epoch;
+      lastFailure = undefined;
+      lastSuccess = null;
+    }
+  };
+  const noteFailure = Effect.fn("MemorySyncService.noteFailure")(
+    function* (epoch: number, error: Error) {
+      const s = yield* readSettings;
+      if (!stopped && s.memoryHubVersion === epoch) {
+        resetStatus(epoch);
+        lastFailure = failureCode(error);
+      }
+    },
+    (effect) => Effect.ignore(effect),
+  );
   const route = Effect.fnUntraced(function* () {
     const s = yield* readSettings;
     if (s.memoryHub.mode === "disabled") return null;
@@ -244,6 +269,8 @@ const make = Effect.gen(function* () {
     initial: Store.TicketRow,
   ) {
     let row = initial;
+    let currentLease = initial.ticket;
+    let renewalFailed = false;
     let definitiveFailure = false;
     const transition = Effect.fnUntraced(function* (
       state: Store.TicketState,
@@ -261,20 +288,22 @@ const make = Effect.gen(function* () {
             relinquish || state === "terminal" || state === "recoverable" || state === "submitting"
               ? null
               : now + 60000,
-          nextAttemptAt:
+          nextAttemptAt: Math.max(
+            renewalFailed ? Date.parse(currentLease.expiresAtHubTime) : 0,
             now +
-            (relinquish || retireClaim || state === "recoverable" || state === "submitting"
-              ? 30000
-              : 0),
+              (relinquish || retireClaim || state === "recoverable" || state === "submitting"
+                ? 30000
+                : 0),
+          ),
           ...(approval ? { approval } : {}),
           ...(retireClaim ? { retireClaim } : {}),
         }),
       );
       if (!next) return yield* new M.MemoryHubError({ code: "fenced" });
-      row = next;
+      row = { ...next, ticket: currentLease };
     });
     const refreshLease = Effect.fnUntraced(function* () {
-      const current = row.ticket;
+      const current = currentLease;
       const input: M.MemoryHubRenewInput = {
         protocolVersion: 1,
         memorySpaceId: current.memorySpaceId,
@@ -284,9 +313,16 @@ const make = Effect.gen(function* () {
         attemptId: current.attemptId,
         fencingToken: current.fencingToken,
       };
-      const renewed = yield* r.connection
-        ? client.renew(r.connection, input)
-        : hub.renew(input, r.principal!);
+      const renewed = yield* (
+        r.connection ? client.renew(r.connection, input) : hub.renew(input, r.principal!)
+      ).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            renewalFailed = true;
+          }),
+        ),
+      );
+
       yield* ensureEpoch(r.settings.memoryHubVersion);
       if (
         renewed.memorySpaceId !== current.memorySpaceId ||
@@ -302,6 +338,10 @@ const make = Effect.gen(function* () {
           selectionKey(current.frozenDefaultModelSelection)
       )
         return yield* new M.MemoryHubError({ code: "fenced" });
+      currentLease = renewed;
+      row = { ...row, ticket: renewed };
+      const slot = executions.get(renewed.memoryId);
+      if (slot) slot.ticket = renewed;
     });
     const settle = Effect.fnUntraced(function* (receipt: M.MemoryHubReceipt) {
       if (!row.submission) return yield* new M.MemoryHubError({ code: "invalid_output" });
@@ -372,7 +412,13 @@ const make = Effect.gen(function* () {
             );
           }),
         ).pipe(
-          Effect.timeout("10 minutes"),
+          // Member time schedules cancellation only; Hub remains the admission authority.
+          Effect.timeout(
+            Math.max(
+              0,
+              Date.parse(currentLease.attemptDeadlineHubTime) - (yield* Clock.currentTimeMillis),
+            ),
+          ),
           Effect.catchTags({
             TimeoutError: () => Effect.fail(new M.MemoryHubError({ code: "lease_expired" })),
           }),
@@ -515,6 +561,7 @@ const make = Effect.gen(function* () {
   const register = Effect.fnUntraced(function* (r: Route, saved: Store.TicketRow) {
     if (
       stopped ||
+      cancelling ||
       executions.size >= 4 ||
       executions.has(saved.ticket.memoryId) ||
       saved.ticket.holderEnvironmentId !== local ||
@@ -543,7 +590,10 @@ const make = Effect.gen(function* () {
           executions.delete(saved.ticket.memoryId);
           return;
         }
-        if (stopped) {
+        if (
+          stopped ||
+          (yield* Effect.result(ensureEpoch(r.settings.memoryHubVersion)))._tag === "Failure"
+        ) {
           yield* store
             .transact(
               store.transitionResolutionTicketTx({
@@ -560,11 +610,7 @@ const make = Effect.gen(function* () {
           return;
         }
         const fiber = yield* restore(runClaimedResolution(r, acquired)).pipe(
-          Effect.catch((e) =>
-            Effect.sync(() => {
-              lastFailure = failureCode(e);
-            }),
-          ),
+          Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)),
           Effect.ensuring(
             Effect.sync(() => {
               executions.delete(saved.ticket.memoryId);
@@ -572,7 +618,11 @@ const make = Effect.gen(function* () {
           ),
           Effect.ensuring(store.wake),
           Effect.ensuring(
-            Effect.suspend(() => sweep).pipe(Effect.ignore, Effect.forkIn(scope), Effect.asVoid),
+            Effect.suspend(() => requestCycle(sweep, true)).pipe(
+              Effect.ignore,
+              Effect.forkIn(scope),
+              Effect.asVoid,
+            ),
           ),
           Effect.forkIn(scope),
         );
@@ -590,7 +640,8 @@ const make = Effect.gen(function* () {
   const sweep: Effect.Effect<void, Error> = registryMutex.withPermit(
     Effect.gen(function* () {
       const r = yield* route();
-      if (!r || !r.space || stopped) return;
+      if (!r || !r.space || stopped || cancelling) return;
+      yield* ensureEpoch(r.settings.memoryHubVersion);
       const now = yield* Clock.currentTimeMillis;
       // The current L1 recovery sweep cancels all resolve rows; do not destroy a durable ticket.
       // L1 must make that sweep frontier-aware before concurrent new-conflict recovery is enabled.
@@ -684,19 +735,21 @@ const make = Effect.gen(function* () {
           ),
         );
         if (attempt._tag === "Failure") {
-          lastFailure = failureCode(attempt.failure);
+          yield* ensureEpoch(r.settings.memoryHubVersion);
+          yield* noteFailure(r.settings.memoryHubVersion, attempt.failure);
+          const code = failureCode(attempt.failure);
           const knownExpiry =
-            lastFailure === "claim_busy"
+            code === "claim_busy"
               ? (yield* store.loadAggregate(r.space, work.memoryId!)).fence?.activeLease
                   ?.expiresAtHubTime
               : undefined;
           yield* store.retryClaimCandidate(
             work.id,
             now +
-              (lastFailure === "claim_busy"
+              (code === "claim_busy"
                 ? 30000
                 : Math.min(600000, [5000, 30000, 120000, 600000][Math.min(work.attempt, 3)]!)),
-            lastFailure,
+            code,
             knownExpiry === undefined ? undefined : Date.parse(knownExpiry),
           );
         }
@@ -842,75 +895,84 @@ const make = Effect.gen(function* () {
     }
     return false;
   });
-  const relay = Effect.fnUntraced(function* (r: Route) {
-    const now = yield* Clock.currentTimeMillis;
-    yield* store.transact(store.purgeHubTransientTx({ memorySpaceId: r.space!, now, limit: 100 }));
-    const input: M.MemoryHubSourceReadCollectInput = {
-      protocolVersion: 1,
-      memorySpaceId: r.space!,
-      limit: 32,
-    };
-    const collected = yield* r.connection
-      ? client.collectSourceReads(r.connection, input)
-      : hub.collectSourceReads(input, r.principal!);
-    for (const request of collected.requests) {
-      yield* Effect.gen(function* () {
-        if (
-          request.sourceThread.environmentId !== local ||
-          Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)
-        )
-          return;
-        const permit = runtime
-          .ownerPermit(request)
-          .pipe(Effect.andThen(ensureEpoch(r.settings.memoryHubVersion)));
-        yield* permit;
-        const outcome = yield* runtime.ownerReader.readCommitted(request, permit).pipe(
-          Effect.timeout("15 seconds"),
-          Effect.catchTags({
-            TimeoutError: () =>
-              Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
-          }),
-        );
-        yield* permit;
-        if (Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)) return;
-        const checked = yield* decodeSource(outcome).pipe(
-          Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
-        );
-        if (
-          checked.kind === "available" &&
-          (checked.page.sourceThread.environmentId !== request.sourceThread.environmentId ||
-            checked.page.sourceThread.threadId !== request.sourceThread.threadId ||
-            checked.page.watermark.fromEventId !== request.sourceWatermark.fromEventId ||
-            checked.page.watermark.toEventId !== request.sourceWatermark.toEventId ||
-            checked.page.watermark.throughSequence !== request.sourceWatermark.throughSequence ||
-            checked.page.messages.length > request.limit ||
-            checked.page.messages.some(
-              (message) => !request.messageIds.includes(message.messageId),
-            ))
-        )
-          return yield* new M.MemoryHubError({ code: "source_invalidated" });
-        const safe: M.MemorySourceReadOutcome =
-          scanMemoryValue(checked).kind === "allowed"
-            ? checked
-            : { kind: "unavailable", code: "secret_detected" };
-        const response: M.MemoryHubSourceReadRespondInput = {
-          protocolVersion: 1,
-          memorySpaceId: r.space!,
-          requestId: request.requestId,
-          outcome: safe,
-        };
-        yield* r.connection
-          ? client.respondSourceRead(r.connection, response)
-          : hub.respondSourceRead(response, r.principal!);
-      }).pipe(
-        Effect.catch((e) =>
-          Effect.sync(() => {
-            lastFailure = failureCode(e);
-          }),
-        ),
+  const relayMutex = yield* Semaphore.make(1);
+  // One relay cycle at a time, at most 32 items, 15s total including permits and transport.
+  const relay = (r: Route) =>
+    relayMutex
+      .withPermit(
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          yield* store.transact(
+            store.purgeHubTransientTx({ memorySpaceId: r.space!, now, limit: 100 }),
+          );
+          const input: M.MemoryHubSourceReadCollectInput = {
+            protocolVersion: 1,
+            memorySpaceId: r.space!,
+            limit: 32,
+          };
+          const collected = yield* r.connection
+            ? client.collectSourceReads(r.connection, input)
+            : hub.collectSourceReads(input, r.principal!);
+          for (const request of collected.requests) {
+            yield* Effect.gen(function* () {
+              if (
+                request.sourceThread.environmentId !== local ||
+                Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)
+              )
+                return;
+              const permit = runtime
+                .ownerPermit(request)
+                .pipe(Effect.andThen(ensureEpoch(r.settings.memoryHubVersion)));
+              yield* permit;
+              const outcome = yield* runtime.ownerReader.readCommitted(request, permit).pipe(
+                Effect.timeout("15 seconds"),
+                Effect.catchTags({
+                  TimeoutError: () =>
+                    Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+                }),
+              );
+              yield* permit;
+              if (Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)) return;
+              const checked = yield* decodeSource(outcome).pipe(
+                Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
+              );
+              if (
+                checked.kind === "available" &&
+                (checked.page.sourceThread.environmentId !== request.sourceThread.environmentId ||
+                  checked.page.sourceThread.threadId !== request.sourceThread.threadId ||
+                  checked.page.watermark.fromEventId !== request.sourceWatermark.fromEventId ||
+                  checked.page.watermark.toEventId !== request.sourceWatermark.toEventId ||
+                  checked.page.watermark.throughSequence !==
+                    request.sourceWatermark.throughSequence ||
+                  checked.page.messages.length > request.limit ||
+                  checked.page.messages.some(
+                    (message) => !request.messageIds.includes(message.messageId),
+                  ))
+              )
+                return yield* new M.MemoryHubError({ code: "source_invalidated" });
+              const safe: M.MemorySourceReadOutcome =
+                scanMemoryValue(checked).kind === "allowed"
+                  ? checked
+                  : { kind: "unavailable", code: "secret_detected" };
+              const response: M.MemoryHubSourceReadRespondInput = {
+                protocolVersion: 1,
+                memorySpaceId: r.space!,
+                requestId: request.requestId,
+                outcome: safe,
+              };
+              yield* r.connection
+                ? client.respondSourceRead(r.connection, response)
+                : hub.respondSourceRead(response, r.principal!);
+            }).pipe(Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)));
+          }
+        }),
+      )
+      .pipe(
+        Effect.timeout("15 seconds"),
+        Effect.catchTags({
+          TimeoutError: () => Effect.void,
+        }),
       );
-    }
-  });
   const push = Effect.fnUntraced(function* (r: Route) {
     const now = yield* Clock.currentTimeMillis;
     const candidates = yield* store.readEligibleOutbox(r.space!, now, 100);
@@ -969,7 +1031,8 @@ const make = Effect.gen(function* () {
         }),
       );
       if (result._tag === "Failure") {
-        lastFailure = failureCode(result.failure);
+        yield* ensureEpoch(r.settings.memoryHubVersion);
+        yield* noteFailure(r.settings.memoryHubVersion, result.failure);
         const time = yield* Clock.currentTimeMillis;
         yield* store.transact(
           store.retrySyncWorkTx({
@@ -978,15 +1041,17 @@ const make = Effect.gen(function* () {
             nextAttemptAt: transient(result.failure)
               ? time + Math.min(30000, 1000 * 2 ** Math.min(candidate.work.attempt, 5))
               : Number.MAX_SAFE_INTEGER,
-            failureCode: lastFailure,
+            failureCode: failureCode(result.failure),
           }),
         );
       }
     }
   });
-  const syncOnce = mutex.withPermit(
+  const syncCycle = mutex.withPermit(
     Effect.gen(function* () {
       if (stopped) return;
+      const s = yield* readSettings;
+      resetStatus(s.memoryHubVersion);
       const r = yield* route();
       if (!r) {
         for (const entry of executions.values())
@@ -1004,15 +1069,11 @@ const make = Effect.gen(function* () {
         if (entry.fiber && (yield* Effect.result(eligibility(entry.ticket)))._tag === "Failure")
           yield* Fiber.interrupt(entry.fiber);
       }
-      yield* relay(r).pipe(
-        Effect.catch((e) =>
-          Effect.sync(() => {
-            lastFailure = failureCode(e);
-          }),
-        ),
-      );
+      yield* relay(r).pipe(Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)));
+      yield* ensureEpoch(r.settings.memoryHubVersion);
       // Tail checkpoint S is incorporated before any local identity assignment or push.
       for (const intent of yield* store.listMaterializableIntents(local, 100)) {
+        yield* ensureEpoch(r.settings.memoryHubVersion);
         const assigned = yield* store.transact(
           store.assignIntentIdentityTx({
             environmentId: local,
@@ -1022,6 +1083,8 @@ const make = Effect.gen(function* () {
             revisionId: M.MemoryRevisionId.make(uuid()),
           }),
         );
+        // L1 exact admission + canonical/outbox commit + intent completion port is pending.
+        // This materialization returns an operation only; it does not complete the intent.
         yield* store.materializeLocalIntent({
           environmentId: local,
           intentId: intent.intentId,
@@ -1033,25 +1096,69 @@ const make = Effect.gen(function* () {
       yield* push(r);
       yield* pullTail(r, budget);
       yield* sweep;
+      yield* ensureEpoch(r.settings.memoryHubVersion);
       lastSuccess = iso(yield* Clock.currentTimeMillis);
     }),
   );
-  const guardedSync = syncOnce.pipe(
-    Effect.catch((e) =>
-      Effect.sync(() => {
-        lastFailure = failureCode(e);
-      }),
-    ),
+  // A single tracked cycle includes manual sync and registry sweeps. Waiters coalesce;
+  // completion hints request one additional sweep, never an accumulating work queue.
+  const requestCycle = (effect: Effect.Effect<void, Error>, sweepOnly = false, wait = true) =>
+    Effect.gen(function* () {
+      const active = yield* coordinator.withPermit(
+        Effect.gen(function* () {
+          if (stopped || cancelling) return null;
+          if (cycle) {
+            if (sweepOnly) pendingSweep = true;
+            return cycle;
+          }
+          const epoch = (yield* readSettings).memoryHubVersion;
+          resetStatus(epoch);
+          cycle = yield* Effect.gen(function* () {
+            yield* effect;
+            while (pendingSweep && !stopped && !cancelling) {
+              pendingSweep = false;
+              yield* ensureEpoch(epoch);
+              yield* sweep;
+            }
+          }).pipe(
+            Effect.tapError((e) => noteFailure(epoch, e)),
+            Effect.ensuring(
+              Effect.sync(() => {
+                cycle = null;
+              }),
+            ),
+            Effect.forkIn(scope),
+          );
+          return cycle;
+        }),
+      );
+      if (!active || !wait) return;
+      const exit = yield* Fiber.await(active);
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause))
+        return yield* Effect.failCause(exit.cause);
+    });
+  const syncOnce = requestCycle(syncCycle);
+  const guardedSync = syncOnce.pipe(Effect.ignore);
+  const cancelEpoch = coordinator.withPermit(
+    Effect.gen(function* () {
+      cancelling = true;
+      pendingSweep = false;
+      const active = cycle;
+      // No sync/registry mutex is held while cancellation is requested. Cycle interruption
+      // finishes any registration reservation first; matching release has a 15s bound.
+      yield* Fiber.interruptAll([
+        ...(active ? [active] : []),
+        ...[...executions.values()].flatMap((e) => (e.fiber ? [e.fiber] : [])),
+      ]);
+      const s = yield* readSettings.pipe(Effect.catch(() => Effect.succeed(null)));
+      if (s) resetStatus(s.memoryHubVersion);
+      cancelling = false;
+    }),
   );
   const shutdown = Effect.gen(function* () {
     stopped = true;
-    for (const fiber of background) yield* Fiber.interrupt(fiber);
-    yield* registryMutex.withPermit(
-      Effect.gen(function* () {
-        for (const entry of executions.values())
-          if (entry.fiber) yield* Fiber.interrupt(entry.fiber);
-      }),
-    );
+    yield* cancelEpoch;
+    yield* Fiber.interruptAll(background);
   });
   yield* Effect.addFinalizer(() => shutdown);
   const start = Effect.gen(function* () {
@@ -1063,7 +1170,13 @@ const make = Effect.gen(function* () {
     );
     background.push(yield* Stream.runForEach(wakes, () => guardedSync).pipe(Effect.forkIn(scope)));
     background.push(
-      yield* Stream.runForEach(changes, () => guardedSync).pipe(Effect.forkIn(scope)),
+      yield* Stream.runForEach(changes, (s) =>
+        Effect.gen(function* () {
+          if (s.memoryHubVersion !== statusEpoch) yield* cancelEpoch;
+          // Do not block the settings consumer on the next transport.
+          yield* requestCycle(syncCycle, false, false).pipe(Effect.ignore);
+        }),
+      ).pipe(Effect.forkIn(scope)),
     );
     background.push(
       yield* Effect.forever(Effect.sleep("30 seconds").pipe(Effect.andThen(guardedSync))).pipe(
@@ -1084,7 +1197,7 @@ const make = Effect.gen(function* () {
     start,
     syncOnce,
     shutdown,
-    scheduleConflictResolution: sweep,
+    scheduleConflictResolution: requestCycle(sweep, true),
     activeResolutions: Effect.sync(() => executions.size + reservations),
     readLocalReadiness,
     requireBootstrap: (space) =>
@@ -1115,17 +1228,30 @@ const make = Effect.gen(function* () {
     syncStatus: (_input, permit) =>
       Effect.gen(function* () {
         yield* permit;
-        const r = yield* route();
-        if (!r?.space) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
-        const persisted = yield* runtime.readProcessing(r.space, r.hubId);
-        const storage = yield* quota.readStorageStatus({
-          memorySpaceId: r.space,
-          environmentId: local,
-        });
+        const s = yield* readSettings;
+        const epoch = s.memoryHubVersion;
+        resetStatus(epoch);
+        const space = s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId;
+        const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
+        const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
+        const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
+        const storage = space
+          ? yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: local })
+          : yield* runtime.readUnboundStorage;
         yield* permit;
+        const current = yield* readSettings;
+        if (current.memoryHubVersion !== epoch)
+          return yield* new M.MemoryHubError({ code: "fenced" });
         return {
-          memorySpaceId: r.space,
-          state: lastFailure ? "offline" : "online",
+          memorySpaceId: space,
+          state:
+            s.memoryHub.mode === "disabled"
+              ? "disabled"
+              : bootstrap !== "ready"
+                ? "bootstrapping"
+                : lastFailure
+                  ? "offline"
+                  : "online",
           pendingSync: persisted.pendingSync,
           quarantined: persisted.quarantined,
           parked: persisted.parked,
@@ -1138,47 +1264,55 @@ const make = Effect.gen(function* () {
       }),
     readSource: (validated, permit) =>
       Effect.gen(function* () {
-        yield* permit;
-        const r = yield* route();
-        if (!r || r.space !== validated.request.memorySpaceId)
-          return yield* new M.MemoryHubError({ code: "space_mismatch" });
-        yield* service.validateSourceOutcome(
-          { request: validated, outcome: { kind: "unavailable", code: "source_unavailable" } },
-          permit,
-        );
-        const requested = yield* r.connection
-          ? client.requestSourceRead(r.connection, validated.request)
-          : hub.requestSourceRead(validated.request, r.principal!);
-        yield* ensureEpoch(r.settings.memoryHubVersion);
-        const deadline = Math.min(
-          (yield* Clock.currentTimeMillis) + 75000,
-          Date.parse(requested.request.expiresAtHubTime),
-        );
-        while ((yield* Clock.currentTimeMillis) < deadline) {
+        const startedAt = yield* Clock.currentTimeMillis;
+        return yield* Effect.gen(function* () {
           yield* permit;
+          const r = yield* route();
+          if (!r || r.space !== validated.request.memorySpaceId)
+            return yield* new M.MemoryHubError({ code: "space_mismatch" });
+          yield* service.validateSourceOutcome(
+            { request: validated, outcome: { kind: "unavailable", code: "source_unavailable" } },
+            permit,
+          );
+          const requested = yield* r.connection
+            ? client.requestSourceRead(r.connection, validated.request)
+            : hub.requestSourceRead(validated.request, r.principal!);
           yield* ensureEpoch(r.settings.memoryHubVersion);
-          yield* relay(r);
-          const i = {
-            protocolVersion: 1 as const,
-            memorySpaceId: validated.request.memorySpaceId,
-            requestId: validated.request.requestId,
-          };
-          const result = yield* r.connection
-            ? client.resultSourceRead(r.connection, i)
-            : hub.resultSourceRead(i, r.principal!);
-          yield* ensureEpoch(r.settings.memoryHubVersion);
-          if ((yield* Clock.currentTimeMillis) >= deadline) break;
-          if (result.state === "completed")
-            return yield* service.validateSourceOutcome(
-              { request: validated, outcome: result.outcome },
-              permit,
-            );
-          if (result.state === "expired") break;
-          yield* Effect.sleep(Math.min(1000, deadline - (yield* Clock.currentTimeMillis)));
-        }
-        yield* permit;
-        return { kind: "unavailable", code: "source_unavailable" } as const;
+          const deadline = Math.min(
+            startedAt + 75000,
+            Date.parse(requested.request.expiresAtHubTime),
+          );
+          return yield* Effect.gen(function* () {
+            while ((yield* Clock.currentTimeMillis) < deadline) {
+              yield* permit;
+              yield* ensureEpoch(r.settings.memoryHubVersion);
+              yield* relay(r);
+              const i = {
+                protocolVersion: 1 as const,
+                memorySpaceId: validated.request.memorySpaceId,
+                requestId: validated.request.requestId,
+              };
+              const result = yield* r.connection
+                ? client.resultSourceRead(r.connection, i)
+                : hub.resultSourceRead(i, r.principal!);
+              yield* ensureEpoch(r.settings.memoryHubVersion);
+              if ((yield* Clock.currentTimeMillis) >= deadline) break;
+              if (result.state === "completed")
+                return yield* service.validateSourceOutcome(
+                  { request: validated, outcome: result.outcome },
+                  permit,
+                );
+              if (result.state === "expired") break;
+              yield* Effect.sleep(Math.min(1000, deadline - (yield* Clock.currentTimeMillis)));
+            }
+            return { kind: "unavailable", code: "source_unavailable" } as const;
+          }).pipe(Effect.timeout(Math.max(0, deadline - (yield* Clock.currentTimeMillis))));
+        }).pipe(Effect.timeout(Math.max(0, startedAt + 75000 - (yield* Clock.currentTimeMillis))));
       }).pipe(
+        Effect.catchTags({
+          TimeoutError: () =>
+            Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+        }),
         Effect.catchTags({
           MemoryHubUnauthorizedError: () =>
             Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" })),
