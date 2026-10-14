@@ -124,6 +124,8 @@ export const MEMORY_IMPORT_MAX_LIVE_BODY_BYTES = 67108864;
 export const MEMORY_IMPORT_MAX_SOURCE_ITEMS = 50000;
 export const MEMORY_IMPORT_MAX_ALIASES = 100000;
 export const MEMORY_IMPORT_MAX_CONTENT_DIGESTS = 100000;
+export const MEMORY_IMPORT_LINEAGE_MAX_RECORDS_PER_MEMORY = 1000;
+export const MEMORY_IMPORT_LINEAGE_MAX_BYTES = 33554432;
 export const MEMORY_IMPORT_KEY_MAX_UTF8_BYTES = 512;
 export const MEMORY_IMPORT_DIGEST_MAX_UTF8_BYTES = 64;
 export const MEMORY_REVERT_WINDOW_MS = 2592000000;
@@ -786,6 +788,8 @@ export const MemoryCapacityDimension = Schema.Literals([
   "derived_cache",
   "fts_indexed_text",
   "fts_admission_brake",
+  "import_lineage_records",
+  "import_lineage_bytes",
 ]);
 export type MemoryCapacityDimension = typeof MemoryCapacityDimension.Type;
 
@@ -2312,6 +2316,48 @@ export const MemorySuppressionRecord = Schema.Union([
 ]);
 export type MemorySuppressionRecord = typeof MemorySuppressionRecord.Type;
 
+/** Body-free lifetime evidence; unlike suppression, live lineage has no delete operation. */
+export const MemoryImportLineageRecord = Schema.Union([
+  struct({
+    memorySpaceId: MemorySpaceId,
+    memoryId: MemoryId,
+    kind: Schema.Literal("sourceKey"),
+    sourceKey: MemorySourceKey,
+  }),
+  struct({
+    memorySpaceId: MemorySpaceId,
+    memoryId: MemoryId,
+    kind: Schema.Literal("content"),
+    content: MemoryContentSuppression,
+  }),
+]);
+export type MemoryImportLineageRecord = typeof MemoryImportLineageRecord.Type;
+
+// Explicit tuples make duplicate identity independent of JSON property insertion order.
+const importProjectKey = (v: MemoryProjectKey) =>
+  v.kind === "repository" ? [v.kind, v.groupingKey] : [v.kind, v.sharedProjectId];
+const importScopeKey = (v: MemoryScope) =>
+  v.kind === "user"
+    ? [v.kind]
+    : v.kind === "project"
+      ? [v.kind, importProjectKey(v.projectKey)]
+      : [
+          v.kind,
+          v.thread.environmentId,
+          v.thread.threadId,
+          v.projectKey === undefined ? null : importProjectKey(v.projectKey),
+        ];
+/** Shared canonical key for ledger union, duplicate validation and checkpoint pagination. */
+export const memoryImportLineageRecordKey = (v: MemoryImportLineageRecord): string =>
+  JSON.stringify([
+    v.memorySpaceId,
+    v.memoryId,
+    v.kind,
+    v.kind === "sourceKey"
+      ? [v.sourceKey.environmentId, v.sourceKey.sourceId, v.sourceKey.sourceItemKey]
+      : [importScopeKey(v.content.scope), v.content.assertionKind, v.content.contentFingerprint],
+  ]);
+
 export const MemoryHubCheckpointPage = bounded(
   struct({
     memorySpaceId: MemorySpaceId,
@@ -2328,6 +2374,7 @@ export const MemoryHubCheckpointPage = bounded(
     identities: array(MemoryIdentityRecord),
     fences: array(MemoryFenceRecord),
     suppressions: array(MemorySuppressionRecord),
+    importLineage: array(MemoryImportLineageRecord),
     nextCursor: Schema.NullOr(canonical),
     bootstrapComplete: Schema.Boolean,
   }).check(
@@ -2341,7 +2388,8 @@ export const MemoryHubCheckpointPage = bounded(
         v.compactReceipts.length +
         v.identities.length +
         v.fences.length +
-        v.suppressions.length;
+        v.suppressions.length +
+        v.importLineage.length;
       return (
         count <= 100 &&
         (count > 0 || v.bootstrapComplete) &&
@@ -2651,6 +2699,7 @@ export function validateMemoryCheckpointRecords(
     resolutions = pages.flatMap((p) => p.resolutions),
     tombstones = pages.flatMap((p) => p.tombstones),
     suppressions = pages.flatMap((p) => p.suppressions),
+    importLineage = pages.flatMap((p) => p.importLineage),
     conflicts = pages.flatMap((p) => p.conflicts),
     items = pages.flatMap((p) => p.items);
   const identitiesById = uniqueIndex(identities, (v) => v.memoryId);
@@ -2661,6 +2710,7 @@ export function validateMemoryCheckpointRecords(
   const tombstonesById = uniqueIndex(tombstones, (v) => v.memoryId);
   const conflictsById = uniqueIndex(conflicts, (v) => v.conflictId);
   const itemsById = uniqueIndex(items, (v) => v.memoryId);
+  const lineageRows = uniqueIndex(importLineage, memoryImportLineageRecordKey);
   const suppressionRows = uniqueIndex(suppressions, (v) => JSON.stringify(v));
   // Rejected attempts may share a resolution id; only committed results own that key.
   const resolveReceiptsById = uniqueIndex(
@@ -2681,6 +2731,7 @@ export function validateMemoryCheckpointRecords(
     !conflictsById ||
     !itemsById ||
     !suppressionRows ||
+    !lineageRows ||
     !resolveReceiptsById
   )
     return false;
@@ -2697,6 +2748,7 @@ export function validateMemoryCheckpointRecords(
     ...resolutions.map((r) => r.resolution),
     ...tombstones,
     ...suppressions,
+    ...importLineage,
     ...conflicts,
     ...items,
   ];
@@ -2706,6 +2758,14 @@ export function validateMemoryCheckpointRecords(
         v.memorySpaceId === first.memorySpaceId &&
         identity(v.memoryId) !== undefined &&
         fence(v.memoryId) !== undefined,
+    )
+  )
+    return false;
+  if (
+    !importLineage.every(
+      (v) =>
+        v.kind !== "content" ||
+        same(importScopeKey(v.content.scope), importScopeKey(identity(v.memoryId)!.scope)),
     )
   )
     return false;
