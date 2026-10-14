@@ -9,8 +9,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Deferred from "effect/Deferred";
-import * as Fiber from "effect/Fiber";
-import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import type { ProviderDriver, ProviderInstance } from "@goat/provider-core/server/driver";
@@ -84,6 +82,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const instanceId = M.ProviderInstanceId.make(`fixture-${label}`);
     const selection = { instanceId, model: `model-${label}` };
     const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
+    const released = yield* Deferred.make<M.MemoryId>();
     let generated = 0;
     const driver: ProviderDriver<{}> = {
       driverKind: M.ProviderDriverKind.make("codex"),
@@ -146,11 +145,29 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       Layer.provide(SourceControlDrivers.layer),
       Layer.provide(vcs),
     );
+    // Observe the real HTTP release after the coordinator's persisted finalize.
+    // Even an erroneous release wakes the test, which asserts the actual state;
+    // it cannot turn a failed resolution into a timeout-only oracle.
+    const observedClient = Layer.effect(
+      Client.MemoryHubClient,
+      Effect.gen(function* () {
+        const client = yield* Client.MemoryHubClient;
+        return Client.MemoryHubClient.of({
+          ...client,
+          release: (connection, input) =>
+            client
+              .release(connection, input)
+              .pipe(
+                Effect.onExit(() => Deferred.succeed(released, input.memoryId).pipe(Effect.asVoid)),
+              ),
+        });
+      }),
+    ).pipe(Layer.provideMerge(Runtime.layer));
     const syncLayer = Layer.mergeAll(Sync.layer, Worker.layer).pipe(
       Layer.provide(Maintenance.layer),
       Layer.provide(OrchestrationRuntime.layerEventSink),
       Layer.provide(RuntimeIdentity.layer),
-      Layer.provideMerge(Runtime.layer),
+      Layer.provideMerge(observedClient),
       Layer.provideMerge(Generation.layer.pipe(Layer.provide(sourceControl))),
       Layer.provideMerge(providers),
       Layer.provideMerge(Layer.succeedContext(baseContext)),
@@ -208,23 +225,6 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     ).pipe(Effect.map((started) => Context.get(started, Sync.MemorySyncService)));
     const aggregate = (space: M.MemorySpaceId, memory: M.MemoryId) =>
       run(Store.MemoryStore.use((s) => s.loadAggregate(space, memory)));
-    const milestone = (
-      space: M.MemorySpaceId,
-      memory: M.MemoryId,
-      predicate: (a: Store.MemoryAggregate) => boolean,
-    ) =>
-      run(
-        Effect.gen(function* () {
-          const store = yield* Store.MemoryStore;
-          const changes = yield* store.changes(space);
-          return yield* changes.pipe(
-            Stream.filterEffect(() => aggregate(space, memory).pipe(Effect.map(predicate))),
-            Stream.take(1),
-            Stream.runDrain,
-            Effect.forkScoped,
-          );
-        }),
-      );
     return {
       home,
       run,
@@ -239,7 +239,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       selection,
       entered,
       aggregate,
-      milestone,
+      released,
       generated: () => generated,
       startProduction,
     };
@@ -547,14 +547,10 @@ it.effect(
       yield* write(c.b, c.space, target, 1121, "B original", heads);
       const aHead = (yield* c.a.aggregate(c.space, target)).heads[0]!;
       const bHead = (yield* c.b.aggregate(c.space, target)).heads[0]!;
-      const committed = yield* c.b.milestone(
-        c.space,
-        target,
-        (aggregate) => aggregate.resolutions.length === 1 && aggregate.item?.status === "active",
-      );
       yield* c.a.tick;
       yield* c.b.tick;
-      yield* Fiber.join(committed);
+      assert.strictEqual(yield* Deferred.await(c.b.released), target);
+      yield* c.b.worker.drain;
       const input = yield* Deferred.await(c.b.entered);
       assert.deepStrictEqual(input.modelSelection, c.b.selection);
       assert.strictEqual(c.b.generated(), 1);
@@ -639,14 +635,10 @@ it.effect(
       yield* c.a.tick;
       assert.strictEqual(c.a.generated(), 0);
       assert.strictEqual((yield* c.h.aggregate(c.space, target)).item?.status, "quarantined");
-      const committed = yield* c.a.milestone(
-        c.space,
-        target,
-        (aggregate) => aggregate.resolutions.length === 1 && aggregate.item?.status === "active",
-      );
       yield* TestClock.adjust("120 seconds");
       yield* c.a.tick;
-      yield* Fiber.join(committed);
+      assert.strictEqual(yield* Deferred.await(c.a.released), target);
+      yield* c.a.worker.drain;
       assert.strictEqual(c.a.generated(), 1);
       assert.strictEqual(
         (yield* c.h.aggregate(c.space, target)).resolutions[0]?.resolvingEnvironmentId,
