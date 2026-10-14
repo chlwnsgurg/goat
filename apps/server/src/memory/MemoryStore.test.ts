@@ -3671,7 +3671,11 @@ it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
                 deleteOperationId: first.operationId,
                 deletingEnvironmentId: env,
                 deletedAtUtc: M.MemoryUtcTimestamp.make(now),
-                suppressedSourceKeys: [],
+                suppressedSourceKeys: Array.from({ length: 20 }, (_, n) => ({
+                  environmentId: env,
+                  sourceId: M.MemoryImportSourceId.make(id(1700)),
+                  sourceItemKey: `${"k".repeat(480)}${n}`,
+                })),
                 suppressedContent: [],
                 sourceExclusions: [],
               },
@@ -3679,7 +3683,7 @@ it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
           : shape === "escaped" && first.kind === "upsert"
             ? {
                 ...first,
-                payload: { ...first.payload, text: '\u0000"\\한글'.repeat(1000) },
+                payload: { ...first.payload, text: "\u0000".repeat(10000) },
               }
             : first;
       yield* store.transact(
@@ -3765,12 +3769,15 @@ it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
         pages.flatMap((p) => p.compactReceipts).length,
         shape === "pages" ? 106 : 1,
       );
-      if (shape === "pages") assert.isAbove(handle.pageCount, 1);
+      if (shape === "pages" || shape === "escaped") assert.isAbove(handle.pageCount, 1);
       assert.strictEqual(
         pages.flatMap((p) => p.identities).length,
         shape === "refusal" || shape === "pages" ? 0 : 1,
       );
-      if (shape === "forget") assert.strictEqual(pages.flatMap((p) => p.tombstones).length, 1);
+      if (shape === "forget") {
+        assert.strictEqual(pages.flatMap((p) => p.tombstones).length, 1);
+        assert.strictEqual(pages.flatMap((p) => p.suppressions).length, 20);
+      }
       const replay = yield* store.transact(store.readHubReceiptTx(space, op.operationId));
       assert.strictEqual(
         replay?.entry.receipt.outcome,

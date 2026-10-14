@@ -1560,26 +1560,36 @@ const make = Effect.gen(function* () {
   const globalCheckpointReservation = Effect.fnUntraced(function* () {
     const rows = yield* stored(
       "hub-checkpoint-bound-global",
-      sql<{ bytes: number }>`
+      sql<{ bytes: number; bound: number }>`
       SELECT coalesce(sum(max(coalesce(r.checkpoint_bytes,0),
         ${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+
         coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD})+
-        coalesce(r.published_pinned_bytes,0)-CASE WHEN r.snapshot_generation=coalesce(g.value,0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END),0) AS bytes
+        coalesce(r.published_pinned_bytes,0)-CASE WHEN r.snapshot_generation=coalesce(g.value,0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END),0) AS bytes,
+      coalesce(sum(${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD}),0) AS bound
       FROM (SELECT space FROM memory_hub_retention UNION SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows') s
       LEFT JOIN memory_hub_retention r ON r.space=s.space
       LEFT JOIN memory_quota_counters b ON b.space=s.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key=''
       LEFT JOIN memory_quota_counters n ON n.space=s.space AND n.dimension='hub_snapshot_rows' AND n.scope_key=''
       LEFT JOIN memory_quota_counters g ON g.space=s.space AND g.dimension='hub_snapshot_generation' AND g.scope_key=''`,
     );
-    return rows[0]!.bytes;
+    return rows[0]!;
   });
   const withHubBudget = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     Effect.gen(function* () {
       const before = new Map((yield* globalHubCounters()).map((row) => [row.dimension, row.value]));
-      before.set("hub_checkpoint", yield* globalCheckpointReservation());
+      const beforeCheckpoint = yield* globalCheckpointReservation();
+      before.set("hub_checkpoint", beforeCheckpoint.bytes);
       const result = yield* effect;
       const after = new Map((yield* globalHubCounters()).map((row) => [row.dimension, row.value]));
-      after.set("hub_checkpoint", yield* globalCheckpointReservation());
+      const afterCheckpoint = yield* globalCheckpointReservation();
+      // A larger explicit reservation must not hide a new request's incremental input growth.
+      const maskedGrowth = Math.max(
+        0,
+        afterCheckpoint.bound -
+          beforeCheckpoint.bound -
+          Math.max(0, afterCheckpoint.bytes - beforeCheckpoint.bytes),
+      );
+      after.set("hub_checkpoint", afterCheckpoint.bytes + maskedGrowth);
       for (const [counter, dimension, limit] of [
         ["hub_metadata", "permanent_metadata", M.MEMORY_PERMANENT_METADATA_MAX_BYTES],
         ["hub_receipts", "receipts", M.MEMORY_DEDUP_MAX_RECEIPTS],

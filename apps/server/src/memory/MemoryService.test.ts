@@ -1343,3 +1343,42 @@ it.effect(
       assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "a fully reserved explicit checkpoint cannot mask a fresh upsert's incremental growth",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+      yield* service.upsert(input(1400), Effect.void);
+      const operation = yield* store.readWorkOperation(`sync:${space}:${id(1400)}`);
+      if (!operation) throw new Error("fixture");
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+      const receipt = yield* service.admitHubOperation({
+        authority: {
+          principal: {
+            memorySpaceId: space,
+            environmentId,
+            credentialVersion: 1,
+            scopes: ["memory:sync"],
+          },
+          now: Clock.currentTimeMillis,
+          reauthorize: Effect.void,
+        },
+        operation,
+      });
+      assert.strictEqual(receipt.failureCode, "capacity_exceeded");
+      assert.strictEqual(receipt.capacity?.dimension, "checkpoint_staging");
+      assert.isNull(receipt.hubSequence);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 0);
+      assert.isTrue((yield* store.loadAggregate(space, memoryId)).item?.pendingSync);
+    }).pipe(Effect.provide(live)),
+);
