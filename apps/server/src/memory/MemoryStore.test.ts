@@ -6725,6 +6725,7 @@ it.effect.each([
       );
       assert.strictEqual(due.attempt, input.expectedAttempt);
       assert.isTrue(yield* fresh.claimCandidate(candidate.id, 2, 4));
+      yield* TestClock.adjust(4);
       assert.deepStrictEqual(
         yield* fresh.transact(
           fresh.prepareClaimAttemptTx({
