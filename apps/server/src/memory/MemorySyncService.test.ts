@@ -1119,12 +1119,13 @@ it.effect.each(["permit", "reader", "recheck"] as const)(
                   : Effect.void;
               }),
             ownerReader: {
-              readCommitted: (request) => {
-                reads++;
-                return request.requestId === id(801) && boundary === "reader"
-                  ? Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }))
-                  : Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const);
-              },
+              readCommitted: (request) =>
+                Effect.suspend(() => {
+                  reads++;
+                  return request.requestId === id(801) && boundary === "reader"
+                    ? Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }))
+                    : Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const);
+                }),
             },
           });
           yield* Effect.scoped(
@@ -1709,7 +1710,7 @@ it.effect.each(["owner permit", "owner read"] as const)(
     }),
 );
 
-it.effect.each(["denied", "epoch", "revoked"] as const)(
+it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] as const)(
   "owner refusal has terminal denial only while responder authority remains current: %s",
   (mode) =>
     Effect.gen(function* () {
@@ -1736,11 +1737,14 @@ it.effect.each(["denied", "epoch", "revoked"] as const)(
             return Effect.succeed({ accepted: true });
           }),
         resultSourceRead: () =>
-          Effect.succeed(
-            completed
+          Effect.gen(function* () {
+            if (mode === "result epoch")
+              yield* changeHub(1, { ...member, secretName: "late-fixture" }).pipe(Effect.orDie);
+            if (mode === "result revoked") return yield* new M.MemoryHubUnauthorizedError({});
+            return completed
               ? { state: "completed" as const, outcome: completed }
-              : { state: "expired" as const, code: "source_unavailable" as const },
-          ),
+              : { state: "expired" as const, code: "source_unavailable" as const };
+          }),
         push: (_c, input) =>
           Effect.sync(() => {
             pushes++;
@@ -1773,14 +1777,16 @@ it.effect.each(["denied", "epoch", "revoked"] as const)(
             Effect.gen(function* () {
               const sync = yield* Sync.MemorySyncService;
               const result = yield* Effect.result(sync.readSource(validated, Effect.void));
-              if (mode === "epoch") {
+              if (mode === "epoch" || mode === "result epoch" || mode === "result revoked") {
                 assert.strictEqual(result._tag, "Failure");
                 if (result._tag === "Failure")
                   assert.deepStrictEqual(
                     result.failure,
-                    new Service.MemoryAccessError({ code: "fenced" }),
+                    new Service.MemoryAccessError({
+                      code: mode === "result revoked" ? "route_unavailable" : "fenced",
+                    }),
                   );
-                assert.strictEqual(attempted, 0);
+                assert.strictEqual(attempted, mode === "epoch" ? 0 : 1);
               } else {
                 assert.strictEqual(result._tag, "Success");
                 if (result._tag === "Success")
@@ -1792,9 +1798,12 @@ it.effect.each(["denied", "epoch", "revoked"] as const)(
                   );
                 assert.strictEqual(attempted, 1);
               }
-              assert.strictEqual(completed?.kind, mode === "denied" ? "denied" : undefined);
+              assert.strictEqual(
+                completed?.kind,
+                mode === "epoch" || mode === "revoked" ? undefined : "denied",
+              );
               requested = undefined;
-              yield* enqueue(806);
+              yield* enqueue(806, M.MemoryId.make(id(807)));
               yield* sync.syncOnce;
               assert.strictEqual(pushes, 1);
             }).pipe(
