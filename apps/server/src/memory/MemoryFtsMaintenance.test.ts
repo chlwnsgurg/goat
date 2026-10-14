@@ -4,13 +4,16 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Fts from "./MemoryFtsMaintenance.ts";
 const env = M.EnvironmentId.make("fixture");
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration).pipe(Layer.provideMerge(database));
+const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(lineageMigration))).pipe(
+  Layer.provideMerge(database),
+);
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 const quotas = Quota.layer.pipe(Layer.provideMerge(live));
 const services = Fts.layer.pipe(Layer.provideMerge(quotas));

@@ -46,7 +46,6 @@ layer("055_OrchestrationV2", (it) => {
         [72, "MemorySearchCounters"],
         [73, "MemoryTaskGrantCeiling"],
         [74, "MemoryImportLineage"],
-        [74, "MemoryImportLineage"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 

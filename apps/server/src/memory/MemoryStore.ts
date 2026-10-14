@@ -8,6 +8,7 @@ import {
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import * as M from "@goat/contracts";
+import type { ImportStorePorts } from "./imports/MemoryImportTypes.ts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -1499,6 +1500,7 @@ export class MemoryStore extends Context.Service<
       space: M.MemorySpaceId,
       scope: M.MemoryScope,
     ) => Effect.Effect<MemoryUsage, MemoryStorageError>;
+    readonly findImportMatchTx: ImportStorePorts["findImportMatchTx"];
     readonly readImportLineage: (
       space: M.MemorySpaceId,
       id: M.MemoryId,
@@ -2869,7 +2871,13 @@ const make = Effect.gen(function* () {
             sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${op.memorySpaceId},${op.memoryId},${yield* identityCodec.encode(decision.identity)},${yield* fenceCodec.encode(decision.fence ?? { memorySpaceId: op.memorySpaceId, memoryId: op.memoryId, highestFencingToken: 0, activeLease: null })},${M.MEMORY_IDENTITY_CORE_MAX_BYTES + reservation.bytes},${reservation.keys}) ON CONFLICT(space,memory_id) DO UPDATE SET reserve_bytes=max(memory_identity_ledger.reserve_bytes,excluded.reserve_bytes),reserve_keys=max(memory_identity_ledger.reserve_keys,excluded.reserve_keys) WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=excluded.space AND t.memory_id=excluded.memory_id)`,
           );
         }
-        if (accepted && !decision.pending && !tombstones.length && op.kind !== "forget") {
+        if (
+          accepted &&
+          decision.admission.kind !== "localIntent" &&
+          !decision.pending &&
+          !tombstones.length &&
+          op.kind !== "forget"
+        ) {
           yield* unionImportLineageTx(lineageForRevision(op.revision), decision.admission);
         }
         if (accepted && op.kind === "forget") {
@@ -5535,6 +5543,83 @@ const make = Effect.gen(function* () {
     );
     return yield* Effect.forEach(rows, (row) => lineageCodec.decode(row.record_json, strict));
   });
+  const findImportMatchTx: ImportStorePorts["findImportMatchTx"] = Effect.fn(
+    "MemoryStore.findImportMatchTx",
+  )(function* (input) {
+    yield* Transaction;
+    const dummy = M.MemoryId.make("00000000-0000-4000-8000-000000000000");
+    let live:
+      | {
+          readonly kind: "live";
+          readonly memoryId: M.MemoryId;
+          readonly revision: M.MemoryRevision;
+          readonly payload: M.MemoryPayload;
+        }
+      | undefined;
+    for (const record of [
+      {
+        memorySpaceId: input.memorySpaceId,
+        memoryId: dummy,
+        kind: "sourceKey" as const,
+        sourceKey: input.source,
+      },
+      {
+        memorySpaceId: input.memorySpaceId,
+        memoryId: dummy,
+        kind: "content" as const,
+        content: input.content,
+      },
+    ]) {
+      const key = M.memoryImportLineageRecordKey(record);
+      const suppressionKey = hashText(
+        yield* suppressionKeyCodec.encode(
+          record.kind === "sourceKey"
+            ? { kind: record.kind, value: record.sourceKey }
+            : { kind: record.kind, value: record.content },
+        ),
+      );
+      const suppressed = yield* stored(
+        "import-suppression-lookup",
+        sql<{ memory_id: string }>`
+        SELECT memory_id FROM memory_import_keys WHERE space=${input.memorySpaceId} AND key_kind=${record.kind} AND key=${suppressionKey}`,
+      );
+      if (suppressed[0])
+        return {
+          kind:
+            record.kind === "sourceKey"
+              ? ("source_suppressed" as const)
+              : ("content_suppressed" as const),
+          memoryId: M.MemoryId.make(suppressed[0].memory_id),
+        };
+      const rows = yield* stored(
+        "import-lineage-lookup",
+        sql<{ memory_id: string }>`
+        SELECT memory_id FROM memory_import_lineage WHERE space=${input.memorySpaceId} AND kind=${record.kind} AND key=${key}
+        ORDER BY memory_id`,
+      );
+      // Check every matching identity's delete fence before choosing a live exact-copy target.
+      for (const row of rows) {
+        const memoryId = M.MemoryId.make(row.memory_id);
+        const current = yield* loadAggregate(input.memorySpaceId, memoryId);
+        if (current.tombstone)
+          return {
+            kind:
+              record.kind === "sourceKey"
+                ? ("source_suppressed" as const)
+                : ("content_suppressed" as const),
+            memoryId,
+          };
+        if (current.pendingForget) return { kind: "pending_forget" as const, memoryId };
+        if (current.item?.status !== "active" || current.heads.length !== 1) continue;
+        const head = current.revisions.find(
+          (pair) => pair.revision.revisionId === current.heads[0],
+        );
+        if (head?.payload)
+          live ??= { kind: "live", memoryId, revision: head.revision, payload: head.payload };
+      }
+    }
+    return live ?? { kind: "none" as const };
+  });
   const persistImportLineageTx = Effect.fnUntraced(function* (
     input: ReadonlyArray<M.MemoryImportLineageRecord>,
   ) {
@@ -8154,6 +8239,13 @@ const make = Effect.gen(function* () {
         ...current.conflicts.filter((c) => c.status !== "resolved"),
       ];
     }
+    const lineageCount = yield* stored(
+      "hub-snapshot-lineage-complete",
+      sql<{ count: number }>`
+      SELECT count(*) AS count FROM memory_import_lineage WHERE space=${space}`,
+    );
+    if (all.importLineage.length !== lineageCount[0]!.count)
+      return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
     all.compactReceipts = receipts;
     const keys = [
       "items",
@@ -8622,6 +8714,7 @@ const make = Effect.gen(function* () {
     );
     const usage = yield* usageForHub(space);
     const specifications = [
+      ["memory_import_lineage", "length(CAST(record_json AS BLOB))"],
       ["memory_hub_operations", "length(CAST(entry_json AS BLOB))"],
       [
         "memory_hub_members",
@@ -9442,6 +9535,7 @@ const make = Effect.gen(function* () {
       ),
     persistCompactReceipt,
     prunePayloads,
+    findImportMatchTx,
     readImportLineage,
     unionImportLineageTx,
     readSuppressions,

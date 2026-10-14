@@ -14,7 +14,10 @@ export default Effect.gen(function* () {
   yield* sql`CREATE INDEX memory_import_lineage_lookup ON memory_import_lineage(space,kind,key,memory_id)`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
     VALUES ('_hub_global','import_lineage_bytes','',0)`;
-  const counter = (space: string, dimension: string, value: string) => `
+  const counter = (space: string, dimension: string, value: string) =>
+    value.startsWith("-")
+      ? `UPDATE memory_quota_counters SET value=value+(${value}) WHERE space=${space} AND dimension='${dimension}' AND scope_key='';`
+      : `
     INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
     VALUES (${space},'${dimension}','',${value})
     ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;

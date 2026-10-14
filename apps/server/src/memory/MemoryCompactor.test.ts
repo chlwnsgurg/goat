@@ -104,6 +104,131 @@ const pull = (afterSequence: number, environmentId = hubEnv): M.MemoryHubPullInp
 
 describe("MemoryCompactor", () => {
   it.effect(
+    "retains 101 import deltas through real compaction, paged bootstrap and delete fences",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        let parents: readonly M.MemoryRevisionId[] = [];
+        for (let n = 0; n < 101; n++) {
+          const base = operation(1000 + n);
+          const op = {
+            ...base,
+            expectedHeads: parents,
+            revision: {
+              ...base.revision,
+              parents,
+              provenance: {
+                environmentId: hubEnv,
+                importSource: {
+                  sourceId: M.MemoryImportSourceId.make(id(9000)),
+                  format: "codex" as const,
+                  parserVersion: "synthetic-v1",
+                  sourceLocator: "synthetic/handbook",
+                  sourceItemKey: `key-${n}`,
+                  sourceFingerprint: String(n).padStart(64, "0"),
+                  contentFingerprint: String(n).padStart(64, "0"),
+                  sourceAliases: [],
+                  acceptedContentFingerprints: [],
+                },
+              },
+            },
+            payload: { ...base.payload, text: `synthetic history ${n}` },
+          };
+          const result = yield* push(op);
+          assert.notStrictEqual(result.receipts[0]!.outcome, "rejected");
+          parents = [op.revision.revisionId];
+        }
+        assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 202);
+        yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS);
+        const status = yield* (yield* Compactor.MemoryCompactor).compact(principal());
+        assert.isAbove(status.compaction.removedRows, 0);
+        assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 202);
+        const hub = yield* Hub.MemoryHubService;
+        const joined = yield* hub.join(
+          { protocolVersion: 1, memorySpaceId: space, environmentId: memberEnv },
+          principal(memberEnv),
+        );
+        const pages: M.MemoryHubCheckpointPage[] = [];
+        let cursor: string | undefined;
+        for (let count = 0; count < 20; count++) {
+          const pulled = yield* hub.pull(
+            {
+              ...pull(0, memberEnv),
+              snapshotToken: joined.snapshotToken,
+              ...(cursor === undefined ? {} : { cursor }),
+            },
+            principal(memberEnv),
+          );
+          const page = pulled.checkpoint!;
+          pages.push(page);
+          if (page.bootstrapComplete) break;
+          cursor = page.nextCursor!;
+        }
+        assert.isAbove(pages.length, 2);
+        assert.strictEqual(pages.flatMap((page) => page.importLineage).length, 202);
+        assert.isTrue(M.validateMemoryCheckpointRecords(pages));
+        yield* Effect.gen(function* () {
+          const replica = yield* Store.MemoryStore;
+          const checkpoint = {
+            memorySpaceId: space,
+            hubEnvironmentId: hubEnv,
+            checkpointId: "synthetic-replica",
+            expectedSnapshotToken: "synthetic-token",
+            expectedCheckpointSequence: pages[0]!.checkpointSequence,
+          };
+          yield* replica.transact(
+            replica.advanceBootstrapTx({
+              ...checkpoint,
+              expectedState: "unbound",
+              nextState: "staging",
+              snapshotToken: checkpoint.expectedSnapshotToken,
+              checkpointSequence: checkpoint.expectedCheckpointSequence,
+              nextCursor: null,
+            }),
+          );
+          yield* replica.installCheckpointPage({ ...checkpoint, page: pages[0]! });
+          assert.strictEqual((yield* replica.readImportLineage(space, memoryId)).length, 0);
+          yield* replica
+            .completeCheckpoint({ ...checkpoint, pageCount: pages.length })
+            .pipe(Effect.flip);
+          assert.strictEqual((yield* replica.readImportLineage(space, memoryId)).length, 0);
+          for (const page of pages) yield* replica.installCheckpointPage({ ...checkpoint, page });
+          yield* replica.completeCheckpoint({ ...checkpoint, pageCount: pages.length });
+          assert.strictEqual((yield* replica.readImportLineage(space, memoryId)).length, 202);
+          const service = yield* Service.MemoryService;
+          yield* service.forget(
+            {
+              memorySpaceId: space,
+              memoryId,
+              operationId: M.MemoryOperationId.make(id(9900)),
+              expectedHeads: parents,
+            },
+            Effect.void,
+          );
+          const match = yield* replica.transact(
+            replica.findImportMatchTx({
+              memorySpaceId: space,
+              environmentId: memberEnv,
+              source: {
+                environmentId: hubEnv,
+                sourceId: M.MemoryImportSourceId.make(id(9000)),
+                sourceItemKey: "key-0",
+              },
+              content: {
+                scope: { kind: "user" },
+                assertionKind: "inference",
+                contentFingerprint: "0".repeat(64),
+              },
+            }),
+          );
+          assert.strictEqual(match.kind, "source_suppressed");
+          assert.strictEqual((yield* replica.readImportLineage(space, memoryId)).length, 202);
+        }).pipe(Effect.provide(core));
+      }).pipe(Effect.provide(live)),
+  );
+
+  it.effect(
     "publishes a recoverable snapshot and real floor, compacts old tail and retains replay",
     () =>
       Effect.gen(function* () {

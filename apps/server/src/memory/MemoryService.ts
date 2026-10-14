@@ -13,6 +13,8 @@ import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
+import { ProviderMemoryImportRuntime } from "./imports/MemoryImportTypes.ts";
+import type { ImportProviderFacade } from "./imports/MemoryImportTypes.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -71,6 +73,7 @@ export type MemoryOwnerCommittedReader = {
 export class MemoryService extends Context.Service<
   MemoryService,
   {
+    readonly importProvider: ImportProviderFacade;
     readonly commitLocalIntent: (
       input: IntentCommitInput,
     ) => Effect.Effect<
@@ -429,6 +432,35 @@ const make = Effect.fnUntraced(function* (
         ),
       catch: (cause) => (isConflict(cause) ? cause : invalid()),
     });
+  const requireImportNotSuppressed = Effect.fnUntraced(function* (op: M.MemoryOperation) {
+    if (op.kind === "forget" || !op.revision.provenance.importSource) return;
+    const source = op.revision.provenance.importSource;
+    const keys = [
+      {
+        environmentId: op.revision.provenance.environmentId,
+        sourceId: source.sourceId,
+        sourceItemKey: source.sourceItemKey,
+      },
+      ...source.sourceAliases,
+    ];
+    const fingerprints = [source.contentFingerprint, ...source.acceptedContentFingerprints];
+    for (let index = 0; index < Math.max(keys.length, fingerprints.length); index++) {
+      const match = yield* store.findImportMatchTx({
+        memorySpaceId: op.memorySpaceId,
+        environmentId,
+        source: keys[index % keys.length]!,
+        content: {
+          scope: op.revision.scope,
+          assertionKind: op.revision.assertionKind,
+          contentFingerprint: fingerprints[index % fingerprints.length]!,
+        },
+      });
+      if (match.kind === "pending_forget")
+        return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+      if (match.kind === "source_suppressed" || match.kind === "content_suppressed")
+        return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
+    }
+  });
   const apply = Effect.fn("MemoryService.apply")(function* (
     op: M.MemoryOperation,
     admission: Store.MemoryAdmissionContext,
@@ -471,6 +503,7 @@ const make = Effect.fnUntraced(function* (
           )
             return yield* new Store.MemoryStoreConflict({ code: "base_compacted" });
         }
+        if (admission.kind !== "approvedReplica") yield* requireImportNotSuppressed(op);
         const decision = yield* decide(current, op, admission, approval, ancestry);
         return yield* quota.commit(decision, environmentId, permit);
       }),
@@ -1424,6 +1457,7 @@ const make = Effect.fnUntraced(function* (
     const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
     // Only the read-only semantic decision is caught; every subsequent write can fail the outer transaction.
     const prepared = yield* Effect.gen(function* () {
+      yield* requireImportNotSuppressed(op);
       if (op.kind !== "forget" && current.pendingForget)
         return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
       let approval: M.MemoryResolutionApproval | undefined;
@@ -1839,6 +1873,11 @@ const make = Effect.fnUntraced(function* (
     );
   });
   return MemoryService.of({
+    importProvider: (input, permit) =>
+      Effect.gen(function* () {
+        yield* permit;
+        return yield* (yield* ProviderMemoryImportRuntime).run(input, permit);
+      }),
     commitLocalIntent,
     readSource,
     prepareSourceRead,

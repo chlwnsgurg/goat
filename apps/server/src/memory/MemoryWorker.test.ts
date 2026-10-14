@@ -15,6 +15,7 @@ import * as RuntimeIdentity from "../runtimeIdentity.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
+import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
@@ -34,6 +35,7 @@ const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     yield* migration;
     yield* hubMigration;
+    yield* lineageMigration;
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
     yield* sql`CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY,deleted_at TEXT)`;
