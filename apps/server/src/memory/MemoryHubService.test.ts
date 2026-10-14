@@ -708,6 +708,43 @@ describe("MemoryHubAdministrator", () => {
       assert.strictEqual((yield* Ref.get(view)).version, 2);
     }).pipe(Effect.provide(adminDependencies)),
   );
+  it.effect("request-id CAS replay recovers a settings commit before ready persistence", () =>
+    Effect.gen(function* () {
+      const { admin, backend, view } = yield* adminFixture;
+      const store = yield* Store.MemoryStore;
+      const failing = yield* Hub.makeAdministrator.pipe(
+        Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+        Effect.provideService(Store.MemoryStore, {
+          ...store,
+          writeHubAdminTx: (input) =>
+            input.record.stage === "ready"
+              ? Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" }))
+              : store.writeHubAdminTx(input),
+        }),
+      );
+      assert.strictEqual(
+        (yield* failing.update(provision, Effect.void).pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      assert.strictEqual((yield* Ref.get(view)).version, 1);
+      const blocked = {
+        ...provision,
+        requestId: M.MemoryOperationId.make(id(413)),
+        expectedVersion: 1,
+        environmentId: M.EnvironmentId.make("later-member"),
+      };
+      assert.strictEqual(
+        (yield* admin.update(blocked, Effect.void).pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      const recovered = yield* admin.update(provision, Effect.void);
+      assert.strictEqual(recovered.view.version, 1);
+      assert.strictEqual(recovered.credential!.credentialVersion, 1);
+      assert.strictEqual((yield* Ref.get(view)).version, 1);
+      yield* admin.update(blocked, Effect.void);
+      assert.strictEqual((yield* Ref.get(view)).version, 2);
+    }).pipe(Effect.provide(adminDependencies)),
+  );
   it.effect("acknowledgement erases outgoing bytes and replay cannot disclose them", () =>
     Effect.gen(function* () {
       const { admin } = yield* adminFixture;

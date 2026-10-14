@@ -258,7 +258,9 @@ describe("MemoryCompactor", () => {
         yield* push();
         const store = yield* Store.MemoryStore;
         const activity = yield* Hub.MemoryHubActivity;
-        const scope = yield* Scope.make();
+        const scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+          Scope.close(scope, Exit.void),
+        );
         const mainId = yield* Effect.withFiberSucceed((fiber) => fiber.id);
         const workers = yield* Ref.make(new Map<number, Fiber.Fiber<unknown, unknown>>());
         const completed = yield* Ref.make(0);
@@ -320,6 +322,14 @@ describe("MemoryCompactor", () => {
           signaledRun.checkpointId,
         );
         yield* TestClock.adjust(1);
+        // Read the committed milestone at the deadline, so a missing daily run
+        // fails immediately instead of relying on the test runner's timeout.
+        assert.strictEqual(
+          Date.parse(
+            (yield* store.transact(store.readHubRetentionTx(space))).compaction.lastRunAtUtc!,
+          ),
+          startedAt + 3600000 + M.MEMORY_CHECKPOINT_INTERVAL_MS,
+        );
         yield* Deferred.await(daily);
         const dailyRun = yield* store.transact(store.readHubRetentionTx(space));
         assert.strictEqual(
@@ -343,7 +353,7 @@ describe("MemoryCompactor", () => {
           dailyRun.checkpointId,
         );
         assert.strictEqual(yield* Ref.get(completed), 3);
-      }).pipe(Effect.provide(live)),
+      }).pipe(Effect.scoped, Effect.provide(live)),
   );
   it.effect("members cannot run hub compaction or floor publication", () =>
     Effect.gen(function* () {
