@@ -689,7 +689,7 @@ const make = Effect.gen(function* () {
               current,
               limit,
               reclaimable: 0,
-              reserved: dimension === "checkpoint_staging" ? hub.checkpointBytes : 0,
+              reserved: dimension === "checkpoint_staging" ? hub.requiredCheckpointBoundBytes : 0,
               warning: current >= limit ? "full" : current >= limit * 0.9 ? "warning" : "normal",
               blockedReasons: current >= limit ? ["capacity_exceeded"] : [],
             });
@@ -700,6 +700,8 @@ const make = Effect.gen(function* () {
           return yield* storageStatusDecode(
             {
               quotas,
+              requiredCheckpointBoundBytes: hub.requiredCheckpointBoundBytes,
+              lastSnapshotBytes: hub.lastSnapshotBytes,
               tables: [
                 ...(sample?.tables ?? []).filter(
                   (table) => !hub.tables.some((h) => h.table === table.table),

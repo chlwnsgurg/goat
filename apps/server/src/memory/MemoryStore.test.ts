@@ -3522,7 +3522,7 @@ it.effect(
       yield* store.transact(
         store.reserveHubCheckpointTx({
           memorySpaceId: space,
-          checkpointDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 1,
+          checkpointDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 4097,
           publishedPinnedDeltaBytes: 0,
         }),
       );
@@ -3537,7 +3537,7 @@ it.effect(
         .transact(
           store.reserveHubCheckpointTx({
             memorySpaceId: other,
-            checkpointDeltaBytes: 1,
+            checkpointDeltaBytes: 4097,
             publishedPinnedDeltaBytes: 0,
           }),
         )
@@ -3547,7 +3547,7 @@ it.effect(
       const counters = yield* sql<{
         value: number;
       }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_checkpoint'`;
-      assert.strictEqual(counters[0]!.value, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
+      assert.strictEqual(counters[0]!.value, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 4096);
       yield* store.transact(
         store.reserveHubCheckpointTx({
           memorySpaceId: space,
@@ -3558,9 +3558,175 @@ it.effect(
       yield* store.transact(
         store.reserveHubCheckpointTx({
           memorySpaceId: other,
-          checkpointDeltaBytes: 1,
+          checkpointDeltaBytes: 4097,
           publishedPinnedDeltaBytes: 0,
         }),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("reserves snapshot growth atomically at pinned equality and rejects one extra byte", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const op = operation(981);
+    const append = store.appendHubEntryTx({
+      operation: op,
+      operationDigest: memoryOperationDigest(op),
+      outcome: "rejected",
+      failureCode: "identity_mismatch",
+      now: 0,
+    });
+    const base = yield* store.transact(store.readHubUsageTx(space));
+    const growth = yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* append;
+          const after = yield* store.readHubUsageTx(space);
+          return yield* Effect.fail(
+            after.requiredCheckpointBoundBytes - base.requiredCheckpointBoundBytes,
+          );
+        }),
+      )
+      .pipe(Effect.flip);
+    if (typeof growth !== "number") throw new Error("fixture growth failed");
+    assert.isAbove(growth, 0);
+    const pins = M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - base.requiredCheckpointBoundBytes - growth;
+    yield* store.transact(
+      store.reserveHubCheckpointTx({
+        memorySpaceId: space,
+        checkpointDeltaBytes: 0,
+        publishedPinnedDeltaBytes: pins + 1,
+      }),
+    );
+    const failed = yield* store.transact(append).pipe(Effect.flip);
+    assert.strictEqual(failed._tag, "MemoryCapacityError");
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 0);
+    assert.strictEqual(
+      (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+      base.requiredCheckpointBoundBytes,
+    );
+    yield* store.transact(
+      store.reserveHubCheckpointTx({
+        memorySpaceId: space,
+        checkpointDeltaBytes: 0,
+        publishedPinnedDeltaBytes: -1,
+      }),
+    );
+    yield* store.transact(append);
+    assert.strictEqual(
+      (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
+      M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+    );
+    const replay = yield* store.transact(append);
+    assert.strictEqual(replay.entry.kind, "metadata");
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["refusal", "forget", "escaped"] as const)(
+  "producer round-trips %s checkpoint and its encoded pages fit the counter bound",
+  (shape) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${env},${hash},1,'active')`;
+      const first = operation(990);
+      const op: M.MemoryOperation =
+        shape === "forget"
+          ? {
+              protocolVersion: 1,
+              memorySpaceId: space,
+              memoryId: memory,
+              operationId: first.operationId,
+              originEnvironmentId: env,
+              expectedHeads: [],
+              kind: "forget",
+              tombstone: {
+                memorySpaceId: space,
+                memoryId: memory,
+                deleteOperationId: first.operationId,
+                deletingEnvironmentId: env,
+                deletedAtUtc: M.MemoryUtcTimestamp.make(now),
+                suppressedSourceKeys: [],
+                suppressedContent: [],
+                sourceExclusions: [],
+              },
+            }
+          : shape === "escaped" && first.kind === "upsert"
+            ? {
+                ...first,
+                payload: { ...first.payload, text: '\u0000"\\한글'.repeat(1000) },
+              }
+            : first;
+      yield* store.transact(
+        Effect.gen(function* () {
+          const ledger = yield* store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome: shape === "refusal" ? "rejected" : shape === "forget" ? "deleted" : "accepted",
+            ...(shape === "refusal" ? { failureCode: "identity_mismatch" as const } : {}),
+            now: 0,
+          });
+          if (shape !== "refusal") {
+            const decided = decideMemoryOperation(
+              yield* store.loadAggregate(space, memory),
+              op,
+              Store.hubAdmission,
+              scanMemoryValue(op),
+            );
+            yield* store.apply({ ...decided, receipt: ledger.entry.receipt });
+          } else {
+            assert.strictEqual(ledger.entry.kind, "metadata");
+            if (ledger.entry.kind === "metadata") assert.isDefined(ledger.entry.compactReceipt);
+          }
+        }),
+      );
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId: env,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      const handle = yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority,
+          checkpointId: `shape-${shape}`,
+          snapshotToken: `token-${shape}`,
+          hubEnvironmentId: env,
+        }),
+      );
+      const pages: M.MemoryHubCheckpointPage[] = [];
+      let cursor: M.MemoryHubCheckpointPage["nextCursor"] = null;
+      for (let i = 0; i < handle.pageCount; i++) {
+        const page: M.MemoryHubCheckpointPage = yield* store.transact(
+          store.readHubCheckpointPageTx({
+            authority,
+            snapshotToken: handle.snapshotToken,
+            cursor,
+          }),
+        );
+        const json = yield* Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage))(
+          page,
+        );
+        pages.push(
+          yield* Schema.decodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage))(json),
+        );
+        cursor = page.nextCursor;
+      }
+      assert.isTrue(M.validateMemoryCheckpointRecords(pages));
+      const usage = yield* store.transact(store.readHubUsageTx(space));
+      assert.isAtMost(usage.lastSnapshotBytes, usage.requiredCheckpointBoundBytes);
+      assert.strictEqual(pages.flatMap((p) => p.compactReceipts).length, 1);
+      assert.strictEqual(pages.flatMap((p) => p.identities).length, shape === "refusal" ? 0 : 1);
+      if (shape === "forget") assert.strictEqual(pages.flatMap((p) => p.tombstones).length, 1);
+      const replay = yield* store.transact(store.readHubReceiptTx(space, op.operationId));
+      assert.strictEqual(
+        replay?.entry.receipt.outcome,
+        shape === "refusal" ? "rejected" : shape === "forget" ? "deleted" : "accepted",
       );
     }).pipe(Effect.provide(live)),
 );

@@ -1,3 +1,9 @@
+import {
+  checkpointBound,
+  CHECKPOINT_BYTE_EXPANSION,
+  CHECKPOINT_RECORD_OVERHEAD,
+  CHECKPOINT_PAGE_OVERHEAD,
+} from "./MemoryCheckpointBound.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes do not depend on runtime identity.
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -701,6 +707,8 @@ export type HubUsage = {
   liveHandles: number;
   stagingBytes: number;
   checkpointBytes: number;
+  requiredCheckpointBoundBytes: number;
+  lastSnapshotBytes: number;
   publishedPinnedBytes: number;
   liveSourceReads: number;
   sourcePayloadBytes: number;
@@ -1530,11 +1538,28 @@ const make = Effect.gen(function* () {
       }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND scope_key=''`,
     );
   });
+  const globalCheckpointReservation = Effect.fnUntraced(function* () {
+    const rows = yield* stored(
+      "hub-checkpoint-bound-global",
+      sql<{ bytes: number }>`
+      SELECT coalesce(sum(max(coalesce(r.checkpoint_bytes,0),
+        ${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+
+        coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD})+
+        coalesce(r.published_pinned_bytes,0)),0) AS bytes
+      FROM (SELECT space FROM memory_hub_retention UNION SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows') s
+      LEFT JOIN memory_hub_retention r ON r.space=s.space
+      LEFT JOIN memory_quota_counters b ON b.space=s.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key=''
+      LEFT JOIN memory_quota_counters n ON n.space=s.space AND n.dimension='hub_snapshot_rows' AND n.scope_key=''`,
+    );
+    return rows[0]!.bytes;
+  });
   const withHubBudget = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     Effect.gen(function* () {
       const before = new Map((yield* globalHubCounters()).map((row) => [row.dimension, row.value]));
+      before.set("hub_checkpoint", yield* globalCheckpointReservation());
       const result = yield* effect;
       const after = new Map((yield* globalHubCounters()).map((row) => [row.dimension, row.value]));
+      after.set("hub_checkpoint", yield* globalCheckpointReservation());
       for (const [counter, dimension, limit] of [
         ["hub_metadata", "permanent_metadata", M.MEMORY_PERMANENT_METADATA_MAX_BYTES],
         ["hub_receipts", "receipts", M.MEMORY_DEDUP_MAX_RECEIPTS],
@@ -6370,7 +6395,20 @@ const make = Effect.gen(function* () {
     );
     for (const row of identities) {
       const current = yield* loadAggregate(space, M.MemoryId.make(row.memory_id));
-      if (!current.identity || !current.fence || !approved.has(current.identity.createOperationId))
+      if (
+        !current.identity ||
+        !current.fence ||
+        !receipts.some(
+          (r) =>
+            r.receipt.operationId === current.identity!.createOperationId &&
+            r.receipt.memoryId === current.identity!.memoryId &&
+            (r.receipt.outcome === "accepted" ||
+              r.receipt.outcome === "conflicted" ||
+              (r.operationKind === "forget" &&
+                r.receipt.outcome === "deleted" &&
+                current.tombstone?.deleteOperationId === r.receipt.operationId)),
+        )
+      )
         return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
       all.identities = [...all.identities, current.identity];
       all.fences = [...all.fences, current.fence];
@@ -6561,6 +6599,11 @@ const make = Effect.gen(function* () {
       const encoded = yield* Effect.forEach(pages, (page) => checkpointCodec.encode(page));
       const bytes = encoded.reduce((sum, json) => sum + new TextEncoder().encode(json).length, 0);
       const usage = yield* readHubUsageTx(space);
+      if (bytes > usage.requiredCheckpointBoundBytes)
+        return yield* new MemoryStorageError({
+          stage: "checkpoint-bound-underflow",
+          cause: undefined,
+        });
       yield* reserveHubCheckpointTx({
         memorySpaceId: space,
         checkpointDeltaBytes: bytes - usage.checkpointBytes,
@@ -6859,6 +6902,18 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(length(CAST(lease_json AS BLOB))+32),0) FROM memory_hub_leases WHERE space=${space}) AS metadata_bytes`,
     );
     const row = rows[0]!;
+    const inputs = yield* stored(
+      "hub-snapshot-input-counters",
+      sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')`,
+    );
+    const inputCounters = new Map(inputs.map((r) => [r.dimension, r.value]));
+    const requiredCheckpointBoundBytes = checkpointBound(
+      inputCounters.get("hub_snapshot_bytes") ?? 0,
+      inputCounters.get("hub_snapshot_rows") ?? 0,
+    );
     const usage = yield* usageForHub(space);
     const specifications = [
       ["memory_hub_operations", "length(CAST(entry_json AS BLOB))"],
@@ -6910,7 +6965,10 @@ const make = Effect.gen(function* () {
         )
         .reduce((sum, table) => sum + table.logicalBytes, 0),
       activeMembers: row.members,
-      stagingBytes: (row.checkpoint_bytes ?? 0) + (row.pinned_bytes ?? 0),
+      stagingBytes:
+        Math.max(requiredCheckpointBoundBytes, row.checkpoint_bytes ?? 0) + (row.pinned_bytes ?? 0),
+      requiredCheckpointBoundBytes,
+      lastSnapshotBytes: row.checkpoint_bytes ?? 0,
       checkpointBytes: row.checkpoint_bytes ?? 0,
       publishedPinnedBytes: row.pinned_bytes ?? 0,
       liveSourceReads: row.relay,

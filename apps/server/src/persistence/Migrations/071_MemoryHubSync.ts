@@ -201,4 +201,65 @@ export default Effect.gen(function* () {
       delta("hub_receipts", `-(${guardCount("OLD")})`) +
       delta("hub_keys", "-1"),
   );
+  // Deliberately retain historical and private inputs too: expiry/compaction can only reduce this upper bound.
+  const snapshotInputs = [
+    ["memory_items", "space", "item_json,heads_json"],
+    [
+      "memory_revisions",
+      "space",
+      "space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref",
+    ],
+    ["memory_payloads", "space", "body_json"],
+    [
+      "memory_tombstones",
+      "space",
+      "space,memory_id,delete_operation_id,deleting_environment_id,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json",
+    ],
+    [
+      "memory_conflicts",
+      "space",
+      "space,conflict_id,memory_id,heads_json,status,failure_code,attempt_id",
+    ],
+    ["memory_resolutions", "space", "resolution_json"],
+    ["memory_identity_ledger", "space", "identity_json,fence_json"],
+    ["memory_compact_receipts", "space", "compact_json,receipt_json"],
+    ["memory_import_keys", "space", "record_json"],
+    ["memory_events", "memory_space_id", "metadata_json,receipt_json"],
+    ["memory_outbox", "space", "metadata_json,admin_json,ticket_json,frozen_claim_json"],
+    ["memory_hub_members", "space", "space,environment,credential_digest,status"],
+    ["memory_hub_leases", "space", "lease_json"],
+    ["memory_hub_source_reads", "space", "locator_json,request_digest,response_digest"],
+  ] as const;
+  for (const [table, spaceColumn, columns] of snapshotInputs) {
+    const bytes = (prefix: string) =>
+      columns
+        .split(",")
+        .map((column) => `coalesce(length(CAST(${prefix}${column} AS BLOB)),0)`)
+        .join("+") + (table === "memory_identity_ledger" ? `+${prefix}reserve_bytes` : "");
+    for (const [dimension, expression] of [
+      ["hub_snapshot_bytes", bytes("")],
+      ["hub_snapshot_rows", "1"],
+    ] as const) {
+      yield* sql.unsafe(
+        `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+        SELECT ${spaceColumn},?,'',sum(${expression}) FROM ${table} GROUP BY ${spaceColumn}
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+        [dimension],
+      );
+      const change = (prefix: string, sign: number) =>
+        sign < 0
+          ? `UPDATE memory_quota_counters SET value=value-(${dimension === "hub_snapshot_rows" ? "1" : bytes(`${prefix}.`)}) WHERE space=${prefix}.${spaceColumn} AND dimension='${dimension}' AND scope_key='';`
+          : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+        VALUES (${prefix}.${spaceColumn},'${dimension}','',${dimension === "hub_snapshot_rows" ? "1" : bytes(`${prefix}.`)})
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+      for (const [action, body] of [
+        ["INSERT", change("NEW", 1)],
+        ["UPDATE", change("OLD", -1) + change("NEW", 1)],
+        ["DELETE", change("OLD", -1)],
+      ] as const)
+        yield* sql.unsafe(
+          `CREATE TRIGGER ${table}_${dimension}_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN ${body} END`,
+        );
+    }
+  }
 });
