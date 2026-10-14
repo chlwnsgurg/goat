@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
+import * as Console from "effect/Console";
 import * as References from "effect/References";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
@@ -7026,8 +7027,9 @@ it.effect("recovery skips completed installCredential admin before work decoding
         (row) => row.detail.includes("INTEGER PRIMARY KEY") && row.detail.includes("rowid>"),
       ),
     );
-    yield* Effect.log("R17_ORPHAN_EXPLAIN", JSON.stringify(plans)).pipe(
+    yield* Effect.logInfo("R17_ORPHAN_EXPLAIN", JSON.stringify(plans)).pipe(
       Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+      Effect.provideService(Console.Console, console),
       Effect.provideService(References.MinimumLogLevel, "Info"),
     );
   }).pipe(Effect.provide(live)),
