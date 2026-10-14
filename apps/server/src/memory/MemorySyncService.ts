@@ -974,7 +974,7 @@ const make = Effect.gen(function* () {
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
       const budget = { pages: 0, entries: 0 };
-      if (!(yield* bootstrap(r, budget))) return;
+      if (!(yield* bootstrap(r, budget)) || budget.pages >= 10) return;
       yield* pullTail(r, budget);
       for (const entry of executions.values()) {
         if (entry.fiber && (yield* Effect.result(eligibility(entry.ticket)))._tag === "Failure")
@@ -1125,6 +1125,7 @@ const make = Effect.gen(function* () {
         const requested = yield* r.connection
           ? client.requestSourceRead(r.connection, validated.request)
           : hub.requestSourceRead(validated.request, r.principal!);
+        yield* ensureEpoch(r.settings.memoryHubVersion);
         const deadline = Math.min(
           (yield* Clock.currentTimeMillis) + 75000,
           Date.parse(requested.request.expiresAtHubTime),
@@ -1141,6 +1142,7 @@ const make = Effect.gen(function* () {
           const result = yield* r.connection
             ? client.resultSourceRead(r.connection, i)
             : hub.resultSourceRead(i, r.principal!);
+          yield* ensureEpoch(r.settings.memoryHubVersion);
           if ((yield* Clock.currentTimeMillis) >= deadline) break;
           if (result.state === "completed")
             return yield* service.validateSourceOutcome(
