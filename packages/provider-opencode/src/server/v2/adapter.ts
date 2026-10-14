@@ -3779,6 +3779,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           // so the turn remembers where the history stood before it.
           const newest = yield* client.message.list({ sessionID, order: "desc", limit: 1 });
           yield* markBefore(sessionId, newest.data[0]?.id ?? null);
+          if (state.active !== turn || turn.interrupted) return;
+          if (state.active !== turn || turn.interrupted) return;
           yield* prepareMemory(sessionId, state, turnInput);
           if (!sending()) return;
           return yield* client.session.command({ sessionID, ...command });
@@ -3794,6 +3796,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ),
           )
         : [];
+      if (state.active !== turn || turn.interrupted) return;
       yield* prepareMemory(sessionId, state, turnInput);
       if (!sending()) return;
       return yield* client.session

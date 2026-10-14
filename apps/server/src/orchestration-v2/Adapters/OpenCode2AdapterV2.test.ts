@@ -168,6 +168,22 @@ const withInstructions = (
         "skill.list",
       ].includes(String(entry.frame.type)),
   );
+  if (
+    entries.some(
+      (entry) =>
+        entry.type === "expect_outbound" &&
+        typeof entry.frame === "object" &&
+        entry.frame !== null &&
+        "type" in entry.frame &&
+        entry.frame.type === "session.instructions.entry.put" &&
+        "input" in entry.frame &&
+        typeof entry.frame.input === "object" &&
+        entry.frame.input !== null &&
+        "key" in entry.frame.input &&
+        entry.frame.input.key === "goat",
+    )
+  )
+    return entries;
   // T3's MCP server is added before the entry that describes it.
   const after = entries.findIndex(
     (entry, index) =>
@@ -479,6 +495,14 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         let failPut = reason === "put-failure";
         const { runtime, thread } = yield* resumed(
           [
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "goat",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+            out("session.active"),
+            replyData("session.active", {}),
             out("session.prompt", { sessionID: SESSION, text: "hi" }),
             promptAccepted,
             event("session.execution.succeeded", { sessionID: SESSION }),
