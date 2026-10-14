@@ -3340,9 +3340,9 @@ it.effect.each([0, 1])(
     }).pipe(Effect.provide(live)),
 );
 
-it.effect(
-  "protects the thirty-day revert inputs and collects covered canonical history after expiry",
-  () =>
+it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
+  "protects revert inputs and collects expired canonical judgment with %s result",
+  (mode) =>
     Effect.gen(function* () {
       const { store, sql, ticket, submission } = yield* seedSubmission;
       for (const n of [3, 4, 5]) {
@@ -3476,15 +3476,46 @@ it.effect(
             .length,
           1,
         );
+      if (mode !== "current") {
+        const base = operation(996);
+        if (base.kind === "forget") throw new Error("fixture");
+        const successor = decodeOperation({
+          ...base,
+          expectedHeads: [op.revision.revisionId],
+          revision: { ...base.revision, parents: [op.revision.revisionId] },
+        });
+        const next = yield* store.transact(
+          store.appendHubEntryTx({
+            operation: successor,
+            operationDigest: memoryOperationDigest(successor),
+            outcome: "accepted",
+            now: expiresAt,
+          }),
+        );
+        yield* store.apply({
+          ...decideMemoryOperation(
+            yield* store.loadAggregate(space, memory),
+            successor,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+          receipt: next.entry.receipt,
+        });
+        // Work protects the judgment across one bounded sweep, without pinning the superseded result.
+        yield* store.enqueueWork({
+          ...backgroundWork("judgment:protected"),
+          payloadRef: op.resolution.judgmentRef,
+        });
+      }
       const nextFloor = yield* publish(
         "revert-expired",
-        expiresAt + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+        expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
         floor,
       );
       yield* store.transact(
         store.purgeHubTransientTx({
           memorySpaceId: space,
-          now: expiresAt + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          now: expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
           limit: 100,
         }),
       );
@@ -3492,10 +3523,37 @@ it.effect(
         store.compactEligibleHistoryTx({
           memorySpaceId: space,
           expectedFloor: nextFloor,
-          now: expiresAt + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          now: expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
           limit: 100,
         }),
       );
+      if (mode !== "current") {
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${op.revision.revisionId}`)
+            .length,
+          0,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`)
+            .length,
+          1,
+        );
+        yield* store.finishWork("judgment:protected", "completed");
+        const sweepAt = expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS;
+        if (mode === "replaced-prune") {
+          yield* sql`UPDATE memory_payloads SET purge_eligible_after=${sweepAt} WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`;
+          yield* store.prunePayloads(sweepAt, 100);
+        } else {
+          yield* store.transact(
+            store.compactEligibleHistoryTx({
+              memorySpaceId: space,
+              expectedFloor: nextFloor,
+              now: sweepAt,
+              limit: 100,
+            }),
+          );
+        }
+      }
       for (const revisionId of op.resolution.inputRevisionIds)
         assert.strictEqual(
           (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${revisionId}`)
