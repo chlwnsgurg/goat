@@ -41,6 +41,7 @@ const local = M.EnvironmentId.make("fixture-member");
 const remote = M.EnvironmentId.make("fixture-hub");
 const selection = { instanceId: M.ProviderInstanceId.make("P"), model: "P" };
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeStatus = Schema.decodeUnknownEffect(M.MemorySyncStatus);
 const pushDecode = Schema.decodeUnknownSync(Schema.fromJsonString(M.MemoryHubPushInput));
 const timestamp = "1970-01-01T00:00:00.000Z";
 const member = {
@@ -1800,9 +1801,7 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
         Effect.gen(function* () {
           const sync = yield* Sync.MemorySyncService;
           const status = () =>
-            sync
-              .syncStatus({}, Effect.void)
-              .pipe(Effect.tap((s) => Schema.decodeUnknownEffect(M.MemorySyncStatus)(s)));
+            sync.syncStatus({}, Effect.void).pipe(Effect.tap((s) => decodeStatus(s)));
           assert.strictEqual((yield* status()).state, "disabled");
           yield* changeHub(1, { ...member, memorySpaceId: null });
           const unbound = yield* status();
@@ -1905,4 +1904,118 @@ it.effect(
         }).pipe(Effect.provide(fixture(client))),
       );
     }),
+);
+
+it.effect("settings cancels local-hub pull without an HTTP timeout", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const interrupted = yield* Deferred.make<void>();
+    const next = yield* Deferred.make<void>();
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${local},${"a".repeat(64)},1,'active')`;
+        yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${local},0,'ready')`;
+        yield* changeHub(1, { mode: "hub", memorySpaceId: space });
+        const actual = yield* Hub.MemoryHubService;
+        const localHub = Hub.MemoryHubService.of({
+          ...actual,
+          pull: () =>
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(Deferred.succeed(interrupted, undefined)),
+            ),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            const start = yield* sync.start.pipe(Effect.forkScoped);
+            yield* Deferred.await(entered);
+            yield* changeHub(2, { mode: "disabled" });
+            yield* Deferred.await(interrupted);
+            yield* Fiber.join(start);
+            assert.strictEqual(yield* sync.activeResolutions, 0);
+            assert.strictEqual(yield* (yield* Store.MemoryStore).readCursor(space, local), 0);
+            yield* ready;
+            yield* changeHub(3, member);
+            yield* Deferred.await(next);
+            yield* sync.shutdown;
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Hub.MemoryHubService, localHub)),
+              ),
+            ),
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          fixture(
+            peer({
+              pull: (_c, i) =>
+                Deferred.succeed(next, undefined).pipe(
+                  Effect.as({
+                    highWatermark: i.afterSequence,
+                    throughSequence: i.afterSequence,
+                    hasMore: false,
+                    entries: [],
+                  }),
+                ),
+            }),
+            undefined,
+            false,
+            true,
+          ),
+        ),
+      ),
+    );
+  }),
+);
+
+it.effect("settings finalization bounds a blocked matching release before freeing the slot", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const releaseEntered = yield* Deferred.make<void>();
+    const releaseInterrupted = yield* Deferred.make<void>();
+    const next = yield* Deferred.make<number>();
+    let sync: Sync.MemorySyncService["Service"] | undefined;
+    const client = peer({
+      release: () =>
+        Deferred.succeed(releaseEntered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(releaseInterrupted, undefined)),
+        ),
+      pull: (c, i) =>
+        Effect.gen(function* () {
+          if (c.epoch === 3) yield* Deferred.succeed(next, yield* sync!.activeResolutions);
+          return {
+            highWatermark: i.afterSequence,
+            throughSequence: i.afterSequence,
+            hasMore: false,
+            entries: [],
+          };
+        }),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        sync = yield* Sync.MemorySyncService;
+        yield* sync.start;
+        yield* Deferred.await(entered);
+        yield* changeHub(1, { mode: "disabled" });
+        yield* Deferred.await(releaseEntered);
+        assert.strictEqual(yield* sync.activeResolutions, 1);
+        yield* TestClock.adjust("15 seconds");
+        yield* Deferred.await(releaseInterrupted);
+        yield* changeHub(2, member);
+        assert.strictEqual(yield* Deferred.await(next), 0);
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(client, model, false, true))),
+    );
+  }),
 );

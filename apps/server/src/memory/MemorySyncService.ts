@@ -232,6 +232,7 @@ const make = Effect.gen(function* () {
     return (
       r.connection ? client.release(r.connection, input) : hub.release(input, r.principal!)
     ).pipe(
+      Effect.interruptible,
       Effect.timeout("15 seconds"),
       Effect.map((result) => result.released),
       Effect.catch(() => Effect.succeed(false)),
