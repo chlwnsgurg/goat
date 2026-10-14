@@ -16,6 +16,9 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Settings from "../serverSettings.ts";
+import type { ProviderInstance } from "@goat/provider-core/server/driver";
+import * as ProviderRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as SourceControl from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Events from "../orchestration-v2/EventSink.ts";
@@ -162,9 +165,44 @@ const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) =>
     release: () => Effect.succeed({ released: true }),
     ...overrides,
   });
+const realGeneration = (overrides: Partial<Generation.TextGeneration["Service"]>) => {
+  const provider = Generation.TextGeneration.of({
+    generateCommitMessage: () => Effect.die("unexpected fixture operation"),
+    generatePrContent: () => Effect.die("unexpected fixture operation"),
+    generateBranchName: () => Effect.die("unexpected fixture operation"),
+    generateThreadTitle: () => Effect.die("unexpected fixture operation"),
+    generateReviewGuide: () => Effect.die("unexpected fixture operation"),
+    ...overrides,
+  });
+  return Layer.effect(Generation.TextGeneration, Generation.make).pipe(
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderInstanceRegistry)({
+        getInstance: (instanceId) =>
+          Effect.succeed({
+            instanceId,
+            driverKind: M.ProviderDriverKind.make("codex"),
+            continuationIdentity: {
+              driverKind: M.ProviderDriverKind.make("codex"),
+              continuationKey: "synthetic-provider",
+            },
+            displayName: undefined,
+            enabled: true,
+            snapshot: {} as ProviderInstance["snapshot"],
+            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            textGeneration: provider,
+          } satisfies ProviderInstance),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(SourceControl.SourceControlProviderRegistry)({
+        resolveLink: () => Effect.die("memory resolution does not read source control"),
+      }),
+    ),
+  );
+};
 const fixture = (
   client: Layer.Layer<Client.MemoryHubClient, never, Settings.ServerSettingsService> = peer(),
-  generation = Layer.mock(Generation.TextGeneration)({ resolveMemoryConflict: () => Effect.never }),
+  generation = realGeneration({ resolveMemoryConflict: () => Effect.never }),
   disabled = false,
 ) => {
   const shared = Layer.mergeAll(
@@ -310,7 +348,7 @@ it.effect.each(["start", "syncOnce"] as const)(
   (method) =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
-      const model = Layer.mock(Generation.TextGeneration)({
+      const model = realGeneration({
         resolveMemoryConflict: (input) =>
           Deferred.succeed(entered, input).pipe(Effect.andThen(Effect.never)),
       });
@@ -425,7 +463,7 @@ it.effect("blocked generation leaves unrelated push and cursor movement free", (
           entries: tailEntries(i.afterSequence, phase),
         }),
     });
-    const model = Layer.mock(Generation.TextGeneration)({
+    const model = realGeneration({
       resolveMemoryConflict: () =>
         Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
     });
@@ -450,15 +488,25 @@ it.effect("blocked generation leaves unrelated push and cursor movement free", (
   }),
 );
 
-it.effect("four slots bound five durable conflicts", () =>
+it.effect("four slots bound five conflicts and the fifth starts after finalization", () =>
   Effect.gen(function* () {
     const allEntered = yield* Deferred.make<void>();
+    const finishFirst = yield* Deferred.make<void>();
+    const fifthEntered = yield* Deferred.make<void>();
     let calls = 0;
-    const model = Layer.mock(Generation.TextGeneration)({
+    const model = realGeneration({
       resolveMemoryConflict: () =>
         Effect.gen(function* () {
           calls++;
           if (calls === 4) yield* Deferred.succeed(allEntered, undefined);
+          if (calls === 5) yield* Deferred.succeed(fifthEntered, undefined);
+          if (calls === 1) {
+            yield* Deferred.await(finishFirst);
+            return yield* new M.TextGenerationError({
+              operation: "resolveMemoryConflict",
+              detail: "generation_failed",
+            });
+          }
           return yield* Effect.never;
         }),
     });
@@ -473,6 +521,10 @@ it.effect("four slots bound five durable conflicts", () =>
         assert.strictEqual(yield* sync.activeResolutions, 4);
         yield* sync.syncOnce;
         assert.strictEqual(calls, 4);
+        yield* Deferred.succeed(finishFirst, undefined);
+        yield* Deferred.await(fifthEntered);
+        assert.strictEqual(calls, 5);
+        assert.strictEqual(yield* sync.activeResolutions, 4);
         yield* sync.shutdown;
         assert.strictEqual(yield* sync.activeResolutions, 0);
       }).pipe(Effect.provide(fixture(peer(), model))),
@@ -657,7 +709,7 @@ it.effect(
             return yield* new M.MemoryHubError({ code: "unavailable" });
           }),
       });
-      const model = Layer.mock(Generation.TextGeneration)({
+      const model = realGeneration({
         resolveMemoryConflict: (input) =>
           Effect.sync(() => {
             generated++;
@@ -717,7 +769,7 @@ it.effect(
       const entered = yield* Deferred.make<void>();
       let resolveClaims = 0;
       let generated = 0;
-      const model = Layer.mock(Generation.TextGeneration)({
+      const model = realGeneration({
         resolveMemoryConflict: () =>
           Effect.sync(() => {
             generated++;
@@ -992,4 +1044,205 @@ it.effect("one denied owner relay read leaves other responses and push moving", 
       }).pipe(Effect.provide(fixture(client))),
     );
   }),
+);
+
+it.effect(
+  "known approval survives a real canonical SQL failure and repairs without generation",
+  () =>
+    Effect.gen(function* () {
+      const firstReleased = yield* Deferred.make<void>();
+      const secondReleased = yield* Deferred.make<void>();
+      let releases = 0;
+      let generated = 0;
+      let applied = 0;
+      let submission: M.MemoryHubApplyResolutionInput | undefined;
+      let database: SqlClient.SqlClient | undefined;
+      const client = peer({
+        applyResolution: (_c, input) =>
+          Effect.gen(function* () {
+            applied++;
+            submission = input;
+            if (!database) return yield* new M.MemoryHubError({ code: "storage_failed" });
+            yield* database`CREATE TRIGGER fixture_canonical_failure BEFORE INSERT ON memory_revisions BEGIN SELECT RAISE(ABORT, 'fixture canonical unavailable'); END`.pipe(
+              Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
+            );
+            if (input.operation.kind !== "resolve") throw new Error("fixture");
+            return {
+              operationId: input.operation.operationId,
+              memoryId: input.operation.memoryId,
+              operationDigest: memoryOperationDigest(input.operation),
+              hubSequence: 1,
+              outcome: "accepted" as const,
+              resolutionApproval: {
+                resolutionId: input.operation.resolution.resolutionId,
+                appliedAtUtc: timestamp,
+                revertDeadlineUtc: "1970-01-31T00:00:00.000Z",
+              },
+            };
+          }),
+        release: () =>
+          Effect.gen(function* () {
+            releases++;
+            yield* Deferred.succeed(releases === 1 ? firstReleased : secondReleased, undefined);
+            return { released: true };
+          }),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.sync(() => {
+            generated++;
+            return {
+              result: {
+                text: "synthetic approved fact",
+                assertionKind: "inference" as const,
+                evidence: [],
+                judgment: "synthetic judgment",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: local,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          database = yield* SqlClient.SqlClient;
+          const memory = yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          yield* Deferred.await(firstReleased);
+          yield* sync.shutdown;
+          const store = yield* Store.MemoryStore;
+          const saved = yield* store.readRecoverableResolutionTickets({ now: 30000, limit: 100 });
+          assert.strictEqual(saved[0]?.approval?.outcome, "accepted");
+          assert.strictEqual((yield* store.loadAggregate(space, memory)).heads.length, 2);
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`DROP TRIGGER fixture_canonical_failure`;
+          yield* TestClock.adjust("30 seconds");
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              yield* Deferred.await(secondReleased);
+              yield* restarted.shutdown;
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+          assert.strictEqual(generated, 1);
+          assert.strictEqual(applied, 1);
+          const repaired = yield* store.loadAggregate(space, memory);
+          assert.strictEqual(repaired.heads.length, 1);
+          if (submission?.operation.kind !== "resolve") throw new Error("fixture");
+          assert.deepStrictEqual(repaired.heads, [submission.operation.revision.revisionId]);
+          assert.strictEqual((yield* store.pendingReports(10)).length, 1);
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);
+
+it.effect("disabling the epoch cancels a registered model immediately", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const cancelled = yield* Deferred.make<void>();
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(cancelled, undefined)),
+        ),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        yield* Deferred.await(entered);
+        const transitions = Option.getOrThrow(
+          yield* Effect.serviceOption(Settings.MemoryHubSettingsTransitions),
+        );
+        yield* transitions.applyMemoryHubTransition(
+          {
+            requestId: M.MemoryOperationId.make(id(998)),
+            expectedVersion: 1,
+            settings: { mode: "disabled" },
+          },
+          Effect.void,
+        );
+        yield* sync.syncOnce;
+        yield* Deferred.await(cancelled);
+        assert.strictEqual(yield* sync.activeResolutions, 0);
+      }).pipe(Effect.provide(fixture(peer(), model))),
+    );
+  }),
+);
+
+it.effect(
+  "hub claim success before ticket SQL failure recovers the same lease with a null default",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
+      const claims: M.MemoryHubClaimInput[] = [];
+      let database: SqlClient.SqlClient | undefined;
+      const client = peer({
+        claim: (_c, input) =>
+          Effect.gen(function* () {
+            claims.push(input);
+            if (!database) return yield* new M.MemoryHubError({ code: "storage_failed" });
+            if (claims.length === 1)
+              yield* database`CREATE TRIGGER fixture_ticket_failure BEFORE INSERT ON memory_outbox WHEN NEW.kind='resolve' BEGIN SELECT RAISE(ABORT, 'fixture ticket unavailable'); END`.pipe(
+                Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
+              );
+            const { protocolVersion: _protocolVersion, ...claim } = input;
+            return {
+              ...claim,
+              fencingToken: 41,
+              claimedAtHubTime: timestamp,
+              expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+              attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            };
+          }),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Deferred.succeed(entered, input).pipe(Effect.andThen(Effect.never)),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          database = yield* SqlClient.SqlClient;
+          yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          yield* sync.syncOnce;
+          assert.strictEqual(
+            (yield* store.readRecoverableResolutionTickets({ now: 0, limit: 100 })).length,
+            0,
+          );
+          assert.strictEqual(yield* sync.activeResolutions, 0);
+          yield* sync.shutdown;
+          yield* database`DROP TRIGGER fixture_ticket_failure`;
+          const settings = yield* Settings.ServerSettingsService;
+          yield* settings.updateSettings({ defaultModelSelection: null });
+          yield* TestClock.adjust("5 seconds");
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              assert.deepStrictEqual((yield* Deferred.await(entered)).modelSelection, selection);
+              yield* restarted.shutdown;
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+          assert.strictEqual(claims.length, 2);
+          assert.deepStrictEqual(claims[1], claims[0]);
+          const tickets = yield* store.readRecoverableResolutionTickets({ now: 35000, limit: 100 });
+          assert.strictEqual(tickets[0]?.ticket.fencingToken, 41);
+          assert.strictEqual(tickets[0]?.ticket.attemptId, claims[0]?.attemptId);
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
 );
