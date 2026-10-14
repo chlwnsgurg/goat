@@ -6,6 +6,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Clock from "effect/Clock";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
@@ -4906,5 +4907,91 @@ it.effect("space selectors reach B behind 100 earlier A candidates and tickets",
       detail: string;
     }>`EXPLAIN QUERY PLAN SELECT id FROM memory_outbox WHERE space=${b} AND kind='claim' AND status IN ('pending','retry') AND next_attempt_at<=1`;
     assert.isTrue(plan.some((r) => r.detail.includes("memory_outbox_sync_due")));
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("resolution snapshot SQL rows and bytes stay constant as history grows", () =>
+  Effect.gen(function* () {
+    const { sql, claim } = yield* seedResolutionConflict;
+    let measuring = false;
+    let rowsRead = 0;
+    let bytesRead = 0;
+    const observed = new Proxy(sql, {
+      apply(target, _this, args) {
+        const statement: Effect.Effect<readonly object[], SqlError> = Reflect.apply(
+          target,
+          target,
+          args,
+        );
+        return Effect.tap(statement, (rows) =>
+          Effect.sync(() => {
+            if (measuring) {
+              rowsRead += rows.length;
+              bytesRead += new TextEncoder().encode(JSON.stringify(rows)).length;
+            }
+          }),
+        );
+      },
+    });
+    const store = yield* Effect.service(Store.MemoryStore).pipe(
+      Effect.provide(Layer.fresh(Store.layer)),
+      Effect.provideService(SqlClient.SqlClient, observed),
+    );
+    measuring = true;
+    yield* store.readResolutionSnapshot(space, memory);
+    measuring = false;
+    const before = { rows: rowsRead, bytes: bytesRead };
+    for (let n = 0; n < 100; n++) {
+      yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(20000 + n)},memory_id,${id(21000 + n)},parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at FROM memory_revisions WHERE space=${space} AND revision_id=${claim.conflictHeadSet[0]}`;
+      yield* sql`INSERT INTO memory_conflicts(space,conflict_id,memory_id,heads_json,status,failure_code) SELECT space,${id(22000 + n)},memory_id,heads_json,status,failure_code FROM memory_conflicts WHERE space=${space} LIMIT 1`;
+    }
+    rowsRead = 0;
+    bytesRead = 0;
+    measuring = true;
+    const after = yield* store.readResolutionSnapshot(space, memory);
+    measuring = false;
+    assert.deepStrictEqual({ rows: rowsRead, bytes: bytesRead }, before);
+    assert.strictEqual(rowsRead, 1);
+    assert.isBelow(bytesRead, 2048);
+    assert.strictEqual(after.status, "quarantined");
+    assert.deepStrictEqual(after.heads, claim.conflictHeadSet);
+    const heads = yield* store.readResolutionHeads({
+      memorySpaceId: space,
+      memoryId: memory,
+      heads: claim.conflictHeadSet,
+    });
+    assert.strictEqual(heads.length, 2);
+    assert.isTrue(heads.every((h) => h.payload !== null));
+    assert.strictEqual(
+      (yield* store
+        .readResolutionHeads({
+          memorySpaceId: space,
+          memoryId: memory,
+          heads: [M.MemoryRevisionId.make(id(20000))],
+        })
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    yield* sql`DELETE FROM memory_payloads WHERE space=${space}`;
+    assert.deepStrictEqual(yield* store.readResolutionSnapshot(space, memory), after);
+    assert.isTrue(
+      (yield* store.readResolutionHeads({
+        memorySpaceId: space,
+        memoryId: memory,
+        heads: claim.conflictHeadSet,
+      })).every((h) => h.payload === null),
+    );
+    yield* sql`INSERT INTO memory_pending_forget_intents(space,memory_id,operation_id,requested_at_utc,attempts,last_failure_code,submission_state) VALUES (${space},${memory},${id(23000)},${now},0,NULL,'unsubmitted')`;
+    assert.isTrue((yield* store.readResolutionSnapshot(space, memory)).pendingForget);
+    assert.strictEqual(
+      (yield* store
+        .readResolutionHeads({
+          memorySpaceId: space,
+          memoryId: memory,
+          heads: claim.conflictHeadSet,
+        })
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
   }).pipe(Effect.provide(live)),
 );

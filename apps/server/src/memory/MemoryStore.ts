@@ -223,6 +223,17 @@ export const PendingForgetIntent = Schema.Struct({
   submissionState: Schema.Literals(["unsubmitted", "uncertain", "rejected"]),
 });
 export type PendingForgetIntent = typeof PendingForgetIntent.Type;
+export type ResolutionSnapshot = {
+  readonly memorySpaceId: M.MemorySpaceId;
+  readonly memoryId: M.MemoryId;
+  readonly status: M.MemoryItem["status"] | null;
+  readonly heads: readonly M.MemoryRevisionId[];
+  readonly generation: number;
+  readonly reasons: M.MemoryLocalAvailability["reasons"];
+  readonly tombstone: boolean;
+  readonly pendingForget: boolean;
+  readonly fence: M.MemoryFenceRecord | undefined;
+};
 export type MemoryAggregate = {
   readonly memorySpaceId: M.MemorySpaceId;
   readonly memoryId: M.MemoryId;
@@ -1109,6 +1120,15 @@ export class MemoryStore extends Context.Service<
       space: M.MemorySpaceId,
       id: M.MemoryOperationId,
     ) => Effect.Effect<StoredReceipt | undefined, MemoryStorageError>;
+    readonly readResolutionSnapshot: (
+      space: M.MemorySpaceId,
+      memoryId: M.MemoryId,
+    ) => Effect.Effect<ResolutionSnapshot, MemoryStorageError>;
+    readonly readResolutionHeads: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      memoryId: M.MemoryId;
+      heads: readonly M.MemoryRevisionId[];
+    }) => Effect.Effect<MemoryAggregate["revisions"], MemoryStorageError | MemoryStoreConflict>;
     readonly loadAggregate: (
       space: M.MemorySpaceId,
       id: M.MemoryId,
@@ -1828,6 +1848,108 @@ const make = Effect.gen(function* () {
       heads: yield* headsCodec.decode(row.heads_json),
       generation: row.generation,
     };
+  });
+  const readResolutionSnapshot: MemoryStore["Service"]["readResolutionSnapshot"] = Effect.fn(
+    "MemoryStore.readResolutionSnapshot",
+  )(function* (space, memoryId) {
+    const rows = yield* stored(
+      "resolution-snapshot",
+      sql<{
+        status: M.MemoryItem["status"] | null;
+        heads_json: string | null;
+        generation: number | null;
+        reasons_json: string | null;
+        fence_json: string | null;
+        tombstone: number;
+        pending_forget: number;
+      }>`SELECT i.status,i.heads_json,i.generation,json_extract(i.availability_json,'$.reasons') AS reasons_json,l.fence_json,
+      EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=${space} AND t.memory_id=${memoryId}) AS tombstone,
+      EXISTS(SELECT 1 FROM memory_pending_forget_intents p WHERE p.space=${space} AND p.memory_id=${memoryId}) AS pending_forget
+      FROM (SELECT 1) LEFT JOIN memory_items i ON i.space=${space} AND i.memory_id=${memoryId}
+      LEFT JOIN memory_identity_ledger l ON l.space=${space} AND l.memory_id=${memoryId}`,
+    );
+    const row = rows[0]!;
+    return {
+      memorySpaceId: space,
+      memoryId,
+      status: row.status,
+      heads: row.heads_json ? yield* headsCodec.decode(row.heads_json, strict) : [],
+      generation: row.generation ?? 0,
+      reasons: row.reasons_json
+        ? yield* codec(Schema.Array(M.MemoryDeferredReason)).decode(row.reasons_json, strict)
+        : [],
+      tombstone: row.tombstone !== 0,
+      pendingForget: row.pending_forget !== 0,
+      fence: row.fence_json ? yield* fenceCodec.decode(row.fence_json, strict) : undefined,
+    };
+  });
+  const readResolutionHeads: MemoryStore["Service"]["readResolutionHeads"] = Effect.fn(
+    "MemoryStore.readResolutionHeads",
+  )(function* (input) {
+    // Generation input is restricted to the current frontier, never the revision history.
+    // The existing conflict set carries the bound; reject unbounded caller selections.
+    if (
+      input.heads.length === 0 ||
+      input.heads.length > M.MEMORY_PAGE_MAX_ITEMS ||
+      new Set(input.heads).size !== input.heads.length
+    )
+      return yield* new MemoryStoreConflict({ code: "invalid_output" });
+    return yield* transact(
+      Effect.gen(function* () {
+        const snapshot = yield* readResolutionSnapshot(input.memorySpaceId, input.memoryId);
+        if (
+          snapshot.tombstone ||
+          snapshot.pendingForget ||
+          snapshot.status !== "quarantined" ||
+          !sameHeadSet(snapshot.heads, input.heads)
+        )
+          return yield* new MemoryStoreConflict({ code: "conflict_changed" });
+        const rows = yield* stored(
+          "resolution-heads",
+          sql<{
+            revision_id: string;
+            operation_id: string;
+            parents_json: string;
+            scope_json: string;
+            assertion_kind: string;
+            provenance_json: string;
+            payload_ref: string | null;
+            created_at: number;
+            body_json: string | null;
+          }>`SELECT r.revision_id,r.operation_id,r.parents_json,r.scope_json,r.assertion_kind,r.provenance_json,r.payload_ref,r.created_at,p.body_json
+        FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+        WHERE r.space=${input.memorySpaceId} AND r.memory_id=${input.memoryId} AND r.revision_id IN (SELECT value FROM json_each(${yield* headsCodec.encode(input.heads)}))`,
+        );
+        if (rows.length !== input.heads.length)
+          return yield* new MemoryStoreConflict({ code: "missing_parent" });
+        return yield* Effect.forEach(rows, (row) =>
+          Effect.gen(function* () {
+            const revision = yield* stored(
+              "revision-codec",
+              decodeRevision(
+                {
+                  memorySpaceId: input.memorySpaceId,
+                  memoryId: input.memoryId,
+                  revisionId: row.revision_id,
+                  operationId: row.operation_id,
+                  parents: yield* headsCodec.decode(row.parents_json),
+                  scope: yield* scopeCodec.decode(row.scope_json),
+                  assertionKind: row.assertion_kind,
+                  provenance: yield* provenanceCodec.decode(row.provenance_json),
+                  payloadRef: row.payload_ref ?? row.revision_id,
+                  createdAtUtc: yield* importTime(row.created_at),
+                },
+                strict,
+              ),
+            );
+            return {
+              revision,
+              payload: row.body_json ? yield* payloadCodec.decode(row.body_json, strict) : null,
+            };
+          }),
+        );
+      }),
+    );
   });
   const loadAggregate = Effect.fn("MemoryStore.loadAggregate")(function* (
     space: M.MemorySpaceId,
@@ -8082,6 +8204,8 @@ const make = Effect.gen(function* () {
     assignIntentIdentityTx,
     transact,
     receipt,
+    readResolutionSnapshot,
+    readResolutionHeads,
     loadAggregate: (space, id) => transact(loadAggregate(space, id)),
     apply: (decision) =>
       decision.admission.kind === "hubAdmission" && decision.operation.kind !== "forget"
