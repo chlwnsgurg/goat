@@ -49,6 +49,12 @@ export default Effect.gen(function* () {
   yield* sql`CREATE INDEX memory_outbox_active_resolution ON memory_outbox(space,memory_id) WHERE kind='resolve' AND status IN ('pending','retry','running')`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN terminal_at INTEGER`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN hold_class TEXT CHECK(hold_class IN ('authorization','protocol','identity','availability'))`;
+  // Four presence probes must also be bounded when a class is absent. The due
+  // index cannot bound filtering by hold_class among many MAX retry rows.
+  yield* sql`CREATE INDEX memory_outbox_held_class ON memory_outbox(space,hold_class)
+    WHERE hold_class IS NOT NULL AND next_attempt_at=9007199254740991
+      AND kind IN ('sync','revert_intent','claim','resolve')
+      AND status IN ('pending','retry','running')`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN failure_code TEXT CHECK(length(failure_code)<=64)`;
 
   yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN pull_retry_json TEXT CHECK(length(CAST(pull_retry_json AS BLOB))<=512)`;

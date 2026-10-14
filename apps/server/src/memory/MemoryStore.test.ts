@@ -7034,3 +7034,216 @@ it.effect("recovery skips completed installCredential admin before work decoding
     );
   }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "r18 discovers push-only protocol hold through a fresh store and clears after rearm",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(decision(operation()));
+      const c = (yield* store.readEligibleOutbox(space, 0, 10))[0]!;
+      const ownership = yield* store.transact(
+        store.acquireSyncWorkTx({
+          workId: c.work.id,
+          operationId: c.operationId,
+          operationDigest: c.operationDigest,
+          owner: "r18",
+          expectedVersion: c.version,
+          now: 0,
+          ownedUntil: 100,
+        }),
+      );
+      if (!ownership) throw new Error("fixture");
+      assert.isTrue(
+        yield* store.transact(
+          store.retrySyncWorkTx({
+            ownership,
+            now: 1,
+            nextAttemptAt: Number.MAX_SAFE_INTEGER,
+            failureCode: "unsupported_protocol",
+            holdClass: "protocol",
+          }),
+        ),
+      );
+      const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+        Effect.provide(Layer.fresh(Store.layer)),
+      );
+      const key = { memorySpaceId: space, hubEnvironmentId: env };
+      assert.isNull((yield* fresh.readPullRetry(key)).holdClass);
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), ["protocol"]);
+      assert.deepStrictEqual(
+        yield* fresh.readPersistedHoldClasses({
+          ...key,
+          memorySpaceId: M.MemorySpaceId.make(id(88888)),
+        }),
+        [],
+      );
+      yield* fresh.transact(
+        fresh.rearmSyncHoldsTx({
+          memorySpaceId: space,
+          holdClass: "protocol",
+          now: 2,
+          afterId: "",
+          limit: 100,
+        }),
+      );
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["authorization", "protocol", "identity", "availability"] as const)(
+  "r18 discovers pull-only %s hold for the exact hub and clears after reset",
+  (holdClass) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const key = { memorySpaceId: space, hubEnvironmentId: env };
+      assert.isNotNull(
+        yield* store.transact(
+          store.writePullRetryTx({
+            ...key,
+            expectedVersion: 0,
+            retry: {
+              attempts: 1,
+              nextAttemptAt: Number.MAX_SAFE_INTEGER,
+              failureCode: "unavailable",
+              holdClass,
+            },
+          }),
+        ),
+      );
+      const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+        Effect.provide(Layer.fresh(Store.layer)),
+      );
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), [holdClass]);
+      assert.deepStrictEqual(
+        yield* fresh.readPersistedHoldClasses({
+          ...key,
+          hubEnvironmentId: M.EnvironmentId.make("other-hub"),
+        }),
+        [],
+      );
+      assert.deepStrictEqual(
+        yield* fresh.readPersistedHoldClasses({
+          ...key,
+          memorySpaceId: M.MemorySpaceId.make(id(88888)),
+        }),
+        [],
+      );
+      yield* fresh.transact(
+        fresh.writePullRetryTx({
+          ...key,
+          expectedVersion: 1,
+          retry: { attempts: 0, nextAttemptAt: 0, failureCode: null, holdClass: null },
+        }),
+      );
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "r18 discovers resolution ticket and candidate holds independently without pull holds",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, candidate, ticket, input } = yield* seedHeldResolutionAttempt;
+      assert.isNotNull(yield* store.transact(store.holdResolutionAttemptTx(input)));
+      const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+        Effect.provide(Layer.fresh(Store.layer)),
+      );
+      const key = { memorySpaceId: space, hubEnvironmentId: env };
+      assert.isNull((yield* fresh.readPullRetry(key)).holdClass);
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), ["identity"]);
+      // Retain only the ticket hold, then only the candidate hold.
+      yield* sql`UPDATE memory_outbox SET hold_class=NULL WHERE id=${candidate.id}`;
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), ["identity"]);
+      yield* sql`UPDATE memory_outbox SET hold_class=NULL WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
+      yield* sql`UPDATE memory_outbox SET hold_class='identity' WHERE id=${candidate.id}`;
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), ["identity"]);
+      yield* fresh.transact(
+        fresh.rearmResolutionHoldsTx({
+          memorySpaceId: space,
+          holdClass: "identity",
+          now: 2,
+          afterId: "",
+          limit: 100,
+        }),
+      );
+      assert.deepStrictEqual(yield* fresh.readPersistedHoldClasses(key), []);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "r18 bounds class discovery with indexed presence probes and excludes inactive or unclassified work",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const key = { memorySpaceId: space, hubEnvironmentId: env };
+      // Irrelevant history and unclassified legacy MAX rows cannot turn absence into a scan.
+      yield* sql`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+      INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at,hold_class)
+      SELECT 'r18-history-'||i,${space},'sync','completed','{}',9007199254740991,'availability' FROM n`;
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at,hold_class)
+      VALUES ('r18-legacy',${space},'sync','retry','{}',9007199254740991,NULL),
+        ('r18-backoff',${space},'sync','retry','{}',10,'availability'),
+        ('r18-summary',${space},'summary','retry','{}',9007199254740991,'availability'),
+        ('r18-foreign',${id(88888)},'sync','retry','{}',9007199254740991,'availability')`;
+      assert.deepStrictEqual(yield* store.readPersistedHoldClasses(key), []);
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at,hold_class)
+      VALUES ('r18-revert',${space},'revert_intent','retry','{}',9007199254740991,'protocol'),
+        ('r18-claim',${space},'claim','running','{}',9007199254740991,'identity'),
+        ('r18-resolve',${space},'resolve','pending','{}',9007199254740991,'availability'),
+        ('r18-sync',${space},'sync','retry','{}',9007199254740991,'authorization'),
+        ('r18-duplicate',${space},'sync','retry','{}',9007199254740991,'protocol')`;
+      assert.deepStrictEqual(yield* store.readPersistedHoldClasses(key), [
+        "authorization",
+        "protocol",
+        "identity",
+        "availability",
+      ]);
+      const plans = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT 1 FROM memory_outbox INDEXED BY memory_outbox_held_class
+      WHERE space=${space} AND hold_class='protocol' AND hold_class IS NOT NULL AND next_attempt_at=9007199254740991
+        AND kind IN ('sync','revert_intent','claim','resolve') AND status IN ('pending','retry','running') LIMIT 1`;
+      const pullPlans = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT pull_retry_json FROM memory_sync_cursors WHERE space=${space} AND hub_environment_id=${env}`;
+      for (const plan of [...plans, ...pullPlans]) {
+        assert.include(plan.detail, "SEARCH");
+        assert.notInclude(plan.detail, "SCAN");
+        assert.notInclude(plan.detail, "TEMP B-TREE");
+      }
+      assert.isTrue(
+        plans.some(
+          (p) =>
+            p.detail.includes("memory_outbox_held_class") &&
+            p.detail.includes("space=? AND hold_class=?"),
+        ),
+      );
+      yield* Effect.logInfo(
+        "R18_DISCOVERY_EXPLAIN",
+        JSON.stringify({ outbox: plans, pull: pullPlans }),
+      ).pipe(
+        Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+        Effect.provideService(Console.Console, console),
+        Effect.provideService(References.MinimumLogLevel, "Info"),
+      );
+      yield* sql`UPDATE memory_outbox SET hold_class=NULL WHERE id IN ('r18-revert','r18-claim','r18-resolve','r18-sync','r18-duplicate')`;
+      assert.deepStrictEqual(yield* store.readPersistedHoldClasses(key), []);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("r18 discovery surfaces storage failure instead of reporting no holds", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    // This is the isolated fixture database, never an installed environment.
+    yield* sql`DROP INDEX memory_outbox_held_class`;
+    const failure = yield* store
+      .readPersistedHoldClasses({ memorySpaceId: space, hubEnvironmentId: env })
+      .pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStorageError");
+    assert.strictEqual(failure.stage, "persisted-hold-discovery");
+  }).pipe(Effect.provide(live)),
+);
