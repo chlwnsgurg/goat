@@ -5807,3 +5807,38 @@ it.effect("recovery closes a frozen cycle despite continuous frontier and orphan
     );
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("new checkpoint judgment bodies receive stage ownership at insertion", () =>
+  Effect.gen(function* () {
+    const { store, sql, submission } = yield* seedSubmission;
+    if (submission.operation.kind !== "resolve") throw new Error("fixture");
+    const op = submission.operation;
+    yield* beginFixtureCheckpoint;
+    yield* store.installCheckpointPage({
+      ...fixtureCheckpointIdentity,
+      page: {
+        ...checkpoint(),
+        revisions: [],
+        resolutions: [{ resolution: op.resolution, payload: op.resolutionPayload }],
+      },
+    });
+    assert.deepStrictEqual(
+      yield* sql`SELECT checkpoint_stage_id FROM memory_payloads WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`,
+      [{ checkpoint_stage_id: "fixture" }],
+    );
+    assert.isTrue(
+      yield* store.transact(
+        store.discardBootstrapTx({
+          ...fixtureCheckpointIdentity,
+          expectedCheckpointId: fixtureCheckpointIdentity.checkpointId,
+        }),
+      ),
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`)
+        .length,
+      0,
+    );
+    assert.isAbove((yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space}`).length, 0);
+  }).pipe(Effect.provide(live)),
+);
