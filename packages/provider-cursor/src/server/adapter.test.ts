@@ -391,6 +391,9 @@ describe("CursorAdapterV2", () => {
       let refreshes = 0;
       let memory: typeof snapshot | undefined = snapshot;
       let sendCalls = 0;
+      const opens: CursorAgentSdk.CursorAgentSdkOpenInput[] = [];
+      const connections: string[] = [];
+      let closes = 0;
       const instanceId = ProviderInstanceId.make("cursor");
       const threadId = ThreadId.make("cursor-transport-error-thread");
       const sessions = yield* McpProviderSessions.McpProviderSessions;
@@ -418,37 +421,44 @@ describe("CursorAdapterV2", () => {
       }).pipe(
         Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
           assertComplete: Effect.void,
-          open: () =>
-            Effect.succeed({
-              agentId: "native-cursor-error",
-              listMessages: Effect.succeed([]),
-              close: Effect.void,
-              send: (input) =>
-                Effect.sync(() => {
-                  sendCalls += 1;
-                  imageCounts.push(
-                    typeof input.message === "string" ? 0 : (input.message.images?.length ?? 0),
-                  );
-                  sentMessages.push(
-                    typeof input.message === "string" ? input.message : input.message.text,
-                  );
-                  const runId = `native-cursor-run-${sendCalls}`;
-                  return {
-                    agentId: "native-cursor-error",
-                    runId,
-                    wait: Effect.succeed({
-                      id: runId,
-                      requestId: `native-request-${sendCalls}`,
-                      status: "finished" as const,
-                      model: { id: "composer-2.5" },
-                      durationMs: 1,
-                      ...(sendCalls === 1
-                        ? { result: "Error: RetriableError: WritableIterable is closed" }
-                        : {}),
-                    }),
-                    cancel: Effect.void,
-                  };
+          open: (openInput) =>
+            Effect.gen(function* () {
+              opens.push(openInput);
+              connections.push("open");
+              return {
+                agentId: "native-cursor-error",
+                listMessages: Effect.succeed([]),
+                close: Effect.sync(() => {
+                  closes++;
+                  connections.push("close");
                 }),
+                send: (input) =>
+                  Effect.sync(() => {
+                    sendCalls += 1;
+                    imageCounts.push(
+                      typeof input.message === "string" ? 0 : (input.message.images?.length ?? 0),
+                    );
+                    sentMessages.push(
+                      typeof input.message === "string" ? input.message : input.message.text,
+                    );
+                    const runId = `native-cursor-run-${sendCalls}`;
+                    return {
+                      agentId: "native-cursor-error",
+                      runId,
+                      wait: Effect.succeed({
+                        id: runId,
+                        requestId: `native-request-${sendCalls}`,
+                        status: "finished" as const,
+                        model: { id: "composer-2.5" },
+                        durationMs: 1,
+                        ...(sendCalls === 1
+                          ? { result: "Error: RetriableError: WritableIterable is closed" }
+                          : {}),
+                      }),
+                      cancel: Effect.void,
+                    };
+                  }),
+              };
             }),
         }),
         Effect.provide(hostContext),
@@ -603,12 +613,83 @@ describe("CursorAdapterV2", () => {
           `read=true, write=${index === 1}, source=${index === 1}`,
         );
       }
+      // Grants alone reuse the installed transport; attachment changes reopen the same agent.
+      assert.equal(opens.length, 1);
+      assert.equal(closes, 0);
+      const baseConfig = config(["memory:read", "memory:write", "orchestration:read"]);
+      const endpointConfig = { ...baseConfig, endpoint: "http://rotated.fixture.invalid/mcp" };
+      const authorizationConfig = {
+        ...endpointConfig,
+        authorizationHeader: "Bearer rotated-fixture",
+      };
+      const attachments = [
+        undefined,
+        baseConfig,
+        endpointConfig,
+        authorizationConfig,
+        authorizationConfig,
+      ];
+      for (const [index, attachment] of attachments.entries()) {
+        if (attachment === undefined) yield* sessions.clear(threadId);
+        else yield* sessions.set(attachment);
+        yield* runtime.startTurn({
+          ...ordinaryInput,
+          runOrdinal: index + 6,
+          providerTurnOrdinal: index + 6,
+        });
+        yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        const expectedChanges = Math.min(index + 1, 4);
+        assert.equal(opens.length, expectedChanges + 1);
+        assert.equal(closes, expectedChanges);
+        const opened = opens[opens.length - 1]!;
+        assert.equal(opened.operation, "resume");
+        assert.equal(opened.agentId, "native-cursor-error");
+        assert.deepEqual(opened.options.mcpServers, cursorMcpServers(attachment));
+        assert.include(sentMessages[index + 5]!, memoryContextText(snapshot));
+        assert.include(
+          sentMessages[index + 5]!,
+          attachment === undefined
+            ? "read=false, write=false, source=false"
+            : "read=true, write=true, source=true",
+        );
+      }
+      assert.equal(refreshes, 9);
+      assert.deepEqual(connections, [
+        "open",
+        "close",
+        "open",
+        "close",
+        "open",
+        "close",
+        "open",
+        "close",
+        "open",
+      ]);
+      const movedPolicy = { ...runtimePolicy, cwd: `${workspace}/moved` };
+      yield* runtime.startTurn({
+        ...ordinaryInput,
+        runtimePolicy: movedPolicy,
+        runOrdinal: 11,
+        providerTurnOrdinal: 11,
+      });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.equal(opens.length, 6);
+      assert.equal(closes, 5);
+      assert.equal(opens[5]!.agentId, "native-cursor-error");
+      assert.equal(opens[5]!.options.local?.cwd, movedPolicy.cwd);
+      assert.include(sentMessages[10]!, "read=true, write=true, source=true");
       memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
       const failed = yield* runtime
         .startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 })
         .pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(failed));
-      assert.equal(sentMessages.length, 5);
+      assert.equal(sentMessages.length, 11);
     }).pipe(
       Effect.scoped,
       Effect.provide(

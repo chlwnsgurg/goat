@@ -839,6 +839,7 @@ interface ActiveCursorTurn {
 }
 
 interface CursorLiveAgent {
+  readonly cwd: string | null;
   readonly mcpAuthorization: string | undefined;
   readonly mcpEndpoint: string | undefined;
   readonly nativeThreadId: string;
@@ -2083,6 +2084,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             existing !== null &&
             openInput.operation === "resume" &&
             existing.nativeThreadId === openInput.agentId &&
+            existing.cwd === openInput.runtimePolicy.cwd &&
             existing.mcpAuthorization === mcpSession?.authorizationHeader &&
             existing.mcpEndpoint === mcpSession?.endpoint
           ) {
@@ -2106,6 +2108,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             providerSessionId: input.providerSessionId,
           });
           const next = {
+            cwd: openInput.runtimePolicy.cwd,
             nativeThreadId: sdkSession.agentId,
             session: sdkSession,
             mcpAuthorization: mcpSession?.authorizationHeader,
@@ -2202,7 +2205,8 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           const agent = yield* Ref.get(liveAgent);
           const availability = McpProviderSession.memoryToolAvailability(
             config?.authorizationHeader === agent?.mcpAuthorization &&
-              config?.endpoint === agent?.mcpEndpoint
+              config?.endpoint === agent?.mcpEndpoint &&
+              turnInput.runtimePolicy.cwd === agent?.cwd
               ? config
               : undefined,
           );
