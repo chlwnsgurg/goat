@@ -172,7 +172,7 @@ it.effect(
                 const message = projection.messages.find((m) => m.id === input.messageId)!;
                 assert.equal(run.memoryGrantCeiling, expected.get(input.scheduledTaskId!));
                 assert.equal(
-                  runMemoryPrepareInput({ run, message }).memoryGrantCeiling,
+                  runMemoryPrepareInput({ run, message, projection }).memoryGrantCeiling,
                   expected.get(input.scheduledTaskId!),
                 );
                 dispatched.push({

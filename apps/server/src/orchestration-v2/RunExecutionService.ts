@@ -1,3 +1,4 @@
+import { MAX_CONTINUATION_CHAIN } from "./ContinuationChain.ts";
 import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
 import { framePendingReports } from "../remoteReports/reportFrame.ts";
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
@@ -534,14 +535,34 @@ export function runMemoryPrepareInput(input: {
   readonly run: OrchestrationV2Run;
   readonly message: Pick<
     import("@goat/contracts").OrchestrationV2ConversationMessage,
-    "createdBy" | "scheduledTaskId"
+    "createdBy" | "creationSource" | "scheduledTaskId"
+  >;
+  readonly projection: Pick<
+    import("@goat/contracts").OrchestrationV2ThreadProjection,
+    "runs" | "messages"
   >;
 }): RunMemoryPrepareInput {
+  let { run, message } = input;
+  let depth = 0;
+  for (;;) {
+    const sourceId = run.restartContinuationOfRunId ?? run.usageLimitContinuationOfRunId;
+    if (sourceId === undefined) break;
+    if (depth >= MAX_CONTINUATION_CHAIN) return { memoryGrantCeiling: "none" };
+    const source = input.projection.runs.find((candidate) => candidate.id === sourceId);
+    const sourceMessage = input.projection.messages.find(
+      (candidate) => candidate.id === source?.userMessageId,
+    );
+    if (source === undefined || sourceMessage === undefined) return { memoryGrantCeiling: "none" };
+    run = source;
+    message = sourceMessage;
+    depth++;
+  }
   const ordinary =
-    input.message.createdBy === "user" &&
-    input.message.scheduledTaskId === undefined &&
-    input.run.delegatedTaskId === undefined;
-  return { memoryGrantCeiling: ordinary ? null : (input.run.memoryGrantCeiling ?? "none") };
+    message.createdBy === "user" &&
+    (message.creationSource === "web" || message.creationSource === "mobile") &&
+    message.scheduledTaskId === undefined &&
+    run.delegatedTaskId === undefined;
+  return { memoryGrantCeiling: ordinary ? null : (run.memoryGrantCeiling ?? "none") };
 }
 
 export interface RunExecutionServiceV2StartRootRunInput {
