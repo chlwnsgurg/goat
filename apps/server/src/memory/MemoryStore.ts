@@ -963,6 +963,15 @@ export class MemoryStore extends Context.Service<
       failureCode: M.MemoryFailureCode;
       holdClass: MemoryHoldClass;
     }) => InTx<boolean>;
+    readonly holdResolutionAttemptTx: (input: {
+      ownership: TicketOwner;
+      candidateId: string;
+      expectedGeneration: number;
+      expectedAttempt: number;
+      now: number;
+      failureCode: M.MemoryFailureCode;
+      holdClass: MemoryHoldClass;
+    }) => InTx<TicketRow | null>;
     readonly rearmResolutionHoldsTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       holdClass: MemoryHoldClass;
@@ -1063,6 +1072,19 @@ export class MemoryStore extends Context.Service<
     readonly readProcessing: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
+    }) => Effect.Effect<
+      {
+        processing: M.MemoryProcessingStatus;
+        pendingSync: number;
+        quarantined: number;
+        parked: number;
+      },
+      MemoryStorageError
+    >;
+    readonly readLocalProcessingStatus: (input: {
+      environmentId: M.EnvironmentId;
+      memorySpaceId: M.MemorySpaceId | null;
+      hubEnvironmentId: M.EnvironmentId | null;
     }) => Effect.Effect<
       {
         processing: M.MemoryProcessingStatus;
@@ -6343,6 +6365,39 @@ const make = Effect.gen(function* () {
     );
     return rows.length === 1;
   });
+  const holdResolutionAttemptTx: MemoryStore["Service"]["holdResolutionAttemptTx"] = Effect.fn(
+    "MemoryStore.holdResolutionAttemptTx",
+  )(function* (input) {
+    yield* Transaction;
+    const row = yield* ownedTicket(input.ownership, input.now);
+    // Submitted work needs reconciliation. A permanent refusal must never retire its
+    // frozen attempt or manufacture a failure report, including approval-only rows.
+    if (!row || row.submission || row.submissionDigest || row.approval) return null;
+    const candidateId = `claim:${row.ticket.memorySpaceId}:${row.ticket.memoryId}:${hashText(yield* headsCodec.encode(row.ticket.conflictHeadSet))}`;
+    if (input.candidateId !== candidateId) return null;
+    const changed = yield* stored(
+      "resolution-attempt-hold",
+      sql`UPDATE memory_outbox SET status='retry',hold_class=${input.holdClass},failure_code=${input.failureCode},next_attempt_at=${Number.MAX_SAFE_INTEGER},claimed_by=NULL,claimed_until=NULL
+      WHERE id=${input.candidateId} AND space=${row.ticket.memorySpaceId} AND memory_id=${row.ticket.memoryId} AND kind='claim'
+      AND sync_version=${input.expectedGeneration} AND attempt=${input.expectedAttempt}
+      AND json_extract(frozen_claim_json,'$.attemptId')=${row.ticket.attemptId}
+      AND ((status='running' AND claimed_by=${String(input.ownership.coordinatorEpoch)} AND claimed_until>${input.now})
+        OR (status='retry' AND claimed_by IS NULL AND claimed_until IS NULL)) RETURNING id`,
+    );
+    if (changed.length !== 1) return null;
+    const held = yield* failResolutionTicketTx({
+      ownership: input.ownership,
+      now: input.now,
+      failureCode: input.failureCode,
+      nextAttemptAt: Number.MAX_SAFE_INTEGER,
+      holdClass: input.holdClass,
+      reportConflictFailure: false,
+    });
+    // Fail, rather than return null, after the first write so the enclosing Tx rolls
+    // both rows back if the ticket CAS unexpectedly loses its fence.
+    if (!held) return yield* new MemoryStoreConflict({ code: "fenced" });
+    return held;
+  });
   const rearmResolutionHoldsTx: MemoryStore["Service"]["rearmResolutionHoldsTx"] = Effect.fn(
     "MemoryStore.rearmResolutionHoldsTx",
   )(function* (input) {
@@ -6857,9 +6912,10 @@ const make = Effect.gen(function* () {
     });
     return next;
   });
-  const readProcessing: MemoryStore["Service"]["readProcessing"] = Effect.fn(
-    "MemoryStore.readProcessing",
-  )(function* (input) {
+  const readProcessingFor = Effect.fn("MemoryStore.readProcessingFor")(function* (input: {
+    space: string;
+    binding: { memorySpaceId: M.MemorySpaceId; hubEnvironmentId: M.EnvironmentId } | null;
+  }) {
     return yield* transact(
       Effect.gen(function* () {
         const rows = yield* stored(
@@ -6867,7 +6923,7 @@ const make = Effect.gen(function* () {
           sql<{
             dimension: string;
             value: number;
-          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.memorySpaceId} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
+          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.space} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
         );
         const values = new Map(rows.map((r) => [r.dimension, r.value]));
         const count = (name: string) => values.get(`processing_${name}`) ?? 0;
@@ -6875,14 +6931,14 @@ const make = Effect.gen(function* () {
           "processing-oldest",
           sql<{
             processing_oldest_at: string;
-          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.memorySpaceId} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
+          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.space} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
         );
-        const bootstrap = yield* readBootstrap(input);
+        const sequence = input.binding ? (yield* readBootstrap(input.binding)).afterSequence : 0;
         const state = yield* stored(
           "processing-watermark",
           sql<{
             projection_watermark: number;
-          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}`,
+          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.space}`,
         );
         const eligible = count("eligible");
         const indexed = count("indexed");
@@ -6890,7 +6946,7 @@ const make = Effect.gen(function* () {
           "processing-codec",
           codec(M.MemoryProcessingStatus).decode(
             yield* codec(M.MemoryProcessingStatus).encode({
-              lastReceivedHubSequence: bootstrap.afterSequence,
+              lastReceivedHubSequence: sequence,
               receiveLag: null,
               deferred: count("deferred"),
               oldestDeferredAtUtc: oldest[0]
@@ -6925,6 +6981,17 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readProcessing: MemoryStore["Service"]["readProcessing"] = (input) =>
+    readProcessingFor({ space: input.memorySpaceId, binding: input });
+  const readLocalProcessingStatus: MemoryStore["Service"]["readLocalProcessingStatus"] = (input) =>
+    readProcessingFor({
+      // WP2 drafts use an internal key, never a protocol MemorySpaceId or a new space.
+      space: input.memorySpaceId ?? `_local:${input.environmentId}`,
+      binding:
+        input.memorySpaceId !== null && input.hubEnvironmentId !== null
+          ? { memorySpaceId: input.memorySpaceId, hubEnvironmentId: input.hubEnvironmentId }
+          : null,
+    });
   const readBootstrap: MemoryStore["Service"]["readBootstrap"] = Effect.fn(
     "MemoryStore.readBootstrap",
   )(function* (input) {
@@ -8826,6 +8893,7 @@ const make = Effect.gen(function* () {
     readPendingHubAdmins,
     readActivatedHubAdminTx,
     readProcessing,
+    readLocalProcessingStatus,
     readBootstrap,
     discardBootstrapTx,
     retireFrozenClaimTx,
@@ -8862,6 +8930,7 @@ const make = Effect.gen(function* () {
     renewResolutionTicketTx,
     failResolutionTicketTx,
     holdClaimCandidateTx,
+    holdResolutionAttemptTx,
     rearmResolutionHoldsTx,
     listMaterializableIntents,
     assignIntentIdentityTx,
