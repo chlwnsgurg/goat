@@ -5,22 +5,20 @@ source provenance. GOAT never changes those sources. Re-import observes stable s
 content changes and permanent forget suppression; every environment submits the same ordinary
 local intents to the configured hub. Imported text is untrusted inference, not instructions.
 
-- Date: 2026-10-14. Status: WP3-final P re-anchor **PLAN_READY** for coordinator reflection/A; prior reflection r2 ALIGNED and audit r2 GO-WITH-FIXES assessed the pre-WP3 plan, not this revision. WP5 implementation and runtime acceptance: **NOT RUN**.
+- Date: 2026-10-14. Status: WP3-final re-anchor reflection r1 **ALIGNED after corrections** at input `bff448153`; independent A remains pending; prior reflection r2 ALIGNED and audit r2 GO-WITH-FIXES assessed the pre-WP3 plan, not this revision. WP5 implementation and runtime acceptance: **NOT RUN**.
 - Authoring branch: `goat/memory-wp5-provider-import`, worktree `goat-wp5-plan`, input HEAD `3cc957768`: prior WP5 plan `6a5a072a9` plus WP3 final `5f12fb1b8`. WP3 code is present; WP4 implementation is not present. WP3 #183 green is supplied coordinator evidence, not a fresh check in this task.
 - Dependency pins: [030](030_wp3_hub_sync.md) final decisions rev **11f/11g**, [000](000_plan.md) WP3 B integration 1–3, and the actual WP3 code at this input HEAD. [040](040_wp4_mcp_injection.md) is a read-only handoff snapshot; its owner is replanning in parallel. No origin/dev fetch or moving-head review is claimed here.
 - Authority: [000 decisions](000_plan.md#decisions-main-dispositions-of-m1-m20) M17/M19/M20,
   [shared names](000_plan.md#shared-names-all-phase-docs-must-use-these) and
   [enforcement limits](000_plan.md#enforcement-inventory). Research is evidence, not authority.
 
-Loop spec: **satisfy-spec**, triggered by this bounded WP5 P re-anchor request. Goal: a bounded,
-source-grounded implementation handoff for read-only import. Non-goals: implementation, other
-plan edits, home-corpus inspection, provider execution, UI, watchers, write-back, push or PR
-creation. Verifier for this authoring is `git diff --check`; formatting is skipped when this tree has no node_modules;
-runtime acceptance is future exact-head macmini-cf focused tests plus PR CI, NOT RUN. Stop after rewriting 050, adding
-one WP5 P record to 000 and making the requested single docs commit. Memory artifact: this
-plan and that record. Outcomes: PLAN_READY or NEEDS_DECISION;
-escalate a predecessor signature/schema incompatibility to its owner before B, never hide it
-behind an import compatibility shim. No product decision is currently outstanding.
+Authoring scope: bounded same-architect reflection before A, not an implementation loop.
+Only this document and the WP5 cycle record in 000 are edited and committed; no code, other
+worktree, push or PR. The reflection report is `/tmp/goat-wp5-reflection-r1.md`.
+Verification is documentation consistency plus `git diff --check` / `git show --check`;
+no node_modules means fmt skipped. Runtime acceptance remains **NOT RUN** and requires exact-head
+macmini-cf focused evidence plus PR CI. The user explicitly authorizes these existing plan edits.
+No new product decision is required; release ordering is a coordinator gate in §5, not assumed history.
 
 ## 1. Stale check and evidence boundary
 
@@ -120,6 +118,19 @@ apply supplies space/source/session/batch operationId and 1–32 selectors
 `{sourceItemKey, sourceFingerprint, scope, project?}`; status takes space and operationId.
 No body preview, caller path, free-form parserVersion or start/cancel job. New wire changes are checkpoint lineage plus hub compatibility fencing specified in §5 L1-0; import action DTOs stay unchanged.
 Results obey 64-KiB encoded limit as well as item counts (`C/memory.ts:1683–1716`).
+
+**WP4 A-lite boundary (Jun decision supplied for this reflection).** Import's destination
+memory:write AND filesystem:read grant checks authorize provider-file discovery/read/import
+only. They do not attest a requester or grant original-thread source relay. WP4 owns requester
+caller authorization plus the owning device's allowlist/read policy; a sync credential alone
+never authorizes raw source access. Keep its attestation/relay path out of ProviderMemoryImport
+and out of import grant synthesis. Imported provenance is evidence of origin, not a relay permit;
+provider originals have no GOAT sourceThread and cannot be fetched via memory_read_source.
+The local 040 snapshot predates this parallel reflection; do not overwrite it. WP4 L2 owns the
+nine-tool MCP catalog/auth/handlers including memory_read_source, **not an import tool**;
+WP4 L4 owns the guarded import client command; WP5 L5 owns only import RPC activation. An MCP
+import tool is excluded from current acceptance and requires a separately assigned contract
+and auth change; no unowned promise of future exposure is necessary for c-6.
 
 The reader registers an opaque UUID sourceId once per `(space, environment, format, trusted
 logical root slot, selected Claude directory/omo agent)`. Persist registration in the source
@@ -345,7 +356,27 @@ accepted lineage. Ordinary edits retain lineage; approved replica restores the f
 union without local re-admission, and reserved forget remains possible. Permanent suppression
 copies are charged/reserved separately; lineage is not reclaimed when forgotten.
 
-Extend the existing **071-derived accounting**, not a new full-scan path: 072 installs INSERT/UPDATE/DELETE lineage triggers for per-memory distinct records, global lineage encoded bytes, `_hub_global` hub_metadata, per-space hub_snapshot_bytes/rows/generation and first-forget reserve deltas. Every producer-input mutation invalidates consumed staging credit in the same transaction (071:393–407; Store:8211–8228). Add lineage to Store.usage/logicalBytes/usageForHub/readHubUsageTx inventory and capacity/status codecs, plus actual checkpointBound proof for maximal record encoding/escaping/page overhead. Existing suppression counters must not double-charge restored union or reserved metadata. On equality/+1 test old published/pinned pages plus the next complete checkpoint; a 32-MiB ledger can be refused earlier by aggregate permanent/checkpoint ceilings. 32 MiB is a logical sub-budget, not a physical SQLite/FTS size guarantee. No new corpus index, per-item dbstat scan or raw-file archive; requirement 7 requires same-head off-host growth evidence, not just constants.
+Extend the existing **071-derived accounting**, not a new full-scan path: 072 installs one INSERT, one UPDATE and one DELETE lineage trigger for global lineage encoded bytes, `_hub_global` hub_metadata, per-space hub_snapshot_bytes/rows/generation and first-forget reserve deltas. Every producer-input mutation invalidates consumed staging credit in the same transaction (071:393–407; Store:8211–8228). Add lineage to Store.usage/logicalBytes/usageForHub/readHubUsageTx inventory and capacity/status codecs, plus actual checkpointBound proof for maximal record encoding/escaping/page overhead. Existing suppression counters must not double-charge restored union or reserved metadata. On equality/+1 test old published/pinned pages plus the next complete checkpoint; a 32-MiB ledger can be refused earlier by aggregate permanent/checkpoint ceilings. 32 MiB is a logical sub-budget, not a physical SQLite/FTS size guarantee. No new corpus index, per-item dbstat scan or raw-file archive; requirement 7 requires same-head off-host growth evidence, not just constants.
+
+Minimal accounting model: one body-free lineage table, its primary key and at most one
+justified lookup index; exactly three delta triggers on that table, combining M19 bytes,
+snapshot rows/bytes/generation and reserve updates in each trigger. Reuse memory_quota_counters
+for one global lineage-byte sub-counter and memory_identity_ledger for first-forget reserve;
+use a bounded primary-key count for the 1,000-record limit. No separate per-memory counter,
+worker, scan-per-item dbstat sampler, lineage history ring or additional physical reserve pool.
+Duplicate union uses insert-on-conflict-do-nothing: zero row delta means zero counter, generation
+or checkpoint-credit mutation. Restore/rollback tests cover the trigger deltas and reserve.
+
+The 1,000 / 32-MiB values are conservative admission ceilings, not measured workload needs or
+guaranteed usable capacity. They are upper bounds within existing 128-MiB M19 metadata,
+including first-forget reserve; retained/new checkpoint charges also face their existing
+separate ceilings. **128 MiB is not a new reserve allocation**. A simpler latest-provenance-only or 100-entry eviction model loses old
+keys after resolve/compaction and violates forget. Reusing memory_import_keys as the live ledger
+would require changing its tombstone-bound space-global identity; the small separate table
+avoids that wider codec change. Retaining bounded body-free lineage plus suppression duplicates
+is deliberate for re-import prevention; measure both and refuse new imports early. Requirement 7
+is unproven until off-host DB/WAL/FTS growth is measured on the same integrated SHA. A 27.3-GB
+recall corpus/index is explicitly outside this design: no provider corpus index or archive.
 
 WP5's Store/Quota lane implements missing import-specific counters and receipt/session
 reservations on top of current quota.commit/withAdmission. Local allocations have explicit
@@ -372,7 +403,7 @@ first. No parser edits a shared service/contract and no integration lane rewrite
 
 | Lane                     | Exact owned files (NEW / MODIFY)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Delivered boundary                                                                                                                                                                                                                                                     |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L1 durable import seam   | MODIFY S/memory/MemoryStore.ts, MemoryService.ts, MemoryQuotaService.ts and their three .test.ts files; WP5-owned post-WP3 extensions: S/memory/MemoryCompactor.ts, MemoryCompactor.test.ts, MemoryHubService.ts, MemoryHubService.test.ts, MemorySyncService.ts, MemorySyncService.test.ts; S/persistence/Migrations.ts, S/persistence/reconcileGoatMigrationIds.ts and its .test.ts; MODIFY S/memory/MemoryHubClient.ts and its .test.ts, MemoryHubHttp.ts and its .test.ts, MemoryCheckpointBound.ts (only if the measured bound needs amendment); MemoryHubScenarios.test.ts, MemoryHubSyncScenarios.test.ts; NEW S/persistence/Migrations/072_MemoryImportLineage.ts and its .test.ts (reconcile next free ordinal after WP3 071); NEW S/memory/imports/MemoryImportTypes.ts, S/memory/MemoryImport.test.ts. | Strict private receipt/session codecs, indexed dedup/suppression lookup, CAS and quota reservation; importProvider interface/service delegation; parent-aware intents, settlement metadata and forget extraction/fragments. No reader I/O or second transaction owner. |
+| L1 durable import seam   | MODIFY S/memory/MemoryStore.ts, MemoryService.ts, MemoryQuotaService.ts and their three .test.ts files; WP5-owned post-WP3 extensions: S/memory/MemoryCompactor.ts, MemoryCompactor.test.ts, MemoryHubService.ts, MemoryHubService.test.ts, MemorySyncService.ts, MemorySyncService.test.ts; S/persistence/Migrations.ts, S/persistence/reconcileGoatMigrationIds.ts and its .test.ts; CONDITIONAL on §5 v2 gate: MODIFY S/memory/MemoryHubClient.ts and its .test.ts, MemoryHubHttp.ts and its .test.ts; MODIFY MemoryCheckpointBound.ts (only if the measured bound needs amendment); MemoryHubScenarios.test.ts, MemoryHubSyncScenarios.test.ts; NEW S/persistence/Migrations/072_MemoryImportLineage.ts and its .test.ts (reconcile next free ordinal after WP3 071); NEW S/memory/imports/MemoryImportTypes.ts, S/memory/MemoryImport.test.ts. | Strict private receipt/session codecs, indexed dedup/suppression lookup, CAS and quota reservation; importProvider interface/service delegation; parent-aware intents, settlement metadata and forget extraction/fragments. No reader I/O or second transaction owner. |
 | L2 read-only reader      | NEW S/memory/imports/MemoryImportReader.ts, MemoryImportReader.test.ts, MemoryImportFixtures.fixture.ts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Trusted root registration references, descriptor/Git snapshots, hard ceilings, read-only fault fixtures. Consumes L1 types/ports; shared synthetic fixture builder is owned here, not modified by parser lanes.                                                        |
 | L3 deterministic parsers | NEW S/memory/imports/CodexMemoryImporter.ts, CodexMemoryImporter.test.ts, ClaudeMemoryImporter.ts, ClaudeMemoryImporter.test.ts, OmoMemoryImporter.ts, OmoMemoryImporter.test.ts.                                                                                                                                                                                                                                                                                                                                                                                                      | Pure supported-profile parsers, routing/evidence exclusions, stable item keys and canonical candidates. No SQL/process/provider configuration.                                                                                                                         |
 | L4 coordinator           | NEW S/memory/imports/ProviderMemoryImport.ts, ProviderMemoryImport.test.ts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Four action orchestration, raw/title/output scans, profile/session/source-change fences, per-item selection and errors, dependency calls to L1 without direct SQL. L1 owns the new real-store MemoryImport.test.ts and imports this module for integrated cases.       |
@@ -393,11 +424,35 @@ Add `MEMORY_IMPORT_LINEAGE_MAX_RECORDS_PER_MEMORY = 1000` and
 `MEMORY_IMPORT_LINEAGE_MAX_BYTES = 33554432`, plus `import_lineage_records` and
 `import_lineage_bytes` capacity dimensions and their strict MemoryCapacityExceeded codecs/tests;
 retain existing import DTO/error shape. Unknown kind/missing arm rejects strictly.
-All peers need the new checkpoint codec before import activation; no silent empty-default fallback. Current hub envelopes and HTTP guard are literal version 1 (C/memory.ts:2135–2138; S/memory/MemoryHubHttp.ts:173–174), so a required checkpoint array alone does not fence old members on live pull. L1-0 introduces a distinct **hub protocol version 2** constant/envelopes (join/result/checkpoint/apply/pull/claim/source-read), while ordinary MemoryOperation/storage protocol 1 is retained. L1 updates HubService/HubClient/HubHttp/Sync/Store hub-envelope producers, validators and tests; L5 publishes the actual ready hub version through existing composition. Every request rejects incompatible hub peers before join/admission/bootstrap, including previously installed credentials. Tests cover old client/new hub, new client/old hub, existing-member pull/apply, and no unknown/missing-lineage fallback. Old staged hub snapshots are rebuilt safely before activation; canonical operation/digest/history is never rewritten to fabricate lineage. No shared operation protocol bump or compatibility shim is implied.
+All peers need the new checkpoint codec before import activation; no silent empty-default fallback.
+
+**Hub protocol decision — default: extend unreleased v1 in place.** The supplied release
+boundary is origin/dev through 069, with WP3's stack still draft and merge-frozen. Local WP3
+integration is not a release. This reflection does not fetch or newly verify hosted state.
+The current checkpoint lacks lineage (C/memory.ts:2086–2138); HTTP rejects versions other than 1
+(S/memory/MemoryHubHttp.ts:173–174), and HubClient/Sync preflight require 1 (:196/:1689).
+
+| Release condition | Decision / safety | Scope |
+| --- | --- | --- |
+| WP3 + WP5 ship in one release; no supported pre-extension v1 member exists | Extend v1's required checkpoint array/validation/producer/install in place, as rev 11f allows for unreleased migrations. All shipped v1 peers understand lineage. Keep version 1; reject missing lineage, rebuild isolated intermediate snapshots before activation. | L1 checkpoint/Store/Service/Quota/Compactor/schema/tests; no gratuitous HubClient/HubHttp version edits. |
+| WP3 ships first, or any supported pre-extension v1 member/credential can remain | Use hub v2 with a mandatory version fence on **every** join/apply/pull/claim/source-read/checkpoint request, including enrolled members; old/new combinations return unsupported_protocol before data access. Never let old peers keep live-pulling while only checkpoint decode fails. | L1 additionally owns HubService/HubClient/HubHttp/Sync version constants, predicates, envelopes and tests; L5 publishes actual ready v2. Ordinary MemoryOperation/storage remains v1. |
+
+Before L1-0/B, the coordinator records release order and supported member inventory. Unknown or
+mixed deployment state selects **v2 conservatively**, never the smaller branch by assumption.
+The v1 default is conditional on a coordinated release gate: do not release WP3 standalone
+while claiming this branch is safe. Intermediate unpublished development installations are
+upgraded/rebuilt in isolation before participation, not silently accepted as compatible peers.
+If the sequence changes later, switch to v2 before import activation. No parallel v1/v2 shim,
+optional missing-lineage decoder, digest rewrite or canonical-history rewrite. In either branch,
+checkpoint publication/install must preserve the complete ledger before compaction and exposure.
+Old staged snapshots are regenerated safely; missing canonical history refuses activation.
 
 L1 migration creates `memory_import_lineage(space, memory_id, kind, key, record_json)` with
-primary key `(space, memory_id, kind, key)`, indexed key lookup, strict record codec and encoded
-byte/count accounting. **Migration recommendation: separate 072**, next free ordinal in this tree, rather than extending 071. Rev 11f allows 070/071 in-place edits because they are unreleased; it does not require later features to modify them. WP3 071 owns hub/sync initialization; WP5 adds a new permanent lineage table, new triggers and an independently named reconciliation boundary after that baseline. 072 can correctly run after a database already recorded 071. Keep 070/071 read-only in WP5; if another upstream migration takes 072 before B, renumber by stable name. L1 registers the stable name `MemoryImportLineage` in `reconcileGoatMigrationIds.ts` (GOAT
+primary key `(space, memory_id, kind, key)`, strict record codec and encoded byte accounting.
+Use the primary-key prefix for bounded per-memory count/forget reads (maximum 1,000 rows);
+add at most one `(space, kind, key, memory_id)` lookup index for cross-memory exact matching,
+only if the existing receipt/suppression lookup cannot serve that query. No FTS or JSON index.
+Do not add a per-memory counter table or separate lineage database. **Migration recommendation: separate 072**, next free ordinal in this tree, rather than extending 071. Rev 11f allows 070/071 in-place edits because they are unreleased; it does not require later features to modify them. WP3 071 owns hub/sync initialization; WP5 adds a new permanent lineage table, new triggers and an independently named reconciliation boundary after that baseline. 072 can correctly run after a database already recorded 071. Folding the same table/triggers into unreleased 071 is valid and saves one migration file/name; it also works with the existing MemoryHubSync renumbering regression. Therefore renumbering safety alone does not require 072. Retain 072 because it adds no runtime subsystem, isolates the WP5 schema delta and tests already-recorded-071 upgrades without reopening the frozen WP3 migration. This is a small ownership/testing tradeoff, not a deployed-data compatibility mandate. Keep 070/071 read-only in WP5; if another upstream migration takes 072 before B, renumber by stable name. L1 registers the stable name `MemoryImportLineage` in `reconcileGoatMigrationIds.ts` (GOAT
 migrations are identified by name, and an unregistered name is treated as upstream), with a
 regression where upstream takes the number, the GOAT migration moves, and existing lineage rows
 survive. Checking the next free ordinal alone does not handle renumbering after application.
@@ -413,11 +468,11 @@ deltas without a new operation arm; bounded current provenance remains usable by
 Compactor must preserve ledger while deleting revisions/receipts, include every ledger record
 in publication sizing/reservation, and refuse publication if a complete snapshot cannot fit.
 L1 owns corresponding producer/consumer/compactor real-SQL tests, including rollback, replay,
-partial install and across-page >100 records. L1 owns MemoryHubClient/HubHttp/Sync descriptor-version predicates (HubClient:196, SyncService:1689), the HTTP ready-version constant/type (HubHttp:192,269), hub-envelope fixtures and H/A/B scenarios; L5 owns descriptor publication/composition (ServerEnvironment:311). C/environment.ts:101 already accepts integer hub versions, so no environment contract file change is assigned. L5 never edits L1 files.
+partial install and across-page >100 records. Only the v2 branch adds edits to MemoryHubClient/HubHttp/Sync descriptor-version predicates (HubClient:196, SyncService:1689), the HTTP ready-version constant/type (HubHttp:192,269), hub-envelope fixtures; H/A/B lineage scenarios apply in both branches. L5 owns descriptor publication/composition (ServerEnvironment:311). C/environment.ts:101 already accepts integer hub versions, so no environment contract file change is assigned. L5 never edits L1 files.
 
 Integration: merged WP3 and WP4 code → **L1-0 contract commit** → L1 migration/types/store/service
 and WP5-owned post-WP3 checkpoint/compactor extensions → L2/L3 → L4 → L5 → integrated exact-head
-macmini-cf focused tests and PR CI. Freeze L1 types/ports before L2/L3/L4; final L1 integrated tests consume L4 after its merge, without shared-file lane edits. WP3 baseline is merged; these later extensions belong to WP5 L1 after WP4 integration. No package/dependency/client-runtime/UI
+macmini-cf focused tests and PR CI. Freeze L1 types/ports before L2/L3/L4; final L1 integrated tests consume L4 after its merge, without shared-file lane edits. WP3 baseline is integrated into this branch, not claimed released; these later extensions belong to WP5 L1 after WP4 integration. No package/dependency/client-runtime/UI
 or other plan edit is assigned. Before B validate codecs, protocol compatibility and complete
 permanent-metadata/checkpoint reservations against those merged source hashes.
 
@@ -509,17 +564,38 @@ settings, credentials, provider network/model call or provider binary is a test 
 | L1 quota/store tests                                                            | Before/after import/drain and repeated noop samples, FTS brake/resume, absent dbstat/WAL/baseline, forget/rebuild → bounded growth and truthful unavailable metrics; no duplicate raw text/history identity/index, forgotten text absent. Use existing maintenance, no new physical sampler per item.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | L5 rpc.test.ts, ws.test.ts, RpcAuthorization.test.ts, ServerEnvironment.test.ts | Before activation only WP4 core; after activation discover/preview/apply/status round trips and actual capability. Missing/revoked either grant after wait/lock denies every action; no handler-local bypass, old destination unavailable. Lost WS response status returns persisted partial/completed receipt without source reads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
+### c-6 evidence chain and lane sufficiency
+
+c-6 requires Codex, Claude and omo read-only import **with provenance and unchanged sources**.
+Five lanes remain: L1 durable lineage/contracts/integration; L2 reader/source immutability;
+L3 the three pure parsers; L4 coordinator; L5 RPC/auth/composition. L1-0 is L1's first commit,
+not a sixth lane. L1 is the critical serial seam: freeze contract → ledger/transactions →
+checkpoint/forget/accounting, then integrate L4 and run the end-to-end cases; do not dispatch
+those shared-file phases concurrently. Version-client/HTTP work is conditional, reducing its
+normal scope. No sixth protocol lane or three separately owning parser lanes are needed.
+
+| c-6 claim | Required exact-head proof / owner | Insufficient evidence |
+| --- | --- | --- |
+| All three provider formats work | L3 profile fixtures plus L1 MemoryImport.test.ts: each Codex handbook/ad-hoc, Claude direct/isolated metadata and committed omo fixture through real reader → coordinator → real Store → hub approval/ACK, then authorized read with exact source/profile/key/fingerprint provenance. | Parser-only tests, mocked coordinator success or one provider happy path. |
+| Provider original unchanged | Same integrated three-provider runs capture pre/post byte hashes, directory inventory and reader write-call spies; omo includes refs/index/config/objects and dirty/untracked exclusions. Failure, retry, cancellation, secret refusal and missing promisor object also leave originals intact. L2 builds fixtures; L1 reuses them. | A read-only type name or unchanged GOAT DB alone. |
+| Forget and restart cannot re-import accepted history | L1 real resolve/compaction → new-device bootstrap → forget/purge GOAT body, resolution inputs, FTS/derived caches/report payloads → all historical keys and exact same-scope bodies suppressed; provider fixture unchanged. Verify search/read/history/resolve-input/rebuild never exposes forgotten text. | Tombstone only; a handcrafted checkpoint; provider file removal. |
+| Bounded index/storage | L1 repeated noop/change/forget/rebuild metrics including DB/WAL/FTS, equality/+1 refusal and rollback. L5 proves dual grants/remote destination/capability. | Numeric caps alone, missing measurements treated as zero, CI job conclusion without test steps. |
+
+All rows are future **NOT RUN**. Coordinator captures focused files, collected/executed counts,
+exit codes and logs on macmini-cf at integrated SHA and records PR CI separately. c-6 is not
+closed by this ALIGNED plan verdict. UI/import presentation is WP6; MCP import is not required.
+
 Additional re-anchor acceptance (all NOT RUN):
 
 | Lane / owned tests | Activation and observable result |
 | --- | --- |
-| L1 contracts + HubClient/HubHttp/Sync tests | Hub v1/v2 mismatches including previously enrolled member requests → typed protocol unavailable before reads/writes/joins; ordinary operation v1 remains readable. Missing/duplicate/cross-scope lineage or >100 mixed page records → strict rejection; complete multi-page lineage survives install. |
+| L1 contracts + HubClient/HubHttp/Sync tests | Both release branches: required-lineage strict decode and complete install; v1 branch retains version 1 throughout. Conditional v2: old/new hub and enrolled-member pull/apply/claim/source-read/checkpoint mismatches fail before data access; ordinary operation v1 remains readable. Missing/duplicate/cross-scope lineage or >100 mixed page records → strict rejection; complete multi-page lineage survives install. |
 | L1 072 migration + reconcile tests | Synthetic empty→070→071→072 and already-071→072; upstream reclaims ordinal → stable MemoryImportLineage moves, rows and suppression survive. INSERT/UPDATE/DELETE/rollback/restore counters match strict encoded bytes; repeated union/noop does not double-charge. |
 | L1 MemoryHubSyncScenarios / MemoryImport tests | H imports → A/B receive body plus exact safe provenance. B forgets → H/A cannot re-import same-scope body through fresh local registrations; original registered key remains blocked after source changes. An offline pre-forget proposal reaches the hub and is rejected without resurrecting. Provider fixture hashes/objects remain unchanged. |
 | L1 Store/Quota/Compactor/Sync tests | Changed import concurrent with manual edit → conflict; first observer resolves with execution provenance, takeover/revert retains lifetime lineage. >100 histories, real compaction, new-device bootstrap and forget block all historical keys/hashes. Fill lineage/metadata/retained-page + next-checkpoint bounds at equality/+1, invalidate consumed staging by one lineage mutation, reject atomically; full approved replica still persists union/cursor and reserved forget works. |
 | L2 reader tests | Parent synthetic Git injection/proxy/askpass sentinel → no inheritance, no helper/network/lazy fetch; unsupported isolation/version/missing promisor object → safe refusal, complete source/objects inventory unchanged. No real host environment or credentials inspected. |
 | L4 coordinator tests | Raw secret header/title/item key/locator with otherwise safe body → whole-file value-free refusal; status/lost response retry performs no source I/O. Either live grant revoked during wait/lock → no receipt/provenance mutation. |
-| L5 activation tests | WP4 core remains available before import activation; after composition, dual-grant import RPC and actual capability round-trip. Descriptor advertises hub v2 only with configured ready routes, disabled hub omits it; no MCP import tool added. |
+| L5 activation tests | WP4 core remains available before import activation; after composition, dual-grant import RPC and actual capability round-trip. Descriptor advertises the §5-selected hub version only with configured ready routes, disabled hub omits it; no MCP import tool added. |
 
 Use Deferred barriers/persisted events and existing MemoryWorker.drain plus WP3 settlement/drain
 milestones. If thread orchestration is involved, drain OrchestrationEffectWorkerV2 too. No
@@ -530,10 +606,10 @@ Current CI wiring: `.github/workflows/goat-ci.yml:147–149` runs server package
 `apps/server/package.json:24` runs its test suite; `apps/server/vite.config.ts:155–169` uses
 nonparallel files and weighted shards, with all new server .test.ts files in scope. Contracts
 run at `goat-ci.yml:125–127`. L5 does not edit workflow or claim old r4 static counts apply.
-Future targeted static checks belong to changed server/contracts files in PR CI; no local
-compiler/linter/test/build command is executed in this authoring. Capture exact PR head,
+Focused typecheck/lint of changed server/contracts files are allowed on this Mac and in PR CI;
+none is needed or run for this docs-only reflection. Tests/e2e/full builds stay off this Mac. Capture exact PR head,
 discovered focused files/case counts and actual logs/steps; cancelled/skipped/toolchain failures
-are not passing tests. No local bun/pnpm/vp test, vitest, e2e, repo checks, full build, pnpm,
+are not passing tests. No local bun/pnpm/vp test, vitest, e2e, repo checks, full build,
 dependency installation or dev server on this Mac.
 
 ## 7. Risks, ownership and reflection handoff
@@ -558,23 +634,26 @@ privileged direct DB edits remain limits; tested service paths are the enforceme
 not a guarantee over arbitrary external writers. Root bypasses/profile changes require
 migration retaining suppression, not a downgrade of the read-only claim.
 
-Coordinator reflection packet: this input SHA/dependency pins, R01–R18, §2 parser decisions,
-§3 actual versus planned ports, L1–L5 ownership, and §6 NOT RUN evidence. Obtain architect
-reflection and independent A on this concrete rewrite before B. Supplied reflection r1 and audit r1 assessed `6d08771c4`; this correction folds their findings
-without creating a new consultation handle or fresh reviewer PASS. PLAN_READY means ready for repeat reflection/audit, not B approval.
-Before B record the actual WP4 implementation hash and verify L1-0/import codecs against the merged contracts/protocol; WP3 is already anchored above. Source-of-truth target is this
-050 and the one 000 WP5 cycle record for P; a future code PR updates structure docs only if a
-real module boundary/decision changes, not as an implementation diary.
+Reflection r1 assesses input `bff448153` plus the corrections in this body; the resulting
+plan is ALIGNED for independent A. Older reflection/audit handles assessed other heads and
+are historical evidence only. Independent A must assess this exact documentation commit
+before B; no runtime pass or fresh independent audit is claimed.
+Before B record the actual WP4 implementation hash, §5 release/member gate and L1-0 codec/
+accounting checks. This 050 is the implementation plan and 000 records its WP5 cycle;
+future code PRs update structure docs only for a real module boundary/decision change.
 
-Authoring verification: only 050 and the 000 WP5 cycle record are written. This tree has no node_modules: **fmt skipped**, no formatter borrowed from another worktree and no dependency install. `git diff --check` reads the exact authoring diff; the result is recorded in the report. Tests/typecheck/lint/builds/dev servers are prohibited on this Mac and NOT RUN. Future focused proof runs only on **macmini-cf**, in an isolated checkout at exact integrated SHA with synthetic provider roots/database; never use bare macmini. Do not list/read environment, shell configuration, ~/.goat, ~/.t3, ~/.ssh, keychain or credential contents on either host, and never source shell profiles in SSH commands. Use a non-login shell/explicit command and approved installed tool paths. Capture exact files/test totals/exit/log evidence; full repo suites remain CI-owned. No sleeps/polling success; use Deferred and persisted worker milestones.
+Authoring verification: only 050 and the 000 WP5 cycle record are written. This tree has no node_modules: **fmt skipped**, no formatter borrowed from another worktree and no dependency install. `git diff --check` reads the exact authoring diff; the result is recorded in the report. Tests (bun/pnpm/vp test, vitest, e2e) and full builds are prohibited on this Mac. Focused typecheck/lint are allowed but NOT RUN in this docs-only reflection; dev servers/install are unnecessary and NOT RUN. Future focused proof runs only on **macmini-cf**, in an isolated checkout at exact integrated SHA with synthetic provider roots/database; never use bare macmini. Do not list/read environment, shell configuration, ~/.goat, ~/.t3, ~/.ssh, keychain or credential contents on either host, and never source shell profiles in SSH commands. Use a non-login shell/explicit command and approved installed tool paths. Capture exact files/test totals/exit/log evidence; full repo suites remain CI-owned. No sleeps/polling success; use Deferred and persisted worker milestones.
 
 ### Follow-up requests (read-only predecessor boundaries)
 
-- **040 owner:** preserve guarded importProvider destination/dual grants and WP5-only RPC activation. Core MCP remains WP4's eleven tools; no provider import MCP tool is authorized by this WP5 plan. If a future import MCP tool is wanted, amend 040 and assign its contract/auth/service tests before activation; do not silently add it to L5. Consume safe import provenance for injection/readSource: provider imports have no actual sourceThread, so original provider files are never read via thread source relay. Coordinate WP5 hub-v2 compatibility changes after WP4 source-relay merge; no simultaneous source-file ownership.
-- **030 owner:** no correction to finished WP3 code is requested in this P task. Record later WP5 checkpoint lineage/hub-v2 extensions as WP5 scope, rather than claiming existing suppression/provenance already preserves unbounded import history.
+- **040 owner:** preserve guarded importProvider destination/dual grants and WP5-only RPC activation. Core MCP remains WP4's nine catalogued tools; no provider import MCP tool is authorized by this WP5 plan. If a future import MCP tool is wanted, amend 040 and assign its contract/auth/service tests before activation; do not silently add it to L5. Consume safe import provenance for injection/readSource: provider imports have no actual sourceThread, so original provider files are never read via thread source relay. Coordinate the conditional §5 protocol change after WP4 source-relay merge; no simultaneous source-file ownership.
+- **030 owner:** no correction to finished WP3 code is requested in this P task. Record later WP5 checkpoint lineage/conditional protocol extensions as WP5 scope, rather than claiming existing suppression/provenance already preserves unbounded import history.
 - **060 owner:** keep import cancel as stopping future chunks, not a new server action; consume guarded destination command and distinguish accepted/pending/suppressed/held. Re-anchor its stale baseline and provenance/forget presentation later; no UI/docs edit is performed here.
 
-Prior consultation handles are reflection r2 `goat-memory-wp5-reflection-r2` and audit r2 `goat-memory-wp5-audit-r2` recorded in 000. This bounded child re-anchor does not impersonate their architect or independent A review; coordinator owns fresh reflection/A on this concrete revision. PLAN_READY is a complete P artifact, not build authorization or a new reviewer PASS.
+Prior consultation handles `goat-memory-wp5-reflection-r2` and `goat-memory-wp5-audit-r2`
+remain historical in 000. This is the requested same-architect re-anchor reflection r1;
+coordinator owns the next independent A. ALIGNED means plan alignment after corrections,
+not build authorization or runtime closure.
 
 ## Folded revision correspondence
 
@@ -589,4 +668,5 @@ Prior consultation handles are reflection r2 `goat-memory-wp5-reflection-r2` and
 | P-phase audit r1 A#2 on 6d08771c4                     | §4.1 and §6: mandatory lazy-fetch/prompt/network/credential isolation, unsupported Git refusal and unchanged object inventory fixture.                                                                       |
 | P-phase reflection r1 G-2 on 6d08771c4                | §4.1 and §6: secret key/locator rejects whole file with existing value-free typed error and zero unsafe metadata output/logging.                                                                             |
 | P-phase audit r2 #1 on 9027962ec                      | §4.1, §5 L1 and migration: register the stable GOAT name MemoryImportLineage in reconcileGoatMigrationIds with an upstream-renumbering regression; strip inherited Git variables from the child environment. |
-| rev 9 — WP3-final P re-anchor r1 (3cc957768) | §1/§3 current exports/errors; §4 hub propagation, identity-aware suppression, resolve-independent lineage and trigger/checkpoint accounting; §5 separate 072 + reconciliation and mandatory hub-v2 fence; §6 macmini-cf acceptance; §7 predecessor follow-up requests. |
+| rev 9 — WP3-final P re-anchor r1 (3cc957768) | §1/§3 current exports/errors; §4 hub propagation, identity-aware suppression, resolve-independent lineage and trigger/checkpoint accounting; §5 separate 072 + reconciliation and release-gated protocol decision (superseded by rev 10 below); §6 macmini-cf acceptance; §7 predecessor follow-up requests. |
+| rev 10 — same-architect reflection r1 (bff448153) | §4–6: conditional v1-extension default versus v2 mixed-version fence; retain independent 072 with bounded accounting model; WP4 A-lite/import/MCP separation; corrected local verification rule; five-lane c-6 integration matrix. Independent A and runtime acceptance remain NOT RUN. |
