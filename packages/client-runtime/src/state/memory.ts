@@ -14,7 +14,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import {
-  subscribe,
+  subscribeMemoryChanges,
   requestMemoryQuery,
   type MemoryBodyRpcTag,
   type EnvironmentRpcInput,
@@ -100,7 +100,12 @@ export function createMemoryEnvironmentAtoms<R, E>(
   const readPermissions = createCommandPermissions(runtime, WS_METHODS.memoryRead);
   const exposureFamily = Atom.family((key: string) => {
     const [environmentId, input] = JSON.parse(key) as [EnvironmentId, MemoryTarget["input"]];
-    const unavailable = emptyMemoryExposure();
+    const tombstones = new Set<MemoryId>();
+    const closedState = (): MemoryExposure => ({
+      ...emptyMemoryExposure(),
+      forgotten: new Set(tombstones),
+    });
+    const unavailable = closedState();
     const streamAtom = runtime
       .atom((get) => {
         const allowed = get(readPermissions.permissionAtom(environmentId));
@@ -113,7 +118,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
           !config ||
           !supportsMemoryProtocol(config.environment.capabilities)
         ) {
-          return Stream.succeed(emptyMemoryExposure());
+          return Stream.succeed(closedState());
         }
         return followStreamInEnvironment(
           environmentId,
@@ -122,11 +127,17 @@ export function createMemoryEnvironmentAtoms<R, E>(
               Effect.map((supervisor) =>
                 SubscriptionRef.changes(supervisor.session).pipe(
                   Stream.switchMap((session) => {
-                    const closed = emptyMemoryExposure();
+                    const closed = closedState();
                     if (Option.isNone(session)) return Stream.succeed(closed);
-                    return subscribe(WS_METHODS.memoryChanges, input).pipe(
-                      Stream.scan(() => closed, applyMemoryChange),
-                      Stream.catchCause(() => Stream.succeed(emptyMemoryExposure())),
+                    return subscribeMemoryChanges(runtime, get.registry, input).pipe(
+                      Stream.scan(
+                        () => closed,
+                        (state, signal) => {
+                          if (signal.kind === "forget") tombstones.add(signal.memoryId);
+                          return applyMemoryChange(state, signal);
+                        },
+                      ),
+                      Stream.catchCause(() => Stream.succeed(closedState())),
                       (stream) => Stream.concat(Stream.succeed(closed), stream),
                     );
                   }),
@@ -147,16 +158,12 @@ export function createMemoryEnvironmentAtoms<R, E>(
 
   function command<T extends EnvironmentUnaryRpcTag>(tag: T) {
     const result = createEnvironmentRpcCommand(runtime, { label: `memory:${tag}`, tag });
-    const availability = Atom.family((key: string) => {
-      const [environmentId, input] = JSON.parse(key) as [
-        EnvironmentId | null,
-        EnvironmentRpcInput<T>,
-      ];
-      return Atom.make((get) => {
+    const availability = Atom.family((environmentId: EnvironmentId | null) =>
+      Atom.make((get) => {
         if (
           environmentId === null ||
           !get(catalogValueAtom).entries.get(environmentId)?.enabled ||
-          !get(result.permissionAtom(environmentId, input))
+          !get(result.permissionAtom(environmentId))
         )
           return false;
         const config = get(sessions.initialConfigValueAtom(environmentId));
@@ -167,12 +174,12 @@ export function createMemoryEnvironmentAtoms<R, E>(
           (tag !== WS_METHODS.memoryImportProvider ||
             config.environment.capabilities.memory?.importProvider === true)
         );
-      });
-    });
+      }),
+    );
     return {
       ...result,
-      permissionAtom: (environmentId: EnvironmentId | null, input?: EnvironmentRpcInput<T>) =>
-        availability(JSON.stringify([environmentId, input])),
+      permissionAtom: (environmentId: EnvironmentId | null, _input?: EnvironmentRpcInput<T>) =>
+        availability(environmentId),
     };
   }
 

@@ -545,3 +545,17 @@ export function requestMemoryQuery<R, E, T extends MemoryBodyRpcTag>(
     ),
   );
 }
+
+/** Shares the destination grant checks with memory commands and body queries. */
+export function subscribeMemoryChanges<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+  atoms: AtomRegistry.AtomRegistry,
+  input: EnvironmentRpcInput<typeof WS_METHODS.memoryChanges>,
+) {
+  return subscribe(WS_METHODS.memoryChanges, input).pipe(
+    Stream.provideService(RpcPermissionGuard, {
+      authorize: (id, method, payload) =>
+        createCommandPermissions(runtime, method).authorize(atoms, id, payload),
+    }),
+  );
+}

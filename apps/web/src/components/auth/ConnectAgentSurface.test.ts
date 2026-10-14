@@ -2,7 +2,7 @@ import { AuthMcpApprovalDecisionRequest, type AuthMcpApprovalDetails } from "@go
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { act } from "react";
+import { act, createElement } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -68,7 +68,7 @@ afterEach(async () => {
 });
 async function mount() {
   await act(async () => {
-    renderer = create(<ConnectAgentSurface />);
+    renderer = create(createElement(ConnectAgentSurface));
   });
 }
 async function select(index: number, checked: boolean) {
