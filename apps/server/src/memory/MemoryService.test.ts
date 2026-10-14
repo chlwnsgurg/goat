@@ -1448,6 +1448,29 @@ it.effect(
           sourceExclusions: [],
         },
       };
+      const rolledBack = yield* store
+        .transact(
+          Effect.gen(function* () {
+            assert.strictEqual(
+              (yield* service.admitHubOperationTx({ authority, operation: forget })).outcome,
+              "deleted",
+            );
+            assert.strictEqual(
+              (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:current-large'`)
+                .length,
+              0,
+            );
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(rolledBack, "rollback");
+      assert.deepStrictEqual(yield* store.transact(store.readHubUsageTx(space)), equality);
+      assert.isAbove(
+        (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:current-large'`)
+          .length,
+        0,
+      );
       assert.strictEqual(
         (yield* service.admitHubOperation({ authority, operation: forget })).outcome,
         "deleted",
@@ -1472,7 +1495,7 @@ it.effect(
         }),
       );
       assert.isTrue(
-        page.items.some((item) => item.memoryId === memoryId && item.status === "forgotten"),
+        page.items.some((item) => item.memoryId === memoryId && item.status === "blocked"),
       );
       assert.isTrue(
         page.items.some((item) => item.memoryId !== memoryId && item.status === "active"),

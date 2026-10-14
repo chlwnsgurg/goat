@@ -2604,6 +2604,10 @@ describe("MemoryStore durable hub checkpoints", () => {
                 hubEnvironmentId: env,
               });
               assert.strictEqual(staged.checkpointSequence, 2);
+              assert.isAbove(
+                (yield* store.readHubUsageTx(space)).checkpointReservationConsumedBytes,
+                0,
+              );
               yield* store.publishCheckpointAndFloorTx({
                 memorySpaceId: space,
                 checkpointId: staged.checkpointId,
@@ -2611,6 +2615,10 @@ describe("MemoryStore durable hub checkpoints", () => {
                 nextFloor: 1,
                 now: 0,
               });
+              assert.strictEqual(
+                (yield* store.readHubUsageTx(space)).checkpointReservationConsumedBytes,
+                0,
+              );
             }),
           );
           assert.deepStrictEqual(
