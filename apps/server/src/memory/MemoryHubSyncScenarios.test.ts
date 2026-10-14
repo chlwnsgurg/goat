@@ -8,6 +8,22 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+import type { ProviderDriver, ProviderInstance } from "@goat/provider-core/server/driver";
+import * as Registry from "../provider/ProviderInstanceRegistry.ts";
+import * as Generation from "../textGeneration/TextGeneration.ts";
+import * as SourceControl from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as SourceControlDrivers from "../sourceControl/builtInDrivers.ts";
+import * as Git from "../vcs/GitVcsDriver.ts";
+import * as Vcs from "../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as Sync from "./MemorySyncService.ts";
+import * as Runtime from "./MemorySyncRuntimeLive.ts";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
@@ -27,9 +43,10 @@ import { layerMemoryHubServices, layerMemoryHubRoutes } from "../server.ts";
 const id = (n: number) =>
   M.MemoryOperationId.make(`00000000-0000-4000-8000-${String(n).padStart(12, "0")}`);
 
-// This fixture proves the production Hub/Client prerequisites. It deliberately
-// does not stand in for the missing application-owned Sync authorization/reader.
-const environment = (label: "H" | "A" | "B") =>
+type Resolve = NonNullable<Generation.TextGeneration["Service"]["resolveMemoryConflict"]>;
+// The only double is the provider instance returned by this driver. Registry,
+// TextGeneration routing, storage, HTTP and Sync all run their production code.
+const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const home = yield* fs.makeTempDirectoryScoped({ prefix: `goat-wp3-l5-${label}-` });
@@ -54,11 +71,84 @@ const environment = (label: "H" | "A" | "B") =>
     const application = Layer.mergeAll(Environment.layer, Client.layer).pipe(
       Layer.provideMerge(routes),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(FetchHttpClient.layer),
       Layer.provideMerge(HttpRouter.layer),
     );
     const memoMap = yield* Layer.makeMemoMap;
     const scope = yield* Scope.Scope;
-    const context = yield* Layer.buildWithMemoMap(application, memoMap, scope);
+    const baseContext = yield* Layer.buildWithMemoMap(application, memoMap, scope);
+    const instanceId = M.ProviderInstanceId.make(`fixture-${label}`);
+    const selection = { instanceId, model: `model-${label}` };
+    const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
+    let generated = 0;
+    const driver: ProviderDriver<{}> = {
+      driverKind: M.ProviderDriverKind.make("codex"),
+      metadata: { displayName: "Synthetic memory provider", hasDefaultInstance: false },
+      configSchema: Schema.Struct({}),
+      defaultConfig: () => ({}),
+      create: (input) =>
+        Effect.gen(function* () {
+          const identity = Context.get(baseContext, Environment.ServerEnvironmentIdentity);
+          const environmentId = yield* identity.getEnvironmentId;
+          const textGeneration = Generation.TextGeneration.of({
+            generateCommitMessage: () => Effect.die("unexpected provider operation"),
+            generatePrContent: () => Effect.die("unexpected provider operation"),
+            generateBranchName: () => Effect.die("unexpected provider operation"),
+            generateThreadTitle: () => Effect.die("unexpected provider operation"),
+            generateReviewGuide: () => Effect.die("unexpected provider operation"),
+            resolveMemoryConflict: (request) =>
+              Effect.gen(function* () {
+                generated++;
+                yield* Deferred.succeed(entered, request);
+                if (resolve) return yield* resolve(request);
+                return {
+                  result: {
+                    text: "resolved synthetic fact",
+                    assertionKind: "inference" as const,
+                    evidence: [],
+                    judgment: "combine both synthetic versions",
+                  },
+                  execution: {
+                    requestedModelSelection: request.modelSelection,
+                    effectiveProvider: M.ProviderDriverKind.make("codex"),
+                    effectiveModel: request.modelSelection.model,
+                    providerInstanceId: input.instanceId,
+                    environmentId,
+                  },
+                };
+              }),
+          });
+          return {
+            instanceId: input.instanceId,
+            driverKind: M.ProviderDriverKind.make("codex"),
+            continuationIdentity: {
+              driverKind: M.ProviderDriverKind.make("codex"),
+              continuationKey: `synthetic-${label}`,
+            },
+            displayName: input.displayName,
+            enabled: true,
+            snapshot: {} as ProviderInstance["snapshot"],
+            orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+            textGeneration,
+          };
+        }),
+    };
+    const providers = Registry.layer({
+      drivers: [driver],
+      configMap: { [instanceId]: { driver: driver.driverKind, config: {}, enabled: true } },
+    });
+    const vcs = Layer.mergeAll(Git.layer, Vcs.layer).pipe(Layer.provideMerge(VcsProcess.layer));
+    const sourceControl = SourceControl.layer.pipe(
+      Layer.provide(SourceControlDrivers.layer),
+      Layer.provide(vcs),
+    );
+    const syncLayer = Sync.layer.pipe(
+      Layer.provideMerge(Runtime.layer),
+      Layer.provide(Generation.layer.pipe(Layer.provide(sourceControl))),
+      Layer.provideMerge(providers),
+      Layer.provideMerge(Layer.succeedContext(baseContext)),
+    );
+    const context = yield* Layer.buildWithMemoMap(syncLayer, memoMap, scope);
     const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideContext(effect, context);
     const identity = yield* run(
       Environment.ServerEnvironmentIdentity.use((s) => s.getEnvironmentId),
@@ -94,7 +184,41 @@ const environment = (label: "H" | "A" | "B") =>
         return { ...snapshot.settings, epoch: snapshot.version };
       }),
     );
-    return { home, run, identity, update, descriptor, serve, connection };
+    const sync = Context.get(context, Sync.MemorySyncService);
+    const aggregate = (space: M.MemorySpaceId, memory: M.MemoryId) =>
+      run(Store.MemoryStore.use((s) => s.loadAggregate(space, memory)));
+    const milestone = (
+      space: M.MemorySpaceId,
+      memory: M.MemoryId,
+      predicate: (a: Store.MemoryAggregate) => boolean,
+    ) =>
+      run(
+        Effect.gen(function* () {
+          const store = yield* Store.MemoryStore;
+          const changes = yield* store.changes(space);
+          return yield* changes.pipe(
+            Stream.filterEffect(() => aggregate(space, memory).pipe(Effect.map(predicate))),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        }),
+      );
+    return {
+      home,
+      run,
+      identity,
+      update,
+      descriptor,
+      serve,
+      connection,
+      sync,
+      selection,
+      entered,
+      aggregate,
+      milestone,
+      generated: () => generated,
+    };
   });
 
 it.effect(
@@ -194,4 +318,389 @@ it.effect(
         assert.isTrue(yield* fs.exists(dbPath));
       }
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+type Replica = Effect.Success<ReturnType<typeof environment>>;
+const cluster = (resolveB?: Resolve) =>
+  Effect.gen(function* () {
+    const h = yield* environment("H");
+    const a = yield* environment("A");
+    const b = yield* environment("B", resolveB);
+    const configured = yield* h.update(
+      {
+        requestId: id(1000),
+        expectedVersion: 0,
+        action: "configure",
+        settings: { mode: "hub", memorySpaceId: null },
+      },
+      Effect.void,
+    );
+    if (configured.view.settings.mode !== "hub" || configured.view.settings.memorySpaceId === null)
+      return yield* Effect.die("missing configured space");
+    const space = configured.view.settings.memorySpaceId;
+    const endpoint = yield* h.serve;
+    for (const [index, member] of [a, b].entries()) {
+      const view = yield* h.run(Settings.MemoryHubCommittedSettings.use((s) => s.read));
+      const provisioned = yield* h.update(
+        {
+          requestId: id(1010 + index),
+          expectedVersion: view.version,
+          action: "provisionMember",
+          environmentId: member.identity,
+        },
+        Effect.void,
+      );
+      if (provisioned.credential === null) return yield* Effect.die("missing issued credential");
+      yield* member.update(
+        {
+          requestId: id(1020 + index),
+          expectedVersion: 0,
+          action: "installCredential",
+          hubEnvironmentId: h.identity,
+          endpoint,
+          memorySpaceId: space,
+          credential: provisioned.credential.credential,
+        },
+        Effect.void,
+      );
+      yield* member.run(
+        Settings.ServerSettingsService.use((s) =>
+          s.updateSettings({ defaultModelSelection: member.selection }),
+        ),
+      );
+      yield* member.sync.syncOnce;
+      assert.deepStrictEqual(yield* member.sync.readLocalReadiness(), {
+        memorySpaceId: space,
+        bootstrap: "ready",
+      });
+    }
+    return { h, a, b, space };
+  });
+const memory = (n: number) =>
+  M.MemoryId.make(`00000000-0000-4000-9000-${String(n).padStart(12, "0")}`);
+const write = (
+  replica: Replica,
+  space: M.MemorySpaceId,
+  target: M.MemoryId,
+  n: number,
+  text: string,
+  expectedHeads: readonly M.MemoryRevisionId[] = [],
+) =>
+  replica.run(
+    Service.MemoryService.use((s) =>
+      s.upsert(
+        {
+          memorySpaceId: space,
+          memoryId: target,
+          operationId: id(n),
+          expectedHeads,
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: { text, evidence: [], derivedFromMemoryRevisions: [] },
+          baseBoundary: null,
+        },
+        Effect.void,
+      ),
+    ),
+  );
+const activeText = (aggregate: Store.MemoryAggregate) => {
+  assert.strictEqual(aggregate.item?.status, "active");
+  return aggregate.item?.status === "active" ? aggregate.item.payload.text : undefined;
+};
+const common = (c: Effect.Success<ReturnType<typeof cluster>>, target: M.MemoryId) =>
+  Effect.gen(function* () {
+    yield* write(c.a, c.space, target, 1100, "common parent");
+    yield* c.a.sync.syncOnce;
+    yield* c.b.sync.syncOnce;
+    return (yield* c.a.aggregate(c.space, target)).heads;
+  });
+
+it.effect("a: A write propagates through real H HTTP to B", () =>
+  Effect.gen(function* () {
+    const c = yield* cluster();
+    const target = memory(1);
+    yield* write(c.a, c.space, target, 1101, "A shared fact");
+    yield* c.a.sync.syncOnce;
+    yield* c.b.sync.syncOnce;
+    for (const replica of [c.a, c.h, c.b]) {
+      assert.strictEqual(activeText(yield* replica.aggregate(c.space, target)), "A shared fact");
+      assert.strictEqual(replica.generated(), 0);
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("b: A forget dominates B concurrent edit and purges every replica", () =>
+  Effect.gen(function* () {
+    const c = yield* cluster();
+    const target = memory(2);
+    const heads = yield* common(c, target);
+    yield* write(c.b, c.space, target, 1102, "B offline concurrent edit", heads);
+    yield* c.a.run(
+      Service.MemoryService.use((s) =>
+        s.forget(
+          { memorySpaceId: c.space, memoryId: target, operationId: id(1103), expectedHeads: heads },
+          Effect.void,
+        ),
+      ),
+    );
+    yield* c.a.sync.syncOnce;
+    yield* c.b.sync.syncOnce;
+    yield* c.a.sync.syncOnce;
+    for (const replica of [c.a, c.h, c.b]) {
+      const aggregate = yield* replica.aggregate(c.space, target);
+      assert.strictEqual(aggregate.item?.status, "forgotten");
+      assert.isDefined(aggregate.tombstone);
+      assert.isTrue(aggregate.revisions.every((r) => r.payload === null));
+      assert.strictEqual(replica.generated(), 0);
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "c: one conflicted memory is quarantined while unrelated memory continues during a blocked provider",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* cluster(() => Effect.never);
+      const target = memory(3);
+      const heads = yield* common(c, target);
+      yield* write(c.a, c.space, target, 1110, "A version", heads);
+      yield* write(c.b, c.space, target, 1111, "B version", heads);
+      yield* c.a.sync.syncOnce;
+      yield* c.b.sync.syncOnce;
+      const input = yield* Deferred.await(c.b.entered);
+      assert.strictEqual(input.memoryId, target);
+      assert.strictEqual((yield* c.h.aggregate(c.space, target)).item?.status, "quarantined");
+      assert.strictEqual((yield* c.b.aggregate(c.space, target)).item?.status, "quarantined");
+      const other = memory(30);
+      yield* write(c.a, c.space, other, 1112, "unrelated healthy fact");
+      yield* c.a.sync.syncOnce;
+      yield* c.b.sync.syncOnce;
+      assert.strictEqual(
+        activeText(yield* c.b.aggregate(c.space, other)),
+        "unrelated healthy fact",
+      );
+      assert.strictEqual((yield* c.b.aggregate(c.space, target)).item?.status, "quarantined");
+      assert.strictEqual(c.b.generated(), 1);
+      assert.strictEqual(c.a.generated(), 0);
+      yield* c.b.sync.shutdown;
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "d/f: first observer B automatically resolves with its default provider and one revert reaches all replicas",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* cluster();
+      const target = memory(4);
+      const heads = yield* common(c, target);
+      yield* write(c.a, c.space, target, 1120, "A original", heads);
+      yield* write(c.b, c.space, target, 1121, "B original", heads);
+      const aHead = (yield* c.a.aggregate(c.space, target)).heads[0]!;
+      const bHead = (yield* c.b.aggregate(c.space, target)).heads[0]!;
+      const committed = yield* c.b.milestone(
+        c.space,
+        target,
+        (aggregate) => aggregate.resolutions.length === 1 && aggregate.item?.status === "active",
+      );
+      yield* c.a.sync.syncOnce;
+      yield* c.b.sync.syncOnce;
+      yield* Fiber.join(committed);
+      const input = yield* Deferred.await(c.b.entered);
+      assert.deepStrictEqual(input.modelSelection, c.b.selection);
+      assert.strictEqual(c.b.generated(), 1);
+      assert.strictEqual(c.a.generated(), 0);
+      yield* c.a.sync.syncOnce;
+      const resolved = yield* c.b.aggregate(c.space, target);
+      const resolution = resolved.resolutions[0]!;
+      assert.deepStrictEqual([...resolution.inputRevisionIds].sort(), [aHead, bHead].sort());
+      assert.strictEqual(resolution.resolvingEnvironmentId, c.b.identity);
+      assert.deepStrictEqual(resolution.requestedModelSelection, c.b.selection);
+      assert.strictEqual(resolution.effectiveProvider, "codex");
+      assert.strictEqual(resolution.effectiveModel, "model-B");
+      const history = yield* c.b.run(
+        Service.MemoryService.use((s) =>
+          s.history({ memorySpaceId: c.space, memoryId: target, limit: 100 }, Effect.void),
+        ),
+      );
+      assert.deepStrictEqual(
+        history.revisions
+          .filter((r) => [aHead, bHead].includes(r.revision.revisionId))
+          .map((r) => r.payload?.text)
+          .sort(),
+        ["A original", "B original"],
+      );
+      assert.strictEqual(
+        history.resolutions[0]?.payload?.judgment,
+        "combine both synthetic versions",
+      );
+      for (const replica of [c.a, c.h, c.b])
+        assert.strictEqual(
+          activeText(yield* replica.aggregate(c.space, target)),
+          "resolved synthetic fact",
+        );
+      yield* c.b.run(
+        Service.MemoryService.use((s) =>
+          s.revertResolution(
+            {
+              memorySpaceId: c.space,
+              memoryId: target,
+              operationId: id(1122),
+              resolutionId: resolution.resolutionId,
+              restoredRevisionId: aHead,
+              expectedHeads: resolved.heads,
+            },
+            Effect.void,
+          ),
+        ),
+      );
+      yield* c.b.sync.syncOnce;
+      yield* c.a.sync.syncOnce;
+      for (const replica of [c.a, c.h, c.b])
+        assert.strictEqual(activeText(yield* replica.aggregate(c.space, target)), "A original");
+      assert.strictEqual(c.b.generated(), 1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "e: departed holder cannot release and A takes over only after the hub lease expires",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* cluster(() => Effect.never);
+      const target = memory(5);
+      const heads = yield* common(c, target);
+      yield* write(c.a, c.space, target, 1130, "A takeover original", heads);
+      yield* write(c.b, c.space, target, 1131, "B takeover original", heads);
+      yield* c.a.sync.syncOnce;
+      yield* c.b.sync.syncOnce;
+      yield* Deferred.await(c.b.entered);
+      // Revocation models loss of the departed device's authenticated transport.
+      // Its real HTTP release is denied, leaving the hub lease to expire naturally.
+      const view = yield* c.h.run(Settings.MemoryHubCommittedSettings.use((s) => s.read));
+      yield* c.h.update(
+        {
+          requestId: id(1132),
+          expectedVersion: view.version,
+          action: "revokeMember",
+          environmentId: c.b.identity,
+        },
+        Effect.void,
+      );
+      yield* c.b.sync.shutdown;
+      yield* c.a.sync.syncOnce;
+      assert.strictEqual(c.a.generated(), 0);
+      assert.strictEqual((yield* c.h.aggregate(c.space, target)).item?.status, "quarantined");
+      const committed = yield* c.a.milestone(
+        c.space,
+        target,
+        (aggregate) => aggregate.resolutions.length === 1 && aggregate.item?.status === "active",
+      );
+      yield* TestClock.adjust("120 seconds");
+      yield* c.a.sync.syncOnce;
+      yield* Fiber.join(committed);
+      assert.strictEqual(c.a.generated(), 1);
+      assert.strictEqual(
+        (yield* c.h.aggregate(c.space, target)).resolutions[0]?.resolvingEnvironmentId,
+        c.a.identity,
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("WP3 owner source authorization fails closed while unrelated HTTP sync continues", () =>
+  Effect.gen(function* () {
+    const c = yield* cluster();
+    const target = memory(6);
+    const sourceThread = {
+      environmentId: c.b.identity,
+      threadId: M.ThreadId.make("synthetic-owner-thread"),
+    };
+    const watermark = {
+      fromEventId: M.EventId.make("synthetic-from"),
+      toEventId: M.EventId.make("synthetic-to"),
+      throughSequence: 8,
+    };
+    const messageId = M.MessageId.make("synthetic-owner-message");
+    const operation: Extract<M.MemoryOperation, { kind: "upsert" }> = {
+      protocolVersion: 1,
+      kind: "upsert",
+      memorySpaceId: c.space,
+      memoryId: target,
+      operationId: id(1140),
+      originEnvironmentId: c.a.identity,
+      expectedHeads: [],
+      revision: {
+        memorySpaceId: c.space,
+        memoryId: target,
+        operationId: id(1140),
+        revisionId: M.MemoryRevisionId.make(id(1141)),
+        payloadRef: M.MemoryRevisionId.make(id(1141)),
+        parents: [],
+        scope: { kind: "user" },
+        assertionKind: "inference",
+        createdAtUtc: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
+        provenance: { environmentId: c.a.identity, sourceThread, sourceWatermark: watermark },
+      },
+      payload: {
+        text: "synthetic linked summary",
+        evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
+        derivedFromMemoryRevisions: [],
+      },
+    };
+    const connection = yield* c.a.connection;
+    yield* c.a.run(
+      Client.MemoryHubClient.use((client) =>
+        client.push(connection, {
+          protocolVersion: 1,
+          memorySpaceId: c.space,
+          environmentId: c.a.identity,
+          operations: [operation],
+        }),
+      ),
+    );
+    const requested = yield* c.a.run(
+      Client.MemoryHubClient.use((client) =>
+        client.requestSourceRead(connection, {
+          protocolVersion: 1,
+          memorySpaceId: c.space,
+          memoryId: target,
+          requestId: M.MemorySourceReadRequestId.make(id(1142)),
+          sourceThread,
+          sourceWatermark: watermark,
+          messageIds: [messageId],
+          limit: 10,
+          authorizedScopes: ["memory:read", "orchestration:read"],
+        }),
+      ),
+    );
+    const denied = yield* c.b.run(
+      Sync.MemorySyncRuntime.use((runtime) =>
+        Effect.result(runtime.ownerPermit(requested.request)),
+      ),
+    );
+    assert.strictEqual(denied._tag, "Failure");
+    if (denied._tag === "Failure") {
+      assert.strictEqual(denied.failure._tag, "MemoryAccessError");
+      assert.strictEqual(denied.failure.code, "route_unavailable");
+    }
+    const other = memory(60);
+    yield* write(c.b, c.space, other, 1143, "ordinary sync survives source denial");
+    yield* c.b.sync.syncOnce;
+    assert.strictEqual(
+      activeText(yield* c.h.aggregate(c.space, other)),
+      "ordinary sync survives source denial",
+    );
+    const status = yield* c.b.sync.syncStatus({}, Effect.void);
+    assert.strictEqual(status.failureCode, "route_unavailable");
+    const outcome = yield* c.a.run(
+      Client.MemoryHubClient.use((client) =>
+        client.resultSourceRead(connection, {
+          protocolVersion: 1,
+          memorySpaceId: c.space,
+          requestId: requested.request.requestId,
+        }),
+      ),
+    );
+    // L4 currently records typed owner denial but leaves the remote result pending;
+    // it must map that denial to the existing denied wire outcome in its own lane.
+    assert.strictEqual(outcome.state, "pending");
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
