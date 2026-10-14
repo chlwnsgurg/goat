@@ -13,6 +13,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
+import { sourceReadInput, sourceReadLocatorDigest } from "./MemoryOwnerSourceReader.ts";
 import * as Settings from "../serverSettings.ts";
 
 export type HubConnection = Extract<M.MemoryHubSettings, { mode: "member" }> & {
@@ -75,6 +76,7 @@ export class MemoryHubClient extends Context.Service<
     readonly respondSourceRead: (
       connection: HubConnection,
       input: M.MemoryHubSourceReadRespondInput,
+      prepare?: Effect.Effect<M.MemoryHubSourceReadRespondInput, HubClientFailure>,
     ) => Effect.Effect<M.MemoryHubSourceReadRespondResult, HubClientFailure>;
     readonly resultSourceRead: (
       connection: HubConnection,
@@ -219,14 +221,9 @@ const make = Effect.gen(function* () {
   ) => {
     const encode = Schema.encodeEffect(Schema.fromJsonString(inputSchema));
     const decode = Schema.decodeUnknownEffect(outputSchema);
-    return (connection: HubConnection, input: I) =>
+    return (connection: HubConnection, input: I, prepare?: Effect.Effect<I, HubClientFailure>) =>
       bounded(
         Effect.gen(function* () {
-          const body = yield* encode(input).pipe(
-            Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
-          );
-          if (new TextEncoder().encode(body).length > RESPONSE_MAX_BYTES)
-            return yield* new M.MemoryHubError({ code: "payload_too_large" });
           yield* preflightOnce(connection);
           const credential = yield* secrets
             .get(connection.secretName)
@@ -236,6 +233,13 @@ const make = Effect.gen(function* () {
           if (!/^[A-Za-z0-9_-]{43}$/.test(token))
             return yield* new M.MemoryHubUnauthorizedError({});
           yield* ensureEpoch(connection);
+          // Descriptor/credential waits are complete. Revalidate source for each attempt.
+          const prepared = prepare ? yield* prepare : input;
+          const body = yield* encode(prepared).pipe(
+            Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
+          );
+          if (new TextEncoder().encode(body).length > RESPONSE_MAX_BYTES)
+            return yield* new M.MemoryHubError({ code: "payload_too_large" });
           const raw = yield* execute(
             HttpClientRequest.post(new URL(path, connection.endpoint).href).pipe(
               HttpClientRequest.setHeader("authorization", `Bearer ${token}`),
@@ -301,6 +305,12 @@ const make = Effect.gen(function* () {
       M.MEMORY_HUB_PATHS.sourceReadRequest,
       M.MemoryHubSourceReadRequestInput,
       M.MemoryHubSourceReadRequestResult,
+      (_connection, input, output) =>
+        output.request.requestId === input.requestId &&
+        output.request.memorySpaceId === input.memorySpaceId &&
+        output.request.stamp !== undefined &&
+        output.request.stamp.locatorDigest === sourceReadLocatorDigest(input) &&
+        sourceReadLocatorDigest(sourceReadInput(output.request)) === sourceReadLocatorDigest(input),
     ),
     collectSourceReads: call(
       M.MEMORY_HUB_PATHS.sourceReadCollect,
@@ -311,6 +321,14 @@ const make = Effect.gen(function* () {
       M.MEMORY_HUB_PATHS.sourceReadRespond,
       M.MemoryHubSourceReadRespondInput,
       M.MemoryHubSourceReadRespondResult,
+      (_connection, input, output) =>
+        input.kind === "revoke"
+          ? output.kind === "revoke" &&
+            output.ack.memorySpaceId === input.memorySpaceId &&
+            output.ack.requesterEnvironmentId === input.requesterEnvironmentId &&
+            output.ack.removalEpoch === input.ownerPolicyEpoch &&
+            output.ack.revokedThroughEpoch >= input.ownerPolicyEpoch
+          : output.kind === "normal",
     ),
     resultSourceRead: call(
       M.MEMORY_HUB_PATHS.sourceReadResult,
