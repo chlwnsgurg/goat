@@ -455,7 +455,7 @@ describe("MemoryHubService source relay", () => {
         );
         const response = {
           kind: "normal" as const,
-          ownerPolicyEpoch: 0,
+          ownerPolicyEpoch: 1,
           protocolVersion: 1 as const,
           memorySpaceId: space,
           requestId: sourceRequest.requestId,

@@ -147,6 +147,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const sourceRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
     const sourceSecondRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
     let sourceAdmissions = 0;
+    let sourceAckFault = false;
     const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
     let sourceAfterResultGate: Deferred.Deferred<void> | null = null;
     let sourceResultGate: Deferred.Deferred<void> | null = null;
@@ -254,6 +255,20 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
                   ),
                 ),
               ),
+          respondSourceRead: (connection, input) =>
+            client.respondSourceRead(connection, input).pipe(
+              Effect.map((result) =>
+                sourceAckFault && result.kind === "revoke"
+                  ? {
+                      ...result,
+                      ack: {
+                        ...result.ack,
+                        ownerEnvironmentId: M.EnvironmentId.make("wrong-owner"),
+                      },
+                    }
+                  : result,
+              ),
+            ),
           resultSourceRead: (connection, input) =>
             Effect.suspend(() =>
               (sourceResultGate ? Deferred.await(sourceResultGate) : Effect.void).pipe(
@@ -400,6 +415,9 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
           // sees the real commit notification once production startup subscribes.
           yield* PubSub.publish(sourceChanges, next);
         }),
+      setSourceAckFault: (fault: boolean) => {
+        sourceAckFault = fault;
+      },
       sourceSecondRequested,
       sourceRequested,
       sourceResult,
@@ -1341,4 +1359,68 @@ it.effect("requester rejects a denied live caller permit before hub admission", 
       }),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "hub commit before lost owner ack preserves pending reenrollment and retries the same fence",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const gate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(gate);
+      const fiber = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      const request = yield* Deferred.await(c.a.sourceRequested);
+      yield* c.owner.sync.syncOnce;
+      c.owner.setSourceAckFault(true);
+      yield* c.remove(true);
+      yield* c.owner.sync.syncOnce;
+      const pending = yield* Ref.get(c.owner.sourcePolicy);
+      assert.strictEqual(pending.policy.removals[0]?.state, "pending");
+      assert.strictEqual(pending.policy.enrollments[0]?.state, "pending");
+      assert.deepStrictEqual(pending.policy.allowedRequesterEnvironmentIds, []);
+      const denied = yield* c.owner.run(
+        Sync.MemorySyncRuntime.use((runtime) => Effect.result(runtime.ownerPermit(request))),
+      );
+      assert.strictEqual(denied._tag, "Failure");
+      yield* c.h.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            record_json: string;
+          }>`SELECT record_json FROM memory_import_keys WHERE key_kind='hub_source_fences'`;
+          assert.strictEqual(rows.length, 1);
+        }),
+      );
+      c.owner.setSourceAckFault(false);
+      yield* c.owner.sync.syncOnce;
+      const acknowledged = yield* Ref.get(c.owner.sourcePolicy);
+      assert.strictEqual(acknowledged.policy.removals[0]?.state, "acknowledged");
+      assert.strictEqual(acknowledged.policy.enrollments[0]?.state, "active");
+      assert.deepStrictEqual(acknowledged.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
+      yield* Deferred.succeed(gate, undefined);
+      assert.deepStrictEqual(yield* Fiber.join(fiber), {
+        kind: "denied",
+        requiredPermission: "orchestration:read",
+      });
+      const nextGate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(nextGate);
+      const next = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      const nextRequest = yield* Deferred.await(c.a.sourceSecondRequested);
+      assert.notStrictEqual(nextRequest.requestId, request.requestId);
+      yield* c.owner.sync.syncOnce;
+      const connection = yield* c.owner.connection;
+      yield* c.owner.run(
+        Client.MemoryHubClient.use((client) =>
+          client.respondSourceRead(connection, {
+            protocolVersion: 1,
+            kind: "revoke",
+            memorySpaceId: c.space,
+            requesterEnvironmentId: c.a.identity,
+            ownerPolicyEpoch: 2,
+          }),
+        ),
+      );
+      yield* Deferred.succeed(nextGate, undefined);
+      assert.strictEqual((yield* Fiber.join(next)).kind, "available");
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
