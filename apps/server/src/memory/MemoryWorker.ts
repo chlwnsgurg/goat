@@ -144,7 +144,7 @@ const make = Effect.gen(function* () {
             const size = new TextEncoder().encode(
               yield* query(encodeGenerationMessage(input)),
             ).length;
-            if (messages.length === 100 || bytes + size > 200000) break;
+            if (messages.length === 100 || bytes + size > 180000) break;
             messages.push(input);
             bytes += size;
             last = row;
@@ -390,6 +390,17 @@ const make = Effect.gen(function* () {
         : yield* store.loadAggregate(M.MemorySpaceId.make(work.space), work.memoryId);
       if (current?.tombstone || current?.pendingForget)
         return yield* new MemoryWorkerError({ code: "forgotten" });
+      // Reserve input space for the bounded previous payload, including its evidence.
+      const previousSummary = work.space.startsWith("_local:")
+        ? yield* store.readLocalSummaryPayload(
+            environmentId,
+            `${environmentId}:${meta.sourceThread.threadId}:summary`,
+          )
+        : (current?.revisions.find(
+            (pair) => current.heads.length === 1 && current.heads[0] === pair.revision.revisionId,
+          )?.payload ?? undefined);
+      if (previousSummary && scanMemoryValue(previousSummary).kind !== "allowed")
+        return yield* new MemoryWorkerError({ code: "secret_detected" });
       const generated = yield* Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "memory-generation-" });
@@ -400,6 +411,7 @@ const make = Effect.gen(function* () {
                 sourceThread: meta.sourceThread,
                 sourceWatermark: meta.sourceWatermark,
                 messages: source.messages,
+                ...(previousSummary ? { previousSummary } : {}),
                 modelSelection: meta.modelSelection,
               },
               strict,

@@ -798,6 +798,22 @@ describe("memory sync and views", () => {
         evidence: [{ ...result.evidence[0]!, messageIds: [M.MessageId.make("unknown")] }],
       }),
     ).toBe(false);
+    const cumulative = decode(M.GenerateMemorySummaryInput, {
+      ...input,
+      messages: [{ messageId: "m2", text: "Later", completed: true }],
+      previousSummary: {
+        text: result.text,
+        evidence: result.evidence,
+        derivedFromMemoryRevisions: [],
+      },
+    });
+    expect(M.validateMemoryGenerationResult(cumulative, result)).toBe(true);
+    expect(
+      M.validateMemoryGenerationResult(cumulative, {
+        ...result,
+        evidence: [{ ...result.evidence[0]!, messageIds: [M.MessageId.make("unknown")] }],
+      }),
+    ).toBe(false);
     rejects(M.GenerateMemorySummaryResult, { ...result, revisionId: id(3) });
   });
 });
@@ -1434,7 +1450,6 @@ describe("memory binding and relay contracts", () => {
     round(M.MemorySourceReadRequestId, source);
   });
 });
-
 
 describe("pending forget contracts", () => {
   it("bounds durable pending forget intents per environment", () => {

@@ -52,7 +52,11 @@ const service = Service.layer.pipe(
   ),
 );
 const maintenance = Maintenance.layer.pipe(Layer.provideMerge(quota));
-const live = (failure = false, onInput?: (input: M.GenerateMemorySummaryInput) => void) =>
+const live = (
+  failure = false,
+  onInput?: (input: M.GenerateMemorySummaryInput) => void,
+  local = false,
+) =>
   Worker.layer.pipe(
     Layer.provideMerge(service),
     Layer.provideMerge(maintenance),
@@ -60,7 +64,7 @@ const live = (failure = false, onInput?: (input: M.GenerateMemorySummaryInput) =
     Layer.provide(
       Settings.layerTest({
         defaultModelSelection: selection,
-        memoryHub: { mode: "hub", memorySpaceId: space },
+        memoryHub: local ? { mode: "disabled" } : { mode: "hub", memorySpaceId: space },
       }),
     ),
     Layer.provide(
@@ -83,9 +87,15 @@ const live = (failure = false, onInput?: (input: M.GenerateMemorySummaryInput) =
               )
             : Effect.succeed({
                 result: {
-                  text: "synthetic summary",
+                  text: [
+                    input.previousSummary?.text,
+                    ...input.messages.map((message) => message.messageId),
+                  ]
+                    .filter(Boolean)
+                    .join(" "),
                   assertionKind: "inference",
                   evidence: [
+                    ...(input.previousSummary?.evidence ?? []),
                     {
                       origin: "thread",
                       sourceThread: input.sourceThread,
@@ -327,43 +337,74 @@ describe("MemoryWorker", () => {
       ),
     );
   });
-  it.effect("advances through 100 then 101 messages and later updates", () => {
-    const batches: string[][] = [];
-    return Effect.gen(function* () {
-      yield* seed;
-      const sql = yield* SqlClient.SqlClient;
-      const original = (yield* sql<{
-        payload_json: string;
-      }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
-      const message = yield* decodeMessage(original.payload_json);
-      yield* sql`UPDATE orchestration_events SET sequence=102 WHERE sequence=2`;
-      for (let index = 2; index <= 101; index++) {
-        yield* sql`INSERT INTO orchestration_events VALUES (${index},${id(1000 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`message-${index}`) })},${now},2,'thread')`;
-      }
-      const worker = yield* Worker.MemoryWorker;
-      const store = yield* Store.MemoryStore;
-      yield* worker.sweepDue();
-      yield* worker.sweepDue();
-      yield* worker.sweepDue();
-      assert.deepStrictEqual(
-        batches.map((batch) => batch.length),
-        [100, 1],
+  it.effect.each([false, true])(
+    "preserves earlier chunks and later updates (local=%s)",
+    (local) => {
+      const batches: string[][] = [];
+      const previous: Array<M.MemoryPayload | undefined> = [];
+      return Effect.gen(function* () {
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const original = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+        const message = yield* decodeMessage(original.payload_json);
+        yield* sql`UPDATE orchestration_events SET sequence=102 WHERE sequence=2`;
+        for (let index = 2; index <= 101; index++) {
+          yield* sql`INSERT INTO orchestration_events VALUES (${index},${id(1000 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`message-${index}`) })},${now},2,'thread')`;
+        }
+        const worker = yield* Worker.MemoryWorker;
+        const store = yield* Store.MemoryStore;
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        assert.deepStrictEqual(
+          batches.map((batch) => batch.length),
+          [100, 1],
+        );
+        assert.strictEqual(new Set(batches.flat()).size, 101);
+        assert.deepStrictEqual(yield* store.pendingReports(100), []);
+        const run = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=102`)[0]!;
+        yield* sql`INSERT INTO orchestration_events VALUES (103,${id(1200)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make("later") })},${now},2,'thread')`;
+        yield* sql`INSERT INTO orchestration_events VALUES (104,${id(1201)},${threadId},'run.updated',${run.payload_json},${now},2,'thread')`;
+        yield* worker.sweepDue();
+        assert.deepStrictEqual(batches.at(-1), ["later"]);
+        assert.strictEqual(previous[0], undefined);
+        assert.include(previous[1]!.text, "message-100");
+        assert.strictEqual(previous[1]!.evidence[0]!.messageIds.length, 100);
+        assert.include(previous[2]!.text, "message-101");
+        const summaryId = M.MemoryId.make(
+          Service.memoryStableUuid(`${environmentId}:${threadId}:summary`),
+        );
+        const aggregate = local ? undefined : yield* store.loadAggregate(space, summaryId);
+        const final = local
+          ? yield* store.readLocalSummaryPayload(
+              environmentId,
+              `${environmentId}:${threadId}:summary`,
+            )
+          : aggregate?.revisions.find((pair) => pair.revision.revisionId === aggregate.heads[0])
+              ?.payload;
+        if (!final) throw new Error("Missing summary");
+        assert.include(final.text, "message-100");
+        assert.include(final.text, "message-101");
+        assert.include(final.text, "later");
+        assert.strictEqual(new Set(final.evidence.flatMap((entry) => entry.messageIds)).size, 102);
+      }).pipe(
+        Effect.provide(
+          live(
+            false,
+            (input) => {
+              batches.push(input.messages.map((message) => message.messageId));
+              previous.push(input.previousSummary);
+            },
+            local,
+          ),
+        ),
       );
-      assert.strictEqual(new Set(batches.flat()).size, 101);
-      assert.deepStrictEqual(yield* store.pendingReports(100), []);
-      const run = (yield* sql<{
-        payload_json: string;
-      }>`SELECT payload_json FROM orchestration_events WHERE sequence=102`)[0]!;
-      yield* sql`INSERT INTO orchestration_events VALUES (103,${id(1200)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make("later") })},${now},2,'thread')`;
-      yield* sql`INSERT INTO orchestration_events VALUES (104,${id(1201)},${threadId},'run.updated',${run.payload_json},${now},2,'thread')`;
-      yield* worker.sweepDue();
-      assert.deepStrictEqual(batches.at(-1), ["later"]);
-    }).pipe(
-      Effect.provide(
-        live(false, (input) => batches.push(input.messages.map((message) => message.messageId))),
-      ),
-    );
-  });
+    },
+  );
   it.effect("revisits consolidation at exactly 24 hours after extracting turns", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.parse(now));

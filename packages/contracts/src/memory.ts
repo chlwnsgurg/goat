@@ -1722,6 +1722,7 @@ export const GenerateMemorySummaryInput = struct({
   sourceThread: ScopedThreadRef,
   sourceWatermark: MemorySourceWatermark,
   messages: array(struct({ messageId: MessageId, text: Schema.String, completed: Schema.Boolean })),
+  previousSummary: Schema.optionalKey(MemoryPayload),
   modelSelection: MemoryModelSelection,
 }).check(
   Schema.makeFilter((v) => jsonBytes(v) <= 262144 && unique(v.messages.map((m) => m.messageId))),
@@ -1791,6 +1792,17 @@ export function validateMemoryGenerationResult(
             e.importSourceId === source.importSourceId &&
             e.messageIds.every((id) => source.messageIds.includes(id)),
         );
+    if (
+      input.previousSummary?.evidence.some(
+        (source) =>
+          e.origin === source.origin &&
+          same(e.sourceThread, source.sourceThread) &&
+          same(e.watermark, source.watermark) &&
+          e.importSourceId === source.importSourceId &&
+          e.messageIds.every((id) => source.messageIds.includes(id)),
+      )
+    )
+      return true;
     return (
       e.origin === "thread" &&
       e.messageIds.length > 0 &&

@@ -647,6 +647,10 @@ export class MemoryStore extends Context.Service<
     readonly putLocalIntent: (
       input: LocalMemoryIntent,
     ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    readonly readLocalSummaryPayload: (
+      environmentId: M.EnvironmentId,
+      intentId: string,
+    ) => Effect.Effect<M.MemoryPayload | undefined, MemoryStorageError>;
     readonly refreshLocalSummaryIntent: (
       intent: LocalMemoryIntent,
     ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
@@ -3347,6 +3351,21 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readLocalSummaryPayload = Effect.fn("MemoryStore.readLocalSummaryPayload")(function* (
+    environmentId: M.EnvironmentId,
+    intentId: string,
+  ) {
+    const rows = yield* stored(
+      "summary-local-payload-read",
+      sql<{ body_json: string }>`
+      SELECT p.body_json FROM memory_payloads p JOIN memory_outbox o ON o.space=p.space AND o.payload_ref=p.payload_ref
+      WHERE o.id=${`local:${environmentId}:${intentId}`} AND o.status!='cancelled'
+      AND p.space=${`_local:${environmentId}`} AND p.payload_ref=${intentId}`,
+    );
+    return rows[0]
+      ? yield* stored("summary-local-payload-codec", payloadCodec.decode(rows[0].body_json, strict))
+      : undefined;
+  });
   const refreshLocalSummaryIntent = Effect.fn("MemoryStore.refreshLocalSummaryIntent")(function* (
     input: LocalMemoryIntent,
   ) {
@@ -4058,6 +4077,7 @@ const make = Effect.gen(function* () {
     samples,
     putLocalIntent,
     materializeLocalIntent,
+    readLocalSummaryPayload,
     refreshLocalSummaryIntent,
     installCheckpointPage,
     completeCheckpoint,
