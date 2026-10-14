@@ -32,7 +32,7 @@ export default Effect.gen(function* () {
   yield* sql`CREATE TABLE memory_hub_retention (
     space TEXT PRIMARY KEY, checkpoint_id TEXT, checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
     retention_floor INTEGER NOT NULL DEFAULT 0, boundary_json TEXT, handles_json TEXT NOT NULL DEFAULT '[]',
-    compaction_json TEXT, last_snapshot_bytes INTEGER NOT NULL DEFAULT 0 CHECK(last_snapshot_bytes>=0), checkpoint_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_bytes>=0),
+    compaction_json TEXT, reserved_snapshot_id TEXT, snapshot_generation INTEGER, last_snapshot_bytes INTEGER NOT NULL DEFAULT 0 CHECK(last_snapshot_bytes>=0), checkpoint_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_bytes>=0),
     published_pinned_bytes INTEGER NOT NULL DEFAULT 0 CHECK(published_pinned_bytes>=0),
     CHECK(retention_floor>=0 AND retention_floor<=checkpoint_sequence)
   )`;
@@ -245,16 +245,29 @@ export default Effect.gen(function* () {
     ["memory_hub_source_reads", "space", "locator_json,request_digest,response_digest"],
   ] as const;
   for (const [table, spaceColumn, columns] of snapshotInputs) {
-    const bytes = (prefix: string) =>
+    const rawBytes = (prefix: string) =>
       columns
         .split(",")
         .map((column) => `coalesce(length(CAST(${prefix}${column} AS BLOB)),0)`)
         .join("+") + (table === "memory_identity_ledger" ? `+${prefix}reserve_bytes` : "");
+    const bytes = (prefix: string) =>
+      table === "memory_import_keys"
+        ? `CASE WHEN ${prefix}key_kind='hub_checkpoint_token' THEN 0 ELSE ${rawBytes(prefix)} END`
+        : rawBytes(prefix);
     // The identity owns the future basic-forget rows and its source-key suppression records.
     const recordRows = (prefix: string) =>
       table === "memory_identity_ledger"
         ? `1+${prefix}reserve_keys+CASE WHEN NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=${prefix}space AND t.memory_id=${prefix}memory_id) THEN 8 ELSE 0 END`
-        : "1";
+        : table === "memory_import_keys"
+          ? `CASE WHEN ${prefix}key_kind='hub_checkpoint_token' THEN 0 ELSE 1 END`
+          : "1";
+    for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
+      const prefix = action === "DELETE" ? "OLD" : "NEW";
+      yield* sql.unsafe(`CREATE TRIGGER ${table}_snapshot_generation_${action.toLowerCase()} AFTER ${action} ON ${table} ${table === "memory_import_keys" ? `WHEN ${prefix}.key_kind!='hub_checkpoint_token'` : ""} BEGIN
+        INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${prefix}.${spaceColumn},'hub_snapshot_generation','',1)
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+1;
+      END`);
+    }
     for (const [dimension, expression] of [
       ["hub_snapshot_bytes", bytes("")],
       ["hub_snapshot_rows", recordRows("")],

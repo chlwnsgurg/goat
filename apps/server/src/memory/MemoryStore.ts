@@ -721,6 +721,7 @@ export type HubUsage = {
   checkpointBytes: number;
   requiredCheckpointBoundBytes: number;
   lastSnapshotBytes: number;
+  checkpointReservationConsumedBytes: number;
   publishedPinnedBytes: number;
   liveSourceReads: number;
   sourcePayloadBytes: number;
@@ -1563,11 +1564,12 @@ const make = Effect.gen(function* () {
       SELECT coalesce(sum(max(coalesce(r.checkpoint_bytes,0),
         ${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+
         coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD})+
-        coalesce(r.published_pinned_bytes,0)),0) AS bytes
+        coalesce(r.published_pinned_bytes,0)-CASE WHEN r.snapshot_generation=coalesce(g.value,0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END),0) AS bytes
       FROM (SELECT space FROM memory_hub_retention UNION SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows') s
       LEFT JOIN memory_hub_retention r ON r.space=s.space
       LEFT JOIN memory_quota_counters b ON b.space=s.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key=''
-      LEFT JOIN memory_quota_counters n ON n.space=s.space AND n.dimension='hub_snapshot_rows' AND n.scope_key=''`,
+      LEFT JOIN memory_quota_counters n ON n.space=s.space AND n.dimension='hub_snapshot_rows' AND n.scope_key=''
+      LEFT JOIN memory_quota_counters g ON g.space=s.space AND g.dimension='hub_snapshot_generation' AND g.scope_key=''`,
     );
     return rows[0]!.bytes;
   });
@@ -6657,7 +6659,8 @@ const make = Effect.gen(function* () {
     );
     const sequence = Math.max(rows[0]!.sequence, retention.checkpointSequence);
     let pages = yield* snapshotPages(space, input.checkpointId);
-    if (pages.length === 0) {
+    const builtNewSnapshot = pages.length === 0;
+    if (builtNewSnapshot) {
       pages = yield* buildHubSnapshot(
         space,
         sequence,
@@ -6724,6 +6727,12 @@ const make = Effect.gen(function* () {
       "hub-snapshot-pin",
       sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode([...active, handle])} WHERE space=${space}`,
     );
+    // Preparing materializes the reserved slot. Any later input mutation invalidates this credit in its writer Tx.
+    if (builtNewSnapshot)
+      yield* stored(
+        "hub-snapshot-reservation-consumed",
+        sql`UPDATE memory_hub_retention SET reserved_snapshot_id=${input.checkpointId},last_snapshot_bytes=(SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))),0) FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' AND checkpoint_id=${snapshotId(input.checkpointId)}),snapshot_generation=coalesce((SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''),0) WHERE space=${space}`,
+      );
     return handle;
   });
   const readHubCheckpointPageTx: MemoryStore["Service"]["readHubCheckpointPageTx"] = Effect.fn(
@@ -6962,6 +6971,7 @@ const make = Effect.gen(function* () {
         source_bytes: number;
         checkpoint_bytes: number;
         last_snapshot_bytes: number;
+        consumed_bytes: number;
         pinned_bytes: number;
         metadata_bytes: number;
       }>`SELECT
@@ -6972,6 +6982,7 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_hub_source_reads r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=${space}) AS source_bytes,
       (SELECT coalesce(checkpoint_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS checkpoint_bytes,
       (SELECT coalesce(last_snapshot_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS last_snapshot_bytes,
+      (SELECT CASE WHEN r.snapshot_generation=coalesce((SELECT value FROM memory_quota_counters WHERE space=r.space AND dimension='hub_snapshot_generation' AND scope_key=''),0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END FROM memory_hub_retention r WHERE r.space=${space}) AS consumed_bytes,
       (SELECT coalesce(published_pinned_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS pinned_bytes,
       (SELECT coalesce(sum(length(CAST(credential_digest AS BLOB))+length(CAST(environment AS BLOB))+32),0) FROM memory_hub_members WHERE space=${space})+
       (SELECT coalesce(sum(length(CAST(lease_json AS BLOB))+32),0) FROM memory_hub_leases WHERE space=${space}) AS metadata_bytes`,
@@ -7041,9 +7052,12 @@ const make = Effect.gen(function* () {
         .reduce((sum, table) => sum + table.logicalBytes, 0),
       activeMembers: row.members,
       stagingBytes:
-        Math.max(requiredCheckpointBoundBytes, row.checkpoint_bytes ?? 0) + (row.pinned_bytes ?? 0),
+        Math.max(requiredCheckpointBoundBytes, row.checkpoint_bytes ?? 0) +
+        (row.pinned_bytes ?? 0) -
+        (row.consumed_bytes ?? 0),
       requiredCheckpointBoundBytes,
       lastSnapshotBytes: row.last_snapshot_bytes ?? 0,
+      checkpointReservationConsumedBytes: row.consumed_bytes ?? 0,
       checkpointBytes: row.checkpoint_bytes ?? 0,
       publishedPinnedBytes: row.pinned_bytes ?? 0,
       liveSourceReads: row.relay,
@@ -7161,7 +7175,7 @@ const make = Effect.gen(function* () {
       "hub-reserve",
       sql`UPDATE memory_hub_retention SET checkpoint_bytes=checkpoint_bytes+${input.checkpointDeltaBytes},published_pinned_bytes=published_pinned_bytes+${input.publishedPinnedDeltaBytes} WHERE space=${input.memorySpaceId}
       AND checkpoint_bytes+${input.checkpointDeltaBytes}>=0 AND published_pinned_bytes+${input.publishedPinnedDeltaBytes}>=0
-      AND checkpoint_bytes+${input.checkpointDeltaBytes}+published_pinned_bytes+${input.publishedPinnedDeltaBytes}<=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} RETURNING space`,
+      RETURNING space`,
     );
     if (!rows.length)
       return yield* new MemoryCapacityError({

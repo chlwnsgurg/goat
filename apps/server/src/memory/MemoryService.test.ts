@@ -1218,6 +1218,14 @@ it.effect(
           derivedFromMemoryRevisions: [],
         },
       };
+      yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority,
+          checkpointId: "old-pinned",
+          snapshotToken: "old-pinned-token",
+          hubEnvironmentId: environmentId,
+        }),
+      );
       const before = yield* store.transact(store.readHubUsageTx(space));
       const measured = yield* store
         .transact(
@@ -1235,7 +1243,8 @@ it.effect(
         store.reserveHubCheckpointTx({
           memorySpaceId: space,
           checkpointDeltaBytes: 0,
-          publishedPinnedDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - measured + 1,
+          publishedPinnedDeltaBytes:
+            M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - measured - before.publishedPinnedBytes + 1,
         }),
       );
       const denied = yield* service.admitHubOperation({ authority, operation: op });
@@ -1257,6 +1266,17 @@ it.effect(
         (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
         M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
       );
+      yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority,
+          checkpointId: "new-required",
+          snapshotToken: "new-required-token",
+          hubEnvironmentId: environmentId,
+        }),
+      );
+      const preparedUsage = yield* store.transact(store.readHubUsageTx(space));
+      assert.isAbove(preparedUsage.checkpointReservationConsumedBytes, 0);
+      assert.strictEqual(preparedUsage.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
       assert.deepStrictEqual(
         yield* service.admitHubOperation({ authority, operation: op }),
         accepted,
