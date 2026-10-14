@@ -325,14 +325,18 @@ export default Effect.gen(function* () {
     memory_outbox: "kind,status,memory_id",
   };
   const snapshotDependencies = [
-    ...snapshotByteBounds.map(
-      ([table, spaceColumn, columns]) =>
-        [
-          table,
-          spaceColumn,
-          [columns, snapshotSelectors[table]].filter(Boolean).join(","),
-        ] as const,
-    ),
+    // Retry is private scheduling state: charge its bytes without invalidating canonical
+    // producer staging. buildHubSnapshot does not consume cursor retry state.
+    ...snapshotByteBounds
+      .filter(([table]) => table !== "memory_sync_cursors")
+      .map(
+        ([table, spaceColumn, columns]) =>
+          [
+            table,
+            spaceColumn,
+            [columns, snapshotSelectors[table]].filter(Boolean).join(","),
+          ] as const,
+      ),
     ["memory_hub_operations", "space", "hub_sequence"] as const,
   ];
   for (const [table, spaceColumn, columns] of snapshotDependencies) {

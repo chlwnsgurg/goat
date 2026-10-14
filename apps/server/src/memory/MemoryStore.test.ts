@@ -6003,3 +6003,69 @@ it.effect("review-r11 held resolution sweep cannot advance past 100 live owners"
     );
   }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "review-r11 retry-only change invalidates snapshot staging and creates six triggers",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const triggers = yield* sql<{
+        name: string;
+      }>`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memory_sync_cursors'`;
+
+      yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${env},0,'ready')`;
+      yield* sql`INSERT INTO memory_hub_retention(space,handles_json,reserved_snapshot_id,snapshot_generation,published_pinned_bytes) VALUES (${space},'[]','review-stage',7,2)`;
+      yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,metadata_json,reason,checkpoint_id,missing_parents_json) VALUES (${space},'review-page','checkpoint','{}','hub_snapshot','hub:review-stage','[]')`;
+      const before =
+        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
+      yield* store.transact(
+        store.writePullRetryTx({
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          expectedVersion: 0,
+          retry: { attempts: 1, nextAttemptAt: 10, failureCode: "unavailable", holdClass: null },
+        }),
+      );
+      const after =
+        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
+
+      assert.strictEqual(after[0]!.reserved_snapshot_id, "review-stage");
+      assert.deepStrictEqual(after, before);
+      assert.strictEqual(triggers.length, 3);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:review-stage'`)
+          .length,
+        1,
+      );
+      const charged = (yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`)[0]!
+        .value;
+      const generation =
+        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`;
+      yield* store.transact(
+        store.writePullRetryTx({
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          expectedVersion: 1,
+          retry: { attempts: 2, nextAttemptAt: 20, failureCode: "unavailable", holdClass: null },
+        }),
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`,
+        before,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`,
+        generation,
+      );
+      assert.strictEqual(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`)[0]!
+          .value,
+        charged,
+      );
+    }).pipe(Effect.provide(live)),
+);
