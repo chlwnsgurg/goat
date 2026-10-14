@@ -8,6 +8,7 @@ import {
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -3068,6 +3069,239 @@ describe("AcpAdapterV2", () => {
         }
       }
       assert.equal(secondStatus, "completed");
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.live.each([
+    "rollback removal",
+    "rollback rotation",
+    "failed rollback",
+    "fork removal",
+    "snapshot removal",
+  ] as const)("keeps the ACP MCP bridge current through %s", (transition) =>
+    Effect.gen(function* () {
+      const requests: Array<{ path: string; authorization: string }> = [];
+      const server = yield* Effect.acquireRelease(
+        Effect.promise(
+          () =>
+            new Promise<NodeHttp.Server>((resolve) => {
+              const fixture = NodeHttp.createServer(async (request, response) => {
+                const chunks: Buffer[] = [];
+                for await (const chunk of request) chunks.push(Buffer.from(chunk));
+                const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+                requests.push({
+                  path: request.url ?? "",
+                  authorization: request.headers.authorization ?? "",
+                });
+                response.setHeader("content-type", "application/json");
+                response.end(
+                  JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [] } }),
+                );
+              });
+              fixture.listen(0, "127.0.0.1", () => resolve(fixture));
+            }),
+        ),
+        (fixture) =>
+          Effect.promise(
+            () =>
+              new Promise<void>((resolve, reject) =>
+                fixture.close((error) => (error ? reject(error) : resolve())),
+              ),
+          ),
+      );
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        return yield* Effect.die("No fixture port");
+      const fixtureId = transition.replaceAll(" ", "-");
+      const instanceId = ProviderInstanceId.make(`acp-bridge-${fixtureId}`);
+      const threadId = ThreadId.make(`acp-bridge-${fixtureId}`);
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      const config = (credential: "A" | "B", targetThreadId = threadId) => ({
+        environmentId: EnvironmentId.make("bridge-fixture"),
+        threadId: targetThreadId,
+        providerSessionId: "bridge-fixture",
+        providerInstanceId: instanceId,
+        endpoint: `http://127.0.0.1:${address.port}/${credential}`,
+        authorizationHeader: `Bearer fixture-${credential}`,
+        browserToolsAvailable: false,
+        grantedScopes: ["memory:read"] as const,
+      });
+      const initiallyEmpty = transition === "rollback removal";
+      if (!initiallyEmpty) yield* sessions.set(config("A"));
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      const handlers = new Map<
+        number,
+        {
+          connect?: Parameters<Runtime["handleMcpConnect"]>[0];
+          message?: Parameters<Runtime["handleMcpMessage"]>[0];
+        }
+      >();
+      const prompts: ReadonlyArray<{ type: string; text?: string }>[] = [];
+      const makeRuntime = makeMockRuntime({
+        childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+        mockAgentPath,
+        wrapRuntime: (runtime, ordinal) => {
+          const captured: NonNullable<ReturnType<typeof handlers.get>> = {};
+          handlers.set(ordinal, captured);
+          return {
+            ...runtime,
+            start:
+              transition === "failed rollback" && ordinal > 1
+                ? () =>
+                    Effect.fail(
+                      new EffectAcpErrors.AcpTransportError({
+                        detail: "Fixture replacement failure",
+                        cause: new Error("Fixture candidate rejected"),
+                      }),
+                    )
+                : runtime.start,
+            prompt: (input) =>
+              Effect.sync(() => prompts.push(input.prompt)).pipe(
+                Effect.andThen(runtime.prompt(input)),
+              ),
+            handleMcpConnect: (handler) =>
+              Effect.sync(() => {
+                captured.connect = handler;
+              }).pipe(Effect.andThen(runtime.handleMcpConnect(handler))),
+            handleMcpMessage: (handler) =>
+              Effect.sync(() => {
+                captured.message = handler;
+              }).pipe(Effect.andThen(runtime.handleMcpMessage(handler))),
+          };
+        },
+      });
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: { driver: ACP_TEST_DRIVER, capabilities: AcpProviderCapabilitiesV2, makeRuntime },
+      });
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make(`bridge-${fixtureId}`),
+        modelSelection,
+        runtimePolicy,
+      });
+      let thread = yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy });
+      let currentThreadId = threadId;
+      let runtimeOrdinal = 1;
+      const callTools = Effect.fnUntraced(function* () {
+        const active = handlers.get(runtimeOrdinal)!;
+        const connection = yield* active.connect!({ serverId: "goat" }, undefined as never);
+        yield* active.message!(
+          { connectionId: connection.connectionId, method: "tools/list" },
+          undefined as never,
+        );
+        return connection.connectionId;
+      });
+      const originalConnection = initiallyEmpty ? undefined : yield* callTools();
+      if (transition === "fork removal") {
+        currentThreadId = ThreadId.make(`${threadId}-fork`);
+        yield* sessions.set(config("B", currentThreadId));
+        thread = yield* runtime.forkThread({
+          sourceProviderThread: thread,
+          targetThreadId: currentThreadId,
+        });
+      } else {
+        yield* sessions.set(config("B"));
+        if (transition === "snapshot removal") {
+          thread = {
+            ...thread,
+            nativeThreadRef: {
+              driver: ACP_TEST_DRIVER,
+              nativeId: "mock-session-snapshot",
+              strength: "strong",
+            },
+          };
+          yield* runtime.readThreadSnapshot({ providerThread: thread });
+        } else {
+          const rolledBack = yield* runtime
+            .rollbackThread({
+              providerThread: thread,
+              providerThreadTurns: [],
+              target: {
+                type: "thread_start",
+                checkpointId: CheckpointId.make("bridge-checkpoint"),
+                appRunOrdinal: 0,
+              },
+            })
+            .pipe(Effect.exit);
+          if (transition === "failed rollback") {
+            assert.isTrue(Exit.isFailure(rolledBack));
+          } else {
+            if (Exit.isFailure(rolledBack)) return yield* Effect.failCause(rolledBack.cause);
+            thread = rolledBack.value.providerThread;
+            runtimeOrdinal = 2;
+          }
+        }
+      }
+      let previousConnection: string;
+      if (transition === "failed rollback") {
+        yield* sessions.set(config("A"));
+        previousConnection = originalConnection!;
+      } else {
+        previousConnection = yield* callTools();
+        assert.deepEqual(requests.at(-1), { path: "/B", authorization: "Bearer fixture-B" });
+        if (transition === "rollback rotation") yield* sessions.set(config("A"));
+        else yield* sessions.clear(currentThreadId);
+      }
+      const beforeAdmission = requests.length;
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId: currentThreadId,
+          providerThread: thread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+        }),
+      );
+      yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runDrain,
+      );
+      const active = handlers.get(runtimeOrdinal)!;
+      if (transition === "rollback rotation" || transition === "failed rollback") {
+        if (transition === "failed rollback") {
+          // The original live connection survives both failed candidates.
+          yield* active.message!(
+            { connectionId: previousConnection, method: "tools/list" },
+            undefined as never,
+          );
+        } else yield* callTools();
+        assert.deepEqual(requests.at(-1), { path: "/A", authorization: "Bearer fixture-A" });
+        assert.isTrue(
+          requests
+            .slice(beforeAdmission)
+            .every((request) => request.authorization === "Bearer fixture-A"),
+        );
+      } else {
+        for (const denied of [
+          active.connect!({ serverId: "goat" }, undefined as never),
+          active.message!(
+            { connectionId: previousConnection, method: "tools/list" },
+            undefined as never,
+          ),
+        ]) {
+          const result = yield* denied.pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(result));
+          if (Exit.isFailure(result))
+            assert.include(Cause.pretty(result.cause), "GOAT MCP is unavailable");
+        }
+        assert.equal(requests.length, beforeAdmission, "removed B must receive no HTTP requests");
+        // No prompt advertised tools on this native ID; bridge calls are not claims.
+        assert.isUndefined(
+          prompts.at(-1)?.find((part) => part.text?.startsWith("GOAT memory tools:")),
+        );
+      }
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
@@ -14358,3 +14592,9 @@ describe("acpPostSettleMonitorPromptShouldSuppress", () => {
     );
   });
 });
+
+import { acpMemoryDelivery } from "./memoryDelivery.testkit.ts";
+
+it.live.each([true, false])("WP4 memory delivery acp attached=%s", (attached) =>
+  acpMemoryDelivery("acp", attached),
+);

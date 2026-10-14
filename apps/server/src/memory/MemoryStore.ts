@@ -57,6 +57,7 @@ export class MemoryCapacityError extends Schema.TaggedError<MemoryCapacityError>
     dimension: Schema.String,
     limit: Schema.Int,
     current: Schema.optionalKey(Schema.Int),
+    reclaimable: Schema.optionalKey(Schema.Int),
   },
 ) {
   override get message() {
@@ -1329,12 +1330,18 @@ export class MemoryStore extends Context.Service<
     readonly list: (
       filter: MemoryReadFilter,
     ) => Effect.Effect<ReadonlyArray<M.MemoryItem>, MemoryStorageError | MemoryStoreConflict>;
+    readonly searchCoverage: (
+      filter: MemoryReadFilter,
+    ) => Effect.Effect<
+      { ready: boolean; eligible: number; indexed: number; textBytes: number },
+      MemoryStorageError
+    >;
     readonly search: (
       filter: MemoryReadFilter,
       text: string,
       mode: "fts" | "substring",
     ) => Effect.Effect<
-      ReadonlyArray<M.MemoryItem>,
+      M.MemorySearchPage,
       MemoryStorageError | MemoryStoreConflict | MemoryCapacityError
     >;
     readonly dueWork: (
@@ -1678,6 +1685,7 @@ const Projection = Schema.Union([
 ]);
 const projectionCodec = codec(Projection);
 const decodeItem = Schema.decodeUnknownEffect(M.MemoryItem);
+const encodeSearchItem = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const payloadCodec = codec(M.MemoryPayload);
 const resolutionPayloadCodec = codec(M.MemoryResolutionPayload);
 const scopeCodec = codec(M.MemoryScope);
@@ -3041,6 +3049,51 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  // A request advances at most one durable batch; mutations of counted rows adjust totals in SQL.
+  const searchCoverage = Effect.fn("MemoryStore.searchCoverage")(function* (
+    filter: MemoryReadFilter,
+  ) {
+    const state = (yield* stored(
+      "search-backfill-state",
+      sql<{
+        after_rowid: number;
+        ready: number;
+      }>`SELECT after_rowid,ready FROM memory_search_backfill WHERE singleton=1`,
+    ))[0]!;
+    let ready = state.ready === 1;
+    if (!ready) {
+      const rows = yield* stored(
+        "search-backfill-window",
+        sql<{
+          rowid: number;
+        }>`SELECT rowid FROM memory_items WHERE rowid>${state.after_rowid} ORDER BY rowid LIMIT 1000`,
+      );
+      for (const row of rows)
+        yield* stored(
+          "search-backfill-row",
+          sql`UPDATE memory_items SET search_counted=1,search_text_bytes=coalesce((SELECT length(CAST(json_extract(body_json,'$.text') AS BLOB)) FROM memory_payloads p WHERE p.space=memory_items.space AND p.payload_ref=memory_items.payload_ref),0) WHERE rowid=${row.rowid} AND search_counted=0`,
+        );
+      ready = rows.length < 1000;
+      yield* stored(
+        "search-backfill-progress",
+        sql`UPDATE memory_search_backfill SET after_rowid=${rows.at(-1)?.rowid ?? state.after_rowid},ready=${ready ? 1 : 0} WHERE singleton=1`,
+      );
+    }
+    const rows = yield* stored(
+      "search-coverage",
+      sql<{
+        eligible: number;
+        indexed: number;
+        text_bytes: number;
+      }>`SELECT eligible,indexed,text_bytes FROM memory_search_counters WHERE space=${filter.memorySpaceId} AND scope_key=${scopeKey(filter.scope)}`,
+    );
+    return {
+      ready,
+      eligible: rows[0]?.eligible ?? 0,
+      indexed: rows[0]?.indexed ?? 0,
+      textBytes: rows[0]?.text_bytes ?? 0,
+    };
+  });
   const search = Effect.fn("MemoryStore.search")(function* (
     filter: MemoryReadFilter,
     text: string,
@@ -3053,43 +3106,58 @@ const make = Effect.gen(function* () {
     )
       return yield* new MemoryStoreConflict({ code: "payload_too_large" });
     const key = scopeKey(yield* stored("scope-codec", decodeScope(filter.scope, strict)));
-    if (mode === "substring") {
-      const counts = yield* stored(
-        "substring-count",
-        sql<{
-          items: number;
-          bytes: number;
-        }>`SELECT count(*) AS items,coalesce(sum(length(CAST(json_extract(p.body_json,'$.text') AS BLOB))),0) AS bytes FROM memory_items i JOIN memory_payloads p ON p.space=i.space AND p.payload_ref=i.payload_ref WHERE i.space=${filter.memorySpaceId} AND i.scope_key=${key} AND i.status='active'`,
-      );
-      if (
-        (counts[0]?.items ?? 0) > M.MEMORY_SUBSTRING_MAX_ITEMS ||
-        (counts[0]?.bytes ?? 0) > M.MEMORY_SUBSTRING_MAX_UTF8_BYTES
-      )
-        return yield* new MemoryCapacityError({
-          dimension: "substring",
-          limit: M.MEMORY_SUBSTRING_MAX_ITEMS,
-        });
+    const coverage = yield* searchCoverage(filter);
+    if (!coverage.ready) {
+      if (mode === "substring") return yield* new MemoryStoreConflict({ code: "unavailable" });
+      return { items: [], examinedAfterMemoryId: filter.afterMemoryId ?? null, exhausted: false };
     }
+    if (
+      mode === "substring" &&
+      (coverage.eligible > M.MEMORY_SUBSTRING_MAX_ITEMS ||
+        coverage.textBytes > M.MEMORY_SUBSTRING_MAX_UTF8_BYTES)
+    )
+      return yield* new MemoryCapacityError({
+        dimension: "substring",
+        limit: M.MEMORY_SUBSTRING_MAX_ITEMS,
+      });
+    // MATERIALIZED prevents MATCH/instr from being flattened ahead of the indexed keyset LIMIT.
+    // Correlated rowid MATCH visits only the selected FTS row, including for absent terms.
     const rows =
       mode === "fts"
         ? yield* stored(
             "fts-search",
-            sql<{
-              memory_id: string;
-            }>`SELECT i.memory_id FROM memory_items i JOIN memory_items_fts f ON f.rowid=i.rowid WHERE memory_items_fts MATCH ${'"' + text.replaceAll('"', '""') + '"'} AND i.space=${filter.memorySpaceId} AND i.scope_key=${key} AND i.status='active' AND i.index_state='ready' AND i.indexed_generation=i.generation AND i.memory_id>${filter.afterMemoryId ?? ""} ORDER BY i.memory_id LIMIT ${filter.limit}`,
+            sql<{ memory_id: string; matches: number }>`WITH window AS MATERIALIZED (
+        SELECT rowid,memory_id,status,index_state,indexed_generation,generation FROM memory_items
+        WHERE space=${filter.memorySpaceId} AND scope_key=${key} AND memory_id>${filter.afterMemoryId ?? ""} ORDER BY memory_id LIMIT 1000
+      ) SELECT memory_id,CASE WHEN status='active' AND index_state='ready' AND indexed_generation=generation THEN EXISTS(SELECT 1 FROM memory_items_fts WHERE rowid=window.rowid AND memory_items_fts MATCH ${'"' + text.replaceAll('"', '""') + '"'}) ELSE 0 END AS matches FROM window ORDER BY memory_id`,
           )
         : yield* stored(
             "substring-search",
-            sql<{
-              memory_id: string;
-            }>`SELECT i.memory_id FROM memory_items i JOIN memory_payloads p ON p.space=i.space AND p.payload_ref=i.payload_ref WHERE i.space=${filter.memorySpaceId} AND i.scope_key=${key} AND i.status='active' AND instr(json_extract(p.body_json,'$.text'),${text})>0 AND i.memory_id>${filter.afterMemoryId ?? ""} ORDER BY i.memory_id LIMIT ${filter.limit}`,
+            sql<{ memory_id: string; matches: number }>`WITH window AS MATERIALIZED (
+        SELECT memory_id,status,payload_ref FROM memory_items WHERE space=${filter.memorySpaceId} AND scope_key=${key} AND memory_id>${filter.afterMemoryId ?? ""} ORDER BY memory_id LIMIT 1000
+      ) SELECT memory_id,CASE WHEN status='active' THEN coalesce((SELECT instr(json_extract(body_json,'$.text'),${text})>0 FROM memory_payloads WHERE space=${filter.memorySpaceId} AND payload_ref=window.payload_ref),0) ELSE 0 END AS matches FROM window ORDER BY memory_id`,
           );
-    return yield* Effect.forEach(rows, (row) =>
-      Effect.gen(function* () {
-        const id = yield* stored("item-id", decodeMemoryId(row.memory_id));
-        return (yield* readItem(filter.memorySpaceId, id))!.item;
-      }),
-    );
+    const items: M.MemoryItem[] = [];
+    let examinedAfterMemoryId = filter.afterMemoryId ?? null;
+    let bytes = 2048; // Reserve the bounded server cursor, watermark and coverage envelope.
+    for (const row of rows) {
+      const id = yield* stored("item-id", decodeMemoryId(row.memory_id));
+      if (row.matches) {
+        const item = (yield* readItem(filter.memorySpaceId, id))!.item;
+        const size =
+          new TextEncoder().encode(yield* stored("search-item-codec", encodeSearchItem(item)))
+            .length + 1;
+        if (bytes + size > M.MEMORY_PAGE_MAX_UTF8_BYTES) {
+          if (!items.length) return yield* new MemoryStoreConflict({ code: "payload_too_large" });
+          return { items, examinedAfterMemoryId, exhausted: false };
+        }
+        items.push(item);
+        bytes += size;
+      }
+      examinedAfterMemoryId = id;
+      if (items.length === filter.limit) return { items, examinedAfterMemoryId, exhausted: false };
+    }
+    return { items, examinedAfterMemoryId, exhausted: rows.length < 1000 };
   });
   const workRows = Effect.fnUntraced(function* (
     rows: ReadonlyArray<{
@@ -7141,6 +7209,38 @@ const make = Effect.gen(function* () {
   const sourceCollectCodec = codec(M.MemoryHubSourceReadCollectResult);
   const sourceThreadCodec = codec(M.ScopedThreadRef);
   const sourceWatermarkCodec = codec(M.MemorySourceWatermark);
+  // Relay authority metadata shares the existing body-free replay registry. One
+  // bounded map per member; membership itself is capped and retained on retirement.
+  const pairFencesCodec = codec(M.MemorySourceReadPairFences);
+  const settlementCodec = codec(
+    Schema.Struct({
+      responseDigest: Schema.NullOr(Schema.String),
+      ownerPolicyEpoch: M.MemoryOwnerPolicyEpoch,
+      denied: Schema.Boolean,
+    }),
+  );
+  const readPairFences = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    owner: M.EnvironmentId,
+  ) {
+    const rows = yield* stored(
+      "relay-pair-fences",
+      sql<{
+        record_json: string;
+      }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_source_fences' AND key=${owner}`,
+    );
+    const fences = rows[0] ? yield* pairFencesCodec.decode(rows[0].record_json, strict) : [];
+    if (fences.some((f) => f.memorySpaceId !== space || f.ownerEnvironmentId !== owner))
+      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+    return fences;
+  });
+  const pairFence = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    return (
+      (yield* readPairFences(space, M.EnvironmentId.make(row.owner))).find(
+        (f) => f.requesterEnvironmentId === row.requester,
+      )?.revokedThroughEpoch ?? -1
+    );
+  });
   type RelayRow = {
     request_id: string;
     memory_id: string;
@@ -7220,6 +7320,46 @@ const make = Effect.gen(function* () {
       "relay-expire",
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
     );
+  });
+  const settleDenied = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    row: RelayRow,
+    epoch: number,
+  ) {
+    if (row.payload_ref)
+      yield* stored(
+        "relay-denied-purge",
+        sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${row.payload_ref}`,
+      );
+    yield* stored(
+      "relay-denied",
+      sql`UPDATE memory_hub_source_reads SET state='completed',payload_ref=NULL,response_digest=${yield* settlementCodec.encode({ responseDigest: null, ownerPolicyEpoch: epoch, denied: true })} WHERE space=${space} AND request_id=${row.request_id}`,
+    );
+  });
+  const relayRequest = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    const request = yield* sourceRequestCodec
+      .decode(row.locator_json, strict)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (
+      !request?.stamp ||
+      request.memorySpaceId !== space ||
+      request.requestId !== row.request_id ||
+      request.memoryId !== row.memory_id ||
+      request.sourceThread.environmentId !== row.owner ||
+      request.requesterEnvironmentId !== row.requester ||
+      request.stamp.requesterCredentialVersion !== row.credential_version ||
+      request.stamp.locatorDigest !== row.request_digest ||
+      Date.parse(request.expiresAtHubTime) !== row.deadline
+    )
+      return null;
+    const {
+      stamp: _stamp,
+      requesterEnvironmentId: _requester,
+      expiresAtHubTime: _expiry,
+      ...locator
+    } = request;
+    const digest = hashText(yield* sourceInputCodec.encode({ protocolVersion: 1, ...locator }));
+    return digest === row.request_digest ? request : null;
   });
   const adminReplayJson = Effect.fnUntraced(function* (record: AdminRecord) {
     const { action, ...replay } = record;
@@ -7317,7 +7457,12 @@ const make = Effect.gen(function* () {
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
       if (old.deadline <= now || old.state === "expired")
         return yield* new M.MemoryHubError({ code: "source_unavailable" });
-      return { request: yield* sourceRequestCodec.decode(old.locator_json, strict) };
+      const request = yield* relayRequest(input.memorySpaceId, old);
+      if (!request) {
+        yield* settleDenied(input.memorySpaceId, old, 0);
+        return yield* new M.MemoryHubError({ code: "source_unavailable" });
+      }
+      return { request };
     }
     const owner = yield* readHubMember(input.memorySpaceId, input.sourceThread.environmentId);
     if (!owner || owner.status !== "active")
@@ -7341,6 +7486,7 @@ const make = Effect.gen(function* () {
       ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       authorizedScopes: request.authorizedScopes,
       requesterEnvironmentId: request.requesterEnvironmentId,
+      stamp: { requesterCredentialVersion: member.credentialVersion, locatorDigest: requestDigest },
       expiresAtHubTime: request.expiresAtHubTime,
     };
     if (!(yield* relayEligible(input.memorySpaceId, locator)))
@@ -7394,7 +7540,11 @@ const make = Effect.gen(function* () {
         input.memorySpaceId,
         M.EnvironmentId.make(row.requester),
       );
-      const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+      const request = yield* relayRequest(input.memorySpaceId, row);
+      if (!request) {
+        yield* settleDenied(input.memorySpaceId, row, 0);
+        continue;
+      }
       if (
         !requester ||
         requester.status !== "active" ||
@@ -7416,6 +7566,49 @@ const make = Effect.gen(function* () {
     "MemoryStore.respondHubSourceReadTx",
   )(function* (authority, input) {
     const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    if (input.kind === "revoke") {
+      if (!(yield* readHubMember(input.memorySpaceId, input.requesterEnvironmentId)))
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      const fences = yield* readPairFences(input.memorySpaceId, member.environmentId);
+      const previous = fences.find(
+        (f) => f.requesterEnvironmentId === input.requesterEnvironmentId,
+      );
+      const epoch = Math.max(previous?.revokedThroughEpoch ?? -1, input.ownerPolicyEpoch);
+      if (!previous || epoch > previous.revokedThroughEpoch) {
+        const next = [
+          ...fences.filter((f) => f.requesterEnvironmentId !== input.requesterEnvironmentId),
+          {
+            memorySpaceId: input.memorySpaceId,
+            ownerEnvironmentId: member.environmentId,
+            requesterEnvironmentId: input.requesterEnvironmentId,
+            revokedThroughEpoch: epoch,
+          },
+        ];
+        const json = yield* pairFencesCodec.encode(next);
+        yield* stored(
+          "relay-pair-revoke",
+          sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${input.memorySpaceId},'hub_source_fences',${member.environmentId},${input.memorySpaceId},${json}) ON CONFLICT(space,key_kind,key) DO UPDATE SET record_json=excluded.record_json`,
+        );
+        const rows = yield* stored(
+          "relay-pair-settle",
+          sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND owner=${member.environmentId} AND requester=${input.requesterEnvironmentId} AND state IN ('pending','completed') ORDER BY request_id LIMIT ${M.MEMORY_SOURCE_READ_MAX_PER_HUB + 1}`,
+        );
+        if (rows.length > M.MEMORY_SOURCE_READ_MAX_PER_HUB)
+          return yield* new M.MemoryHubError({ code: "capacity_exceeded" });
+        for (const row of rows) yield* settleDenied(input.memorySpaceId, row, epoch);
+      }
+      return {
+        kind: "revoke" as const,
+        accepted: true as const,
+        ack: {
+          memorySpaceId: input.memorySpaceId,
+          ownerEnvironmentId: member.environmentId,
+          requesterEnvironmentId: input.requesterEnvironmentId,
+          removalEpoch: input.ownerPolicyEpoch,
+          revokedThroughEpoch: epoch,
+        },
+      };
+    }
     const row = yield* readRelay(input.memorySpaceId, input.requestId);
     if (!row || row.owner !== member.environmentId)
       return yield* new M.MemoryHubError({ code: "identity_mismatch" });
@@ -7431,18 +7624,41 @@ const make = Effect.gen(function* () {
       requester.credentialVersion !== row.credential_version
     ) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
-      return { accepted: false };
+      return { kind: "normal" as const, accepted: false };
     }
-    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    const request = yield* relayRequest(input.memorySpaceId, row);
+    if (!request) {
+      yield* settleDenied(input.memorySpaceId, row, 0);
+      return { kind: "normal" as const, accepted: false };
+    }
+    const previous = row.response_digest
+      ? yield* settlementCodec
+          .decode(row.response_digest, strict)
+          .pipe(Effect.orElseSucceed(() => null))
+      : null;
+    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
+    if (previous?.denied && previous.responseDigest === responseDigest)
+      return { kind: "normal" as const, accepted: true };
+    if (
+      previous?.denied ||
+      (input.outcome.kind === "available" && input.ownerPolicyEpoch === 0) ||
+      input.ownerPolicyEpoch <= (yield* pairFence(input.memorySpaceId, row))
+    ) {
+      yield* settleDenied(
+        input.memorySpaceId,
+        row,
+        Math.max(input.ownerPolicyEpoch, previous?.ownerPolicyEpoch ?? 0),
+      );
+      return { kind: "normal" as const, accepted: false };
+    }
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
-      return { accepted: false };
+      return { kind: "normal" as const, accepted: false };
     }
-    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
     if (row.response_digest) {
-      if (row.response_digest !== responseDigest)
+      if (previous?.responseDigest !== responseDigest)
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
-      return { accepted: row.state === "completed" };
+      return { kind: "normal" as const, accepted: row.state === "completed" };
     }
     if (
       input.outcome.kind === "available" &&
@@ -7461,15 +7677,16 @@ const make = Effect.gen(function* () {
     const json = yield* sourceOutcomeCodec.encode(outcome);
     const payloadRef = `relay:${input.requestId}`;
     // A transient body has no revision, event, report, checkpoint or FTS reference.
-    yield* stored(
-      "relay-response-payload",
-      sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
-    );
+    if (outcome.kind !== "denied")
+      yield* stored(
+        "relay-response-payload",
+        sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
+      );
     yield* stored(
       "relay-response",
-      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${responseDigest},payload_ref=${payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
+      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${yield* settlementCodec.encode({ responseDigest, ownerPolicyEpoch: input.ownerPolicyEpoch, denied: outcome.kind === "denied" })},payload_ref=${outcome.kind === "denied" ? null : payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
     );
-    return { accepted: true };
+    return { kind: "normal" as const, accepted: true };
   });
   const resultHubSourceReadTx: MemoryStore["Service"]["resultHubSourceReadTx"] = Effect.fn(
     "MemoryStore.resultHubSourceReadTx",
@@ -7487,7 +7704,29 @@ const make = Effect.gen(function* () {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { state: "expired", code: "source_unavailable" };
     }
-    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    const settlement = row.response_digest
+      ? yield* settlementCodec
+          .decode(row.response_digest, strict)
+          .pipe(Effect.orElseSucceed(() => null))
+      : null;
+    if (
+      settlement?.denied ||
+      (settlement && settlement.ownerPolicyEpoch <= (yield* pairFence(input.memorySpaceId, row)))
+    ) {
+      yield* settleDenied(input.memorySpaceId, row, settlement.ownerPolicyEpoch);
+      return {
+        state: "completed",
+        outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+      };
+    }
+    const request = yield* relayRequest(input.memorySpaceId, row);
+    if (!request || (row.state === "completed" && !settlement)) {
+      yield* settleDenied(input.memorySpaceId, row, 0);
+      return {
+        state: "completed",
+        outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+      };
+    }
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { state: "completed", outcome: { kind: "unavailable", code: "source_invalidated" } };
@@ -8924,7 +9163,9 @@ const make = Effect.gen(function* () {
       withHubBudget(requestHubSourceReadTx(authority, input)),
     collectHubSourceReadsTx,
     respondHubSourceReadTx: (authority, input) =>
-      withHubBudget(respondHubSourceReadTx(authority, input)),
+      input.kind === "revoke"
+        ? respondHubSourceReadTx(authority, input)
+        : withHubBudget(respondHubSourceReadTx(authority, input)),
     resultHubSourceReadTx,
     readHubAdminTx,
     writeHubAdminTx: (input) => withHubBudget(writeHubAdminTx(input)),
@@ -8992,7 +9233,20 @@ const make = Effect.gen(function* () {
     pendingReceived,
     stageRevertIntent,
     list: (filter) => transact(list(filter)),
-    search: (filter, text, mode) => transact(search(filter, text, mode)),
+    search: (filter, text, mode) =>
+      Effect.gen(function* () {
+        const coverage = yield* transact(searchCoverage(filter));
+        if (!coverage.ready) {
+          if (mode === "substring") return yield* new MemoryStoreConflict({ code: "unavailable" });
+          return {
+            items: [],
+            examinedAfterMemoryId: filter.afterMemoryId ?? null,
+            exhausted: false,
+          };
+        }
+        return yield* transact(search(filter, text, mode));
+      }),
+    searchCoverage: (filter) => transact(searchCoverage(filter)),
     dueWork,
     readWork,
     retryWork,

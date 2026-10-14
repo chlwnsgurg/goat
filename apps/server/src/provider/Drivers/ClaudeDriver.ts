@@ -1,3 +1,5 @@
+import * as AdapterInfrastructure from "../ProviderOrchestrationAdapterInfrastructure.ts";
+import * as Option from "effect/Option";
 /**
  * ClaudeDriver — `ProviderDriver` for the Claude Agent SDK runtime.
  *
@@ -171,6 +173,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       });
 
       const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+      const memoryAdmission = yield* Effect.serviceOption(
+        AdapterInfrastructure.ProviderMemoryAdmission,
+      );
       const orchestrationAdapter = yield* createClaudeAdapterV2(
         {
           instanceId,
@@ -180,7 +185,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           enabled,
           config,
         },
-        { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+        {
+          scopedLimitNames,
+          onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+          ...(Option.isNone(memoryAdmission)
+            ? {}
+            : {
+                mcpCredentialRotations: memoryAdmission.value.rotations,
+              }),
+        },
       ).pipe(
         Effect.mapError(
           (cause) =>

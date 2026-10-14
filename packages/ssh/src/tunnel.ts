@@ -367,6 +367,8 @@ export interface RemoteMcpClientSessionOptions {
   readonly runtimeModeCeiling: string | null;
   /** Also grant `orchestration:approve`. A remote CLI that predates it fails the issue. */
   readonly approvals?: boolean;
+  /** Explicit task memory grants; an older CLI must refuse rather than omit them. */
+  readonly memoryScopes?: ReadonlyArray<"memory:read" | "memory:write">;
 }
 
 export interface RemoteMcpClientSession {
@@ -1744,10 +1746,12 @@ DEFAULT_SERVER_HOME="$HOME/.goat"
 @@GOAT_RUNNER_SETUP@@
 set -- auth session issue --base-dir "$DEFAULT_SERVER_HOME" --subject mcp-client --scope orchestration:read --scope orchestration:operate @@GOAT_EXTRA_SCOPES@@--ttl @@GOAT_TTL@@ --label @@GOAT_LABEL@@ --json
 CEILING=@@GOAT_CEILING@@
+MEMORY_SCOPES=@@GOAT_MEMORY_SCOPES@@
 recheck_selected_before_use
 if [ -n "$CEILING" ] && OUTPUT="$("$RUNNER_FILE" "$@" --runtime-mode-ceiling "$CEILING" 2>/dev/null)"; then
   printf 'GOAT_CEILING=applied\\n%s\\n' "$OUTPUT"
 else
+  if [ "$MEMORY_SCOPES" = required ] && [ -n "$CEILING" ]; then exit 1; fi
   recheck_selected_before_use
   OUTPUT="$("$RUNNER_FILE" "$@")"
   printf 'GOAT_CEILING=default\\n%s\\n' "$OUTPUT"
@@ -1971,7 +1975,10 @@ export function buildRemoteMcpSessionScript(
     GOAT_TTL: shellSingleQuote(options.ttl),
     GOAT_LABEL: shellSingleQuote(options.label),
     GOAT_CEILING: shellSingleQuote(options.runtimeModeCeiling ?? ""),
-    GOAT_EXTRA_SCOPES: options.approvals === true ? "--scope orchestration:approve " : "",
+    GOAT_MEMORY_SCOPES: (options.memoryScopes?.length ?? 0) > 0 ? "required" : "none",
+    GOAT_EXTRA_SCOPES:
+      (options.approvals === true ? "--scope orchestration:approve " : "") +
+      (options.memoryScopes ?? []).map((scope) => `--scope ${shellSingleQuote(scope)} `).join(""),
     GOAT_RUNNER_SETUP: buildRemoteRunnerSetupScript(input, {
       ...selection,
       mayUpgradeOwnedServer: false,

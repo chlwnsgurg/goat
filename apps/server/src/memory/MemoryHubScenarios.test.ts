@@ -647,7 +647,14 @@ describe("Memory hub assembled HTTP scenarios", () => {
         };
         yield* s.call(
           M.MEMORY_HUB_PATHS.sourceReadRespond,
-          { protocolVersion: 1, memorySpaceId: space, requestId, outcome },
+          {
+            protocolVersion: 1,
+            kind: "normal",
+            ownerPolicyEpoch: 1,
+            memorySpaceId: space,
+            requestId,
+            outcome,
+          },
           M.MemoryHubSourceReadRespondResult,
           provisioned.credential.credential,
         );

@@ -1,3 +1,4 @@
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
 import {
   forkSession,
   query,
@@ -1001,6 +1002,7 @@ function layerClaudeProviderAdapterRegistryReplay(
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
+        MemoryDerivedCache.layer,
         layerClaudeAgentSdkReplay(transcript, options),
         IdAllocator.layer,
         NodeServices.layer,

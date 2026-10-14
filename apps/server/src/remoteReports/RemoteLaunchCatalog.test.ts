@@ -16,6 +16,7 @@ const ms = (iso: string) => Date.parse(iso);
 const dispatch = (
   overrides: Partial<Coordinator.RemoteDispatchRecord> = {},
 ): Coordinator.RemoteDispatchRecord => ({
+  memoryGrantCeiling: "none",
   correlationId: "dispatch-1",
   kind: "thread",
   originThreadId: launcher,

@@ -2,6 +2,7 @@ import { GOAT_THREAD_LINK_PROTOCOL } from "@goat/contracts/legacyT3Names";
 import { McpAttachmentInput } from "../attachment/input.ts";
 import { NotifyTargetInput } from "../../completionWebhook.ts";
 import {
+  MemoryTaskGrantCeiling,
   NonNegativeInt,
   ModelSelection,
   TrimmedNonEmptyString,
@@ -130,6 +131,7 @@ export const ThreadLaunchParameters = Schema.Struct({
   ),
   title: TrimmedNonEmptyString,
   modelSelection: Schema.optional(ModelSelection),
+  memoryGrantCeiling: Schema.optional(MemoryTaskGrantCeiling),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
   workspaceStrategy: Schema.optional(

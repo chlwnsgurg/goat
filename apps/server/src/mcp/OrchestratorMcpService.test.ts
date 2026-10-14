@@ -1475,6 +1475,27 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(request.type, "delegated_task.request");
           assert.equal(request.modelSelection.instanceId, antigravityInstanceId);
           assert.equal(request.modelSelection.model, "ant-model");
+          assert.equal((commands[0] as { memoryGrantCeiling?: string }).memoryGrantCeiling, "none");
+          for (const [grantedScopes, expected] of [
+            [[], "none"],
+            [["memory:read"], "read"],
+            [["memory:read", "memory:write"], "read_write"],
+          ] as const) {
+            yield* service.delegateTask(
+              { ...scope, grantedScopes, reauthorize: () => Effect.void },
+              {
+                task: "Summarize the diff.",
+                target: { providerInstanceId: antigravityInstanceId, model: "ant-model" },
+                mode: "async",
+                clientRequestId: `delegate-memory-${expected}`,
+              },
+            );
+            assert.equal(
+              ((yield* Ref.get(dispatched)).at(-1) as { memoryGrantCeiling?: string })
+                .memoryGrantCeiling,
+              expected,
+            );
+          }
         }).pipe(
           Effect.provide(
             OrchestratorMcpService.layer.pipe(

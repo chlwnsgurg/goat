@@ -1,3 +1,4 @@
+import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 /**
  * ProviderInstanceRegistryHydration — derive a `ProviderInstanceConfigMap`
  * from `ServerSettings` and keep `ProviderInstanceRegistry` in sync with it.
@@ -156,6 +157,13 @@ export const layer: Layer.Layer<
 > = Layer.unwrap(
   Effect.gen(function* () {
     const serverSettings = yield* Settings.ServerSettingsService;
+    const admission = yield* ProviderOrchestrationAdapterInfrastructure.ProviderMemoryAdmission;
+    const sessions = yield* McpProviderSessions.McpProviderSessions;
+    // Override only the adapter construction context. The manager retains the raw slot.
+    const fencedSessions = McpProviderSessions.McpProviderSessions.of({
+      ...sessions,
+      read: (threadId) => sessions.read(threadId).pipe(Effect.flatMap(admission.fence)),
+    });
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );
@@ -169,12 +177,21 @@ export const layer: Layer.Layer<
       configMap: initialConfigMap,
     }).pipe(
       Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
+      Layer.provide(Layer.succeed(McpProviderSessions.McpProviderSessions, fencedSessions)),
+      Layer.provide(
+        Layer.succeed(
+          ProviderOrchestrationAdapterInfrastructure.ProviderMemoryAdmission,
+          admission,
+        ),
+      ),
       Layer.provide(AcpRegistrySupport.layerFromHost),
       Layer.provide(ProviderHostLive.layer),
     );
 
     return layerSettingsWatcher.pipe(Layer.provideMerge(layerMutable));
   }),
+).pipe(
+  Layer.provide(ProviderOrchestrationAdapterInfrastructure.layerMemoryAdmission),
 ) as Layer.Layer<
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   never,

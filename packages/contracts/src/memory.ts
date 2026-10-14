@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import * as SchemaParser from "effect/SchemaParser";
@@ -1169,7 +1170,6 @@ export const MemoryContextSnapshot = struct({
   Schema.makeFilter(
     (v) =>
       unique(v.items.map((i) => i.memoryId)) &&
-      v.items.every((i) => v.renderedText.includes(i.text)) &&
       Array.from(v.renderedText + MEMORY_CONTEXT_OUTER_FRAME).length <= MEMORY_CONTEXT_MAX_CHARS &&
       utf8(v.renderedText + MEMORY_CONTEXT_OUTER_FRAME) <= MEMORY_CONTEXT_MAX_UTF8_BYTES,
   ),
@@ -1179,7 +1179,7 @@ export type MemoryContextCandidate = MemoryContextSnapshot["items"][number];
 export type MemoryContextCandidates = Pick<
   MemoryContextSnapshot,
   "memorySpaceId" | "projectionWatermark" | "items"
->;
+> & { readonly nextCursor: MemoryPage["nextCursor"] };
 
 const MemoryForgetRetry = struct({
   operationId: MemoryOperationId,
@@ -1373,14 +1373,109 @@ const limit = PositiveInt.check(Schema.isLessThanOrEqualTo(100)).pipe(
 );
 const paging = { limit, cursor: Schema.optionalKey(canonical) };
 
+/** Server-owned task metadata. Missing legacy values never acquire managed defaults. */
+export const MemoryTaskGrantCeiling = Schema.Literals(["none", "read", "read_write"]);
+export type MemoryTaskGrantCeiling = typeof MemoryTaskGrantCeiling.Type;
+export const MemoryTaskGrantCeilingField = MemoryTaskGrantCeiling.pipe(
+  Schema.withDecodingDefault(Effect.succeed("none")),
+  // Keep older in-process producers assignable; missing and none are omitted on encode and decode to none.
+  Schema.decodeTo(
+    Schema.optionalKey(MemoryTaskGrantCeiling),
+    SchemaTransformation.transformOptional({
+      decode: (value) => value,
+      encode: (value) =>
+        Option.filter(value, (ceiling) => ceiling === "read" || ceiling === "read_write"),
+    }),
+  ),
+);
+
+export const MemorySearchMode = Schema.Literals(["fts", "substring"]);
+export const MemorySearchCursorBinding = struct({
+  memorySpaceId: MemorySpaceId,
+  queryDigest: digest,
+  mode: MemorySearchMode,
+  // SHA-256 of the canonical scope key keeps the complete wire cursor bounded.
+  scopeKey: digest,
+});
+export type MemorySearchCursorBinding = typeof MemorySearchCursorBinding.Type;
+export const MemorySearchCursor = struct({
+  kind: Schema.Literal("memory_search"),
+  version: Schema.Literal(1),
+  binding: MemorySearchCursorBinding,
+  afterMemoryId: MemoryId,
+});
+export type MemorySearchCursor = typeof MemorySearchCursor.Type;
+const searchCursorCodec = Schema.fromJsonString(MemorySearchCursor);
+const decodeSearchCursor = Schema.decodeUnknownSync(searchCursorCodec);
+const encodeSearchCursor = Schema.encodeSync(searchCursorCodec);
+const decodeSearchBinding = Schema.decodeUnknownSync(MemorySearchCursorBinding);
+const decodeCursorString = Schema.decodeSync(canonical);
+
+/** Binding uses the server's digest of the normalized query, never raw query text. */
+export function encodeMemorySearchCursor(
+  binding: MemorySearchCursorBinding,
+  afterMemoryId: MemoryId,
+): string {
+  const cursor =
+    "ms1:" +
+    encodeURIComponent(
+      encodeSearchCursor({
+        kind: "memory_search",
+        version: 1,
+        binding,
+        afterMemoryId,
+      }),
+    );
+  return decodeCursorString(cursor);
+}
+export function decodeMemorySearchCursor(
+  cursor: string,
+  expected: MemorySearchCursorBinding,
+): MemoryId {
+  let decoded: MemorySearchCursor;
+  try {
+    decodeCursorString(cursor);
+    if (!cursor.startsWith("ms1:")) throw new MemoryRpcError({ code: "invalid_cursor" });
+    decoded = decodeSearchCursor(decodeURIComponent(cursor.slice(4)));
+    decodeSearchBinding(expected);
+  } catch {
+    throw new MemoryRpcError({ code: "invalid_cursor" });
+  }
+  if (
+    decoded.binding.memorySpaceId !== expected.memorySpaceId ||
+    decoded.binding.queryDigest !== expected.queryDigest ||
+    decoded.binding.mode !== expected.mode ||
+    decoded.binding.scopeKey !== expected.scopeKey
+  )
+    throw new MemoryRpcError({ code: "invalid_cursor" });
+  return decoded.afterMemoryId;
+}
+/** Store continuation follows examined rows, including empty matching pages. */
+export type MemorySearchPage = {
+  readonly items: ReadonlyArray<MemoryItem>;
+  readonly examinedAfterMemoryId: MemoryId | null;
+  readonly exhausted: boolean;
+};
+
 export const MemorySearchInput = struct({
   ...space,
   ...paging,
+  cursor: Schema.optionalKey(
+    canonical.check(
+      Schema.makeFilter((value) => {
+        if (!value.startsWith("ms1:")) return false;
+        try {
+          decodeSearchCursor(decodeURIComponent(value.slice(4)));
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    ),
+  ),
   query: canonical,
   scope: Schema.optionalKey(MemoryScope),
-  mode: Schema.Literals(["fts", "substring"]).pipe(
-    Schema.withDecodingDefault(Effect.succeed("fts")),
-  ),
+  mode: MemorySearchMode.pipe(Schema.withDecodingDefault(Effect.succeed("fts"))),
 });
 export type MemorySearchInput = typeof MemorySearchInput.Type;
 
@@ -1440,6 +1535,135 @@ export const MemoryReadSourceInput = struct({
 });
 export type MemoryReadSourceInput = typeof MemoryReadSourceInput.Type;
 
+export const MemoryOwnerPolicyEpoch = NonNegativeInt;
+export type MemoryOwnerPolicyEpoch = typeof MemoryOwnerPolicyEpoch.Type;
+const ownerPair = {
+  memorySpaceId: MemorySpaceId,
+  ownerEnvironmentId: EnvironmentId,
+  requesterEnvironmentId: EnvironmentId,
+};
+export const MemorySourceReadPairFence = struct({
+  ...ownerPair,
+  revokedThroughEpoch: MemoryOwnerPolicyEpoch,
+});
+export type MemorySourceReadPairFence = typeof MemorySourceReadPairFence.Type;
+export const MemorySourceReadPairFences = array(
+  MemorySourceReadPairFence,
+  MEMORY_HUB_MAX_MEMBERS,
+).check(
+  Schema.makeFilter((vs) =>
+    unique(vs.map((v) => [v.memorySpaceId, v.ownerEnvironmentId, v.requesterEnvironmentId])),
+  ),
+);
+export const MemorySourceReadRevokeAck = struct({
+  ...ownerPair,
+  removalEpoch: MemoryOwnerPolicyEpoch,
+  revokedThroughEpoch: MemoryOwnerPolicyEpoch,
+}).check(Schema.makeFilter((v) => v.revokedThroughEpoch >= v.removalEpoch));
+export type MemorySourceReadRevokeAck = typeof MemorySourceReadRevokeAck.Type;
+export const MemoryOwnerRemoval = Schema.Union([
+  struct({ ...ownerPair, removalEpoch: MemoryOwnerPolicyEpoch, state: Schema.Literal("pending") }),
+  struct({
+    ...ownerPair,
+    removalEpoch: MemoryOwnerPolicyEpoch,
+    state: Schema.Literal("acknowledged"),
+    ack: MemorySourceReadRevokeAck,
+  }).check(Schema.makeFilter((v) => matchesMemorySourceReadRevokeAck(v, v.ack))),
+]);
+export type MemoryOwnerRemoval = typeof MemoryOwnerRemoval.Type;
+export function matchesMemorySourceReadRevokeAck(
+  pending: Pick<
+    MemorySourceReadRevokeAck,
+    "memorySpaceId" | "ownerEnvironmentId" | "requesterEnvironmentId" | "removalEpoch"
+  >,
+  ack: MemorySourceReadRevokeAck,
+): boolean {
+  return (
+    pending.memorySpaceId === ack.memorySpaceId &&
+    pending.ownerEnvironmentId === ack.ownerEnvironmentId &&
+    pending.requesterEnvironmentId === ack.requesterEnvironmentId &&
+    pending.removalEpoch === ack.removalEpoch &&
+    ack.revokedThroughEpoch >= pending.removalEpoch
+  );
+}
+export const MemoryOwnerEnrollment = Schema.Union([
+  struct({
+    ...ownerPair,
+    ownerPolicyEpoch: MemoryOwnerPolicyEpoch,
+    state: Schema.Literal("pending"),
+    removalEpoch: MemoryOwnerPolicyEpoch,
+  }).check(Schema.makeFilter((v) => v.ownerPolicyEpoch > v.removalEpoch)),
+  struct({
+    ...ownerPair,
+    ownerPolicyEpoch: MemoryOwnerPolicyEpoch,
+    state: Schema.Literal("active"),
+  }),
+]);
+export type MemoryOwnerEnrollment = typeof MemoryOwnerEnrollment.Type;
+export const MemoryOwnerSourceReadPolicy = struct({
+  allowedRequesterEnvironmentIds: distinct(EnvironmentId, MEMORY_HUB_MAX_MEMBERS),
+  ownerPolicyEpoch: MemoryOwnerPolicyEpoch,
+  removals: array(MemoryOwnerRemoval, MEMORY_HUB_MAX_MEMBERS),
+  enrollments: array(MemoryOwnerEnrollment, MEMORY_HUB_MAX_MEMBERS),
+}).check(
+  Schema.makeFilter((v) => {
+    const pairKey = (p: MemorySourceReadRevokeAck | MemoryOwnerRemoval | MemoryOwnerEnrollment) =>
+      JSON.stringify([p.memorySpaceId, p.ownerEnvironmentId, p.requesterEnvironmentId]);
+    if (!unique(v.removals.map(pairKey)) || !unique(v.enrollments.map(pairKey))) return false;
+    const activeRequesters = v.enrollments
+      .filter((e) => e.state === "active")
+      .map((e) => e.requesterEnvironmentId);
+    if (!sameSet(v.allowedRequesterEnvironmentIds, [...new Set(activeRequesters)])) return false;
+    return (
+      v.enrollments.every((e) => {
+        const removal = v.removals.find((r) => pairKey(r) === pairKey(e));
+        return (
+          e.ownerPolicyEpoch <= v.ownerPolicyEpoch &&
+          (e.state === "pending"
+            ? removal?.state === "pending" && removal.removalEpoch === e.removalEpoch
+            : removal === undefined ||
+              (removal.state === "acknowledged" &&
+                e.ownerPolicyEpoch > removal.ack.revokedThroughEpoch))
+        );
+      }) && v.removals.every((r) => r.removalEpoch <= v.ownerPolicyEpoch)
+    );
+  }),
+);
+export type MemoryOwnerSourceReadPolicy = typeof MemoryOwnerSourceReadPolicy.Type;
+export const DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY: MemoryOwnerSourceReadPolicy = {
+  allowedRequesterEnvironmentIds: [],
+  ownerPolicyEpoch: 0,
+  removals: [],
+  enrollments: [],
+};
+export const MemoryOwnerSourceReadPolicyGetInput = struct({});
+export type MemoryOwnerSourceReadPolicyGetInput = typeof MemoryOwnerSourceReadPolicyGetInput.Type;
+export const MemoryOwnerSourceReadPolicyView = struct({
+  policy: MemoryOwnerSourceReadPolicy,
+  version: NonNegativeInt,
+  revocationPropagation: Schema.Literals(["pending", "acknowledged"]),
+}).check(
+  Schema.makeFilter(
+    (v) =>
+      (v.revocationPropagation === "pending") ===
+      v.policy.removals.some((r) => r.state === "pending"),
+  ),
+);
+export type MemoryOwnerSourceReadPolicyView = typeof MemoryOwnerSourceReadPolicyView.Type;
+export const MemoryOwnerSourceReadPolicyUpdateInput = struct({
+  requestId: MemoryOperationId,
+  expectedVersion: NonNegativeInt,
+  allowedRequesterEnvironmentIds: distinct(EnvironmentId, MEMORY_HUB_MAX_MEMBERS),
+});
+export type MemoryOwnerSourceReadPolicyUpdateInput =
+  typeof MemoryOwnerSourceReadPolicyUpdateInput.Type;
+export const MemoryHubDisableInput = struct({
+  requestId: MemoryOperationId,
+  expectedVersion: NonNegativeInt,
+});
+export type MemoryHubDisableInput = typeof MemoryHubDisableInput.Type;
+export const MEMORY_ADMINISTRATION_MCP_TOOLS = ["memory_hub_disable"] as const;
+
 export const MemoryHubSettingsGetInput = struct({});
 export type MemoryHubSettingsGetInput = typeof MemoryHubSettingsGetInput.Type;
 
@@ -1448,6 +1672,11 @@ export const MemoryHubSettingsView = struct({
   version: NonNegativeInt,
 });
 export type MemoryHubSettingsView = typeof MemoryHubSettingsView.Type;
+/** The narrow disable tool cannot return provisioning credentials or an enabled mode. */
+export const MemoryHubDisableResult = MemoryHubSettingsView.check(
+  Schema.makeFilter((view) => view.settings.mode === "disabled"),
+);
+export type MemoryHubDisableResult = typeof MemoryHubDisableResult.Type;
 
 export const MemoryHubSettingsUpdateInput = bounded(
   Schema.Union([
@@ -2257,10 +2486,17 @@ const sourceRequestFields = {
   ]),
 };
 
+export const MemorySourceReadStamp = struct({
+  requesterCredentialVersion: PositiveInt,
+  locatorDigest: digest,
+});
+export type MemorySourceReadStamp = typeof MemorySourceReadStamp.Type;
 export const MemorySourceReadRequest = struct({
   ...sourceRequestFields,
   memorySpaceId: MemorySpaceId,
   requesterEnvironmentId: EnvironmentId,
+  // Legacy unstamped rows must be terminal denied by the relay consumer.
+  stamp: Schema.optionalKey(MemorySourceReadStamp),
   expiresAtHubTime: MemoryUtcTimestamp,
 });
 export type MemorySourceReadRequest = typeof MemorySourceReadRequest.Type;
@@ -2304,14 +2540,40 @@ export const MemorySourceReadOutcome = bounded(
 );
 export type MemorySourceReadOutcome = typeof MemorySourceReadOutcome.Type;
 
-export const MemoryHubSourceReadRespondInput = struct({
+export const MemoryHubSourceReadNormalRespondInput = struct({
   ...hub,
+  kind: Schema.Literal("normal").pipe(Schema.withDecodingDefault(Effect.succeed("normal"))),
   requestId: MemorySourceReadRequestId,
+  ownerPolicyEpoch: MemoryOwnerPolicyEpoch.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
   outcome: MemorySourceReadOutcome,
 });
+export type MemoryHubSourceReadNormalRespondInput =
+  typeof MemoryHubSourceReadNormalRespondInput.Type;
+export const MemoryHubSourceReadRevokeInput = struct({
+  ...hub,
+  kind: Schema.Literal("revoke"),
+  requesterEnvironmentId: EnvironmentId,
+  ownerPolicyEpoch: MemoryOwnerPolicyEpoch,
+});
+export type MemoryHubSourceReadRevokeInput = typeof MemoryHubSourceReadRevokeInput.Type;
+// Hub v1 is unreleased before the joint launch; its first release includes kind and epoch.
+export const MemoryHubSourceReadRespondInput = Schema.Union([
+  MemoryHubSourceReadNormalRespondInput,
+  MemoryHubSourceReadRevokeInput,
+]);
 export type MemoryHubSourceReadRespondInput = typeof MemoryHubSourceReadRespondInput.Type;
 
-export const MemoryHubSourceReadRespondResult = struct({ accepted: Schema.Boolean });
+export const MemoryHubSourceReadRespondResult = Schema.Union([
+  struct({
+    kind: Schema.Literal("normal").pipe(Schema.withDecodingDefault(Effect.succeed("normal"))),
+    accepted: Schema.Boolean,
+  }),
+  struct({
+    kind: Schema.Literal("revoke"),
+    accepted: Schema.Literal(true),
+    ack: MemorySourceReadRevokeAck,
+  }),
+]);
 export type MemoryHubSourceReadRespondResult = typeof MemoryHubSourceReadRespondResult.Type;
 
 export const MemoryHubSourceReadResultInput = struct({

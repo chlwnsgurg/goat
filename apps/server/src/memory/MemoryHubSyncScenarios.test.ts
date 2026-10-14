@@ -13,6 +13,12 @@ import * as Schema from "effect/Schema";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as PubSub from "effect/PubSub";
+import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as DateTime from "effect/DateTime";
+import * as Owner from "./MemoryOwnerSourceReader.ts";
+import { memoryOperationDigest } from "./MemoryDecider.ts";
 import type { ProviderDriver, ProviderInstance } from "@goat/provider-core/server/driver";
 import * as Registry from "../provider/ProviderInstanceRegistry.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
@@ -93,8 +99,63 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const probed = yield* Deferred.make<void>();
     const pulled = yield* Deferred.make<void>();
     let observePull = false;
+    const sourcePolicy = yield* Ref.make<Owner.MemoryOwnerSourceReadCommitted>({
+      version: 0,
+      policy: M.DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY,
+    });
+    const sourceChanges = yield* PubSub.sliding<Owner.MemoryOwnerSourceReadCommitted>(1);
+    const policyPort = Layer.succeed(Owner.MemoryOwnerSourceReadPolicyPort, {
+      read: Ref.get(sourcePolicy),
+      changes: Effect.succeed(Stream.fromPubSub(sourceChanges)),
+      recordRevokeAck: (ack) =>
+        Effect.gen(function* () {
+          const current = yield* Ref.get(sourcePolicy);
+          const removal = current.policy.removals.find(
+            (r) => r.state === "pending" && M.matchesMemorySourceReadRevokeAck(r, ack),
+          );
+          if (!removal) return current;
+          const policy = M.MemoryOwnerSourceReadPolicy.make({
+            ...current.policy,
+            ownerPolicyEpoch: current.policy.ownerPolicyEpoch + 1,
+            removals: current.policy.removals.filter((r) => r !== removal),
+            enrollments: current.policy.enrollments.map((e) =>
+              e.state === "pending" &&
+              M.matchesMemorySourceReadRevokeAck({ ...e, removalEpoch: e.removalEpoch }, ack)
+                ? {
+                    memorySpaceId: e.memorySpaceId,
+                    ownerEnvironmentId: e.ownerEnvironmentId,
+                    requesterEnvironmentId: e.requesterEnvironmentId,
+                    ownerPolicyEpoch: current.policy.ownerPolicyEpoch + 1,
+                    state: "active" as const,
+                  }
+                : e,
+            ),
+            allowedRequesterEnvironmentIds: current.policy.enrollments
+              .filter(
+                (e) =>
+                  e.state === "active" ||
+                  (e.state === "pending" && M.matchesMemorySourceReadRevokeAck(e, ack)),
+              )
+              .map((e) => e.requesterEnvironmentId),
+          });
+          const next = { policy, version: current.version + 1 };
+          yield* Ref.set(sourcePolicy, next);
+          yield* PubSub.publish(sourceChanges, next);
+          return next;
+        }),
+    });
     const sourceRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
+    const sourceSecondRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
+    let sourceAdmissions = 0;
+    let sourceAckFault = false;
+    let sourceSendGate: Deferred.Deferred<void> | null = null;
+    const sourceSendEntered = yield* Deferred.make<void>();
+    let pullFault: "failure" | "budget" | null = null;
+    let pullCalls = 0;
+    let budgetOperation: Extract<M.MemoryOperation, { kind: "upsert" }> | null = null;
+    const sourceResponses: M.MemorySourceReadOutcome[] = [];
     const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
+    let sourceAfterResultGate: Deferred.Deferred<void> | null = null;
     let sourceResultGate: Deferred.Deferred<void> | null = null;
     const driver: ProviderDriver<{}> = {
       driverKind: M.ProviderDriverKind.make("codex"),
@@ -184,20 +245,100 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               Effect.tap(() => Deferred.succeed(probed, undefined)),
             ),
           pull: (connection, input) =>
-            client
-              .pull(connection, input)
-              .pipe(
-                Effect.tap(() => (observePull ? Deferred.succeed(pulled, undefined) : Effect.void)),
-              ),
+            Effect.suspend(() => {
+              pullCalls++;
+              if (pullFault === "failure")
+                return Effect.fail(new M.MemoryHubError({ code: "storage_failed" }));
+              if (pullFault === "budget" && budgetOperation) {
+                const sequence = input.afterSequence + 1;
+                const operationId = id(20000 + sequence);
+                const memoryId = M.MemoryId.make(id(30000 + sequence));
+                const revisionId = M.MemoryRevisionId.make(id(40000 + sequence));
+                const operation = {
+                  ...budgetOperation,
+                  operationId,
+                  memoryId,
+                  expectedHeads: [],
+                  revision: {
+                    ...budgetOperation.revision,
+                    operationId,
+                    memoryId,
+                    revisionId,
+                    payloadRef: revisionId,
+                    parents: [],
+                  },
+                };
+                return Effect.succeed({
+                  hasMore: true,
+                  throughSequence: sequence,
+                  highWatermark: input.highWatermark ?? 10000,
+                  entries: [
+                    {
+                      kind: "operation" as const,
+                      operation,
+                      hubSequence: sequence,
+                      receipt: {
+                        operationId,
+                        memoryId,
+                        hubSequence: sequence,
+                        operationDigest: memoryOperationDigest(operation),
+                        outcome: "accepted" as const,
+                      },
+                    },
+                  ],
+                });
+              }
+              return client.pull(connection, input);
+            }).pipe(
+              Effect.tap(() => (observePull ? Deferred.succeed(pulled, undefined) : Effect.void)),
+            ),
           requestSourceRead: (connection, input) =>
             client
               .requestSourceRead(connection, input)
-              .pipe(Effect.tap((result) => Deferred.succeed(sourceRequested, result.request))),
+              .pipe(
+                Effect.tap((result) =>
+                  Deferred.succeed(
+                    ++sourceAdmissions === 2 ? sourceSecondRequested : sourceRequested,
+                    result.request,
+                  ),
+                ),
+              ),
+          respondSourceRead: (connection, input, prepare) =>
+            Effect.gen(function* () {
+              if (sourceSendGate && input.kind === "normal") {
+                yield* Deferred.succeed(sourceSendEntered, undefined);
+                yield* Deferred.await(sourceSendGate);
+              }
+              if (!prepare && input.kind === "normal") sourceResponses.push(input.outcome);
+              const observedPrepare = prepare?.pipe(
+                Effect.tap((prepared) =>
+                  Effect.sync(() => {
+                    if (prepared.kind === "normal") sourceResponses.push(prepared.outcome);
+                  }),
+                ),
+              );
+              return yield* client.respondSourceRead(connection, input, observedPrepare);
+            }).pipe(
+              Effect.map((result) =>
+                sourceAckFault && result.kind === "revoke"
+                  ? {
+                      ...result,
+                      ack: {
+                        ...result.ack,
+                        ownerEnvironmentId: M.EnvironmentId.make("wrong-owner"),
+                      },
+                    }
+                  : result,
+              ),
+            ),
           resultSourceRead: (connection, input) =>
             Effect.suspend(() =>
               (sourceResultGate ? Deferred.await(sourceResultGate) : Effect.void).pipe(
                 Effect.andThen(client.resultSourceRead(connection, input)),
                 Effect.tap((result) => Deferred.succeed(sourceResult, result)),
+                Effect.tap(() =>
+                  sourceAfterResultGate ? Deferred.await(sourceAfterResultGate) : Effect.void,
+                ),
               ),
             ),
           release: (connection, input) =>
@@ -208,7 +349,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               ),
         });
       }),
-    ).pipe(Layer.provideMerge(Runtime.layer));
+    ).pipe(Layer.provideMerge(Runtime.layer.pipe(Layer.provide(policyPort))));
     const observedRuntime = Layer.effect(
       Sync.MemorySyncRuntime,
       Effect.gen(function* () {
@@ -323,8 +464,41 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       observeNextPull: () => {
         observePull = true;
       },
+      sourcePolicy,
+      sourceResponses,
+      sourceSendEntered,
+      blockSourceSend: (gate: Deferred.Deferred<void>) => {
+        sourceSendGate = gate;
+      },
+      setPullFault: (
+        fault: "failure" | "budget",
+        operation: Extract<M.MemoryOperation, { kind: "upsert" }>,
+      ) => {
+        pullFault = fault;
+        budgetOperation = operation;
+      },
+      pullCalls: () => pullCalls,
+      commitSourcePolicy: (policy: M.MemoryOwnerSourceReadPolicy) =>
+        Effect.gen(function* () {
+          const current = yield* Ref.get(sourcePolicy);
+          const next = {
+            version: current.version + 1,
+            policy: M.MemoryOwnerSourceReadPolicy.make(policy),
+          };
+          yield* Ref.set(sourcePolicy, next);
+          // Explicit syncOnce is the milestone in fixtures; a background stream also
+          // sees the real commit notification once production startup subscribes.
+          yield* PubSub.publish(sourceChanges, next);
+        }),
+      setSourceAckFault: (fault: boolean) => {
+        sourceAckFault = fault;
+      },
+      sourceSecondRequested,
       sourceRequested,
       sourceResult,
+      blockAfterSourceResult: (gate: Deferred.Deferred<void>) => {
+        sourceAfterResultGate = gate;
+      },
       blockSourceResult: (gate: Deferred.Deferred<void>) => {
         sourceResultGate = gate;
       },
@@ -989,5 +1163,459 @@ it.effect(
       assert.strictEqual(c.a.probes(), 1);
       assert.strictEqual(c.a.rearmObservations(), 0);
       yield* c.a.sync.shutdown;
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// A real three-environment hub/HTTP/SQL/Sync/owner reader chain. Only the
+// committed policy port is a fake; L5 owns its filesystem persistence and CAS.
+const sourceFixture = (ownerIsHub = false) =>
+  Effect.gen(function* () {
+    const c = yield* cluster();
+    const owner = ownerIsHub ? c.h : c.b;
+    const target = memory(901);
+    const thread = {
+      environmentId: owner.identity,
+      threadId: M.ThreadId.make("relay-fixture-thread"),
+    };
+    const messageId = M.MessageId.make("relay-fixture-message");
+    const assistantId = M.MessageId.make("relay-fixture-assistant");
+    const runId = M.RunId.make("relay-fixture-run");
+    const watermark = {
+      fromEventId: M.EventId.make(id(9100)),
+      toEventId: M.EventId.make(id(9113)),
+      throughSequence: 4,
+    };
+    const msg = M.OrchestrationV2ConversationMessageJson.make({
+      id: messageId,
+      threadId: thread.threadId,
+      runId: null,
+      nodeId: null,
+      createdBy: "user",
+      creationSource: "web",
+      role: "user",
+      text: "synthetic original from owner",
+      attachments: [],
+      streaming: false,
+      createdAt: DateTime.makeUnsafe(0),
+      updatedAt: DateTime.makeUnsafe(0),
+    });
+    const encodeMessage = Schema.encodeEffect(
+      Schema.fromJsonString(M.OrchestrationV2ConversationMessageJson),
+    );
+    const encodeRun = Schema.encodeEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
+    const run = (status: M.OrchestrationV2RunJson["status"]) =>
+      M.OrchestrationV2RunJson.make({
+        id: runId,
+        threadId: thread.threadId,
+        ordinal: 1,
+        providerInstanceId: owner.selection.instanceId,
+        modelSelection: owner.selection,
+        providerThreadId: null,
+        userMessageId: messageId,
+        rootNodeId: null,
+        activeAttemptId: null,
+        status,
+        requestedAt: DateTime.makeUnsafe(0),
+        startedAt: DateTime.makeUnsafe(0),
+        completedAt: status === "running" ? null : DateTime.makeUnsafe(0),
+        checkpointId: null,
+        contextHandoffId: null,
+      });
+    yield* owner.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO orchestration_v2_projection_threads(thread_id,project_id,title,default_provider,runtime_mode,interaction_mode,created_at,updated_at,payload_json) VALUES (${thread.threadId},'fixture-project','fixture','codex','full-access','default','1970-01-01T00:00:00.000Z','1970-01-01T00:00:00.000Z','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (1,${watermark.fromEventId},${thread.threadId},'message.updated',${yield* encodeMessage(msg)},'1970-01-01T00:00:00.000Z',2,'thread',1,'user','{}')`;
+      }),
+    );
+    yield* owner.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const assistant = {
+          ...msg,
+          id: assistantId,
+          role: "assistant" as const,
+          createdBy: "agent" as const,
+          runId,
+          text: "synthetic completed answer",
+        };
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (2,${id(9111)},${thread.threadId},'run.created',${yield* encodeRun(run("running"))},'1970-01-01T00:00:00.000Z',2,'thread',2,'system','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (3,${id(9112)},${thread.threadId},'message.updated',${yield* encodeMessage(assistant)},'1970-01-01T00:00:00.000Z',2,'thread',3,'system','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${yield* encodeRun(run("completed"))},'1970-01-01T00:00:00.000Z',2,'thread',4,'system','{}')`;
+      }),
+    );
+    const op: M.MemoryOperation = {
+      protocolVersion: 1,
+      kind: "upsert",
+      memorySpaceId: c.space,
+      memoryId: target,
+      operationId: id(9101),
+      originEnvironmentId: c.a.identity,
+      expectedHeads: [],
+      revision: {
+        memorySpaceId: c.space,
+        memoryId: target,
+        operationId: id(9101),
+        revisionId: M.MemoryRevisionId.make(id(9102)),
+        payloadRef: M.MemoryRevisionId.make(id(9102)),
+        parents: [],
+        scope: { kind: "user" },
+        assertionKind: "inference",
+        createdAtUtc: "1970-01-01T00:00:00.000Z",
+        provenance: {
+          environmentId: c.a.identity,
+          sourceThread: thread,
+          sourceWatermark: watermark,
+        },
+      },
+      payload: {
+        text: "synthetic linked summary",
+        evidence: [
+          {
+            origin: "thread",
+            sourceThread: thread,
+            watermark,
+            messageIds: [messageId, assistantId],
+          },
+        ],
+        derivedFromMemoryRevisions: [],
+      },
+    };
+    const connection = yield* c.a.connection;
+    yield* c.a.run(
+      Client.MemoryHubClient.use((client) =>
+        client.push(connection, {
+          protocolVersion: 1,
+          memorySpaceId: c.space,
+          environmentId: c.a.identity,
+          operations: [op],
+        }),
+      ),
+    );
+    yield* c.a.tick;
+    if (!ownerIsHub) yield* c.b.tick;
+    yield* owner.commitSourcePolicy({
+      allowedRequesterEnvironmentIds: [c.a.identity],
+      ownerPolicyEpoch: 1,
+      removals: [],
+      enrollments: [
+        {
+          memorySpaceId: c.space,
+          ownerEnvironmentId: owner.identity,
+          requesterEnvironmentId: c.a.identity,
+          ownerPolicyEpoch: 1,
+          state: "active",
+        },
+      ],
+    });
+    const validated = yield* c.a.run(
+      Service.MemoryService.use((service) =>
+        service.prepareSourceRead(
+          {
+            memorySpaceId: c.space,
+            memoryId: target,
+            sourceThread: thread,
+            messageIds: [messageId, assistantId],
+            limit: 10,
+          },
+          Effect.void,
+        ),
+      ),
+    );
+    const remove = (reenroll = false) =>
+      owner.commitSourcePolicy({
+        allowedRequesterEnvironmentIds: [],
+        ownerPolicyEpoch: reenroll ? 3 : 2,
+        removals: [
+          {
+            memorySpaceId: c.space,
+            ownerEnvironmentId: owner.identity,
+            requesterEnvironmentId: c.a.identity,
+            removalEpoch: 2,
+            state: "pending",
+          },
+        ],
+        enrollments: reenroll
+          ? [
+              {
+                memorySpaceId: c.space,
+                ownerEnvironmentId: owner.identity,
+                requesterEnvironmentId: c.a.identity,
+                ownerPolicyEpoch: 3,
+                removalEpoch: 2,
+                state: "pending",
+              },
+            ]
+          : [],
+      });
+    return {
+      ...c,
+      owner,
+      target,
+      thread,
+      messageId,
+      assistantId,
+      watermark,
+      validated,
+      remove,
+      sourceOperation: op,
+    };
+  });
+
+it.effect.each([false, true])(
+  `scenario g: reads original on its owner, consumes transient body (owner=hub %s)`,
+  (localOwner) =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture(localOwner);
+      const gate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(gate);
+      const fiber = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      const request = yield* Deferred.await(c.a.sourceRequested);
+      yield* c.owner.sync.syncOnce;
+      yield* Deferred.succeed(gate, undefined);
+      const outcome = yield* Fiber.join(fiber);
+      assert.deepStrictEqual(outcome, {
+        kind: "available",
+        page: {
+          sourceThread: c.thread,
+          watermark: c.watermark,
+          messages: [
+            { messageId: c.messageId, text: "synthetic original from owner" },
+            { messageId: c.assistantId, text: "synthetic completed answer" },
+          ],
+          nextCursor: null,
+        },
+      });
+      assert.isDefined(request.stamp);
+      assert.notStrictEqual(request.requestId, c.validated.request.requestId);
+      for (const env of [c.h, c.a])
+        yield* env.run(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            assert.strictEqual(
+              (yield* sql`SELECT 1 FROM memory_payloads WHERE body_json LIKE '%synthetic original from owner%'`)
+                .length,
+              0,
+            );
+          }),
+        );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([false, true])(
+  `revocation linearizes at hub result Tx (released before revoke %s)`,
+  (released) =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const gate = yield* Deferred.make<void>();
+      const admissionGate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(released ? admissionGate : gate);
+      if (released) c.a.blockAfterSourceResult(gate);
+      const fiber = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      yield* Deferred.await(c.a.sourceRequested);
+      yield* c.owner.sync.syncOnce;
+      if (released) {
+        yield* Deferred.succeed(admissionGate, undefined);
+        const result = yield* Deferred.await(c.a.sourceResult);
+        assert.strictEqual(result.state, "completed");
+      }
+      yield* c.remove(true);
+      const before = yield* Ref.get(c.owner.sourcePolicy);
+      assert.deepStrictEqual(before.policy.allowedRequesterEnvironmentIds, []);
+      yield* c.owner.sync.syncOnce;
+      const after = yield* Ref.get(c.owner.sourcePolicy);
+      assert.deepStrictEqual(after.policy.removals, []);
+      assert.isAbove(after.policy.ownerPolicyEpoch, before.policy.ownerPolicyEpoch);
+      assert.strictEqual(
+        after.policy.enrollments[0]?.ownerPolicyEpoch,
+        after.policy.ownerPolicyEpoch,
+      );
+      assert.deepStrictEqual(after.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
+      yield* Deferred.succeed(gate, undefined);
+      const outcome = yield* Fiber.join(fiber);
+      assert.strictEqual(outcome.kind, released ? "available" : "denied");
+      // Duplicate old revoke cannot close the newer active enrollment's response.
+      const connection = yield* c.owner.connection;
+      const revoke = {
+        protocolVersion: 1 as const,
+        kind: "revoke" as const,
+        memorySpaceId: c.space,
+        requesterEnvironmentId: c.a.identity,
+        ownerPolicyEpoch: 2,
+      };
+      const first = yield* c.owner.run(
+        Client.MemoryHubClient.use((client) => client.respondSourceRead(connection, revoke)),
+      );
+      const second = yield* c.owner.run(
+        Client.MemoryHubClient.use((client) => client.respondSourceRead(connection, revoke)),
+      );
+      assert.deepStrictEqual(first, second);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "caller revocation after await denies exposure and independent callers use separate IDs",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const gate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(gate);
+      let live = true;
+      const permit = Effect.suspend(() =>
+        live
+          ? Effect.void
+          : Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" })),
+      );
+      const first = yield* c.a.sync
+        .readSource(c.validated, permit)
+        .pipe(Effect.result, Effect.forkScoped);
+      const second = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      yield* Deferred.await(c.a.sourceRequested);
+      const request1 = yield* Deferred.await(c.a.sourceRequested);
+      const request2 = yield* Deferred.await(c.a.sourceSecondRequested);
+      assert.notStrictEqual(request1.requestId, request2.requestId);
+      assert.notStrictEqual(request1.requestId, c.validated.request.requestId);
+      yield* c.owner.sync.syncOnce;
+      live = false;
+      yield* Deferred.succeed(gate, undefined);
+      assert.strictEqual((yield* Fiber.join(first))._tag, "Failure");
+      const secondResult = yield* Fiber.join(second);
+      assert.strictEqual(secondResult.kind, "available");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("requester rejects a denied live caller permit before hub admission", () =>
+  Effect.gen(function* () {
+    const c = yield* sourceFixture();
+    const denied = Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }));
+    const error = yield* c.a.sync.readSource(c.validated, denied).pipe(Effect.flip);
+    assert.strictEqual(error._tag, "MemoryAccessError");
+    yield* c.h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 0);
+      }),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "hub commit before lost owner ack preserves pending reenrollment and retries the same fence",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const gate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(gate);
+      const fiber = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      const request = yield* Deferred.await(c.a.sourceRequested);
+      yield* c.owner.sync.syncOnce;
+      c.owner.setSourceAckFault(true);
+      yield* c.remove(true);
+      yield* c.owner.sync.syncOnce;
+      const pending = yield* Ref.get(c.owner.sourcePolicy);
+      assert.strictEqual(pending.policy.removals[0]?.state, "pending");
+      assert.strictEqual(pending.policy.enrollments[0]?.state, "pending");
+      assert.deepStrictEqual(pending.policy.allowedRequesterEnvironmentIds, []);
+      const denied = yield* c.owner.run(
+        Sync.MemorySyncRuntime.use((runtime) => Effect.result(runtime.ownerPermit(request))),
+      );
+      assert.strictEqual(denied._tag, "Failure");
+      yield* c.h.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            record_json: string;
+          }>`SELECT record_json FROM memory_import_keys WHERE key_kind='hub_source_fences'`;
+          assert.strictEqual(rows.length, 1);
+        }),
+      );
+      c.owner.setSourceAckFault(false);
+      yield* c.owner.sync.syncOnce;
+      const acknowledged = yield* Ref.get(c.owner.sourcePolicy);
+      assert.deepStrictEqual(acknowledged.policy.removals, []);
+      assert.isAbove(acknowledged.policy.ownerPolicyEpoch, pending.policy.ownerPolicyEpoch);
+      assert.strictEqual(acknowledged.policy.enrollments[0]?.state, "active");
+      assert.deepStrictEqual(acknowledged.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
+      yield* Deferred.succeed(gate, undefined);
+      assert.deepStrictEqual(yield* Fiber.join(fiber), {
+        kind: "denied",
+        requiredPermission: "orchestration:read",
+      });
+      const nextGate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(nextGate);
+      const next = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      const nextRequest = yield* Deferred.await(c.a.sourceSecondRequested);
+      assert.notStrictEqual(nextRequest.requestId, request.requestId);
+      yield* c.owner.sync.syncOnce;
+      const connection = yield* c.owner.connection;
+      yield* c.owner.run(
+        Client.MemoryHubClient.use((client) =>
+          client.respondSourceRead(connection, {
+            protocolVersion: 1,
+            kind: "revoke",
+            memorySpaceId: c.space,
+            requesterEnvironmentId: c.a.identity,
+            ownerPolicyEpoch: 2,
+          }),
+        ),
+      );
+      yield* Deferred.succeed(nextGate, undefined);
+      assert.strictEqual((yield* Fiber.join(next)).kind, "available");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["deleted thread", "pending forget"] as const)(
+  "response submission revalidates owner source after reader completion: %s",
+  (drift) =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const resultGate = yield* Deferred.make<void>();
+      const sendGate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(resultGate);
+      c.owner.blockSourceSend(sendGate);
+      const read = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      yield* Deferred.await(c.a.sourceRequested);
+      const cycle = yield* c.owner.sync.syncOnce.pipe(Effect.forkScoped);
+      yield* Deferred.await(c.owner.sourceSendEntered);
+      yield* c.owner.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          if (drift === "deleted thread")
+            yield* sql`UPDATE orchestration_v2_projection_threads SET deleted_at='deleted' WHERE thread_id=${c.thread.threadId}`;
+          else
+            yield* sql`INSERT INTO memory_pending_forget_intents(space,memory_id,operation_id,requested_at_utc,attempts,last_failure_code,submission_state) VALUES (${c.space},${c.target},${id(9991)},'1970-01-01T00:00:00.000Z',0,NULL,'unsubmitted')`;
+        }),
+      );
+      yield* Deferred.succeed(sendGate, undefined);
+      yield* Fiber.join(cycle);
+      yield* Deferred.succeed(resultGate, undefined);
+      const outcome = yield* Fiber.join(read);
+      assert.notStrictEqual(outcome.kind, "available");
+      assert.strictEqual(c.owner.sourceResponses.length, 1);
+      assert.notStrictEqual(c.owner.sourceResponses[0]?.kind, "available");
+      assert.isFalse(JSON.stringify(c.owner.sourceResponses).includes("synthetic original"));
+      assert.isFalse(JSON.stringify(outcome).includes("synthetic original"));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["failure", "budget"] as const)(
+  "propagates revoke independently of summary pull: %s",
+  (fault) =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      yield* c.remove(true);
+      c.owner.setPullFault(fault, c.sourceOperation);
+      const before = c.owner.pullCalls();
+      const cycle = yield* Effect.result(c.owner.sync.syncOnce);
+      if (fault === "failure") assert.strictEqual(cycle._tag, "Failure");
+      else {
+        assert.strictEqual(cycle._tag, "Success");
+        assert.strictEqual(c.owner.pullCalls() - before, 10);
+      }
+      const committed = yield* Ref.get(c.owner.sourcePolicy);
+      assert.deepStrictEqual(committed.policy.removals, []);
+      assert.strictEqual(committed.policy.enrollments[0]?.state, "active");
+      assert.isAbove(committed.policy.enrollments[0]!.ownerPolicyEpoch, 2);
+      assert.deepStrictEqual(committed.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );

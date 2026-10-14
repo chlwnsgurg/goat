@@ -1,3 +1,4 @@
+export { MemoryTaskGrantCeiling, MemoryTaskGrantCeilingField } from "./memory.ts";
 import * as Schema from "effect/Schema";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
