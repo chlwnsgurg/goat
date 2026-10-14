@@ -5,6 +5,8 @@ import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 import * as Config from "../config.ts";
 import * as Settings from "../serverSettings.ts";
+import * as Environment from "../environment/ServerEnvironment.ts";
+import * as Quota from "./MemoryQuotaService.ts";
 import * as Registry from "../provider/ProviderInstanceRegistry.ts";
 import * as Client from "./MemoryHubClient.ts";
 import * as Service from "./MemoryService.ts";
@@ -16,19 +18,21 @@ const make = Effect.gen(function* () {
   const settings = yield* Settings.MemoryHubCommittedSettings;
   const store = yield* Store.MemoryStore;
   const registry = yield* Registry.ProviderInstanceRegistry;
+  const quota = yield* Quota.MemoryQuotaService;
+  const environmentId = yield* (yield* Environment.ServerEnvironmentIdentity).getEnvironmentId;
   const client = yield* Client.MemoryHubClient;
   type Observation = {
     epoch: number;
     memorySpaceId: M.MemorySpaceId;
+    hubEnvironmentId: M.EnvironmentId;
     holdClass: Store.MemoryHoldClass;
   };
   const events = yield* PubSub.dropping<Observation>(16);
   yield* Effect.addFinalizer(() => PubSub.shutdown(events));
-  // One transport binding, four failure classes, and one safe descriptor tuple.
+  // One transport binding and four failure classes.
   // Never retain credential bytes, response bodies or a per-request history.
   let epoch: number | null = null;
   let binding: Client.HubConnection | null = null;
-  let descriptor: { identity: M.EnvironmentId; protocol: number | undefined } | null = null;
   const failures = new Set<Store.MemoryHoldClass>();
   const publish = (connection: Client.HubConnection, holdClass: Store.MemoryHoldClass) =>
     connection.memorySpaceId === null
@@ -36,6 +40,7 @@ const make = Effect.gen(function* () {
       : PubSub.publish(events, {
           epoch: connection.epoch,
           memorySpaceId: connection.memorySpaceId,
+          hubEnvironmentId: connection.hubEnvironmentId,
           holdClass,
         });
   const observe = <A>(
@@ -54,7 +59,6 @@ const make = Effect.gen(function* () {
         if (epoch !== connection.epoch) {
           const previous = binding;
           failures.clear();
-          descriptor = null;
           epoch = connection.epoch;
           binding = connection;
           if (previous !== null) {
@@ -76,13 +80,19 @@ const make = Effect.gen(function* () {
                 ? "identity"
                 : error.code === "unsupported_protocol" ||
                     error.code === "invalid_output" ||
+                    error.code === "invalid_cursor" ||
                     error.code === "unsupported_operation"
                   ? "protocol"
                   : "availability",
           );
         } else {
           for (const holdClass of failures) {
-            if (holdClass === "authorization" && !authenticated) continue;
+            if (!authenticated) {
+              // The Sync recovery probe validates the pinned descriptor and owns
+              // its rearm. Do not publish the same observation a second time.
+              if (holdClass !== "authorization") failures.delete(holdClass);
+              continue;
+            }
             yield* publish(connection, holdClass);
             failures.delete(holdClass);
           }
@@ -92,26 +102,7 @@ const make = Effect.gen(function* () {
     });
   const observed = Client.MemoryHubClient.of({
     ...client,
-    preflight: (connection) =>
-      observe(connection, client.preflight(connection), false).pipe(
-        Effect.tap((next) =>
-          Effect.gen(function* () {
-            const current = yield* settings.read;
-            if (current.version !== connection.epoch || epoch !== connection.epoch) return;
-            if (descriptor !== null && descriptor.identity !== next.environmentId)
-              yield* publish(connection, "identity");
-            if (
-              descriptor !== null &&
-              descriptor.protocol !== next.capabilities.memoryHubProtocolVersion
-            )
-              yield* publish(connection, "protocol");
-            descriptor = {
-              identity: next.environmentId,
-              protocol: next.capabilities.memoryHubProtocolVersion,
-            };
-          }),
-        ),
-      ),
+    preflight: (connection) => observe(connection, client.preflight(connection), false),
     join: (c, i) => observe(c, client.join(c, i)),
     push: (c, i) => observe(c, client.push(c, i)),
     pull: (c, i) => observe(c, client.pull(c, i)),
@@ -125,12 +116,6 @@ const make = Effect.gen(function* () {
     resultSourceRead: (c, i) => observe(c, client.resultSourceRead(c, i)),
   });
   const denied = Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }));
-  const unbound = Effect.fail(
-    new Store.MemoryStorageError({
-      stage: "bootstrap_required",
-      cause: new M.MemoryHubError({ code: "bootstrap_required" }),
-    }),
-  );
   const runtime = Sync.MemorySyncRuntime.of({
     cwd: config.cwd,
     readIntentBinding: settings.read.pipe(
@@ -147,11 +132,12 @@ const make = Effect.gen(function* () {
             (view) =>
               view.version === event.epoch &&
               view.settings.mode !== "disabled" &&
-              view.settings.memorySpaceId === event.memorySpaceId,
+              view.settings.memorySpaceId === event.memorySpaceId &&
+              (view.settings.mode === "hub" ? environmentId : view.settings.hubEnvironmentId) ===
+                event.hubEnvironmentId,
           ),
         ),
       ),
-      Stream.map(({ memorySpaceId, holdClass }) => ({ memorySpaceId, holdClass })),
     ),
     readBootstrap: (memorySpaceId, hubEnvironmentId) =>
       store.readBootstrap({ memorySpaceId, hubEnvironmentId }),
@@ -175,10 +161,8 @@ const make = Effect.gen(function* () {
         }),
       ),
     readProcessing: (memorySpaceId, hubEnvironmentId) =>
-      memorySpaceId === null || hubEnvironmentId === null
-        ? unbound
-        : store.readProcessing({ memorySpaceId, hubEnvironmentId }),
-    readUnboundStorage: unbound,
+      store.readLocalProcessingStatus({ environmentId, memorySpaceId, hubEnvironmentId }),
+    readUnboundStorage: quota.readUnboundStorageStatus({ environmentId }),
     available: (selection) =>
       registry
         .getInstance(selection.instanceId)
