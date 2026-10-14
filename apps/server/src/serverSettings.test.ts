@@ -128,16 +128,20 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
 // Native watch streams acquire after start returns. Tests await the exact
 // directory registration before editing; filesystem events remain real.
 const withRegisteredSettingsWatchers = <A, E, R>(
-  use: (awaitWatch: (directory: string) => Effect.Effect<void>) => Effect.Effect<A, E, R>,
+  use: (
+    awaitWatch: (directory: string, count?: number) => Effect.Effect<void>,
+  ) => Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const registrations = new Map<string, Deferred.Deferred<void>>();
-    const registration = (directory: string) => {
-      let deferred = registrations.get(directory);
+    const counts = new Map<string, number>();
+    const registration = (directory: string, count = 1) => {
+      const key = `${directory}:${count}`;
+      let deferred = registrations.get(key);
       if (!deferred) {
         deferred = Deferred.makeUnsafe<void>();
-        registrations.set(directory, deferred);
+        registrations.set(key, deferred);
       }
       return deferred;
     };
@@ -155,11 +159,13 @@ const withRegisteredSettingsWatchers = <A, E, R>(
               ),
               (watcher) => Effect.sync(() => watcher.close()),
             );
-            yield* Deferred.succeed(registration(directory), undefined);
+            const count = (counts.get(directory) ?? 0) + 1;
+            counts.set(directory, count);
+            yield* Deferred.succeed(registration(directory, count), undefined);
           }),
         ),
     });
-    return yield* use((directory) => Deferred.await(registration(directory))).pipe(
+    return yield* use((directory, count) => Deferred.await(registration(directory, count))).pipe(
       Effect.provide(layerServerSettings()),
       Effect.provideService(FileSystem.FileSystem, controlledFs),
     );
@@ -351,7 +357,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.symlink(firstSettingsPath, config.settingsPath);
         yield* service.start;
         yield* awaitWatch(path.dirname(firstSettingsPath));
-        yield* awaitWatch(path.dirname(config.settingsPath));
+        // Reload and symlink retargeting have separate source-directory watchers.
+        yield* awaitWatch(path.dirname(config.settingsPath), 2);
 
         const repointChanges = yield* service.subscribeChanges;
         yield* fs.remove(config.settingsPath);
