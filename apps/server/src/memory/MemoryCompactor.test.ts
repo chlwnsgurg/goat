@@ -45,6 +45,7 @@ const core = Service.layer.pipe(
 );
 const live = Layer.merge(Hub.layer, Compactor.layer).pipe(
   Layer.provideMerge(core),
+  Layer.provideMerge(Hub.activityLayer),
   Layer.provide(
     Layer.succeed(Hub.MemoryHubConfiguration, {
       read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: hubEnv }),

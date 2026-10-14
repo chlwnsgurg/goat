@@ -7,6 +7,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
@@ -28,6 +31,26 @@ export class MemoryHubConfiguration extends Context.Service<
     >;
   }
 >()("goat/memory/MemoryHubService/MemoryHubConfiguration") {}
+
+/** Commit notifications include semantic refusals that do not change a memory item. */
+export class MemoryHubActivity extends Context.Service<
+  MemoryHubActivity,
+  {
+    readonly notify: Effect.Effect<void>;
+    readonly subscribe: Effect.Effect<Stream.Stream<void>, never, Scope.Scope>;
+  }
+>()("goat/memory/MemoryHubService/MemoryHubActivity") {}
+
+export const activityLayer = Layer.effect(
+  MemoryHubActivity,
+  Effect.gen(function* () {
+    const events = yield* PubSub.dropping<void>(1);
+    return MemoryHubActivity.of({
+      notify: Effect.asVoid(PubSub.publish(events, undefined)),
+      subscribe: Effect.map(PubSub.subscribe(events), Stream.fromSubscription),
+    });
+  }),
+);
 
 export class MemoryHubService extends Context.Service<
   MemoryHubService,
@@ -86,6 +109,7 @@ export class MemoryHubService extends Context.Service<
 export const make = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
   const service = yield* Service.MemoryService;
+  const activity = yield* MemoryHubActivity;
   const quota = yield* Quota.MemoryQuotaService;
   const configuration = yield* MemoryHubConfiguration;
   const decode = <A, I>(schema: Schema.Codec<A, I>, value: unknown) =>
@@ -157,7 +181,9 @@ export const make = Effect.gen(function* () {
       yield* store.transact(authorize(principal, request.memorySpaceId, request.environmentId));
       const receipts = yield* Effect.forEach(request.operations, (operation) =>
         // This entry owns rollback and the separate null-sequence capacity-refusal read.
-        service.admitHubOperation({ authority: authority(principal), operation }),
+        service
+          .admitHubOperation({ authority: authority(principal), operation })
+          .pipe(Effect.tap(() => activity.notify)),
       );
       return { receipts };
     },
@@ -252,11 +278,13 @@ export const make = Effect.gen(function* () {
   )(function* (input, principal) {
     const request = yield* decode(M.MemoryHubApplyResolutionInput, input);
     yield* store.transact(authorize(principal, request.memorySpaceId, request.holderEnvironmentId));
-    return yield* service.admitHubOperation({
-      authority: authority(principal),
-      operation: request.operation,
-      resolutionRequest: request,
-    });
+    return yield* service
+      .admitHubOperation({
+        authority: authority(principal),
+        operation: request.operation,
+        resolutionRequest: request,
+      })
+      .pipe(Effect.tap(() => activity.notify));
   });
   const requestSourceRead: MemoryHubService["Service"]["requestSourceRead"] = Effect.fn(
     "MemoryHubService.requestSourceRead",

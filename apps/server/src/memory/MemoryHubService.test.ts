@@ -3,6 +3,8 @@ import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -55,6 +57,7 @@ const configuration = Layer.succeed(Hub.MemoryHubConfiguration, {
 });
 const live = Layer.merge(Hub.layer, Compactor.layer).pipe(
   Layer.provideMerge(core),
+  Layer.provideMerge(Hub.activityLayer),
   Layer.provide(configuration),
 );
 const seed = Effect.gen(function* () {
@@ -671,5 +674,157 @@ describe("MemoryHubAdministrator", () => {
         "MemoryHubError",
       );
     }).pipe(Effect.provide(adminDependencies)),
+  );
+});
+
+const resolutionSubmission = Effect.gen(function* () {
+  const { hub, store, claim } = yield* conflict;
+  const lease = yield* hub.claim(claim, principal());
+  const base = operation(80);
+  const resolutionId = M.MemoryResolutionId.make(id(81));
+  const op: Extract<M.MemoryOperation, { kind: "resolve" }> = {
+    ...base,
+    kind: "resolve",
+    expectedHeads: claim.conflictHeadSet,
+    revision: { ...base.revision, parents: claim.conflictHeadSet },
+    conflictId: claim.conflictId,
+    fencingToken: lease.fencingToken,
+    resolution: {
+      resolutionId,
+      memorySpaceId: space,
+      memoryId,
+      inputRevisionIds: claim.conflictHeadSet,
+      inputPayloadRefs: claim.conflictHeadSet,
+      judgmentRef: resolutionId,
+      requestedModelSelection: claim.frozenDefaultModelSelection,
+      effectiveProvider: M.ProviderDriverKind.make("codex"),
+      effectiveModel: "synthetic-model",
+      resolvingEnvironmentId: hubEnv,
+      fencingToken: lease.fencingToken,
+      resultRevisionId: base.revision.revisionId,
+      appliedAtUtc: M.MemoryUtcTimestamp.make("2000-01-01T00:00:00.000Z"),
+      revertDeadlineUtc: M.MemoryUtcTimestamp.make("2000-01-02T00:00:00.000Z"),
+    },
+    resolutionPayload: { resolutionId, judgment: "synthetic judgment" },
+  };
+  const request: M.MemoryHubApplyResolutionInput = {
+    protocolVersion: 1,
+    memorySpaceId: space,
+    holderEnvironmentId: hubEnv,
+    attemptId: claim.attemptId,
+    operation: op,
+  };
+  return { hub, store, claim, lease, op, request };
+});
+
+describe("MemoryHubService resolution approval", () => {
+  it.effect(
+    "uses post-lock hub time rather than operation timestamps and preserves approval on replay",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const { hub, store, request, op } = yield* resolutionSubmission;
+        const now = yield* Clock.currentTimeMillis;
+        const approved = yield* hub.applyResolution(request, principal());
+        assert.strictEqual(approved.outcome, "accepted");
+        assert.strictEqual(
+          approved.resolutionApproval!.appliedAtUtc,
+          DateTime.formatIso(DateTime.makeUnsafe(now)),
+        );
+        assert.strictEqual(
+          Date.parse(approved.resolutionApproval!.revertDeadlineUtc),
+          now + 2592000000,
+        );
+        const aggregate = yield* store.loadAggregate(space, memoryId);
+        assert.deepStrictEqual(aggregate.heads, [op.revision.revisionId]);
+        assert.strictEqual(
+          aggregate.resolutions[0]!.appliedAtUtc,
+          DateTime.formatIso(DateTime.makeUnsafe(now)),
+        );
+        yield* TestClock.adjust(M.MEMORY_RESOLUTION_ATTEMPT_MAX_MS);
+        assert.deepStrictEqual(yield* hub.applyResolution(request, principal()), approved);
+        assert.deepStrictEqual((yield* hub.push(pushInput(op), principal())).receipts, [approved]);
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("ordinary push cannot admit a new resolution", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const { hub, store, op } = yield* resolutionSubmission;
+      const refusal = (yield* hub.push(pushInput(op), principal())).receipts[0]!;
+      assert.strictEqual(refusal.outcome, "rejected");
+      assert.strictEqual(refusal.failureCode, "lease_required");
+      assert.isNotNull(refusal.hubSequence);
+      assert.isFalse(
+        (yield* store.loadAggregate(space, memoryId)).heads.includes(op.revision.revisionId),
+      );
+      const page = yield* hub.pull(pullInput, principal());
+      assert.strictEqual(page.entries.at(-1)!.kind, "metadata");
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("SQL lock wait crossing expiry cannot approve a stale resolution", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const { hub, store, request } = yield* resolutionSubmission;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const blocker = yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const waiting = yield* hub.applyResolution(request, principal()).pipe(Effect.forkChild);
+      yield* TestClock.adjust(M.MEMORY_LEASE_MS);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(blocker);
+      const refusal = yield* Fiber.join(waiting);
+      assert.strictEqual(refusal.failureCode, "lease_expired");
+      assert.isUndefined(refusal.resolutionApproval);
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).resolutions.length, 0);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("forget immediately invalidates pending source relay", () =>
+    Effect.gen(function* () {
+      yield* sourceSeed;
+      const hub = yield* Hub.MemoryHubService;
+      yield* hub.requestSourceRead(sourceRequest, principal());
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const operationId = M.MemoryOperationId.make(id(600));
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId,
+          expectedHeads: (yield* store.loadAggregate(space, memoryId)).heads,
+        },
+        Effect.void,
+      );
+      const op = (yield* store.readWorkOperation(`sync:${space}:${operationId}`))!;
+      yield* hub.push(pushInput(op), principal());
+      const response = yield* hub.respondSourceRead(
+        { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId, outcome },
+        principal(otherEnv),
+      );
+      assert.isFalse(response.accepted);
+      assert.deepStrictEqual(
+        yield* hub.resultSourceRead(
+          { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId },
+          principal(),
+        ),
+        { state: "expired", code: "source_unavailable" },
+      );
+      const sql = yield* SqlClient.SqlClient;
+      assert.strictEqual(
+        (yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_payloads WHERE body_json LIKE '%synthetic original%'`)[0]!
+          .count,
+        0,
+      );
+    }).pipe(Effect.provide(live)),
   );
 });

@@ -9,7 +9,11 @@ import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Store from "./MemoryStore.ts";
-import { MemoryHubConfiguration, type MemoryHubServiceError } from "./MemoryHubService.ts";
+import {
+  MemoryHubConfiguration,
+  MemoryHubActivity,
+  type MemoryHubServiceError,
+} from "./MemoryHubService.ts";
 
 export class MemoryCompactor extends Context.Service<
   MemoryCompactor,
@@ -30,6 +34,7 @@ export class MemoryCompactor extends Context.Service<
 export const make = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
   const configuration = yield* MemoryHubConfiguration;
+  const activity = yield* MemoryHubActivity;
   const run = Effect.fnUntraced(function* (principal: M.MemoryHubPrincipal, force: boolean) {
     return yield* store.transact(
       Effect.gen(function* () {
@@ -116,6 +121,7 @@ export const make = Effect.gen(function* () {
     function* (principal) {
       // Subscribe before the startup sweep, so a concurrent commit cannot be lost.
       const changes = yield* store.changes(principal.memorySpaceId);
+      const admissions = yield* activity.subscribe;
       yield* compactIfNeeded(principal);
       const sweep = compactIfNeeded(principal).pipe(
         Effect.catch((error) =>
@@ -123,6 +129,7 @@ export const make = Effect.gen(function* () {
         ),
       );
       yield* Stream.runForEach(changes, () => sweep).pipe(Effect.forkScoped);
+      yield* Stream.runForEach(admissions, () => sweep).pipe(Effect.forkScoped);
       yield* sweep.pipe(
         Effect.repeat(Schedule.spaced(M.MEMORY_CHECKPOINT_INTERVAL_MS)),
         Effect.forkScoped,
