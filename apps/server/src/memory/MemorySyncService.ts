@@ -309,6 +309,7 @@ const make = Effect.gen(function* () {
   const scheduleRecovery = (
     r: Route,
     c: Store.MemoryHoldClass | null,
+    supersede = true,
   ): Effect.Effect<void, Service.MemoryAccessError> =>
     Effect.gen(function* () {
       if (!started || stopped || cancelling || !r.connection || !c || c === "authorization") return;
@@ -316,14 +317,16 @@ const make = Effect.gen(function* () {
       yield* ensureEpoch(r.settings.memoryHubVersion);
       if (stopped || cancelling) return;
       const previous = recoveries.get(c);
-      // Each failure supersedes an in-flight observation, preserving accumulated backoff.
+      // Persisted presence only coalesces; each new failure supersedes an in-flight
+      // observation, preserving accumulated backoff.
       // Coalesce the class into one slot, but leave at least 30s for its next real probe.
-      recoveries.set(c, {
-        generation: ++recoveryGeneration,
-        route: r,
-        delay: previous?.delay ?? 30000,
-        due: Math.max(previous?.due ?? 0, now + 30000),
-      });
+      if (!previous || supersede)
+        recoveries.set(c, {
+          generation: ++recoveryGeneration,
+          route: r,
+          delay: previous?.delay ?? 30000,
+          due: Math.max(previous?.due ?? 0, now + 30000),
+        });
       if (recoveryFiber) {
         yield* wakeRecovery;
         return;
@@ -360,7 +363,7 @@ const make = Effect.gen(function* () {
         hubEnvironmentId: r.hubId,
       });
       yield* ensureEpoch(r.settings.memoryHubVersion);
-      for (const c of classes) yield* scheduleRecovery(r, c);
+      for (const c of classes) yield* scheduleRecovery(r, c, false);
     }).pipe(
       Effect.catch((error) => {
         if (error._tag === "MemoryStorageError") discoveryFailure = error;
@@ -1268,7 +1271,7 @@ const make = Effect.gen(function* () {
     const key = { memorySpaceId: r.space!, hubEnvironmentId: r.hubId };
     const retry = yield* store.readPullRetry(key);
     if (retry.nextAttemptAt > (yield* Clock.currentTimeMillis)) {
-      yield* scheduleRecovery(r, retry.holdClass);
+      yield* scheduleRecovery(r, retry.holdClass, false);
       return false;
     }
     const result = yield* Effect.result(
