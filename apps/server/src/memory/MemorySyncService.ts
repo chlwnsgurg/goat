@@ -45,7 +45,10 @@ export class MemorySyncRuntime extends Context.Service<
     /** Application observations, never inferred from a timer: credential, descriptor or reconnect. */
     readonly rearmEvents?: Stream.Stream<
       {
+        /** Committed authority at observation, never retagged at delivery. */
+        epoch: number;
         memorySpaceId: M.MemorySpaceId;
+        hubEnvironmentId: M.EnvironmentId;
         holdClass: Store.MemoryHoldClass;
       },
       Service.MemoryAccessError
@@ -293,6 +296,63 @@ const make = Effect.gen(function* () {
     };
   });
   type Route = NonNullable<Effect.Success<ReturnType<typeof route>>>;
+  // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
+  const recoveries = new Map<Store.MemoryHoldClass, { route: Route; delay: number; due: number }>();
+  let recoveryFiber: Fiber.Fiber<void, never> | null = null;
+  let recoveryChanged = yield* Deferred.make<void>();
+  const wakeRecovery = Effect.suspend(() => Deferred.succeed(recoveryChanged, undefined));
+  const scheduleRecovery = (
+    r: Route,
+    c: Store.MemoryHoldClass | null,
+  ): Effect.Effect<void, Service.MemoryAccessError> =>
+    Effect.gen(function* () {
+      if (!started || stopped || cancelling || !r.connection || !c || c === "authorization") return;
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      if (!recoveries.has(c))
+        recoveries.set(c, {
+          route: r,
+          delay: 30000,
+          due: (yield* Clock.currentTimeMillis) + 30000,
+        });
+      if (recoveryFiber) {
+        yield* wakeRecovery;
+        return;
+      }
+      const ready = yield* Deferred.make<void>();
+      recoveryFiber = yield* Deferred.await(ready).pipe(
+        Effect.andThen(Effect.suspend(() => recoveryLoop)),
+        Effect.ensuring(
+          Effect.sync(() => {
+            recoveryFiber = null;
+          }),
+        ),
+        Effect.forkIn(scope),
+      );
+      yield* Deferred.succeed(ready, undefined);
+    }).pipe(Effect.uninterruptible);
+  let discoveryEpoch: number | null = null;
+  let discoveryFailure: Store.MemoryStorageError | null = null;
+  // The cycle mutex serializes discovery with sync. Presence only registers a real probe;
+  // it is never a successful observation or permission to rearm persisted work.
+  const discoverRecoveries = (r: Route) =>
+    Effect.gen(function* () {
+      if (!started || !r.connection || !r.space || discoveryEpoch === r.settings.memoryHubVersion)
+        return;
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      discoveryEpoch = r.settings.memoryHubVersion;
+      discoveryFailure = null;
+      const classes = yield* store.readPersistedHoldClasses({
+        memorySpaceId: r.space,
+        hubEnvironmentId: r.hubId,
+      });
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      for (const c of classes) yield* scheduleRecovery(r, c);
+    }).pipe(
+      Effect.catch((error) => {
+        if (error._tag === "MemoryStorageError") discoveryFailure = error;
+        return noteFailure(r.settings.memoryHubVersion, error);
+      }),
+    );
   const callPull = (r: Route, i: M.MemoryHubPullInput) =>
     r.connection ? client.pull(r.connection, i) : hub.pull(i, r.principal!);
   const release = (r: Route, ticket: M.MemoryResolutionLease) => {
@@ -345,6 +405,11 @@ const make = Effect.gen(function* () {
   const runClaimedResolution = Effect.fn("MemorySyncService.runClaimedResolution")(function* (
     r: Route,
     initial: Store.TicketRow,
+    candidate: {
+      candidateId: string;
+      expectedGeneration: number;
+      expectedAttempt: number;
+    } | null,
   ) {
     let row = initial;
     let currentLease = initial.ticket;
@@ -441,12 +506,10 @@ const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const result = yield* store.transact(
         Effect.gen(function* () {
-          const candidate = rejection
-            ? yield* store.findClaimCandidate({
-                memorySpaceId: row.ticket.memorySpaceId,
-                attemptId: row.ticket.attemptId,
-              })
-            : null;
+          const candidate = yield* store.findClaimCandidate({
+            memorySpaceId: row.ticket.memorySpaceId,
+            attemptId: row.ticket.attemptId,
+          });
           const reconciled = yield* service.reconcileResolutionSubmission({
             ownership: ownership(row),
             now,
@@ -646,10 +709,34 @@ const make = Effect.gen(function* () {
     yield* execute.pipe(
       Effect.tapError((error) =>
         Effect.gen(function* () {
-          definitiveFailure = !row.submission && !transient(error);
+          definitiveFailure = !row.submission && !row.approval && !transient(error);
           if (row.approval || row.state === "terminal") return;
           yield* ensureEpoch(r.settings.memoryHubVersion);
           const now = yield* Clock.currentTimeMillis;
+          const permanentClass = holdClass(error);
+          if (definitiveFailure && ["authorization", "identity"].includes(permanentClass)) {
+            // A stale/protected pair must not fall back to ticket-only hold or retirement.
+            // The candidate acquisition lineage was captured with ticket ownership.
+            failureRecorded = true;
+            const held = yield* store.transact(
+              Effect.gen(function* () {
+                yield* ensureEpoch(r.settings.memoryHubVersion);
+                if (!candidate) return null;
+                return yield* store.holdResolutionAttemptTx({
+                  ownership: ownership(row),
+                  ...candidate,
+                  now,
+                  failureCode: failureCode(error),
+                  holdClass: permanentClass,
+                });
+              }),
+            );
+            if (held) {
+              row = held;
+              yield* scheduleRecovery(r, permanentClass);
+            }
+            return;
+          }
           const failed = yield* store.transact(
             Effect.gen(function* () {
               const saved = yield* store.failResolutionTicketTx({
@@ -741,16 +828,35 @@ const make = Effect.gen(function* () {
     yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
-        const acquired = yield* store.transact(
-          store.acquireResolutionTicketTx({
-            key: { memorySpaceId: saved.ticket.memorySpaceId, attemptId: saved.ticket.attemptId },
-            expectedVersion: saved.version,
-            owner,
-            coordinatorEpoch: r.settings.memoryHubVersion,
-            now,
-            ownedUntil: now + 60000,
+        const attempt = yield* store.transact(
+          Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+            const candidate = yield* store.findClaimCandidate({
+              memorySpaceId: saved.ticket.memorySpaceId,
+              attemptId: saved.ticket.attemptId,
+            });
+            const ticket = yield* store.acquireResolutionTicketTx({
+              key: { memorySpaceId: saved.ticket.memorySpaceId, attemptId: saved.ticket.attemptId },
+              expectedVersion: saved.version,
+              owner,
+              coordinatorEpoch: r.settings.memoryHubVersion,
+              now,
+              ownedUntil: now + 60000,
+            });
+            return {
+              ticket,
+              candidate:
+                candidate?.metadata.kind === "claim"
+                  ? {
+                      candidateId: candidate.id,
+                      expectedGeneration: candidate.metadata.generation ?? 0,
+                      expectedAttempt: candidate.attempt,
+                    }
+                  : null,
+            };
           }),
         );
+        const acquired = attempt.ticket;
         if (!acquired) {
           executions.delete(saved.ticket.memoryId);
           return;
@@ -774,7 +880,7 @@ const make = Effect.gen(function* () {
           executions.delete(saved.ticket.memoryId);
           return;
         }
-        const fiber = yield* restore(runClaimedResolution(r, acquired)).pipe(
+        const fiber = yield* restore(runClaimedResolution(r, acquired, attempt.candidate)).pipe(
           Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)),
           Effect.ensuring(
             Effect.sync(() => {
@@ -862,7 +968,23 @@ const make = Effect.gen(function* () {
             }
             if (!frozen) return;
             prepared.value = frozen;
-            if (!(yield* store.claimCandidate(work.id, r.settings.memoryHubVersion, now))) return;
+            const claimed = yield* store.transact(
+              Effect.gen(function* () {
+                yield* ensureEpoch(r.settings.memoryHubVersion);
+                // A held ticket may be on the next rearm page. Its frozen attempt
+                // resumes through ticket recovery without acquiring the candidate again.
+                const existing = yield* store.readWork(
+                  `resolve:${r.space}:${frozen.claim.attemptId}`,
+                );
+                if (
+                  existing?.metadata.kind === "resolve" &&
+                  !["completed", "cancelled", "failed"].includes(existing.status)
+                )
+                  return false;
+                return yield* store.claimCandidate(work.id, r.settings.memoryHubVersion, now);
+              }),
+            );
+            if (!claimed) return;
             claimOwned = true;
             reservations++;
             reserved = true;
@@ -945,7 +1067,10 @@ const make = Effect.gen(function* () {
                 holdClass: holdClass(attempt.failure),
               }),
             );
-            if (held) continue;
+            if (held) {
+              yield* scheduleRecovery(r, holdClass(attempt.failure));
+              continue;
+            }
           }
           const knownExpiry =
             code === "claim_busy"
@@ -1015,13 +1140,16 @@ const make = Effect.gen(function* () {
     if (!r.space) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
     let state = yield* runtime.readBootstrap(r.space, r.hubId);
     if (state.state === "ready") return true;
-    if (!r.connection) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
     if (state.state === "unbound") {
-      const join = yield* client.join(r.connection, {
+      const input: M.MemoryHubJoinInput = {
         protocolVersion: 1,
         environmentId: local,
         memorySpaceId: r.space,
-      });
+      };
+      // The hub device is a replica too; use its active self authority without self HTTP.
+      const join = yield* r.connection
+        ? client.join(r.connection, input)
+        : hub.join(input, r.principal!);
       yield* ensureEpoch(r.settings.memoryHubVersion);
       state = {
         state: "staging",
@@ -1125,7 +1253,10 @@ const make = Effect.gen(function* () {
   ) {
     const key = { memorySpaceId: r.space!, hubEnvironmentId: r.hubId };
     const retry = yield* store.readPullRetry(key);
-    if (retry.nextAttemptAt > (yield* Clock.currentTimeMillis)) return false;
+    if (retry.nextAttemptAt > (yield* Clock.currentTimeMillis)) {
+      yield* scheduleRecovery(r, retry.holdClass);
+      return false;
+    }
     const result = yield* Effect.result(
       Effect.gen(function* () {
         const complete = yield* bootstrap(r, budget);
@@ -1151,6 +1282,7 @@ const make = Effect.gen(function* () {
           },
         }),
       );
+      yield* scheduleRecovery(r, transient(error) ? null : holdClass(error));
       yield* wakePullRetry;
       return yield* error;
     }
@@ -1201,15 +1333,32 @@ const make = Effect.gen(function* () {
               const permit = runtime
                 .ownerPermit(request)
                 .pipe(Effect.andThen(ensureEpoch(r.settings.memoryHubVersion)));
-              const outcome = yield* permit.pipe(
-                Effect.andThen(runtime.ownerReader.readCommitted(request, permit)),
-                Effect.timeout("5 seconds"),
+              const outcome = yield* Effect.gen(function* () {
+                const read = yield* permit.pipe(
+                  Effect.andThen(runtime.ownerReader.readCommitted(request, permit)),
+                  Effect.timeout("5 seconds"),
+                  Effect.catchTags({
+                    TimeoutError: () =>
+                      Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+                  }),
+                );
+                yield* permit.pipe(Effect.timeout("1 second"));
+                return read;
+              }).pipe(
                 Effect.catchTags({
-                  TimeoutError: () =>
-                    Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+                  MemoryAccessError: (error) =>
+                    error.code === "fenced"
+                      ? Effect.fail(error)
+                      : noteFailure(r.settings.memoryHubVersion, error).pipe(
+                          Effect.as({
+                            kind: "denied",
+                            requiredPermission: "orchestration:read",
+                          } as const),
+                        ),
                 }),
               );
-              yield* permit.pipe(Effect.timeout("1 second"));
+              // Denial needs no source grant, but every response still belongs to this epoch.
+              yield* ensureEpoch(r.settings.memoryHubVersion);
               if (Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)) return;
               const checked = yield* decodeSource(outcome).pipe(
                 Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
@@ -1238,6 +1387,7 @@ const make = Effect.gen(function* () {
                 requestId: request.requestId,
                 outcome: safe,
               };
+              yield* ensureEpoch(r.settings.memoryHubVersion);
               yield* (
                 r.connection
                   ? client.respondSourceRead(r.connection, response)
@@ -1331,6 +1481,7 @@ const make = Effect.gen(function* () {
             ...(transient(result.failure) ? {} : { holdClass: holdClass(result.failure) }),
           }),
         );
+        yield* scheduleRecovery(r, transient(result.failure) ? null : holdClass(result.failure));
       }
     }
   });
@@ -1382,7 +1533,11 @@ const make = Effect.gen(function* () {
       pending.resolutionDone ||= !page.resolution.more;
       pending.syncAfter = page.sync.next ?? pending.syncAfter;
       pending.resolutionAfter = page.resolution.next ?? pending.resolutionAfter;
-      if (pending.syncDone && pending.resolutionDone) rearms.delete(c);
+      if (pending.syncDone && pending.resolutionDone) {
+        rearms.delete(c);
+        recoveries.delete(c);
+        yield* wakeRecovery;
+      }
     }
     if (rearms.size) pendingSync = true;
   });
@@ -1401,6 +1556,9 @@ const make = Effect.gen(function* () {
         if (entry.epoch !== r.settings.memoryHubVersion && entry.fiber)
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
+      yield* discoverRecoveries(r);
+      if (discoveryEpoch === r.settings.memoryHubVersion && discoveryFailure)
+        yield* noteFailure(r.settings.memoryHubVersion, discoveryFailure);
       yield* rearmPage(r);
       const budget = { pages: 0, entries: 0 };
       if (!(yield* synchronizePull(r, budget)) || budget.pages >= 10) return;
@@ -1488,16 +1646,67 @@ const make = Effect.gen(function* () {
     });
   const syncOnce = requestCycle(syncCycle);
   const guardedSync = syncOnce.pipe(Effect.ignore);
+  // Timers only schedule real reads. A successful pinned descriptor is the observation;
+  // authorization is deliberately never inferred from this public, credential-free read.
+  const recoveryLoop: Effect.Effect<void> = Effect.gen(function* () {
+    while (!stopped && recoveries.size) {
+      const next = Math.min(...[...recoveries.values()].map((p) => p.due));
+      const signal = recoveryChanged;
+      const elapsed = yield* Effect.raceFirst(
+        Effect.sleep(Math.max(0, next - (yield* Clock.currentTimeMillis))).pipe(Effect.as(true)),
+        Deferred.await(signal).pipe(Effect.as(false)),
+      );
+      if (!elapsed) {
+        if (signal === recoveryChanged) recoveryChanged = yield* Deferred.make<void>();
+        continue;
+      }
+      for (const [c, pending] of recoveries) {
+        if (pending.due > (yield* Clock.currentTimeMillis)) continue;
+        const r = pending.route;
+        const observed = yield* Effect.result(
+          Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+            const descriptor = yield* client.preflight(r.connection!);
+            if (descriptor.environmentId !== r.hubId)
+              return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+            if (descriptor.capabilities.memoryHubProtocolVersion !== 1)
+              return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+          }).pipe(Effect.timeout("15 seconds")),
+        );
+        if (recoveries.get(c) !== pending) continue;
+        if (observed._tag === "Success") {
+          recoveries.delete(c);
+          enqueueRearm(r.settings.memoryHubVersion, r.space!, [c]);
+          yield* requestCycle(syncCycle, false, false).pipe(Effect.ignore);
+        } else {
+          pending.delay = Math.min(900000, pending.delay * 2);
+          pending.due = (yield* Clock.currentTimeMillis) + pending.delay;
+        }
+      }
+    }
+  }).pipe(Effect.ignore);
   const cancelEpoch = coordinator.withPermit(
     Effect.gen(function* () {
       cancelling = true;
       pendingSweep = false;
       pendingSync = false;
+      const unfinished = [...rearms]
+        .filter(
+          ([, pending]) =>
+            pending.epoch === previousBinding.epoch &&
+            pending.space === previousBinding.space &&
+            !(pending.syncDone && pending.resolutionDone),
+        )
+        .map(([c]) => c);
       rearms.clear();
+      recoveries.clear();
+      const probe = recoveryFiber;
       const active = cycle;
       // No sync/registry mutex is held while cancellation is requested. Cycle interruption
       // finishes any registration reservation first; matching release has a 15s bound.
       yield* Fiber.interruptAll([
+        ...(probe ? [probe] : []),
         ...(active ? [active] : []),
         ...[...executions.values()].flatMap((e) => (e.fiber ? [e.fiber] : [])),
       ]);
@@ -1505,6 +1714,17 @@ const make = Effect.gen(function* () {
       const s = yield* committedSettings.read;
       settingsEpoch = s.version;
       resetStatus(s.version);
+      // Cancellation fences old transports, but an accepted observation still belongs to
+      // the same space/hub. Restart its bounded cursors under the committed epoch.
+      if (
+        !stopped &&
+        s.settings.mode !== "disabled" &&
+        s.settings.memorySpaceId !== null &&
+        s.settings.mode === previousBinding.mode &&
+        s.settings.memorySpaceId === previousBinding.space &&
+        (s.settings.mode === "member" ? s.settings.hubEnvironmentId : local) === previousBinding.hub
+      )
+        enqueueRearm(s.version, s.settings.memorySpaceId, unfinished);
       cancelling = false;
     }),
   );
@@ -1554,8 +1774,17 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const view = yield* committedSettings.read;
             const space = view.settings.mode === "disabled" ? null : view.settings.memorySpaceId;
-            if (!space || space !== event.memorySpaceId || stopped) return;
-            enqueueRearm(view.version, space, [event.holdClass]);
+            const hubId = view.settings.mode === "member" ? view.settings.hubEnvironmentId : local;
+            if (
+              !space ||
+              space !== event.memorySpaceId ||
+              stopped ||
+              view.version !== event.epoch ||
+              hubId !== event.hubEnvironmentId
+            )
+              return;
+            // Keep the observed epoch through the existing in-transaction authority check.
+            enqueueRearm(event.epoch, space, [event.holdClass]);
             yield* requestCycle(syncCycle, false, false);
           }),
         ).pipe(Effect.ignore, Effect.forkIn(scope)),
