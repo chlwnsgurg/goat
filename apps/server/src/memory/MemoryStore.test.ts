@@ -2267,6 +2267,44 @@ describe("MemoryStore transient source relay", () => {
             .accepted,
           true,
         );
+        // Keep the real relay response unconsumed while an approved canonical change is scanned.
+        const next = operation(305);
+        const current = yield* store.loadAggregate(space, memory);
+        const approved = decideMemoryOperation(
+          current,
+          next,
+          Store.approvedReplica,
+          scanMemoryValue(next),
+          {
+            operationId: next.operationId,
+            memoryId: memory,
+            operationDigest: memoryOperationDigest(next),
+            outcome: "conflicted",
+            hubSequence: 2,
+          },
+        );
+        yield* store.apply(approved);
+        const scanner = (yield* store.readDeferred(yield* Clock.currentTimeMillis, 100)).find(
+          (d) => d.kind === "scanner",
+        )!;
+        assert.isDefined(scanner);
+        const chunk = yield* store.readScannerChunk(scanner);
+        assert.isTrue(chunk.payloads.every((p) => "text" in p || "judgment" in p));
+        assert.isFalse(JSON.stringify(chunk.payloads).includes("synthetic original"));
+        assert.isTrue(
+          yield* store.claimDeferred(scanner, "scanner", yield* Clock.currentTimeMillis, 2000),
+        );
+        assert.isTrue(
+          yield* store.finishOwnedDeferred(scanner, "scanner", 2000, {
+            now: yield* Clock.currentTimeMillis,
+            scannerPolicyVersion: 1,
+          }),
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${`relay:${request.requestId}`}`)
+            .length,
+          1,
+        );
         assert.deepStrictEqual(
           yield* store.transact(
             store.resultHubSourceReadTx(authority(), {
@@ -2465,6 +2503,18 @@ describe("MemoryStore durable hub checkpoints", () => {
           (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE reason='hub_snapshot'`).length,
           1,
         );
+        yield* store.transact(
+          store.purgeHubTransientTx({ memorySpaceId: space, now: 600000, limit: 100 }),
+        );
+        assert.strictEqual(
+          (yield* store.transact(store.prepareHubCheckpointTx(preparation)).pipe(Effect.flip))._tag,
+          "MemoryHubError",
+        );
+        const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+        assert.strictEqual(
+          (yield* fresh.transact(fresh.prepareHubCheckpointTx(preparation)).pipe(Effect.flip))._tag,
+          "MemoryHubError",
+        );
         assert.strictEqual(
           (yield* sql`SELECT 1 FROM memory_compaction_state WHERE published=1`).length,
           1,
@@ -2474,6 +2524,59 @@ describe("MemoryStore durable hub checkpoints", () => {
           true,
         );
       }).pipe(Effect.provide(live)),
+  );
+  it.effect("never revives a replaced token even while its published pages survive", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const first = {
+        authority,
+        checkpointId: "token-replacement",
+        snapshotToken: "old-token",
+        hubEnvironmentId: env,
+      };
+      yield* store.transact(store.prepareHubCheckpointTx(first));
+      yield* store.transact(
+        store.publishCheckpointAndFloorTx({
+          memorySpaceId: space,
+          checkpointId: first.checkpointId,
+          expectedFloor: 0,
+          nextFloor: 1,
+          now: 0,
+        }),
+      );
+      yield* TestClock.adjust(1000);
+      const replacement = yield* store.transact(
+        store.prepareHubCheckpointTx({ ...first, snapshotToken: "new-token" }),
+      );
+      assert.strictEqual(replacement.firstIssuedAt, 1000);
+      assert.strictEqual(
+        (yield* store.transact(store.prepareHubCheckpointTx(first)).pipe(Effect.flip))._tag,
+        "MemoryHubError",
+      );
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.readHubCheckpointPageTx({
+              authority,
+              snapshotToken: first.snapshotToken,
+              cursor: null,
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryHubError",
+      );
+      assert.strictEqual(
+        (yield* store.transact(
+          store.readHubCheckpointPageTx({
+            authority,
+            snapshotToken: replacement.snapshotToken,
+            cursor: null,
+          }),
+        )).checkpointSequence,
+        1,
+      );
+    }).pipe(Effect.provide(live)),
   );
   it.effect("forget scrubs a pinned snapshot immediately without changing its continuation", () =>
     Effect.gen(function* () {

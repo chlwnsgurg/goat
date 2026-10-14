@@ -679,6 +679,11 @@ const HubCheckpointHandleSchema = Schema.Struct({
   pageCount: Schema.Int,
 });
 export type HubCheckpointHandle = typeof HubCheckpointHandleSchema.Type;
+// A pin is transient; its first issue and retirement are permanent replay knowledge.
+const CheckpointTokenGuardSchema = Schema.Struct({
+  handle: HubCheckpointHandleSchema,
+  retired: Schema.Boolean,
+});
 export type HubRetention = {
   memorySpaceId: M.MemorySpaceId;
   checkpointId: string | null;
@@ -3024,7 +3029,7 @@ const make = Effect.gen(function* () {
         payload_bytes: number;
       }>`SELECT i.space,i.memory_id,d.value AS deferred_json,
       CASE WHEN json_extract(d.value,'$.kind')='scanner' THEN
-        min(coalesce((SELECT sum(payload_bytes) FROM (SELECT length(CAST(body_json AS BLOB)) AS payload_bytes FROM memory_payloads p WHERE p.space=i.space AND p.memory_id=i.memory_id AND p.payload_ref>coalesce(json_extract(d.value,'$.scannerCursor'),'') ORDER BY p.payload_ref LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS})),0),${Math.min(M.MEMORY_DEFERRED_SWEEP_MAX_BYTES, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS * M.MEMORY_PAYLOAD_MAX_UTF8_BYTES)})
+        min(coalesce((SELECT sum(payload_bytes) FROM (SELECT length(CAST(body_json AS BLOB)) AS payload_bytes FROM memory_payloads p WHERE p.space=i.space AND p.memory_id=i.memory_id AND p.payload_ref NOT LIKE 'relay:%' AND p.payload_ref NOT LIKE 'submission:%' AND p.payload_ref>coalesce(json_extract(d.value,'$.scannerCursor'),'') ORDER BY p.payload_ref LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS})),0),${Math.min(M.MEMORY_DEFERRED_SWEEP_MAX_BYTES, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS * M.MEMORY_PAYLOAD_MAX_UTF8_BYTES)})
       WHEN json_extract(d.value,'$.kind')='index' THEN coalesce((SELECT length(CAST(p.body_json AS BLOB)) FROM memory_payloads p JOIN memory_revisions r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=i.space AND r.memory_id=i.memory_id AND r.revision_id=json_extract(d.value,'$.revisionId')),0)
       ELSE 0 END AS payload_bytes
       FROM memory_items i JOIN json_each(i.deferred_json) d
@@ -3060,6 +3065,7 @@ const make = Effect.gen(function* () {
       SELECT p.payload_ref,p.body_json,length(CAST(p.body_json AS BLOB)) AS bytes FROM memory_payloads p
       JOIN memory_items i ON i.space=p.space AND i.memory_id=p.memory_id
       WHERE p.space=${target.memorySpaceId} AND p.memory_id=${target.memoryId} AND i.generation=${target.generation} AND i.status!='forgotten'
+      AND p.payload_ref NOT LIKE 'relay:%' AND p.payload_ref NOT LIKE 'submission:%'
       AND p.payload_ref>${target.scannerCursor ?? ""} ORDER BY p.payload_ref LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS + 1}`,
     );
     const selected = [];
@@ -5569,6 +5575,18 @@ const make = Effect.gen(function* () {
       "hub-member-relay-delete",
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${input.memorySpaceId} AND (requester=${input.environmentId} OR owner=${input.environmentId})`,
     );
+    const previousHandles = yield* handlesFor(input.memorySpaceId);
+    for (const handle of previousHandles.filter(
+      (h) => h.memberEnvironmentId === input.environmentId,
+    ))
+      yield* stored(
+        "hub-member-token-retire",
+        sql`UPDATE memory_import_keys SET record_json=json_set(record_json,'$.retired',json('true')) WHERE space=${input.memorySpaceId} AND key_kind='hub_checkpoint_token' AND key=${hashText(handle.snapshotToken)}`,
+      );
+    yield* stored(
+      "hub-member-pin-retire",
+      sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode(previousHandles.filter((h) => h.memberEnvironmentId !== input.environmentId))} WHERE space=${input.memorySpaceId}`,
+    );
     yield* writeHubAdminTx({
       record: { ...record, stage: "activated", memberVersion: next.credentialVersion },
       expectedStage: "prepared",
@@ -6250,6 +6268,26 @@ const make = Effect.gen(function* () {
       if (replay.expiresAt <= now) return yield* new M.MemoryHubError({ code: "cursor_expired" });
       return replay;
     }
+    const tokenKey = hashText(input.snapshotToken);
+    const prior = yield* stored(
+      "hub-token-guard",
+      sql<{
+        record_json: string;
+      }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' AND key=${tokenKey}`,
+    );
+    if (prior.length) return yield* new M.MemoryHubError({ code: "cursor_expired" });
+    const guards = yield* stored(
+      "hub-token-budget",
+      sql<{
+        rows: number;
+        bytes: number;
+      }>`SELECT count(*) AS rows,coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM memory_import_keys WHERE space=${space}`,
+    );
+    if (guards[0]!.rows >= M.MEMORY_DEDUP_MAX_RECEIPTS)
+      return yield* new MemoryCapacityError({
+        dimension: "dedup_receipts",
+        limit: M.MEMORY_DEDUP_MAX_RECEIPTS,
+      });
     const active = handles.filter(
       (h) => h.expiresAt > now && h.memberEnvironmentId !== member.environmentId,
     );
@@ -6303,6 +6341,24 @@ const make = Effect.gen(function* () {
       expiresAt: now + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
       pageCount: pages.length,
     };
+    const guardJson = yield* codec(CheckpointTokenGuardSchema).encode({ handle, retired: false });
+    if (
+      guards[0]!.bytes + new TextEncoder().encode(guardJson).length >
+      M.MEMORY_PERMANENT_METADATA_MAX_BYTES
+    )
+      return yield* new MemoryCapacityError({
+        dimension: "permanent_metadata",
+        limit: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
+      });
+    for (const previous of handles.filter((h) => h.memberEnvironmentId === member.environmentId))
+      yield* stored(
+        "hub-token-retire",
+        sql`UPDATE memory_import_keys SET record_json=json_set(record_json,'$.retired',json('true')) WHERE space=${space} AND key_kind='hub_checkpoint_token' AND key=${hashText(previous.snapshotToken)}`,
+      );
+    yield* stored(
+      "hub-token-first-issue",
+      sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hub_checkpoint_token',${tokenKey},NULL,${guardJson})`,
+    );
     yield* stored(
       "hub-snapshot-pin",
       sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode([...active, handle])} WHERE space=${space}`,
