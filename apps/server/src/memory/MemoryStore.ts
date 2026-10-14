@@ -7209,6 +7209,38 @@ const make = Effect.gen(function* () {
   const sourceCollectCodec = codec(M.MemoryHubSourceReadCollectResult);
   const sourceThreadCodec = codec(M.ScopedThreadRef);
   const sourceWatermarkCodec = codec(M.MemorySourceWatermark);
+  // Relay authority metadata shares the existing body-free replay registry. One
+  // bounded map per member; membership itself is capped and retained on retirement.
+  const pairFencesCodec = codec(M.MemorySourceReadPairFences);
+  const settlementCodec = codec(
+    Schema.Struct({
+      responseDigest: Schema.NullOr(Schema.String),
+      ownerPolicyEpoch: M.MemoryOwnerPolicyEpoch,
+      denied: Schema.Boolean,
+    }),
+  );
+  const readPairFences = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    owner: M.EnvironmentId,
+  ) {
+    const rows = yield* stored(
+      "relay-pair-fences",
+      sql<{
+        record_json: string;
+      }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_source_fences' AND key=${owner}`,
+    );
+    const fences = rows[0] ? yield* pairFencesCodec.decode(rows[0].record_json, strict) : [];
+    if (fences.some((f) => f.memorySpaceId !== space || f.ownerEnvironmentId !== owner))
+      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+    return fences;
+  });
+  const pairFence = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    return (
+      (yield* readPairFences(space, M.EnvironmentId.make(row.owner))).find(
+        (f) => f.requesterEnvironmentId === row.requester,
+      )?.revokedThroughEpoch ?? -1
+    );
+  });
   type RelayRow = {
     request_id: string;
     memory_id: string;
@@ -7288,6 +7320,46 @@ const make = Effect.gen(function* () {
       "relay-expire",
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
     );
+  });
+  const settleDenied = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    row: RelayRow,
+    epoch: number,
+  ) {
+    if (row.payload_ref)
+      yield* stored(
+        "relay-denied-purge",
+        sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${row.payload_ref}`,
+      );
+    yield* stored(
+      "relay-denied",
+      sql`UPDATE memory_hub_source_reads SET state='completed',payload_ref=NULL,response_digest=${yield* settlementCodec.encode({ responseDigest: null, ownerPolicyEpoch: epoch, denied: true })} WHERE space=${space} AND request_id=${row.request_id}`,
+    );
+  });
+  const relayRequest = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    const request = yield* sourceRequestCodec
+      .decode(row.locator_json, strict)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (
+      !request?.stamp ||
+      request.memorySpaceId !== space ||
+      request.requestId !== row.request_id ||
+      request.memoryId !== row.memory_id ||
+      request.sourceThread.environmentId !== row.owner ||
+      request.requesterEnvironmentId !== row.requester ||
+      request.stamp.requesterCredentialVersion !== row.credential_version ||
+      request.stamp.locatorDigest !== row.request_digest ||
+      Date.parse(request.expiresAtHubTime) !== row.deadline
+    )
+      return null;
+    const {
+      stamp: _stamp,
+      requesterEnvironmentId: _requester,
+      expiresAtHubTime: _expiry,
+      ...locator
+    } = request;
+    const digest = hashText(yield* sourceInputCodec.encode({ protocolVersion: 1, ...locator }));
+    return digest === row.request_digest ? request : null;
   });
   const adminReplayJson = Effect.fnUntraced(function* (record: AdminRecord) {
     const { action, ...replay } = record;
@@ -7385,7 +7457,12 @@ const make = Effect.gen(function* () {
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
       if (old.deadline <= now || old.state === "expired")
         return yield* new M.MemoryHubError({ code: "source_unavailable" });
-      return { request: yield* sourceRequestCodec.decode(old.locator_json, strict) };
+      const request = yield* relayRequest(input.memorySpaceId, old);
+      if (!request) {
+        yield* settleDenied(input.memorySpaceId, old, 0);
+        return yield* new M.MemoryHubError({ code: "source_unavailable" });
+      }
+      return { request };
     }
     const owner = yield* readHubMember(input.memorySpaceId, input.sourceThread.environmentId);
     if (!owner || owner.status !== "active")
@@ -7409,6 +7486,7 @@ const make = Effect.gen(function* () {
       ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       authorizedScopes: request.authorizedScopes,
       requesterEnvironmentId: request.requesterEnvironmentId,
+      stamp: { requesterCredentialVersion: member.credentialVersion, locatorDigest: requestDigest },
       expiresAtHubTime: request.expiresAtHubTime,
     };
     if (!(yield* relayEligible(input.memorySpaceId, locator)))
@@ -7462,7 +7540,11 @@ const make = Effect.gen(function* () {
         input.memorySpaceId,
         M.EnvironmentId.make(row.requester),
       );
-      const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+      const request = yield* relayRequest(input.memorySpaceId, row);
+      if (!request) {
+        yield* settleDenied(input.memorySpaceId, row, 0);
+        continue;
+      }
       if (
         !requester ||
         requester.status !== "active" ||
@@ -7483,10 +7565,50 @@ const make = Effect.gen(function* () {
   const respondHubSourceReadTx: MemoryStore["Service"]["respondHubSourceReadTx"] = Effect.fn(
     "MemoryStore.respondHubSourceReadTx",
   )(function* (authority, input) {
-    // L6 activates revoke admission; the legacy store remains fail-closed.
-    if (input.kind === "revoke")
-      return yield* new M.MemoryHubError({ code: "unsupported_operation" });
     const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    if (input.kind === "revoke") {
+      if (!(yield* readHubMember(input.memorySpaceId, input.requesterEnvironmentId)))
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      const fences = yield* readPairFences(input.memorySpaceId, member.environmentId);
+      const previous = fences.find(
+        (f) => f.requesterEnvironmentId === input.requesterEnvironmentId,
+      );
+      const epoch = Math.max(previous?.revokedThroughEpoch ?? -1, input.ownerPolicyEpoch);
+      if (!previous || epoch > previous.revokedThroughEpoch) {
+        const next = [
+          ...fences.filter((f) => f.requesterEnvironmentId !== input.requesterEnvironmentId),
+          {
+            memorySpaceId: input.memorySpaceId,
+            ownerEnvironmentId: member.environmentId,
+            requesterEnvironmentId: input.requesterEnvironmentId,
+            revokedThroughEpoch: epoch,
+          },
+        ];
+        const json = yield* pairFencesCodec.encode(next);
+        yield* stored(
+          "relay-pair-revoke",
+          sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${input.memorySpaceId},'hub_source_fences',${member.environmentId},${input.memorySpaceId},${json}) ON CONFLICT(space,key_kind,key) DO UPDATE SET record_json=excluded.record_json`,
+        );
+        const rows = yield* stored(
+          "relay-pair-settle",
+          sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND owner=${member.environmentId} AND requester=${input.requesterEnvironmentId} AND state IN ('pending','completed') ORDER BY request_id LIMIT ${M.MEMORY_SOURCE_READ_MAX_PER_HUB + 1}`,
+        );
+        if (rows.length > M.MEMORY_SOURCE_READ_MAX_PER_HUB)
+          return yield* new M.MemoryHubError({ code: "capacity_exceeded" });
+        for (const row of rows) yield* settleDenied(input.memorySpaceId, row, epoch);
+      }
+      return {
+        kind: "revoke" as const,
+        accepted: true as const,
+        ack: {
+          memorySpaceId: input.memorySpaceId,
+          ownerEnvironmentId: member.environmentId,
+          requesterEnvironmentId: input.requesterEnvironmentId,
+          removalEpoch: input.ownerPolicyEpoch,
+          revokedThroughEpoch: epoch,
+        },
+      };
+    }
     const row = yield* readRelay(input.memorySpaceId, input.requestId);
     if (!row || row.owner !== member.environmentId)
       return yield* new M.MemoryHubError({ code: "identity_mismatch" });
@@ -7504,14 +7626,37 @@ const make = Effect.gen(function* () {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { kind: "normal" as const, accepted: false };
     }
-    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    const request = yield* relayRequest(input.memorySpaceId, row);
+    if (!request) {
+      yield* settleDenied(input.memorySpaceId, row, 0);
+      return { kind: "normal" as const, accepted: false };
+    }
+    const previous = row.response_digest
+      ? yield* settlementCodec
+          .decode(row.response_digest, strict)
+          .pipe(Effect.orElseSucceed(() => null))
+      : null;
+    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
+    if (previous?.denied && previous.responseDigest === responseDigest)
+      return { kind: "normal" as const, accepted: true };
+    if (
+      previous?.denied ||
+      (input.outcome.kind === "available" && input.ownerPolicyEpoch === 0) ||
+      input.ownerPolicyEpoch <= (yield* pairFence(input.memorySpaceId, row))
+    ) {
+      yield* settleDenied(
+        input.memorySpaceId,
+        row,
+        Math.max(input.ownerPolicyEpoch, previous?.ownerPolicyEpoch ?? 0),
+      );
+      return { kind: "normal" as const, accepted: false };
+    }
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { kind: "normal" as const, accepted: false };
     }
-    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
     if (row.response_digest) {
-      if (row.response_digest !== responseDigest)
+      if (previous?.responseDigest !== responseDigest)
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
       return { kind: "normal" as const, accepted: row.state === "completed" };
     }
@@ -7532,13 +7677,14 @@ const make = Effect.gen(function* () {
     const json = yield* sourceOutcomeCodec.encode(outcome);
     const payloadRef = `relay:${input.requestId}`;
     // A transient body has no revision, event, report, checkpoint or FTS reference.
-    yield* stored(
-      "relay-response-payload",
-      sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
-    );
+    if (outcome.kind !== "denied")
+      yield* stored(
+        "relay-response-payload",
+        sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
+      );
     yield* stored(
       "relay-response",
-      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${responseDigest},payload_ref=${payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
+      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${yield* settlementCodec.encode({ responseDigest, ownerPolicyEpoch: input.ownerPolicyEpoch, denied: outcome.kind === "denied" })},payload_ref=${outcome.kind === "denied" ? null : payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
     );
     return { kind: "normal" as const, accepted: true };
   });
@@ -7558,7 +7704,29 @@ const make = Effect.gen(function* () {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { state: "expired", code: "source_unavailable" };
     }
-    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    const settlement = row.response_digest
+      ? yield* settlementCodec
+          .decode(row.response_digest, strict)
+          .pipe(Effect.orElseSucceed(() => null))
+      : null;
+    if (
+      settlement?.denied ||
+      (settlement && settlement.ownerPolicyEpoch <= (yield* pairFence(input.memorySpaceId, row)))
+    ) {
+      yield* settleDenied(input.memorySpaceId, row, settlement.ownerPolicyEpoch);
+      return {
+        state: "completed",
+        outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+      };
+    }
+    const request = yield* relayRequest(input.memorySpaceId, row);
+    if (!request || (row.state === "completed" && !settlement)) {
+      yield* settleDenied(input.memorySpaceId, row, 0);
+      return {
+        state: "completed",
+        outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+      };
+    }
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
       return { state: "completed", outcome: { kind: "unavailable", code: "source_invalidated" } };
