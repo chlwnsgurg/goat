@@ -101,6 +101,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const pulled = yield* Deferred.make<void>();
     let observePull = false;
     const sourceRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
+    const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
     let sourceResultGate: Deferred.Deferred<void> | null = null;
     const driver: ProviderDriver<{}> = {
       driverKind: M.ProviderDriverKind.make("codex"),
@@ -237,6 +238,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
             Effect.suspend(() =>
               (sourceResultGate ? Deferred.await(sourceResultGate) : Effect.void).pipe(
                 Effect.andThen(client.resultSourceRead(connection, input)),
+                Effect.tap((result) => Deferred.succeed(sourceResult, result)),
               ),
             ),
           release: (connection, input) =>
@@ -363,6 +365,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         observePull = true;
       },
       sourceRequested,
+      sourceResult,
       blockSourceResult: (gate: Deferred.Deferred<void>) => {
         sourceResultGate = gate;
       },
@@ -736,23 +739,46 @@ it.effect(
       yield* c.a.tick;
       yield* c.b.tick;
       yield* Deferred.await(c.b.entered);
-      // Revocation models loss of the departed device's authenticated transport.
-      // Its real HTTP release is denied, leaving the hub lease to expire naturally.
-      const view = yield* c.h.run(Settings.MemoryHubCommittedSettings.use((s) => s.read));
-      yield* c.h.update(
-        {
-          requestId: id(1132),
-          expectedVersion: view.version,
-          action: "revokeMember",
-          environmentId: c.b.identity,
-        },
-        Effect.void,
+      const lease = (yield* c.h.aggregate(c.space, target)).fence?.activeLease;
+      assert.isDefined(lease);
+      if (!lease) return yield* Effect.die("missing holder lease");
+      assert.strictEqual(lease.holderEnvironmentId, c.b.identity);
+      assert.strictEqual(Date.parse(lease.expiresAtHubTime), 120000);
+      // Losing the member's local transport credential leaves Hub authority and
+      // its lease intact. Revocation would invalidate that lease immediately.
+      const departedConnection = yield* c.b.connection;
+      yield* c.b.run(
+        Secrets.ServerSecretStore.use((secrets) =>
+          secrets.set(departedConnection.secretName, new TextEncoder().encode("A".repeat(43))),
+        ),
       );
+      const releaseDenied = yield* c.b.run(
+        Client.MemoryHubClient.use((client) =>
+          Effect.result(
+            client.release(departedConnection, {
+              protocolVersion: 1,
+              memorySpaceId: c.space,
+              memoryId: target,
+              conflictId: lease.conflictId,
+              holderEnvironmentId: c.b.identity,
+              attemptId: lease.attemptId,
+              fencingToken: lease.fencingToken,
+            }),
+          ),
+        ),
+      );
+      assert.strictEqual(releaseDenied._tag, "Failure");
+      if (releaseDenied._tag === "Failure")
+        assert.strictEqual(releaseDenied.failure._tag, "MemoryHubUnauthorizedError");
       yield* c.b.sync.shutdown;
       yield* c.a.tick;
       assert.strictEqual(c.a.generated(), 0);
       assert.strictEqual((yield* c.h.aggregate(c.space, target)).item?.status, "quarantined");
-      yield* TestClock.adjust("120 seconds");
+      assert.deepStrictEqual((yield* c.h.aggregate(c.space, target)).fence?.activeLease, lease);
+      yield* TestClock.adjust(119999);
+      assert.strictEqual(c.a.generated(), 0);
+      assert.deepStrictEqual((yield* c.h.aggregate(c.space, target)).fence?.activeLease, lease);
+      yield* TestClock.adjust(1);
       yield* c.a.tick;
       assert.strictEqual(yield* Deferred.await(c.a.released), target);
       yield* c.a.worker.drain;
@@ -890,15 +916,7 @@ it.effect(
         kind: "denied",
         requiredPermission: "orchestration:read",
       });
-      const outcome = yield* c.a.run(
-        Client.MemoryHubClient.use((client) =>
-          client.resultSourceRead(connection, {
-            protocolVersion: 1,
-            memorySpaceId: c.space,
-            requestId: request.requestId,
-          }),
-        ),
-      );
+      const outcome = yield* Deferred.await(c.a.sourceResult);
       assert.strictEqual(outcome.state, "completed");
       if (outcome.state !== "completed") return yield* Effect.die("source request stayed pending");
       assert.deepStrictEqual(outcome.outcome, {
