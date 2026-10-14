@@ -11,7 +11,6 @@ import * as Scope from "effect/Scope";
 import * as Deferred from "effect/Deferred";
 import * as Schema from "effect/Schema";
 import * as Fiber from "effect/Fiber";
-import * as Clock from "effect/Clock";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type { ProviderDriver, ProviderInstance } from "@goat/provider-core/server/driver";
@@ -87,13 +86,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
     const released = yield* Deferred.make<M.MemoryId>();
     let generated = 0;
-    const leaseTrace: Array<{
-      method: string;
-      now: number;
-      result: string;
-      expires?: string;
-      claimed?: string;
-    }> = [];
+    const claimed = yield* Deferred.make<M.MemoryResolutionLease>();
+    const releaseResult = yield* Deferred.make<M.MemoryHubReleaseResult>();
     let descriptorHealthy = true;
     let probes = 0;
     let rearmObservations = 0;
@@ -174,47 +168,9 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         return Client.MemoryHubClient.of({
           ...client,
           claim: (connection, input) =>
-            Effect.gen(function* () {
-              const result = yield* Effect.result(client.claim(connection, input));
-              leaseTrace.push({
-                method: "claim",
-                now: yield* Clock.currentTimeMillis,
-                result:
-                  result._tag === "Success"
-                    ? "success"
-                    : result.failure._tag === "MemoryHubError"
-                      ? result.failure.code
-                      : result.failure._tag,
-                ...(result._tag === "Success"
-                  ? {
-                      expires: result.success.expiresAtHubTime,
-                      claimed: result.success.claimedAtHubTime,
-                    }
-                  : {}),
-              });
-              return result._tag === "Success" ? result.success : yield* result.failure;
-            }),
-          renew: (connection, input) =>
-            Effect.gen(function* () {
-              const result = yield* Effect.result(client.renew(connection, input));
-              leaseTrace.push({
-                method: "renew",
-                now: yield* Clock.currentTimeMillis,
-                result:
-                  result._tag === "Success"
-                    ? "success"
-                    : result.failure._tag === "MemoryHubError"
-                      ? result.failure.code
-                      : result.failure._tag,
-                ...(result._tag === "Success"
-                  ? {
-                      expires: result.success.expiresAtHubTime,
-                      claimed: result.success.claimedAtHubTime,
-                    }
-                  : {}),
-              });
-              return result._tag === "Success" ? result.success : yield* result.failure;
-            }),
+            client
+              .claim(connection, input)
+              .pipe(Effect.tap((lease) => Deferred.succeed(claimed, lease))),
           preflight: (connection) =>
             client.preflight(connection).pipe(
               Effect.tap(() =>
@@ -242,11 +198,10 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               ),
             ),
           release: (connection, input) =>
-            client
-              .release(connection, input)
-              .pipe(
-                Effect.onExit(() => Deferred.succeed(released, input.memoryId).pipe(Effect.asVoid)),
-              ),
+            client.release(connection, input).pipe(
+              Effect.tap((result) => Deferred.succeed(releaseResult, result)),
+              Effect.onExit(() => Deferred.succeed(released, input.memoryId).pipe(Effect.asVoid)),
+            ),
         });
       }),
     ).pipe(Layer.provideMerge(Runtime.layer));
@@ -352,7 +307,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       aggregate,
       released,
       generated: () => generated,
-      leaseTrace,
+      claimed,
+      releaseResult,
       startProduction,
       setDescriptorHealthy: (healthy: boolean) => {
         descriptorHealthy = healthy;
@@ -782,39 +738,16 @@ it.effect(
       yield* c.a.tick;
       assert.strictEqual(yield* Deferred.await(c.a.released), target);
       yield* c.a.worker.drain;
-      if (c.a.generated() !== 1) {
-        const status = yield* c.a.sync.syncStatus({}, Effect.void);
-        const snapshot = yield* c.a.run(
-          Store.MemoryStore.use((store) => store.readResolutionSnapshot(c.space, target)),
-        );
-        const tickets = yield* c.a.run(
-          Store.MemoryStore.use((store) =>
-            store.readRecoverableResolutionTickets({
-              memorySpaceId: c.space,
-              now: Number.MAX_SAFE_INTEGER,
-              limit: 100,
-            }),
-          ),
-        );
-        assert.fail(
-          JSON.stringify({
-            trace: c.a.leaseTrace,
-            generated: c.a.generated(),
-            now: yield* Clock.currentTimeMillis,
-            failureCode: status.failureCode,
-            status: snapshot.status,
-            reasons: snapshot.reasons,
-            lease: snapshot.fence?.activeLease,
-            tickets: tickets.map((row) => ({
-              state: row.state,
-              nextAttemptAt: row.nextAttemptAt,
-              ownedUntil: row.ownedUntil,
-              leaseExpires: row.ticket.expiresAtHubTime,
-            })),
-          }),
-        );
-      }
       assert.strictEqual(c.a.generated(), 1);
+      const takeover = yield* Deferred.await(c.a.claimed);
+      assert.strictEqual(Date.parse(takeover.claimedAtHubTime), 120000);
+      assert.strictEqual(Date.parse(takeover.expiresAtHubTime), 240000);
+      assert.isAbove(takeover.fencingToken, lease.fencingToken);
+      assert.strictEqual((yield* Deferred.await(c.a.releaseResult)).released, true);
+      assert.strictEqual(
+        activeText(yield* c.a.aggregate(c.space, target)),
+        "resolved synthetic fact",
+      );
       assert.strictEqual(
         (yield* c.h.aggregate(c.space, target)).resolutions[0]?.resolvingEnvironmentId,
         c.a.identity,
@@ -956,6 +889,33 @@ it.effect(
             assert.strictEqual(status.state, "disabled");
             assert.strictEqual(status.memorySpaceId, null);
             assert.deepStrictEqual(status.processing, processing.processing);
+            yield* Store.MemoryStore.use((store) =>
+              store.putLocalIntent({
+                intentId: "synthetic-unbound",
+                environmentId: replica.identity,
+                memoryId: memory(90),
+                scope: { kind: "user" },
+                assertionKind: "inference",
+                provenance: { environmentId: replica.identity },
+                createdAtUtc: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
+                payload: {
+                  text: "synthetic local draft",
+                  evidence: [],
+                  derivedFromMemoryRevisions: [],
+                },
+              }),
+            );
+            assert.strictEqual((yield* runtime.readProcessing(null, null)).pendingSync, 1);
+            const draftStorage = yield* runtime.readUnboundStorage;
+            assert.strictEqual(
+              draftStorage.quotas.find((quota) => quota.dimension === "work_items")?.current,
+              1,
+            );
+            assert.isAbove(
+              draftStorage.quotas.find((quota) => quota.dimension === "work_bytes")?.current ?? 0,
+              0,
+            );
+            assert.strictEqual((yield* replica.sync.syncStatus({}, Effect.void)).pendingSync, 1);
           }),
         ),
       );
