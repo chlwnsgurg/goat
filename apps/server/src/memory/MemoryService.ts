@@ -1105,6 +1105,7 @@ const make = Effect.gen(function* () {
     return {
       memorySpaceId: input.memorySpaceId,
       projectionWatermark: result.projectionWatermark,
+      nextCursor: result.nextCursor,
       items: result.items.flatMap((i) =>
         i.status === "active" && i.localAvailability.exposure === "visible"
           ? [
@@ -1142,6 +1143,7 @@ const make = Effect.gen(function* () {
         return {
           memorySpaceId: space,
           projectionWatermark: rows[0]?.watermark ?? 0,
+          nextCursor: null,
           items: items.flatMap((i) =>
             i.status === "active" && i.localAvailability.exposure === "visible"
               ? [

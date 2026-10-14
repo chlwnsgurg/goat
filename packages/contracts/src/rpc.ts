@@ -426,6 +426,8 @@ export const WS_METHODS = {
   memoryRead: "memory.read",
   memoryHistory: "memory.history",
   memorySyncStatus: "memory.syncStatus",
+  memoryOwnerSourceReadPolicyGet: "memory.ownerSourceReadPolicy.get",
+  memoryOwnerSourceReadPolicyUpdate: "memory.ownerSourceReadPolicy.update",
   memoryUpsert: "memory.upsert",
   memoryForget: "memory.forget",
   memoryRevertResolution: "memory.revertResolution",
@@ -2370,6 +2372,26 @@ export const WsMemoryHubSettingsUpdateRpc = Rpc.make(WS_METHODS.memoryHubSetting
   success: Memory.MemoryHubSettingsUpdateResult,
   error: MemoryRpcErrors,
 });
+export const WsMemoryOwnerSourceReadPolicyGetRpc = Rpc.make(
+  WS_METHODS.memoryOwnerSourceReadPolicyGet,
+  {
+    payload: Memory.MemoryOwnerSourceReadPolicyGetInput,
+    success: Memory.MemoryOwnerSourceReadPolicyView,
+    error: MemoryRpcErrors,
+  },
+);
+export const WsMemoryOwnerSourceReadPolicyUpdateRpc = Rpc.make(
+  WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
+  {
+    payload: Memory.MemoryOwnerSourceReadPolicyUpdateInput,
+    success: Memory.MemoryOwnerSourceReadPolicyView,
+    error: MemoryRpcErrors,
+  },
+);
+export const WsMemoryAdministrationRpcGroup = RpcGroup.make(
+  WsMemoryOwnerSourceReadPolicyGetRpc,
+  WsMemoryOwnerSourceReadPolicyUpdateRpc,
+).middleware(RpcScopeAuthorization);
 export const WsMemoryImportProviderRpc = Rpc.make(WS_METHODS.memoryImportProvider, {
   payload: Memory.MemoryImportProviderInput,
   success: Memory.MemoryImportProviderResult,

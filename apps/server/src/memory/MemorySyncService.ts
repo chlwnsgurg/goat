@@ -1399,6 +1399,8 @@ const make = Effect.gen(function* () {
                   ? checked
                   : { kind: "unavailable", code: "secret_detected" };
               const response: M.MemoryHubSourceReadRespondInput = {
+                kind: "normal",
+                ownerPolicyEpoch: 0,
                 protocolVersion: 1,
                 memorySpaceId: r.space!,
                 requestId: request.requestId,

@@ -10,6 +10,7 @@ import {
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
   requiredScopesForProjectMutation,
+  requiredScopesForServerSettingsPatch,
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -1254,5 +1255,37 @@ describe("memory hub settings", () => {
     expect(decodeServerSettingsPatch({ standingInstructions: "valid", futureField: 1 })).toEqual({
       standingInstructions: "valid",
     });
+  });
+});
+
+describe("managed memory settings", () => {
+  it("defaults installed agent memory on and owner source reads to an empty policy", () => {
+    const settings = decodeServerSettings({});
+    expect(settings.enableAgentMemoryAccess).toBe(true);
+    expect(settings.memoryOwnerSourceReadPolicy).toEqual({
+      allowedRequesterEnvironmentIds: [],
+      ownerPolicyEpoch: 0,
+      removals: [],
+      enrollments: [],
+    });
+    expect(settings.memoryOwnerSourceReadPolicyVersion).toBe(0);
+    expect(decodeServerSettings(encodeServerSettings(settings))).toEqual(settings);
+  });
+  it("round-trips memory off and guards both on/off updates with settings write", () => {
+    expect(decodeServerSettings({ enableAgentMemoryAccess: false }).enableAgentMemoryAccess).toBe(
+      false,
+    );
+    expect(decodeServerSettingsPatch({ enableAgentMemoryAccess: false })).toEqual({
+      enableAgentMemoryAccess: false,
+    });
+    for (const enabled of [true, false])
+      expect(requiredScopesForServerSettingsPatch({ enableAgentMemoryAccess: enabled })).toEqual([
+        "settings:write",
+      ]);
+    expect(() => decodeServerSettingsPatch({ enableAgentMemoryAccess: "on" })).toThrow();
+    for (const key of ["memoryOwnerSourceReadPolicy", "memoryOwnerSourceReadPolicyVersion"])
+      expect(() =>
+        decodeServerSettingsPatch({ [key]: key.endsWith("Version") ? 0 : {} }),
+      ).toThrow();
   });
 });

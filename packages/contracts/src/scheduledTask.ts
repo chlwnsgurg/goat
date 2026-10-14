@@ -1,3 +1,4 @@
+import { MemoryTaskGrantCeilingField } from "./memory.ts";
 import * as Schema from "effect/Schema";
 
 import {
@@ -187,6 +188,7 @@ export const ScheduledTaskWebhookEndpoint = Schema.Struct({
 export type ScheduledTaskWebhookEndpoint = typeof ScheduledTaskWebhookEndpoint.Type;
 
 export const ScheduledTask = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
   id: ScheduledTaskId,
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
@@ -221,7 +223,7 @@ export const ScheduledTaskListResult = Schema.Struct({
 });
 export type ScheduledTaskListResult = typeof ScheduledTaskListResult.Type;
 
-export const ScheduledTaskUpsertInput = Schema.Struct({
+const ScheduledTaskUpsertInputFields = Schema.Struct({
   id: Schema.optional(ScheduledTaskId),
   requireExisting: Schema.optional(Schema.Boolean).annotate({
     description: "Reject the save if the task no longer exists, for edits from a client form.",
@@ -240,6 +242,13 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   createdBy: Schema.optional(OrchestrationV2Actor),
   creationSource: Schema.optional(OrchestrationV2CreationSource),
 });
+// Memory ceiling is captured from the authenticated caller, never public task input.
+export const ScheduledTaskUpsertInput = Schema.Unknown.check(
+  Schema.makeFilter(
+    (value) =>
+      typeof value !== "object" || value === null || !Object.hasOwn(value, "memoryGrantCeiling"),
+  ),
+).pipe(Schema.decodeTo(ScheduledTaskUpsertInputFields));
 export type ScheduledTaskUpsertInput = typeof ScheduledTaskUpsertInput.Type;
 
 /** Partial update that flips only the enabled flag — never overwrites other fields. */

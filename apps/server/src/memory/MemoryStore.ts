@@ -7415,6 +7415,9 @@ const make = Effect.gen(function* () {
   const respondHubSourceReadTx: MemoryStore["Service"]["respondHubSourceReadTx"] = Effect.fn(
     "MemoryStore.respondHubSourceReadTx",
   )(function* (authority, input) {
+    // L6 activates revoke admission; the legacy store remains fail-closed.
+    if (input.kind === "revoke")
+      return yield* new M.MemoryHubError({ code: "unsupported_operation" });
     const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
     const row = yield* readRelay(input.memorySpaceId, input.requestId);
     if (!row || row.owner !== member.environmentId)
@@ -7431,18 +7434,18 @@ const make = Effect.gen(function* () {
       requester.credentialVersion !== row.credential_version
     ) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
-      return { accepted: false };
+      return { kind: "normal" as const, accepted: false };
     }
     const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
     if (!(yield* relayEligible(input.memorySpaceId, request))) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
-      return { accepted: false };
+      return { kind: "normal" as const, accepted: false };
     }
     const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
     if (row.response_digest) {
       if (row.response_digest !== responseDigest)
         return yield* new M.MemoryHubError({ code: "operation_id_reused" });
-      return { accepted: row.state === "completed" };
+      return { kind: "normal" as const, accepted: row.state === "completed" };
     }
     if (
       input.outcome.kind === "available" &&
@@ -7469,7 +7472,7 @@ const make = Effect.gen(function* () {
       "relay-response",
       sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${responseDigest},payload_ref=${payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
     );
-    return { accepted: true };
+    return { kind: "normal" as const, accepted: true };
   });
   const resultHubSourceReadTx: MemoryStore["Service"]["resultHubSourceReadTx"] = Effect.fn(
     "MemoryStore.resultHubSourceReadTx",

@@ -2346,6 +2346,8 @@ describe("MemoryStore transient source relay", () => {
           },
         };
         const response = {
+          kind: "normal" as const,
+          ownerPolicyEpoch: 0,
           protocolVersion: 1 as const,
           memorySpaceId: space,
           requestId: request.requestId,

@@ -1624,3 +1624,150 @@ describe("authoritative resolution approvals", () => {
     round(M.MemoryResolution, { ...resolution, revertDeadlineUtc: "2026-10-15T00:00:00.000Z" });
   });
 });
+
+describe("WP4 cursor, owner policy and relay contracts", () => {
+  const binding = decode(M.MemorySearchCursorBinding, {
+    memorySpaceId: id(),
+    queryDigest: "a".repeat(64),
+    mode: "fts",
+    scopeKey: "b".repeat(64),
+  });
+  const pair = {
+    memorySpaceId: id(),
+    ownerEnvironmentId: "owner",
+    requesterEnvironmentId: "reader",
+  };
+  const ack = { ...pair, removalEpoch: 7, revokedThroughEpoch: 7 };
+  it("binds search continuation to query, mode, space and canonical scope digest", () => {
+    const cursor = M.encodeMemorySearchCursor(binding, M.MemoryId.make(id(2)));
+    expect(cursor.length).toBeLessThanOrEqual(1024);
+    expect(cursor).not.toContain("raw query");
+    expect(M.decodeMemorySearchCursor(cursor, binding)).toBe(id(2));
+    round(M.MemorySearchInput, { memorySpaceId: id(), query: "raw query", cursor });
+    for (const change of [
+      { queryDigest: "c".repeat(64) },
+      { mode: "substring" as const },
+      { memorySpaceId: M.MemorySpaceId.make(id(3)) },
+      { scopeKey: "d".repeat(64) },
+    ])
+      expect(() => M.decodeMemorySearchCursor(cursor, { ...binding, ...change })).toThrow();
+    for (const value of [id(2), "ms1:%broken", "ms2:bad", "{}"])
+      rejects(M.MemorySearchInput, { memorySpaceId: id(), query: "query", cursor: value });
+    const decoded = decode(M.MemorySearchCursor, {
+      kind: "memory_search",
+      version: 1,
+      binding,
+      afterMemoryId: id(2),
+    });
+    rejects(M.MemorySearchCursor, { ...decoded, query: "raw query" });
+    rejects(M.MemorySearchCursor, { ...decoded, kind: "memory_list" });
+    round(M.MemoryListInput, { memorySpaceId: id(), includeQuarantined: false, cursor: id(2) });
+  });
+  it("extends v1 normal responses and Boolean results with strict revoke arms", () => {
+    const normal = round(M.MemoryHubSourceReadRespondInput, {
+      protocolVersion: 1,
+      memorySpaceId: id(),
+      requestId: id(4),
+      outcome: { kind: "denied", requiredPermission: "orchestration:read" },
+    });
+    expect(normal.kind).toBe("normal");
+    if (normal.kind === "normal") expect(normal.ownerPolicyEpoch).toBe(0);
+    const revoke = {
+      protocolVersion: 1,
+      memorySpaceId: id(),
+      kind: "revoke",
+      requesterEnvironmentId: "reader",
+      ownerPolicyEpoch: 7,
+    };
+    round(M.MemoryHubSourceReadRespondInput, revoke);
+    rejects(M.MemoryHubSourceReadRespondInput, { ...revoke, requestId: id(4) });
+    rejects(M.MemoryHubSourceReadRespondInput, {
+      ...revoke,
+      outcome: normal.kind === "normal" ? normal.outcome : {},
+    });
+    rejects(M.MemoryHubSourceReadRespondInput, { ...revoke, ownerEnvironmentId: "forged" });
+    rejects(M.MemoryHubSourceReadRespondInput, { ...revoke, protocolVersion: 2 });
+    expect(round(M.MemoryHubSourceReadRespondResult, { accepted: true })).toEqual({
+      kind: "normal",
+      accepted: true,
+    });
+    round(M.MemoryHubSourceReadRespondResult, { kind: "revoke", accepted: true, ack });
+    rejects(M.MemoryHubSourceReadRespondResult, { kind: "revoke", accepted: true });
+    rejects(M.MemoryHubSourceReadRespondResult, { kind: "revoke", accepted: false, ack });
+    rejects(M.MemorySourceReadRevokeAck, { ...ack, revokedThroughEpoch: 6 });
+    rejects(M.MemorySourceReadRevokeAck, { ...ack, body: "forbidden" });
+  });
+  it("matches exact pending removal identities and epoch before opening enrollment", () => {
+    const pending = { ...pair, state: "pending", removalEpoch: 7 };
+    const typedAck = decode(M.MemorySourceReadRevokeAck, ack);
+    const typedPending = decode(M.MemoryOwnerRemoval, pending);
+    expect(M.matchesMemorySourceReadRevokeAck(typedPending, typedAck)).toBe(true);
+    for (const change of [
+      { memorySpaceId: M.MemorySpaceId.make(id(3)) },
+      { ownerEnvironmentId: M.EnvironmentId.make("other") },
+      { requesterEnvironmentId: M.EnvironmentId.make("other") },
+      { removalEpoch: 6 },
+    ])
+      expect(M.matchesMemorySourceReadRevokeAck(typedPending, { ...typedAck, ...change })).toBe(
+        false,
+      );
+    round(M.MemoryOwnerRemoval, { ...pending, state: "acknowledged", ack });
+    rejects(M.MemoryOwnerRemoval, {
+      ...pending,
+      state: "acknowledged",
+      ack: { ...ack, removalEpoch: 6 },
+    });
+    const blocked = {
+      allowedRequesterEnvironmentIds: [],
+      ownerPolicyEpoch: 8,
+      removals: [pending],
+      enrollments: [{ ...pair, state: "pending", removalEpoch: 7, ownerPolicyEpoch: 8 }],
+    };
+    round(M.MemoryOwnerSourceReadPolicy, blocked);
+    rejects(M.MemoryOwnerSourceReadPolicy, {
+      ...blocked,
+      allowedRequesterEnvironmentIds: ["reader"],
+    });
+    rejects(M.MemoryOwnerSourceReadPolicy, {
+      ...blocked,
+      enrollments: [{ ...pair, state: "active", ownerPolicyEpoch: 8 }],
+      allowedRequesterEnvironmentIds: ["reader"],
+    });
+    round(M.MemoryOwnerSourceReadPolicy, {
+      ...blocked,
+      removals: [{ ...pending, state: "acknowledged", ack }],
+      enrollments: [{ ...pair, state: "active", ownerPolicyEpoch: 8 }],
+      allowedRequesterEnvironmentIds: ["reader"],
+    });
+    rejects(M.MemoryOwnerSourceReadPolicy, { ...blocked, removals: [pending, pending] });
+    rejects(M.MemorySourceReadPairFences, [
+      { ...pair, revokedThroughEpoch: 7 },
+      { ...pair, revokedThroughEpoch: 8 },
+    ]);
+  });
+  it("keeps admin authority and original request stamping outside public source input", () => {
+    round(M.MemoryOwnerSourceReadPolicyUpdateInput, {
+      requestId: id(),
+      expectedVersion: 0,
+      allowedRequesterEnvironmentIds: [],
+    });
+    rejects(M.MemoryOwnerSourceReadPolicyUpdateInput, {
+      requestId: id(),
+      expectedVersion: 0,
+      allowedRequesterEnvironmentIds: [],
+      ownerPolicyEpoch: 99,
+    });
+    round(M.MemoryHubDisableInput, { requestId: id(), expectedVersion: 0 });
+    rejects(M.MemoryHubDisableInput, { requestId: id(), expectedVersion: 0, credential: "forged" });
+    expect(M.MEMORY_MCP_TOOLS).toHaveLength(9);
+    expect(M.MEMORY_ADMINISTRATION_MCP_TOOLS).toEqual(["memory_hub_disable"]);
+    round(M.MemorySourceReadStamp, {
+      requesterCredentialVersion: 1,
+      locatorDigest: "a".repeat(64),
+    });
+    rejects(M.MemorySourceReadStamp, {
+      requesterCredentialVersion: 0,
+      locatorDigest: "a".repeat(64),
+    });
+  });
+});
