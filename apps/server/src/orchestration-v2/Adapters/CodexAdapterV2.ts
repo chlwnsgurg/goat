@@ -1903,8 +1903,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   MemoryContext.validateMemoryContext(snapshot),
                 );
                 context.goat_memory = { kind: "untrusted", value: validated.renderedText };
-              } else memoryByThread.delete(threadId);
-            } else memoryByThread.delete(threadId);
+              } else yield* clearMemoryDelivery(threadId, selected.threadId);
+            } else yield* clearMemoryDelivery(threadId);
             if (Object.keys(context).length === 0) return;
             yield* client.request("thread/inject_items", {
               threadId,
@@ -1946,7 +1946,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               Effect.gen(function* () {
                 if (rotation.providerInstanceId !== adapterOptions.instanceId) return;
                 for (const [nativeId, selected] of memoryByThread)
-                  if (selected.threadId === rotation.threadId) memoryByThread.delete(nativeId);
+                  if (selected.threadId === rotation.threadId)
+                    yield* clearMemoryDelivery(nativeId, rotation.threadId);
                 if (memorySnapshots) yield* memorySnapshots.invalidate(rotation.threadId);
                 // Attachment refresh is serialized with the next ordinary start. Existing stale tokens are denied immediately.
               }),
@@ -7036,6 +7037,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               );
             }).pipe(
+              Effect.onError(() =>
+                getNativeThreadId(turnInput.providerThread).pipe(
+                  Effect.flatMap((nativeId) => clearMemoryDelivery(nativeId, turnInput.threadId)),
+                  Effect.ignore,
+                ),
+              ),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterTurnStartError({
@@ -7179,9 +7186,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           interruptTurn: (requestedInput) =>
             Effect.gen(function* () {
               const nativeThreadId = requestedInput.providerThread.nativeThreadRef?.nativeId;
-              if (nativeThreadId) memoryByThread.delete(nativeThreadId);
-              if (memorySnapshots && requestedInput.providerThread.appThreadId)
-                yield* memorySnapshots.invalidate(requestedInput.providerThread.appThreadId);
+              if (nativeThreadId)
+                yield* clearMemoryDelivery(
+                  nativeThreadId,
+                  requestedInput.providerThread.appThreadId ?? undefined,
+                );
               const retryHold = nativeThreadId == null ? undefined : retryHolds.get(nativeThreadId);
               if (
                 nativeThreadId != null &&
