@@ -742,7 +742,10 @@ const make = Effect.gen(function* () {
     const value = yield* decode(decodeHistory(input, strict));
     return yield* store.transact(
       Effect.gen(function* () {
-        const item = yield* read(value, permit);
+        const item = yield* read(
+          { memorySpaceId: value.memorySpaceId, memoryId: value.memoryId },
+          permit,
+        );
         const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
         const offset = value.cursor ? Number(value.cursor) : 0;
         if (!Number.isSafeInteger(offset) || offset < 0)
