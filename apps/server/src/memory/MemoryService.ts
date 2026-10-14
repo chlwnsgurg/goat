@@ -1105,12 +1105,7 @@ const make = Effect.gen(function* () {
     let approval: M.MemoryResolutionApproval | undefined;
     if (op.kind === "resolve") {
       if (!input.resolutionRequest) return yield* new M.MemoryHubError({ code: "lease_required" });
-      const request = yield* decode(
-        Schema.decodeUnknownEffect(M.MemoryHubApplyResolutionInput)(
-          input.resolutionRequest,
-          strict,
-        ),
-      );
+      const request = yield* decode(decodeResolutionRequest(input.resolutionRequest, strict));
       const lease = current.fence?.activeLease;
       if (
         request.memorySpaceId !== op.memorySpaceId ||

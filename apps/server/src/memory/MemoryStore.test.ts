@@ -1980,3 +1980,149 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+describe("MemoryStore hub administration", () => {
+  const record = (
+    n: number,
+    action: "provisionMember" | "rotateMemberCredential" | "revokeMember",
+  ): Store.AdminRecord => ({
+    requestId: M.MemoryOperationId.make(id(n)),
+    requestDigest: "b".repeat(64),
+    expectedVersion: n,
+    stage: "prepared",
+    action: {
+      requestId: M.MemoryOperationId.make(id(n)),
+      expectedVersion: n,
+      action,
+      environmentId: env,
+    },
+    secretName: action === "revokeMember" ? null : "synthetic-member-key",
+    result: null,
+    memberVersion: null,
+  });
+  it.effect("provisions, rotates and revokes with durable replay and stale credential denial", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const first = record(200, "provisionMember");
+      yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+      const activation = {
+        requestId: first.requestId,
+        requestDigest: first.requestDigest,
+        memorySpaceId: space,
+        environmentId: env,
+        expectedCredentialVersion: null,
+        next: { credentialDigest: "a".repeat(64), credentialVersion: 1 },
+        now: 100,
+      };
+      const member = yield* store.transact(store.activateHubMemberTx(activation));
+      assert.strictEqual(member.credentialVersion, 1);
+      assert.deepStrictEqual(yield* store.transact(store.activateHubMemberTx(activation)), member);
+      const rotate = record(201, "rotateMemberCredential");
+      yield* store.transact(store.writeHubAdminTx({ record: rotate, expectedStage: null }));
+      yield* store.transact(
+        store.activateHubMemberTx({
+          ...activation,
+          requestId: rotate.requestId,
+          expectedCredentialVersion: 1,
+          next: { credentialDigest: "c".repeat(64), credentialVersion: 2 },
+        }),
+      );
+      assert.isUndefined(yield* store.findHubMemberByCredential("a".repeat(64)));
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.requireHubMemberTx({
+              memorySpaceId: space,
+              environmentId: env,
+              credentialVersion: 1,
+              scopes: ["memory:sync"],
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+      const revoke = record(202, "revokeMember");
+      yield* store.transact(store.writeHubAdminTx({ record: revoke, expectedStage: null }));
+      const revoked = yield* store.transact(
+        store.activateHubMemberTx({
+          ...activation,
+          requestId: revoke.requestId,
+          expectedCredentialVersion: 2,
+          next: "revoked",
+        }),
+      );
+      assert.strictEqual(revoked.status, "revoked");
+      assert.strictEqual(revoked.credentialVersion, 3);
+      assert.strictEqual(
+        (yield* store.transact(store.readHubAdminTx(revoke.requestId)))?.stage,
+        "activated",
+      );
+      assert.strictEqual((yield* store.readPendingHubAdmins(100)).length, 3);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("rolls activation back with the admin stage and rejects changed request reuse", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const first = record(210, "provisionMember");
+      yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* store.activateHubMemberTx({
+              requestId: first.requestId,
+              requestDigest: first.requestDigest,
+              memorySpaceId: space,
+              environmentId: env,
+              expectedCredentialVersion: null,
+              next: { credentialDigest: "a".repeat(64), credentialVersion: 1 },
+              now: 0,
+            });
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.isUndefined(yield* store.readHubMember(space, env));
+      assert.strictEqual(
+        (yield* store.transact(store.readHubAdminTx(first.requestId)))?.stage,
+        "prepared",
+      );
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.writeHubAdminTx({
+              record: { ...first, requestDigest: "d".repeat(64) },
+              expectedStage: "prepared",
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "bootstrap cannot become ready before the matching canonical checkpoint is published",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const progress = {
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          checkpointId: "synthetic-checkpoint",
+          snapshotToken: "synthetic-token",
+          checkpointSequence: 5,
+          nextCursor: null,
+        };
+        yield* store.transact(
+          store.advanceBootstrapTx({ ...progress, expectedState: "unbound", nextState: "staging" }),
+        );
+        const error = yield* store
+          .transact(
+            store.advanceBootstrapTx({ ...progress, expectedState: "staging", nextState: "ready" }),
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual(error._tag, "MemoryStoreConflict");
+        if (error._tag === "MemoryStoreConflict")
+          assert.strictEqual(error.code, "bootstrap_required");
+      }).pipe(Effect.provide(live)),
+  );
+});

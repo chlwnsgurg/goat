@@ -597,6 +597,54 @@ export const resolutionReportId = (
   resolution: M.MemoryResolutionId,
 ): M.MemoryReportDelivery["reportId"] => hashText(`${space}:${operation}:${resolution}`);
 
+const adminBase = {
+  requestId: M.MemoryOperationId,
+  expectedVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+};
+const PersistedAdminActionSchema = Schema.Union([
+  Schema.Struct({
+    ...adminBase,
+    action: Schema.Literal("configure"),
+    settings: M.MemoryHubSettings,
+  }),
+  Schema.Struct({
+    ...adminBase,
+    action: Schema.Literals(["provisionMember", "rotateMemberCredential", "revokeMember"]),
+    environmentId: M.EnvironmentId,
+  }),
+  Schema.Struct({
+    ...adminBase,
+    action: Schema.Literal("installCredential"),
+    hubEnvironmentId: M.EnvironmentId,
+    endpoint: M.MemoryHubEndpoint,
+    memorySpaceId: M.MemorySpaceId,
+  }),
+  Schema.Struct({
+    ...adminBase,
+    action: Schema.Literal("acknowledgeCredential"),
+    credentialRequestId: M.MemoryOperationId,
+  }),
+]);
+export type PersistedAdminAction =
+  | Exclude<M.MemoryHubSettingsUpdateInput, { action: "installCredential" }>
+  | Omit<Extract<M.MemoryHubSettingsUpdateInput, { action: "installCredential" }>, "credential">;
+const AdminRecordSchema = Schema.Struct({
+  requestId: M.MemoryOperationId,
+  requestDigest: digest,
+  expectedVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  stage: Schema.Literals(["prepared", "activated", "ready", "acknowledged"]),
+  action: PersistedAdminActionSchema,
+  secretName: Schema.NullOr(
+    Schema.String.check(Schema.makeFilter((v) => /^[a-z0-9-]{1,128}$/.test(v))),
+  ),
+  result: Schema.NullOr(Schema.Struct({ view: M.MemoryHubSettingsView })),
+  memberVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
+}).check(
+  Schema.makeFilter(
+    (v) => v.requestId === v.action.requestId && v.expectedVersion === v.action.expectedVersion,
+  ),
+);
+export type AdminRecord = typeof AdminRecordSchema.Type;
 export type HubRetention = {
   memorySpaceId: M.MemorySpaceId;
   checkpointId: string | null;
@@ -799,6 +847,33 @@ export class MemoryStore extends Context.Service<
       | M.MemoryHubUnauthorizedError
       | M.MemoryHubForbiddenError
     >;
+    readonly readHubAdminTx: (requestId: M.MemoryOperationId) => InTx<AdminRecord | undefined>;
+    readonly writeHubAdminTx: (input: {
+      record: AdminRecord;
+      expectedStage: AdminRecord["stage"] | null;
+    }) => InTx<AdminRecord, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
+    readonly activateHubMemberTx: (input: {
+      requestId: M.MemoryOperationId;
+      requestDigest: string;
+      memorySpaceId: M.MemorySpaceId;
+      environmentId: M.EnvironmentId;
+      expectedCredentialVersion: number | null;
+      next: { credentialDigest: string; credentialVersion: number } | "revoked";
+      now: number;
+    }) => InTx<HubMember, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
+    readonly readPendingHubAdmins: (
+      limit: number,
+    ) => Effect.Effect<readonly AdminRecord[], MemoryStorageError>;
+    readonly advanceBootstrapTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+      expectedState: "unbound" | "staging" | "ready";
+      nextState: "staging" | "ready";
+      checkpointId: string;
+      snapshotToken: string | null;
+      checkpointSequence: number;
+      nextCursor: string | null;
+    }) => InTx<void>;
     readonly readHubRetentionTx: (space: M.MemorySpaceId) => InTx<HubRetention>;
     readonly readHubUsageTx: (space: M.MemorySpaceId) => InTx<HubUsage>;
     readonly reserveHubCheckpointTx: (input: {
@@ -5065,6 +5140,233 @@ const make = Effect.gen(function* () {
     if (!principal.scopes.includes("memory:sync")) return yield* new M.MemoryHubForbiddenError({});
     return member;
   });
+  const adminCodec = codec(AdminRecordSchema);
+  const adminDecode = Schema.decodeUnknownEffect(AdminRecordSchema);
+  const adminActionCodec = codec(PersistedAdminActionSchema);
+  const readHubAdminTx: MemoryStore["Service"]["readHubAdminTx"] = Effect.fn(
+    "MemoryStore.readHubAdminTx",
+  )(function* (requestId) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "hub-admin-read",
+      sql<{
+        admin_json: string;
+      }>`SELECT admin_json FROM memory_outbox WHERE id=${`admin:${requestId}`} AND kind='admin'`,
+    );
+    return rows[0]
+      ? yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict))
+      : undefined;
+  });
+  const writeHubAdminTx: MemoryStore["Service"]["writeHubAdminTx"] = Effect.fn(
+    "MemoryStore.writeHubAdminTx",
+  )(function* (input) {
+    yield* Transaction;
+    const record = yield* stored("hub-admin-codec", adminDecode(input.record, strict));
+    const json = yield* stored("hub-admin-codec", adminCodec.encode(record));
+    if (new TextEncoder().encode(json).length > M.MEMORY_PAGE_MAX_UTF8_BYTES)
+      return yield* new MemoryStoreConflict({ code: "payload_too_large" });
+    const old = yield* readHubAdminTx(record.requestId);
+    if (old) {
+      if (
+        old.requestDigest !== record.requestDigest ||
+        old.expectedVersion !== record.expectedVersion ||
+        (yield* adminActionCodec.encode(old.action)) !==
+          (yield* adminActionCodec.encode(record.action)) ||
+        old.secretName !== record.secretName
+      )
+        return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+      if ((yield* adminCodec.encode(old)) === json) return old;
+      const stages = ["prepared", "activated", "ready", "acknowledged"];
+      if (
+        old.stage !== input.expectedStage ||
+        stages.indexOf(record.stage) !== stages.indexOf(old.stage) + 1 ||
+        (old.memberVersion !== null && old.memberVersion !== record.memberVersion)
+      )
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+    } else if (
+      input.expectedStage !== null ||
+      record.stage !== "prepared" ||
+      record.memberVersion !== null ||
+      record.result !== null
+    )
+      return yield* new MemoryStoreConflict({ code: "revision_changed" });
+    const counts = yield* stored(
+      "hub-admin-budget",
+      sql<{
+        rows: number;
+        bytes: number;
+      }>`SELECT count(*) AS rows,coalesce(sum(length(CAST(admin_json AS BLOB))),0) AS bytes FROM memory_outbox WHERE kind='admin'`,
+    );
+    const previousBytes = old ? new TextEncoder().encode(yield* adminCodec.encode(old)).length : 0;
+    if (
+      counts[0]!.rows + Number(!old) > M.MEMORY_WORK_MAX_PENDING_ITEMS ||
+      counts[0]!.bytes + new TextEncoder().encode(json).length - previousBytes >
+        M.MEMORY_WORK_MAX_PAYLOAD_BYTES
+    )
+      return yield* new MemoryCapacityError({
+        dimension: "work_bytes",
+        limit: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
+      });
+    yield* stored(
+      "hub-admin-write",
+      sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,admin_json,next_attempt_at) VALUES (${`admin:${record.requestId}`},'_admin','admin','pending','{}',${json},0) ON CONFLICT(id) DO UPDATE SET admin_json=excluded.admin_json,status=${record.stage === "acknowledged" ? "completed" : "pending"}`,
+    );
+    return record;
+  });
+  const readPendingHubAdmins: MemoryStore["Service"]["readPendingHubAdmins"] = Effect.fn(
+    "MemoryStore.readPendingHubAdmins",
+  )(function* (limit) {
+    const rows = yield* stored(
+      "hub-admin-pending",
+      sql<{
+        admin_json: string;
+      }>`SELECT admin_json FROM memory_outbox WHERE kind='admin' AND status='pending' AND admin_json IS NOT NULL ORDER BY id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS))}`,
+    );
+    return yield* Effect.forEach(rows, (row) =>
+      stored("hub-admin-codec", adminCodec.decode(row.admin_json, strict)),
+    );
+  });
+  const activateHubMemberTx: MemoryStore["Service"]["activateHubMemberTx"] = Effect.fn(
+    "MemoryStore.activateHubMemberTx",
+  )(function* (input) {
+    yield* Transaction;
+    const record = yield* readHubAdminTx(input.requestId);
+    if (
+      !record ||
+      record.requestDigest !== input.requestDigest ||
+      !("environmentId" in record.action) ||
+      record.action.environmentId !== input.environmentId
+    )
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const expectedAction =
+      input.next === "revoked"
+        ? "revokeMember"
+        : input.expectedCredentialVersion === null
+          ? "provisionMember"
+          : "rotateMemberCredential";
+    if (record.action.action !== expectedAction)
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const old = yield* readHubMember(input.memorySpaceId, input.environmentId);
+    if (record.memberVersion !== null) {
+      if (
+        !old ||
+        old.credentialVersion !== record.memberVersion ||
+        (input.next === "revoked"
+          ? old.status !== "revoked"
+          : old.credentialDigest !== input.next.credentialDigest || old.status !== "active")
+      )
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      return old;
+    }
+    if (
+      record.stage !== "prepared" ||
+      (old?.credentialVersion ?? null) !== input.expectedCredentialVersion ||
+      (input.next === "revoked" && !old)
+    )
+      return yield* new MemoryStoreConflict({ code: "revision_changed" });
+    if (
+      input.next !== "revoked" &&
+      (!/^[a-f0-9]{64}$/.test(input.next.credentialDigest) ||
+        input.next.credentialVersion !== (old?.credentialVersion ?? 0) + 1)
+    )
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const count = yield* stored(
+      "hub-member-count",
+      sql<{
+        count: number;
+      }>`SELECT count(*) AS count FROM memory_hub_members WHERE space=${input.memorySpaceId}`,
+    );
+    if (!old && count[0]!.count >= M.MEMORY_HUB_MAX_MEMBERS)
+      return yield* new MemoryCapacityError({
+        dimension: "hub_members",
+        limit: M.MEMORY_HUB_MAX_MEMBERS,
+      });
+    const next: HubMember = {
+      memorySpaceId: input.memorySpaceId,
+      environmentId: input.environmentId,
+      credentialDigest:
+        input.next === "revoked" ? old!.credentialDigest : input.next.credentialDigest,
+      credentialVersion:
+        input.next === "revoked" ? old!.credentialVersion + 1 : input.next.credentialVersion,
+      status: input.next === "revoked" ? "revoked" : "active",
+      joinedAt: old?.joinedAt ?? input.now,
+    };
+    yield* stored(
+      "hub-member-activate",
+      sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${next.memorySpaceId},${next.environmentId},${next.credentialDigest},${next.credentialVersion},${next.status},${next.joinedAt}) ON CONFLICT(space,environment) DO UPDATE SET credential_digest=excluded.credential_digest,credential_version=excluded.credential_version,status=excluded.status`,
+    );
+    // Rotation/revoke fences both ledgers before the new credential can authorize a request.
+    const leases = yield* stored(
+      "hub-member-leases",
+      sql<{
+        memory_id: string;
+        highest_token: number;
+      }>`SELECT memory_id,highest_token FROM memory_hub_leases WHERE space=${input.memorySpaceId} AND json_extract(lease_json,'$.holderEnvironmentId')=${input.environmentId}`,
+    );
+    for (const lease of leases) {
+      const aggregate = yield* loadAggregate(input.memorySpaceId, M.MemoryId.make(lease.memory_id));
+      const highest = Math.max(lease.highest_token, aggregate.fence?.highestFencingToken ?? 0) + 1;
+      const fence: M.MemoryFenceRecord = {
+        memorySpaceId: input.memorySpaceId,
+        memoryId: M.MemoryId.make(lease.memory_id),
+        highestFencingToken: highest,
+        activeLease: null,
+      };
+      yield* stored(
+        "hub-member-invalidate",
+        sql`UPDATE memory_hub_leases SET highest_token=${highest},lease_json=NULL WHERE space=${input.memorySpaceId} AND memory_id=${lease.memory_id}`,
+      );
+      yield* stored(
+        "hub-member-fence",
+        sql`UPDATE memory_identity_ledger SET fence_json=${yield* fenceCodec.encode(fence)} WHERE space=${input.memorySpaceId} AND memory_id=${lease.memory_id}`,
+      );
+    }
+    const relay = yield* stored(
+      "hub-member-relay",
+      sql<{
+        payload_ref: string | null;
+      }>`SELECT payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND (requester=${input.environmentId} OR owner=${input.environmentId})`,
+    );
+    for (const row of relay)
+      if (row.payload_ref)
+        yield* stored(
+          "hub-member-relay-purge",
+          sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${row.payload_ref}`,
+        );
+    yield* stored(
+      "hub-member-relay-delete",
+      sql`DELETE FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND (requester=${input.environmentId} OR owner=${input.environmentId})`,
+    );
+    yield* writeHubAdminTx({
+      record: { ...record, stage: "activated", memberVersion: next.credentialVersion },
+      expectedStage: "prepared",
+    });
+    return next;
+  });
+  const advanceBootstrapTx: MemoryStore["Service"]["advanceBootstrapTx"] = Effect.fn(
+    "MemoryStore.advanceBootstrapTx",
+  )(function* (input) {
+    yield* Transaction;
+    if (input.expectedState === "unbound" && input.nextState !== "staging")
+      return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+    yield* stored(
+      "bootstrap-init",
+      sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${input.memorySpaceId},${input.hubEnvironmentId},0,'unbound') ON CONFLICT(space,hub_environment_id) DO NOTHING`,
+    );
+    if (input.nextState === "ready") {
+      const published = yield* stored(
+        "bootstrap-published",
+        sql`SELECT 1 FROM memory_compaction_state WHERE space=${input.memorySpaceId} AND checkpoint_id=${input.checkpointId} AND published=1 AND json_extract(boundary_json,'$.checkpointSequence')=${input.checkpointSequence}`,
+      );
+      if (!published.length || input.nextCursor !== null)
+        return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+    }
+    const changed = yield* stored(
+      "bootstrap-cas",
+      sql`UPDATE memory_sync_cursors SET bootstrap_state=${input.nextState},checkpoint_id=${input.checkpointId},snapshot_token=${input.snapshotToken},checkpoint_sequence=${input.checkpointSequence},checkpoint_cursor=${input.nextCursor},after_sequence=CASE WHEN ${input.nextState}='ready' THEN max(after_sequence,${input.checkpointSequence}) ELSE after_sequence END WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId} AND bootstrap_state=${input.expectedState} AND (${input.expectedState}!='staging' OR checkpoint_id=${input.checkpointId} AND snapshot_token IS ${input.snapshotToken} AND checkpoint_sequence=${input.checkpointSequence}) RETURNING space`,
+    );
+    if (!changed.length) return yield* new MemoryStoreConflict({ code: "revision_changed" });
+  });
   const hubEntryCodec = codec(M.MemoryHubEntry);
   const hubReceiptDecode = Schema.decodeUnknownEffect(M.MemoryHubReceipt);
   const hubEntryDecode = Schema.decodeUnknownEffect(M.MemoryHubEntry);
@@ -5574,6 +5876,11 @@ const make = Effect.gen(function* () {
       return { reportId, deliverable };
     });
   return MemoryStore.of({
+    readHubAdminTx,
+    writeHubAdminTx,
+    activateHubMemberTx,
+    readPendingHubAdmins,
+    advanceBootstrapTx,
     readHubMember,
     findHubMemberByCredential,
     requireHubMemberTx,
