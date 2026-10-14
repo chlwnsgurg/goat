@@ -5784,8 +5784,11 @@ it.effect("recovery closes a frozen cycle despite continuous frontier and orphan
         yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) SELECT space,${other},scope_json,scope_key,heads_json,status,projection_watermark,${JSON.stringify(copy)},availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
       }
     });
+    // Seed a real claim through recovery before copying its metadata for the orphan.
+    yield* store.recoverClaimCandidates(0);
     yield* appendItems(0, 205);
     yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) SELECT 'early-orphan',space,${id(1900)},kind,'pending',metadata_json,0 FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim' LIMIT 1`;
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE id='early-orphan'`).length, 1);
     for (let n = 0; n < 205; n++) yield* store.enqueueWork(backgroundWork(`tail:${n}`));
     yield* store.recoverClaimCandidates(0);
     yield* sql`DELETE FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim'`;
