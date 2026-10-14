@@ -81,7 +81,9 @@ it.effect(
         });
         const parent = yield* store.getThreadProjection(threadId);
         const run = parent.runs[0]!;
-        expect(runMemoryPrepareInput({ run, message: parent.messages[0]! })).toEqual({
+        expect(
+          runMemoryPrepareInput({ run, message: parent.messages[0]!, projection: parent }),
+        ).toEqual({
           memoryGrantCeiling: null,
         });
         const command = {
@@ -104,9 +106,13 @@ it.effect(
         expect(task.memoryGrantCeiling).toBe(ceiling ?? "none");
         const child = yield* store.getThreadProjection(task.childThreadId!);
         expect(child.runs[0]!.memoryGrantCeiling).toBe(ceiling ?? "none");
-        expect(runMemoryPrepareInput({ run: child.runs[0]!, message: child.messages[0]! })).toEqual(
-          { memoryGrantCeiling: ceiling ?? "none" },
-        );
+        expect(
+          runMemoryPrepareInput({
+            run: child.runs[0]!,
+            message: child.messages[0]!,
+            projection: child,
+          }),
+        ).toEqual({ memoryGrantCeiling: ceiling ?? "none" });
         const scheduledMessage = MessageId.make(`scheduled:${suffix}`);
         yield* orchestrator.dispatch({
           type: "message.dispatch",
@@ -125,7 +131,9 @@ it.effect(
         const bound = yield* store.getThreadProjection(threadId);
         const boundRun = bound.runs.find((run) => run.userMessageId === scheduledMessage)!;
         const boundMessage = bound.messages.find((message) => message.id === scheduledMessage)!;
-        expect(runMemoryPrepareInput({ run: boundRun, message: boundMessage })).toEqual({
+        expect(
+          runMemoryPrepareInput({ run: boundRun, message: boundMessage, projection: bound }),
+        ).toEqual({
           memoryGrantCeiling: ceiling ?? "none",
         });
         expect(boundRun.status).toBe("queued");

@@ -1,9 +1,27 @@
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as ChannelDispatcher from "../channels/ChannelDispatcher.ts";
+import * as ChannelLedger from "../channels/ChannelLedger.ts";
+import * as ChannelRemoteWorkers from "../channels/ChannelRemoteWorkers.ts";
+import * as SlackChannelSettings from "../channels/SlackChannelSettings.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ServerConfig from "../config.ts";
+import * as Path from "effect/Path";
 import * as MemoryToolkitFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
 import * as NetAddress from "effect/net/NetAddress";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@goat/shared/AgentScope";
 import {
+  CommandId,
+  MessageId,
+  TurnItemId,
+  ChannelTaskId,
+  ChannelTaskEventId,
+  ChannelQuestionId,
   EnvironmentId,
   CheckpointScopeId,
   ScheduledTaskId,
@@ -5461,6 +5479,21 @@ it.effect.each(["failure", "interrupt"] as const)(
 // The provider fixture resumes a native thread; run delivery is an explicit milestone.
 const turnStartMemoryCases = [
   { name: "ordinary", kind: "ordinary", ceiling: undefined, expected: "read_write" },
+  { name: "channel reply", kind: "channel", ceiling: undefined, expected: "none" },
+  {
+    name: "usage-limit ordinary",
+    kind: "ordinary",
+    ceiling: undefined,
+    expected: "read_write",
+    continuation: true,
+  },
+  {
+    name: "usage-limit delegated read",
+    kind: "delegated",
+    ceiling: "read",
+    expected: "read",
+    continuation: true,
+  },
   ...(["scheduled", "delegated"] as const).flatMap((kind) =>
     (["none", "read", "read_write"] as const).map(
       (ceiling) =>
@@ -5566,7 +5599,7 @@ it.effect.each(turnStartMemoryCases)(
           attachments: [],
           streaming: false,
           createdBy: testCase.kind === "delegated" ? "agent" : "user",
-          creationSource: "server",
+          creationSource: testCase.kind === "ordinary" ? "web" : "server",
           createdAt: now,
           updatedAt: now,
           ...(testCase.kind === "scheduled"
@@ -5663,6 +5696,215 @@ it.effect.each(turnStartMemoryCases)(
             payload: message,
           });
         yield* sink.write({ events: initialEvents });
+        let startRunId = runId;
+        if ("continuation" in testCase || testCase.kind === "channel") {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const original = { ...run, status: "failed" as const, completedAt: now };
+          const resetAt = DateTime.formatIso(now);
+          const requestId = CommandId.make("memory-recovery-request");
+          const projection = yield* projections.getThreadProjection(threadId);
+          yield* sink.write({
+            commandId: CommandId.make("command:runtime-reconcile:memory-source"),
+            events: [
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "run.updated",
+                payload: original,
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "thread.metadata-updated",
+                payload: {
+                  ...projection.thread,
+                  limitRecovery: { runId, resetAt, autoResume: true, snooze: false, requestId },
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "turn-item.updated",
+                payload: {
+                  id: TurnItemId.make("memory-source-failure"),
+                  type: "error",
+                  threadId,
+                  runId,
+                  nodeId: rootNodeId,
+                  providerThreadId: providerThread.id,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 2,
+                  status: "failed",
+                  title: "Usage limit",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                  failure: {
+                    class: "usage_limit",
+                    message: "Synthetic limit",
+                    code: null,
+                    retryable: null,
+                    resetAt,
+                  },
+                },
+              },
+            ],
+          });
+          if (testCase.kind === "channel") {
+            const taskId = ChannelTaskId.make("memory-channel-task");
+            const dispatcherLayer = ChannelDispatcher.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.mock(ChannelLedger.ChannelLedger)({
+                    getTask: () =>
+                      Effect.succeed({
+                        ownerId: "owner",
+                        pendingAnswerMessageId: undefined,
+                        completionHold: undefined,
+                        task: {
+                          taskId,
+                          worker: { threadId },
+                          target: { projectId: ProjectId.make("project-1") },
+                          requester: {
+                            displayName: "Requester",
+                            runtimeModeCeiling: "full-access",
+                          },
+                        },
+                      } as ChannelLedger.ChannelStoredTask),
+                    completeForward: () => Effect.void,
+                  }),
+                  Layer.mock(ThreadManagement.ThreadManagementService)({
+                    sendToThread: (input) =>
+                      orchestrator
+                        .dispatch({
+                          type: "message.dispatch",
+                          commandId: input.commandId!,
+                          threadId,
+                          messageId: input.messageId,
+                          text: input.text,
+                          attachments: input.attachments,
+                          createdBy: input.createdBy,
+                          creationSource: input.creationSource,
+                          dispatchMode: { type: "queue_after_active" },
+                        })
+                        .pipe(Effect.as({ threadId } as never)),
+                  }),
+                  Layer.mock(ProjectStore.ProjectStoreV2)({}),
+                  Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+                  Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({}),
+                  Layer.mock(ChannelRemoteWorkers.ChannelRemoteWorkers)({}),
+                  Layer.mock(SlackChannelSettings.SlackChannelSettings)({}),
+                  Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+                  settingsLayer,
+                  ServerConfig.layerTest(process.cwd(), { prefix: "memory-channel-" }).pipe(
+                    Layer.provide(NodeServices.layer),
+                  ),
+                  Path.layer,
+                  FileSystem.layerNoop({}),
+                ),
+              ),
+            );
+            yield* Effect.flatMap(ChannelDispatcher.ChannelDispatcher, (dispatcher) =>
+              dispatcher.forward(
+                {
+                  sequence: 1,
+                  event: {
+                    taskId,
+                    eventId: ChannelTaskEventId.make("memory-channel-answer"),
+                    type: "task.question.answered",
+                    payload: { answer: "Continue", questionId: ChannelQuestionId.make("question") },
+                    sequence: 1,
+                    taskVersion: 1,
+                    actor: "user",
+                    occurredAt: DateTime.formatIso(now),
+                  },
+                },
+                "owner",
+              ),
+            ).pipe(Effect.provide(dispatcherLayer));
+          } else {
+            // An invalid public continuation command must not create a run.
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("memory-invalid-recovery"),
+              threadId,
+              messageId: MessageId.make("memory-invalid-recovery"),
+              text: "Continue",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "web",
+              dispatchMode: { type: "start_immediately" },
+              usageLimitContinuationOfRunId: runId,
+              usageLimitRecoveryRequestId: CommandId.make("wrong-request"),
+            });
+            assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 1);
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("memory-valid-recovery"),
+              threadId,
+              messageId: MessageId.make("memory-valid-recovery"),
+              text: "Continue",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "server",
+              dispatchMode: { type: "start_immediately" },
+              usageLimitContinuationOfRunId: runId,
+              usageLimitRecoveryRequestId: requestId,
+            });
+          }
+          const continued = (yield* projections.getThreadProjection(threadId)).runs.at(-1)!;
+          assert.notEqual(continued.id, runId);
+          if (testCase.kind !== "channel")
+            assert.equal(continued.usageLimitContinuationOfRunId, runId);
+          startRunId = continued.id;
+          // Supply the native resume fixture's execution records for the admitted run.
+          yield* sink.write({
+            events: [
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "run.updated",
+                payload: {
+                  ...continued,
+                  providerThreadId: providerThread.id,
+                  rootNodeId: continued.rootNodeId,
+                  activeAttemptId: continued.activeAttemptId,
+                  status: "starting",
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "node.updated",
+                payload: {
+                  ...node,
+                  id: continued.rootNodeId!,
+                  rootNodeId: continued.rootNodeId!,
+                  runId: startRunId,
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "run-attempt.updated",
+                payload: {
+                  ...attempt,
+                  id: continued.activeAttemptId!,
+                  rootNodeId: continued.rootNodeId!,
+                  runId: startRunId,
+                },
+              },
+              {
+                ...eventBase,
+                id: yield* ids.allocate.event({ threadId }),
+                type: "checkpoint-scope.created",
+                payload: { ...checkpoint, nodeId: continued.rootNodeId!, runId: startRunId },
+              },
+            ],
+          });
+        }
         if ("pending" in testCase) {
           yield* manager.prepareMcpSession!({
             threadId,
@@ -5676,7 +5918,8 @@ it.effect.each(turnStartMemoryCases)(
           ...runtimePolicy,
           ...("readOnly" in testCase ? { sandboxPolicy: "read-only" as const } : {}),
         };
-        const startLayer = ProviderTurnStart.layer.pipe(
+        // The replay harness also builds this layer; use the manager under test here.
+        const startLayer = Layer.fresh(ProviderTurnStart.layer).pipe(
           Layer.provide(
             Layer.mergeAll(
               Layer.succeed(EventSink.EventSinkV2, sink),
@@ -5698,7 +5941,7 @@ it.effect.each(turnStartMemoryCases)(
           ),
         );
         const start = Effect.flatMap(ProviderTurnStart.ProviderTurnStartServiceV2, (service) =>
-          service.start({ threadId, runId }),
+          service.start({ threadId, runId: startRunId }),
         ).pipe(Effect.provide(startLayer));
         if ("missingMessage" in testCase) {
           assert.equal((yield* start.pipe(Effect.flip))._tag, "ProviderTurnStartError");
@@ -5722,7 +5965,9 @@ it.effect.each(turnStartMemoryCases)(
             expectedScopes,
           );
           assert.equal(
-            (yield* projections.getThreadProjection(threadId)).runs[0]?.status,
+            (yield* projections.getThreadProjection(threadId)).runs.find(
+              (candidate) => candidate.id === startRunId,
+            )?.status,
             "running",
           );
           assert.equal((yield* Ref.get(state)).openCount, 1);
@@ -5732,6 +5977,29 @@ it.effect.each(turnStartMemoryCases)(
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
+            Layer.effect(
+              Orchestrator.OrchestratorV2,
+              Effect.gen(function* () {
+                return yield* Orchestrator.OrchestratorV2;
+              }),
+            ).pipe(
+              Layer.provide(
+                ProviderReplayHarness.layerWithRegistry(
+                  { name: "memory-start-admission" },
+                  ProviderAdapterRegistry.layerFromAdapters([
+                    {
+                      instanceId: modelSelection.instanceId,
+                      driver: ProviderDriverKind.make("codex"),
+                      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+                      planSelectionTransition: () =>
+                        Effect.succeed({ type: "apply_on_next_turn" as const }),
+                      openSession: () => Effect.die("unused replay provider"),
+                    } as ProviderAdapter.ProviderAdapterV2["Service"],
+                  ]),
+                  { databaseLayer: layerTestDatabase, runEffectWorker: false },
+                ),
+              ),
+            ),
           ),
         ),
       );

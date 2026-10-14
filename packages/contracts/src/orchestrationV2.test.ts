@@ -32,6 +32,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2RunJson,
   OrchestrationV2QuestionEscalation,
   OrchestrationV2QuestionResolution,
   OrchestrationV2AppThread,
@@ -2437,4 +2438,31 @@ describe("WP4 task ceiling propagation codecs", () => {
       });
     }
   });
+});
+
+const decodeMemoryRun = Schema.decodeUnknownSync(OrchestrationV2RunJson);
+const encodeMemoryRun = Schema.encodeSync(OrchestrationV2RunJson);
+it("round-trips usage-limit run ancestry and omits absent ancestry on the wire", () => {
+  const legacy = {
+    id: "run-memory-contract",
+    threadId: "thread-memory-contract",
+    ordinal: 1,
+    providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "test" },
+    providerThreadId: null,
+    userMessageId: "message-memory-contract",
+    rootNodeId: null,
+    activeAttemptId: null,
+    status: "starting",
+    requestedAt: "2026-10-15T00:00:00.000Z",
+    startedAt: null,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+  };
+  expect(encodeMemoryRun(decodeMemoryRun(legacy))).not.toHaveProperty(
+    "usageLimitContinuationOfRunId",
+  );
+  const continuation = { ...legacy, usageLimitContinuationOfRunId: "run-original" };
+  expect(encodeMemoryRun(decodeMemoryRun(continuation))).toEqual(continuation);
 });
