@@ -560,6 +560,23 @@ export type Settlement = {
 };
 const HoldClass = Schema.Literals(["authorization", "protocol", "identity", "availability"]);
 export type MemoryHoldClass = typeof HoldClass.Type;
+const PullRetry = Schema.Struct({
+  version: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2147483647 })),
+  attempts: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 2147483647 })),
+  nextAttemptAt: Schema.Int.check(
+    Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  ),
+  failureCode: Schema.NullOr(M.MemoryFailureCode),
+  holdClass: Schema.NullOr(HoldClass),
+});
+export type PullRetryState = typeof PullRetry.Type;
+const emptyPullRetry: PullRetryState = {
+  version: 0,
+  attempts: 0,
+  nextAttemptAt: 0,
+  failureCode: null,
+  holdClass: null,
+};
 export type WorkHold = {
   holdClass: MemoryHoldClass | null;
   failureCode: M.MemoryFailureCode | null;
@@ -839,6 +856,16 @@ export class MemoryStore extends Context.Service<
       failureCode: M.MemoryFailureCode | null;
       holdClass?: MemoryHoldClass;
     }) => InTx<boolean>;
+    readonly readPullRetry: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+    }) => Effect.Effect<PullRetryState, MemoryStorageError>;
+    readonly writePullRetryTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+      expectedVersion: number;
+      retry: Omit<PullRetryState, "version">;
+    }) => InTx<PullRetryState | null>;
     readonly readWorkHold: (workId: string) => Effect.Effect<WorkHold | null, MemoryStorageError>;
     readonly rearmSyncHoldsTx: (input: {
       memorySpaceId: M.MemorySpaceId;
@@ -5574,6 +5601,41 @@ const make = Effect.gen(function* () {
     );
     return rows.length === 1;
   });
+  const readPullRetry: MemoryStore["Service"]["readPullRetry"] = Effect.fn(
+    "MemoryStore.readPullRetry",
+  )(function* (input) {
+    const rows = yield* stored(
+      "pull-retry",
+      sql<{
+        pull_retry_json: string | null;
+      }>`SELECT pull_retry_json FROM memory_sync_cursors WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId}`,
+    );
+    return rows[0]?.pull_retry_json
+      ? yield* codec(PullRetry).decode(rows[0].pull_retry_json, strict)
+      : emptyPullRetry;
+  });
+  const writePullRetryTx: MemoryStore["Service"]["writePullRetryTx"] = Effect.fn(
+    "MemoryStore.writePullRetryTx",
+  )(function* (input) {
+    yield* Transaction;
+    const current = yield* readPullRetry(input);
+    if (current.version !== input.expectedVersion) return null;
+    if (
+      (input.retry.nextAttemptAt === Number.MAX_SAFE_INTEGER) !==
+      (input.retry.holdClass !== null)
+    )
+      return yield* new MemoryStoreConflict({ code: "invalid_output" });
+    const next = { ...input.retry, version: current.version + 1 };
+    const json = yield* codec(PullRetry).encode(next);
+    const rows = yield* stored(
+      "pull-retry-write",
+      sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state,pull_retry_json)
+      VALUES (${input.memorySpaceId},${input.hubEnvironmentId},0,'unbound',${json})
+      ON CONFLICT(space,hub_environment_id) DO UPDATE SET pull_retry_json=excluded.pull_retry_json
+      WHERE coalesce(json_extract(memory_sync_cursors.pull_retry_json,'$.version'),0)=${input.expectedVersion} RETURNING space`,
+    );
+    return rows.length === 1 ? next : null;
+  });
   const readWorkHold: MemoryStore["Service"]["readWorkHold"] = Effect.fn(
     "MemoryStore.readWorkHold",
   )(function* (workId) {
@@ -8290,6 +8352,8 @@ const make = Effect.gen(function* () {
     acquireSyncWorkTx,
     retrySyncWorkTx,
     readWorkHold,
+    readPullRetry,
+    writePullRetryTx,
     rearmSyncHoldsTx,
     prepareClaimAttemptTx,
     readRecoverableResolutionTickets,

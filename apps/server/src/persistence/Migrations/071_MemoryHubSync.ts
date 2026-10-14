@@ -49,6 +49,7 @@ export default Effect.gen(function* () {
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN hold_class TEXT CHECK(hold_class IN ('authorization','protocol','identity','availability'))`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN failure_code TEXT CHECK(length(failure_code)<=64)`;
 
+  yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN pull_retry_json TEXT CHECK(length(CAST(pull_retry_json AS BLOB))<=512)`;
   yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN checkpoint_page_count INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_page_count>=0)`;
   yield* sql`ALTER TABLE memory_payloads ADD COLUMN checkpoint_stage_id TEXT`;
   yield* sql`UPDATE memory_sync_cursors SET checkpoint_page_count=(SELECT count(*) FROM memory_inbox_pending p WHERE p.space=memory_sync_cursors.space AND p.checkpoint_id=memory_sync_cursors.checkpoint_id AND p.record_kind='checkpoint')`;
@@ -259,6 +260,7 @@ export default Effect.gen(function* () {
     ["memory_hub_members", "space", "space,environment,credential_digest,status"],
     ["memory_hub_leases", "space", "lease_json"],
     ["memory_hub_source_reads", "space", "locator_json,request_digest,response_digest"],
+    ["memory_sync_cursors", "space", "pull_retry_json"],
   ] as const;
   for (const [table, spaceColumn, columns] of snapshotByteBounds) {
     const rawBytes = (prefix: string) =>

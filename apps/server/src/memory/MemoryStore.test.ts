@@ -5086,3 +5086,71 @@ it.effect("rearms only the persisted sync hold class and fences the old owner", 
     assert.strictEqual((yield* fresh.readEligibleOutbox(space, 2, 100)).length, 1);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("pull bootstrap retry survives restart with version CAS and untouched cursor", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const key = { memorySpaceId: space, hubEnvironmentId: env };
+    assert.deepStrictEqual(yield* store.readPullRetry(key), {
+      version: 0,
+      attempts: 0,
+      nextAttemptAt: 0,
+      failureCode: null,
+      holdClass: null,
+    });
+    yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state,snapshot_token,checkpoint_cursor) VALUES (${space},${env},9,'staging','original-token','original-cursor')`;
+    const retry = {
+      attempts: 3,
+      nextAttemptAt: 12345,
+      failureCode: "unavailable" as const,
+      holdClass: null,
+    };
+    const first = yield* store.transact(
+      store.writePullRetryTx({ ...key, expectedVersion: 0, retry }),
+    );
+    assert.deepStrictEqual(first, { ...retry, version: 1 });
+    const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+      Effect.provide(Layer.fresh(Store.layer)),
+    );
+    assert.deepStrictEqual(yield* fresh.readPullRetry(key), first);
+    assert.isNull(
+      yield* fresh.transact(fresh.writePullRetryTx({ ...key, expectedVersion: 0, retry })),
+    );
+    const held = {
+      attempts: 4,
+      nextAttemptAt: Number.MAX_SAFE_INTEGER,
+      failureCode: "identity_mismatch" as const,
+      holdClass: "identity" as const,
+    };
+    yield* fresh
+      .transact(
+        Effect.gen(function* () {
+          yield* fresh.writePullRetryTx({ ...key, expectedVersion: 1, retry: held });
+          return yield* Effect.fail("rollback");
+        }),
+      )
+      .pipe(Effect.exit);
+    assert.deepStrictEqual(yield* fresh.readPullRetry(key), first);
+    yield* fresh.transact(fresh.writePullRetryTx({ ...key, expectedVersion: 1, retry: held }));
+    assert.strictEqual((yield* fresh.readPullRetry(key)).nextAttemptAt, Number.MAX_SAFE_INTEGER);
+    const cursor = yield* sql<{
+      after_sequence: number;
+      snapshot_token: string;
+      checkpoint_cursor: string;
+    }>`SELECT after_sequence,snapshot_token,checkpoint_cursor FROM memory_sync_cursors WHERE space=${space} AND hub_environment_id=${env}`;
+    assert.deepStrictEqual(cursor[0], {
+      after_sequence: 9,
+      snapshot_token: "original-token",
+      checkpoint_cursor: "original-cursor",
+    });
+    yield* fresh.transact(
+      fresh.writePullRetryTx({
+        ...key,
+        expectedVersion: 2,
+        retry: { attempts: 0, nextAttemptAt: 0, failureCode: null, holdClass: null },
+      }),
+    );
+    assert.strictEqual((yield* fresh.readPullRetry(key)).version, 3);
+  }).pipe(Effect.provide(live)),
+);
