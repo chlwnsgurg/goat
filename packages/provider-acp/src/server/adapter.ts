@@ -60,6 +60,7 @@ import { formatReadToolLabel, formatSearchToolLabel } from "@goat/shared/toolAct
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { makeAcpMcpOverAcpBridge, type AcpMcpOverAcpBridge } from "./mcpOverAcpBridge.ts";
 import { mcpToolPresentation } from "@goat/provider-core/server/mcpToolPresentation";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
 import {
@@ -7160,7 +7161,46 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               return;
             }
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
-            yield* runtime.prompt({ prompt: promptParts!.prompt }).pipe(
+            const prompt = yield* Effect.gen(function* () {
+              const snapshot =
+                isAppOwnedWakeTurn ||
+                (flavor.supportsCompaction === true &&
+                  turnInput.message.text.trim() === "/compact" &&
+                  turnInput.message.attachments.length === 0)
+                  ? undefined
+                  : turnInput.refreshMemoryContext
+                    ? yield* turnInput.refreshMemoryContext()
+                    : turnInput.memoryContext;
+              const memory =
+                snapshot === undefined
+                  ? undefined
+                  : yield* Effect.try({
+                      try: () => MemoryContext.memoryContextText(snapshot),
+                      catch: () =>
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver,
+                          detail: "Invalid memory context frame",
+                        }),
+                    });
+              const config = yield* mcpSessions.read(turnInput.threadId);
+              // Only the attachment installed on this native session can advertise tools.
+              const attached = terminalEnvironmentBySessionId.get(requestedSessionId);
+              const availability = McpProviderSession.memoryToolAvailability(
+                config !== undefined &&
+                  attached?.GOAT_ACP_MCP_AUTHORIZATION === config.authorizationHeader
+                  ? config
+                  : undefined,
+              );
+              return [
+                ...promptParts!.prompt,
+                {
+                  type: "text" as const,
+                  text: `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+                },
+                ...(memory === undefined ? [] : [{ type: "text" as const, text: memory }]),
+              ];
+            }).pipe(Effect.tapError(() => finalizeTurn(context, "failed")));
+            yield* runtime.prompt({ prompt }).pipe(
               Effect.tap(() =>
                 Ref.update(promptInstructionStates, (current) => {
                   if (promptParts?.instructionState === undefined) return current;

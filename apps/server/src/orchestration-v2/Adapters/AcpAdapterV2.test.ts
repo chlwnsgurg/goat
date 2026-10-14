@@ -14358,3 +14358,9 @@ describe("acpPostSettleMonitorPromptShouldSuppress", () => {
     );
   });
 });
+
+import { acpMemoryDelivery } from "./memoryDelivery.testkit.ts";
+
+it.live.each([true, false])("WP4 memory delivery acp attached=%s", (attached) =>
+  acpMemoryDelivery("acp", attached),
+);
