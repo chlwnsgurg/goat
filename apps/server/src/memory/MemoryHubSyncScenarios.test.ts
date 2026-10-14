@@ -153,6 +153,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     let pullFault: "failure" | "budget" | null = null;
     let pullCalls = 0;
     let budgetOperation: Extract<M.MemoryOperation, { kind: "upsert" }> | null = null;
+    const sourceResponses: M.MemorySourceReadOutcome[] = [];
     const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
     let sourceAfterResultGate: Deferred.Deferred<void> | null = null;
     let sourceResultGate: Deferred.Deferred<void> | null = null;
@@ -308,7 +309,15 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
                 yield* Deferred.succeed(sourceSendEntered, undefined);
                 yield* Deferred.await(sourceSendGate);
               }
-              return yield* client.respondSourceRead(connection, input, prepare);
+              if (!prepare && input.kind === "normal") sourceResponses.push(input.outcome);
+              const observedPrepare = prepare?.pipe(
+                Effect.tap((prepared) =>
+                  Effect.sync(() => {
+                    if (prepared.kind === "normal") sourceResponses.push(prepared.outcome);
+                  }),
+                ),
+              );
+              return yield* client.respondSourceRead(connection, input, observedPrepare);
             }).pipe(
               Effect.map((result) =>
                 sourceAckFault && result.kind === "revoke"
@@ -456,6 +465,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         observePull = true;
       },
       sourcePolicy,
+      sourceResponses,
       sourceSendEntered,
       blockSourceSend: (gate: Deferred.Deferred<void>) => {
         sourceSendGate = gate;
@@ -1562,6 +1572,9 @@ it.effect.each(["deleted thread", "pending forget"] as const)(
       yield* Deferred.succeed(resultGate, undefined);
       const outcome = yield* Fiber.join(read);
       assert.notStrictEqual(outcome.kind, "available");
+      assert.strictEqual(c.owner.sourceResponses.length, 1);
+      assert.notStrictEqual(c.owner.sourceResponses[0]?.kind, "available");
+      assert.isFalse(JSON.stringify(c.owner.sourceResponses).includes("synthetic original"));
       assert.isFalse(JSON.stringify(outcome).includes("synthetic original"));
     }).pipe(Effect.provide(NodeServices.layer)),
 );
