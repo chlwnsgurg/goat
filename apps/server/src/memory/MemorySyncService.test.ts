@@ -2389,3 +2389,134 @@ it.effect("intent binding is rechecked inside commit and rejects a changed space
     }).pipe(Effect.provide(fixture())),
   ),
 );
+
+it.effect("ticketless definitive refusal rotates the frozen attempt but uncertainty does not", () =>
+  Effect.gen(function* () {
+    const claims: M.MemoryHubClaimInput[] = [];
+    let code: M.MemoryFailureCode = "conflict_changed";
+    const client = peer({
+      claim: (_c, input) =>
+        Effect.sync(() => {
+          claims.push(input);
+        }).pipe(Effect.andThen(Effect.suspend(() => Effect.fail(new M.MemoryHubError({ code }))))),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        code = "unavailable";
+        yield* TestClock.adjust("30 seconds");
+        yield* sync.syncOnce;
+        assert.strictEqual(claims.length, 2);
+        assert.notStrictEqual(claims[1]!.attemptId, claims[0]!.attemptId);
+        yield* TestClock.adjust("30 seconds");
+        yield* sync.syncOnce;
+        assert.strictEqual(claims.length, 3);
+        assert.deepStrictEqual(claims[2], claims[1]);
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(client))),
+    );
+  }),
+);
+
+it.effect.each(["rejected", "uncertain"] as const)(
+  "%s apply preserves its retirement contract and new-conflict discovery",
+  (outcome) =>
+    Effect.gen(function* () {
+      const released = yield* Deferred.make<void>();
+      const second = yield* Deferred.make<void>();
+      let generations = 0;
+      let submitted: M.MemoryHubApplyResolutionInput | undefined;
+      const client = peer({
+        applyResolution: (_c, input) =>
+          Effect.gen(function* () {
+            submitted = input;
+            if (outcome === "uncertain")
+              return yield* new M.MemoryHubError({ code: "unavailable" });
+            return {
+              operationId: input.operation.operationId,
+              memoryId: input.operation.memoryId,
+              operationDigest: memoryOperationDigest(input.operation),
+              hubSequence: null,
+              outcome: "rejected" as const,
+              failureCode: "conflict_changed" as const,
+            };
+          }),
+        release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.gen(function* () {
+            generations++;
+            if (generations === 2) {
+              yield* Deferred.succeed(second, undefined);
+              return yield* Effect.never;
+            }
+            return {
+              result: {
+                text: "synthetic resolution",
+                evidence: [],
+                assertionKind: "inference" as const,
+                judgment: "synthetic judgment",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: local,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          yield* sync.syncOnce;
+          yield* Deferred.await(released);
+          yield* sync.shutdown;
+          const saved = yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 0,
+            limit: 100,
+          });
+          if (outcome === "rejected") {
+            assert.strictEqual(saved.length, 0);
+            assert.isNull(
+              yield* store.findClaimCandidate({
+                memorySpaceId: space,
+                attemptId: submitted!.attemptId,
+              }),
+            );
+          } else {
+            assert.deepStrictEqual(saved[0]?.submission, submitted);
+            assert.isNotNull(
+              yield* store.findClaimCandidate({
+                memorySpaceId: space,
+                attemptId: submitted!.attemptId,
+              }),
+            );
+          }
+          const other = yield* conflict(2);
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              yield* Deferred.await(second);
+              assert.strictEqual(generations, 2);
+              assert.strictEqual(
+                (yield* store.readResolutionSnapshot(space, other)).status,
+                "quarantined",
+              );
+              yield* restarted.shutdown;
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);

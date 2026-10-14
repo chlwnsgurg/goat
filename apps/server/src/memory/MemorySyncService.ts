@@ -128,6 +128,21 @@ const failureCode = (e: Error): M.MemoryFailureCode =>
       : e._tag === "MemoryCapacityError"
         ? "capacity_exceeded"
         : e.code;
+const holdClass = (e: Error): Store.MemoryHoldClass =>
+  e._tag === "MemoryHubUnauthorizedError" ||
+  e._tag === "MemoryHubForbiddenError" ||
+  failureCode(e) === "route_unavailable"
+    ? "authorization"
+    : ["identity_mismatch", "space_mismatch"].includes(failureCode(e))
+      ? "identity"
+      : [
+            "unsupported_protocol",
+            "unsupported_operation",
+            "invalid_output",
+            "invalid_cursor",
+          ].includes(failureCode(e))
+        ? "protocol"
+        : "availability";
 const transient = (e: Error) =>
   e._tag === "MemoryHubError" && ["unavailable", "storage_failed"].includes(e.code);
 
@@ -1098,6 +1113,7 @@ const make = Effect.gen(function* () {
               ? time + Math.min(30000, 1000 * 2 ** Math.min(candidate.work.attempt, 5))
               : Number.MAX_SAFE_INTEGER,
             failureCode: failureCode(result.failure),
+            ...(transient(result.failure) ? {} : { holdClass: holdClass(result.failure) }),
           }),
         );
       }
