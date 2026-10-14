@@ -169,19 +169,21 @@ const withInstructions = (
       ].includes(String(entry.frame.type)),
   );
   if (
-    entries.some(
-      (entry) =>
-        entry.type === "expect_outbound" &&
-        typeof entry.frame === "object" &&
-        entry.frame !== null &&
-        "type" in entry.frame &&
-        entry.frame.type === "session.instructions.entry.put" &&
-        "input" in entry.frame &&
-        typeof entry.frame.input === "object" &&
-        entry.frame.input !== null &&
-        "key" in entry.frame.input &&
-        entry.frame.input.key === "goat",
-    )
+    entries
+      .slice(0, first)
+      .some(
+        (entry) =>
+          entry.type === "expect_outbound" &&
+          typeof entry.frame === "object" &&
+          entry.frame !== null &&
+          "type" in entry.frame &&
+          entry.frame.type === "session.instructions.entry.put" &&
+          "input" in entry.frame &&
+          typeof entry.frame.input === "object" &&
+          entry.frame.input !== null &&
+          "key" in entry.frame.input &&
+          entry.frame.input.key === "goat",
+      )
   )
     return entries;
   // T3's MCP server is added before the entry that describes it.
@@ -493,6 +495,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
   it.effect.each([false, true])("WP4 OpenCode v2 grant transitions external=%s", (external) =>
     Effect.gen(function* () {
       const sessions = yield* McpProviderSessions.McpProviderSessions;
+      yield* Effect.addFinalizer(() => sessions.clear(threadId));
       const grants: ReadonlyArray<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>> = [
         ["memory:read", "memory:write", "orchestration:read"],
         [],
@@ -509,13 +512,14 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         browserToolsAvailable: false,
       };
       yield* sessions.set({ ...config, grantedScopes: grants[0]! });
+      const serverName = yield* goatMcpServerName(threadId).pipe(Effect.provide(NodeCrypto.layer));
       const values: string[] = [];
       const systems: string[] = [];
       const entries: ProviderReplayEntry[] = [];
       if (!external)
         entries.push(
           out("mcp.add", {
-            server: goatMcpServerName(threadId),
+            server: serverName,
             config: {
               type: "remote",
               url: config.endpoint,
@@ -543,7 +547,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       }
       if (!external)
         entries.push(
-          out("mcp.remove", { server: goatMcpServerName(threadId), "location[directory]": WORK }),
+          out("mcp.remove", { server: serverName, "location[directory]": WORK }),
           reply("mcp.remove", null),
         );
       const { runtime, thread } = yield* resumed(entries, {
