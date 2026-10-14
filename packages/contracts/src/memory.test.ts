@@ -435,6 +435,48 @@ describe("memory sync and views", () => {
     });
     expect(M.validateMemoryCheckpointRecords([p])).toBe(true);
   });
+  it("round-trips forget-created identities and body-free refusal-only checkpoints", () => {
+    const deleted = {
+      ...compact,
+      operationKind: "forget",
+      revisionId: null,
+      receipt: { ...receipt, outcome: "deleted" },
+    };
+    const forgotten = round(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      revisions: [],
+      items: [],
+      tombstones: [tombstone],
+      compactReceipts: [deleted],
+    });
+    expect(M.validateMemoryCheckpointRecords([forgotten])).toBe(true);
+    const refusal = round(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      identities: [],
+      fences: [],
+      revisions: [],
+      items: [],
+      compactReceipts: [
+        {
+          ...compact,
+          revisionId: null,
+          receipt: { ...receipt, outcome: "rejected", failureCode: "identity_mismatch" },
+        },
+      ],
+    });
+    expect(M.validateMemoryCheckpointRecords([refusal])).toBe(true);
+    expect(M.validateMemoryCheckpointRecords([{ ...forgotten, tombstones: [] }])).toBe(false);
+    expect(
+      M.validateMemoryCheckpointRecords([
+        decode(M.MemoryHubCheckpointPage, { ...checkpoint, identities: [], fences: [] }),
+      ]),
+    ).toBe(false);
+    expect(
+      M.validateMemoryCheckpointRecords([
+        { ...refusal, compactReceipts: [decode(M.MemoryCompactReceipt, compact)] },
+      ]),
+    ).toBe(false);
+  });
   it("preserves original digest outcome and report retry identities", () => {
     expect(round(M.MemoryCompactReceipt, compact).receipt).toEqual(receipt);
     rejects(M.MemoryCompactReceipt, {
@@ -487,7 +529,16 @@ describe("memory sync and views", () => {
     const resolveReceipt = {
       ...compact,
       operationKind: "resolve",
-      receipt: { ...receipt, operationId: id(12), hubSequence: 2 },
+      receipt: {
+        ...receipt,
+        operationId: id(12),
+        hubSequence: 2,
+        resolutionApproval: {
+          resolutionId: id(7),
+          appliedAtUtc: now,
+          revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+        },
+      },
       revisionId: id(3),
       resolutionId: id(7),
       attemptId: id(13),
@@ -559,10 +610,11 @@ describe("memory sync and views", () => {
         ]),
       ).toBe(false);
     }
+    const { resolutionApproval: _approval, ...withoutApproval } = resolveReceipt.receipt;
     const rejectedAttempt = {
       ...resolveReceipt,
       receipt: {
-        ...resolveReceipt.receipt,
+        ...withoutApproval,
         operationId: id(30),
         outcome: "rejected",
         failureCode: "fenced",
@@ -723,7 +775,9 @@ describe("memory sync and views", () => {
       highWatermark: 1,
       throughSequence: 1,
       hasMore: false,
-      entries: [{ kind: "metadata", hubSequence: 1, receipt, memoryId: id(2) }],
+      entries: [
+        { kind: "metadata", operationKind: "upsert", hubSequence: 1, receipt, memoryId: id(2) },
+      ],
       checkpoint,
     });
   });
@@ -1280,7 +1334,16 @@ it("preserves well-formed report guard digests after detail purge for server ver
   const resolveReceipt = {
     ...compact,
     operationKind: "resolve",
-    receipt: { ...receipt, operationId: id(12), hubSequence: 2 },
+    receipt: {
+      ...receipt,
+      operationId: id(12),
+      hubSequence: 2,
+      resolutionApproval: {
+        resolutionId: id(7),
+        appliedAtUtc: now,
+        revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+      },
+    },
     revisionId: id(3),
     resolutionId: id(7),
     attemptId: id(13),
@@ -1473,5 +1536,91 @@ describe("pending forget contracts", () => {
     round(M.MemoryItem, JSON.parse(JSON.stringify(received)));
     rejects(M.MemoryItem, { ...item, payload });
     rejects(M.MemoryItem, { ...item, revision });
+  });
+});
+
+describe("authoritative resolution approvals", () => {
+  const approval = {
+    resolutionId: id(7),
+    appliedAtUtc: now,
+    revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+  };
+  const accepted = { ...receipt, resolutionApproval: approval };
+  const metadata = {
+    kind: "metadata",
+    operationKind: "resolve",
+    resolutionId: id(7),
+    memoryId: id(2),
+    hubSequence: 1,
+    receipt: accepted,
+  };
+  it("validates purged resolve metadata independently of bodies", () => {
+    round(M.MemoryHubEntry, metadata);
+    rejects(M.MemoryHubEntry, { ...metadata, receipt });
+    rejects(M.MemoryHubEntry, { ...metadata, resolutionId: id(9) });
+    rejects(M.MemoryHubEntry, { ...metadata, operationKind: "upsert" });
+    rejects(M.MemoryHubEntry, { ...metadata, operationKind: "revert" });
+    rejects(M.MemoryHubEntry, { ...metadata, receipt: { ...accepted, outcome: "deleted" } });
+    rejects(M.MemoryHubReceipt, { ...accepted, outcome: "rejected", failureCode: "fenced" });
+  });
+  it("accepts optional metadata compact guards and rejects inconsistent receipt identity or approval", () => {
+    const compact = {
+      memorySpaceId: id(),
+      originEnvironmentId: "fixture",
+      operationKind: "resolve",
+      receipt: accepted,
+      revisionId: id(4),
+      resolutionId: id(7),
+      revertsResolutionId: null,
+      attemptId: id(3),
+      fencingToken: 1,
+      reportGuard: {
+        reportId: "a".repeat(64),
+        resolvingEnvironmentId: "fixture",
+        resolutionId: id(7),
+        outcome: "resolved",
+      },
+    };
+    round(M.MemoryHubEntry, { ...metadata, compactReceipt: compact });
+    round(M.MemoryHubEntry, metadata);
+    for (const change of [
+      { operationId: id(9) },
+      { memoryId: id(9) },
+      { operationDigest: "b".repeat(64) },
+      { outcome: "conflicted" },
+      { hubSequence: 2 },
+      {
+        resolutionApproval: {
+          ...approval,
+          appliedAtUtc: "2026-10-15T00:00:00.000Z",
+          revertDeadlineUtc: "2026-11-14T00:00:00.000Z",
+        },
+      },
+    ])
+      rejects(M.MemoryHubEntry, {
+        ...metadata,
+        compactReceipt: { ...compact, receipt: { ...accepted, ...change } },
+      });
+    rejects(M.MemoryHubEntry, {
+      ...metadata,
+      compactReceipt: {
+        ...compact,
+        operationKind: "revert",
+        attemptId: null,
+        fencingToken: null,
+        revertsResolutionId: id(7),
+        reportGuard: { ...compact.reportGuard, outcome: "reverted" },
+      },
+    });
+    rejects(M.MemoryHubEntry, { ...metadata, compactReceipt: { ...compact, resolutionId: id(9) } });
+  });
+  it("requires exactly thirty days only at the approval boundary", () => {
+    round(M.MemoryResolutionApproval, approval);
+    rejects(M.MemoryResolutionApproval, {
+      ...approval,
+      revertDeadlineUtc: "2026-11-13T00:00:00.001Z",
+    });
+    rejects(M.MemoryResolutionApproval, { ...approval, extra: true });
+    round(M.MemoryResolution, { ...resolution, revertDeadlineUtc: "2026-10-15T00:00:00.000Z" });
   });
 });

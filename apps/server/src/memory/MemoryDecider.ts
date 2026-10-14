@@ -30,6 +30,7 @@ export function decideMemoryOperation(
   scan: MemoryScanResult | undefined,
   approval?: M.MemoryHubReceipt,
   ancestry?: MemoryAncestry,
+  hubNow?: number,
 ): MemoryDecision {
   const digest = memoryOperationDigest(operation); // strict encoding rejects extra nested fields
   if (current.memoryId !== operation.memoryId || current.memorySpaceId !== operation.memorySpaceId)
@@ -44,6 +45,16 @@ export function decideMemoryOperation(
       approval.hubSequence === null)
   )
     fail("identity_mismatch");
+  if (
+    replica &&
+    approval &&
+    !M.validateMemoryResolutionApproval(
+      operation.kind,
+      operation.kind === "resolve" ? operation.resolution.resolutionId : null,
+      approval,
+    )
+  )
+    fail("unsupported_protocol");
   const base: MemoryDecision = {
     operation,
     operationDigest: digest,
@@ -103,7 +114,12 @@ export function decideMemoryOperation(
   const existing = revisions.get(r.revisionId);
   if (existing && JSON.stringify(existing) !== JSON.stringify(r)) fail("identity_mismatch");
   if (r.parents.includes(r.revisionId)) fail("identity_mismatch");
-  if (r.parents.length === 0 && current.identity) fail("revision_changed");
+  if (
+    r.parents.length === 0 &&
+    current.identity &&
+    current.identity.createOperationId !== operation.operationId
+  )
+    fail("revision_changed");
   if (ancestry?.parents.some((parent) => parent.status === "crossMemory"))
     fail("identity_mismatch");
   const compacted = new Set(
@@ -113,7 +129,11 @@ export function decideMemoryOperation(
   );
   if (!replica && compacted.size) fail("base_compacted");
   const missing = r.parents.filter((id) => !revisions.has(id) && !compacted.has(id));
-  if (!replica && !sameSet(current.heads, operation.expectedHeads) && missing.length === 0)
+  if (
+    admission.kind === "localIntent" &&
+    !sameSet(current.heads, operation.expectedHeads) &&
+    missing.length === 0
+  )
     fail("revision_changed");
   if (operation.kind === "resolve" && !replica) {
     if (!sameSet(current.heads, operation.resolution.inputRevisionIds)) fail("conflict_changed");
@@ -124,8 +144,8 @@ export function decideMemoryOperation(
       current.fence?.highestFencingToken !== operation.fencingToken
     )
       fail("fenced");
-    if (Date.parse(lease.expiresAtHubTime) <= Date.parse(operation.resolution.appliedAtUtc))
-      fail("lease_expired");
+    if (hubNow === undefined) fail("lease_required");
+    if (Date.parse(lease.expiresAtHubTime) <= hubNow) fail("lease_expired");
     if (lease.conflictId !== operation.conflictId || !sameSet(lease.conflictHeadSet, current.heads))
       fail("conflict_changed");
   }
@@ -139,8 +159,8 @@ export function decideMemoryOperation(
       !resolution.inputRevisionIds.includes(operation.restoredRevisionId)
     )
       fail("revision_changed");
-    if (Date.parse(r.createdAtUtc) >= Date.parse(resolution.revertDeadlineUtc))
-      fail("revert_expired");
+    if (hubNow === undefined) fail("lease_required");
+    if (hubNow >= Date.parse(resolution.revertDeadlineUtc)) fail("revert_expired");
     const original = current.revisions.find(
       (pair) => pair.revision.revisionId === operation.restoredRevisionId,
     )?.payload;
@@ -154,7 +174,7 @@ export function decideMemoryOperation(
       scope: r.scope,
       status: "blocked",
       failureCode: "missing_parent",
-      pendingSync: !replica,
+      pendingSync: admission.kind === "localIntent",
       localAvailability: {
         exposure: "held",
         reasons: ["missing_parent"],
@@ -227,7 +247,7 @@ export function decideMemoryOperation(
         scope: r.scope,
         status: "quarantined",
         conflict,
-        pendingSync: !replica,
+        pendingSync: admission.kind === "localIntent",
         localAvailability: { ...availability, exposure: "held", reasons: ["conflicted"] },
       },
     };
@@ -248,7 +268,7 @@ export function decideMemoryOperation(
       status: "active",
       revision: selected.revision,
       payload: selected.payload,
-      pendingSync: !replica,
+      pendingSync: admission.kind === "localIntent",
       localAvailability: availability,
     },
   };
