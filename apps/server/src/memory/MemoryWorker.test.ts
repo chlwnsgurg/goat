@@ -57,6 +57,7 @@ const live = (
   failure = false,
   onInput?: (input: M.GenerateMemorySummaryInput) => void,
   local = false,
+  elapsedPerCallMs = 0,
 ) =>
   Worker.layer.pipe(
     Layer.provideMerge(service),
@@ -79,7 +80,7 @@ const live = (
       Layer.mock(Generation.TextGeneration)({
         generateMemorySummary: (input) => {
           onInput?.(input);
-          return failure
+          const result = failure
             ? Effect.fail(
                 new M.TextGenerationError({
                   operation: "generateMemorySummary",
@@ -94,11 +95,11 @@ const live = (
                   ]
                     .filter(Boolean)
                     .join(" "),
-                  assertionKind: "inference",
+                  assertionKind: "inference" as const,
                   evidence: [
                     ...(input.previousSummary?.evidence ?? []),
                     {
-                      origin: "thread",
+                      origin: "thread" as const,
                       sourceThread: input.sourceThread,
                       watermark: input.sourceWatermark,
                       messageIds: input.messages.map((m) => m.messageId),
@@ -113,6 +114,9 @@ const live = (
                   environmentId,
                 },
               });
+          return elapsedPerCallMs
+            ? TestClock.adjust(elapsedPerCallMs).pipe(Effect.andThen(result))
+            : result;
         },
       }),
     ),
@@ -564,6 +568,56 @@ describe("MemoryWorker", () => {
         assert.isTrue(evidenceIds.has(M.MessageId.make("survivor")));
         assert.strictEqual(evidenceIds.size, 102);
       }).pipe(Effect.provide(live(false, (input) => inputs.push(input), local)));
+    },
+  );
+  it.effect.each([false, true])(
+    "keeps its claim across a summary that outlasts the claim deadline (local=%s)",
+    (local) => {
+      const inputs: M.GenerateMemorySummaryInput[] = [];
+      return Effect.gen(function* () {
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const worker = yield* Worker.MemoryWorker;
+        const store = yield* Store.MemoryStore;
+        const row = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+        const message = yield* decodeMessage(row.payload_json);
+        // 151 messages before the terminal run need two bounded chunks for one summary.
+        yield* sql`UPDATE orchestration_events SET sequence=200 WHERE sequence=2`;
+        for (let index = 0; index < 150; index++) {
+          yield* sql`INSERT INTO orchestration_events VALUES (${index + 2},${id(3000 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`long-${index}`), runId: null })},${now},2,'thread')`;
+        }
+        // The hook reads 100 events per sweep; the extra sweep would reclaim a lapsed claim.
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        // Two 400s provider calls outlast the 600s claim, so each call must renew it.
+        assert.strictEqual(inputs.length, 2);
+        assert.isUndefined(inputs[0]!.previousSummary);
+        assert.isDefined(inputs[1]!.previousSummary);
+        const seen = inputs.flatMap((input) => input.messages.map((m) => m.messageId));
+        assert.strictEqual(seen.length, 151);
+        assert.strictEqual(new Set(seen).size, seen.length);
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='summary' AND status!='completed'`)
+            .length,
+          0,
+        );
+        const summaryId = M.MemoryId.make(
+          Service.memoryStableUuid(`${environmentId}:${threadId}:summary`),
+        );
+        const aggregate = local ? undefined : yield* store.loadAggregate(space, summaryId);
+        const final = local
+          ? yield* store.readLocalSummaryPayload(
+              environmentId,
+              `${environmentId}:${threadId}:summary`,
+            )
+          : aggregate?.revisions.find((pair) => pair.revision.revisionId === aggregate.heads[0])
+              ?.payload;
+        if (!final) throw new Error("Missing summary");
+        assert.include(final.text, "long-149");
+      }).pipe(Effect.provide(live(false, (input) => inputs.push(input), local, 400000)));
     },
   );
   it.effect("revisits consolidation at exactly 24 hours after extracting turns", () =>

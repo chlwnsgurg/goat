@@ -496,6 +496,12 @@ export class MemoryStore extends Context.Service<
       work: MemoryWork,
       nextAttemptAt: number,
     ) => Effect.Effect<boolean, MemoryStorageError>;
+    /** Extends a live claim held by the same owner and attempt; undefined once it lapsed or moved. */
+    readonly renewWork: (
+      work: MemoryWork,
+      now: number,
+      until: number,
+    ) => Effect.Effect<MemoryWork | undefined, MemoryStorageError>;
     readonly cancelThreadWork: (
       thread: M.ScopedThreadRef,
     ) => Effect.Effect<number, MemoryStorageError>;
@@ -1856,6 +1862,19 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_outbox SET status='retry',next_attempt_at=${nextAttemptAt},claimed_by=NULL,claimed_until=NULL WHERE id=${work.id} AND kind NOT IN ('claim','resolve','revert_intent') AND status='running' AND claimed_by=${work.claimedBy} AND claimed_until=${work.claimedUntil} AND attempt=${work.attempt} RETURNING id`,
     );
     return rows.length === 1;
+  });
+  const renewWork = Effect.fn("MemoryStore.renewWork")(function* (
+    work: MemoryWork,
+    now: number,
+    until: number,
+  ) {
+    if (work.status !== "running" || work.claimedBy === null || work.claimedUntil === null)
+      return undefined;
+    const rows = yield* stored(
+      "renew-work",
+      sql`UPDATE memory_outbox SET claimed_until=${until} WHERE id=${work.id} AND kind IN ('summary','consolidate','rebuild') AND status='running' AND claimed_by=${work.claimedBy} AND claimed_until=${work.claimedUntil} AND attempt=${work.attempt} AND claimed_until>${now} RETURNING id`,
+    );
+    return rows.length === 1 ? { ...work, claimedUntil: until } : undefined;
   });
   const cancelThreadWork = Effect.fn("MemoryStore.cancelThreadWork")(function* (
     input: M.ScopedThreadRef,
@@ -4109,6 +4128,7 @@ const make = Effect.gen(function* () {
     dueWork,
     readWork,
     retryWork,
+    renewWork,
     readThreadHookWatermark,
     cancelThreadWork,
     commitThreadHook,

@@ -60,6 +60,8 @@ const strict = { onExcessProperty: "error" } as const;
 const terminal = new Set(["completed", "failed", "interrupted", "cancelled"]);
 export const memoryRetryDelay = (attempt: number) =>
   [5000, 30000, 120000][Math.max(0, attempt - 1)] ?? 600000;
+// Internal ownership deadline for local work rows; this is not the hub resolution lease.
+const workClaimMs = 600000;
 const isFailureCode = Schema.is(M.MemoryFailureCode);
 const safeCode = (error: unknown): M.MemoryFailureCode => {
   if (typeof error === "object" && error !== null) {
@@ -380,6 +382,15 @@ const make = Effect.gen(function* () {
       return yield* new MemoryWorkerError({ code: "unsupported_operation" });
     if (work.claimedBy !== runtime.instanceId || work.status !== "running")
       return yield* new MemoryWorkerError({ code: "attempt_expired" });
+    // A summary can span several provider calls. Each call starts under a renewed claim,
+    // and the latest claim snapshot is what commit and failure handling compare against.
+    let owned = work;
+    const renewClaim = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const renewed = yield* store.renewWork(owned, now, now + workClaimMs);
+      if (!renewed) return yield* new MemoryWorkerError({ code: "attempt_expired" });
+      owned = renewed;
+    });
     const run = Effect.gen(function* () {
       if (work.kind === "rebuild") {
         if (work.metadata.kind !== "rebuild" || !work.memoryId || !work.metadata.revisionId)
@@ -428,7 +439,7 @@ const make = Effect.gen(function* () {
         ? undefined
         : yield* store.receipt(M.MemorySpaceId.make(work.space), meta.operationId);
       if (existingReceipt) {
-        yield* store.completeSummaryWork(work);
+        yield* store.completeSummaryWork(owned);
         return;
       }
       const current = work.space.startsWith("_local:")
@@ -477,6 +488,7 @@ const make = Effect.gen(function* () {
             );
             if (!generation.generateMemorySummary)
               return yield* new MemoryWorkerError({ code: "unsupported_operation" });
+            yield* renewClaim;
             const output = yield* generation
               .generateMemorySummary(input)
               .pipe(
@@ -544,13 +556,13 @@ const make = Effect.gen(function* () {
                 effectiveModel: execution.effectiveModel,
               },
             });
-            if (!(yield* store.completeSummaryWork(work)))
+            if (!(yield* store.completeSummaryWork(owned)))
               return yield* new MemoryWorkerError({ code: "attempt_expired" });
           }),
         );
       } else
         yield* service.commitSummary({
-          work,
+          work: owned,
           input: generated.input,
           generated: generated.output,
           expectedHeads: current!.heads,
@@ -584,9 +596,9 @@ const make = Effect.gen(function* () {
               return;
             }
             const now = yield* Clock.currentTimeMillis;
-            if (work.metadata.kind === "summary")
-              yield* store.failGenerationAttempt({
-                work,
+            if (work.metadata.kind === "summary") {
+              const recorded = yield* store.failGenerationAttempt({
+                work: owned,
                 environmentId,
                 failureCode: code,
                 now,
@@ -599,7 +611,10 @@ const make = Effect.gen(function* () {
                   ? now + memoryRetryDelay(work.attempt)
                   : null,
               });
-            else yield* store.retryWork(work, now + memoryRetryDelay(work.attempt));
+              // A lapsed claim cannot record a report, but while no one reclaimed the row it
+              // still gets a backoff instead of being picked up again immediately.
+              if (!recorded) yield* store.retryWork(owned, now + memoryRetryDelay(work.attempt));
+            } else yield* store.retryWork(owned, now + memoryRetryDelay(work.attempt));
           }),
         ),
       )
@@ -698,7 +713,7 @@ const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       for (const candidate of yield* store.dueWork(now, 100)) {
         if (!["summary", "consolidate", "rebuild"].includes(candidate.kind)) continue;
-        if (!(yield* store.claimWork(candidate.id, runtime.instanceId, now, now + 600000)))
+        if (!(yield* store.claimWork(candidate.id, runtime.instanceId, now, now + workClaimMs)))
           continue;
         const work = yield* store.readWork(candidate.id);
         if (work) yield* execute(work);
