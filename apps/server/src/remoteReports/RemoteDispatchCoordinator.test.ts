@@ -594,6 +594,21 @@ it.effect(
     }).pipe(Effect.provide(database)),
 );
 
+it.effect("ordinary thread launch preserves omitted ceiling through report fallback", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.refuse(true);
+    yield* Effect.gen(function* () {
+      const coordinator = yield* Coordinator.RemoteDispatchCoordinator;
+      const launched = yield* f.launch(coordinator, "notify_only");
+      assert.equal(f.launches.length, 2);
+      for (const attempt of f.launches)
+        assert.isFalse(Object.hasOwn(attempt, "memoryGrantCeiling"));
+      assert.equal((yield* coordinator.get(launched.correlationId))?.memoryGrantCeiling, "none");
+    }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(database)),
+);
+
 it.effect("report fallback preserves captured memory ceilings on every launch attempt", () =>
   Effect.gen(function* () {
     const f = yield* fixture;

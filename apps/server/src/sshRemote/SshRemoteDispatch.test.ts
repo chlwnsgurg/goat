@@ -1,6 +1,8 @@
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import {
+  NodeId,
+  RunId,
   EnvironmentId,
   ProviderInstanceId,
   ProjectId,
@@ -39,6 +41,16 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpClient } from "effect/http";
 import { buildRemoteGoatRunnerScript } from "@goat/ssh/tunnel";
+
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Coordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
+import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
+import Migration0062 from "../persistence/Migrations/063_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/064_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/066_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/068_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/073_MemoryTaskGrantCeiling.ts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -1267,6 +1279,12 @@ describe("SSH dispatch launch lineage", () => {
   /** Launches against a fake remote and returns the arguments goat_thread_launch received. */
   const launchAgainst = (remote: {
     readonly declaresLaunchedBy: boolean;
+    readonly coordinatorKind?: "thread" | "task";
+    readonly refuseReport?: boolean;
+    readonly afterReportRefusal?: {
+      readonly advertisesMemory: boolean;
+      readonly declaresMemoryCeiling: boolean;
+    };
     readonly memoryCeilings?: ReadonlyArray<import("@goat/contracts").MemoryTaskGrantCeiling>;
     readonly declaresMemoryCeiling?: boolean;
     readonly advertisesMemory?: boolean;
@@ -1290,6 +1308,7 @@ describe("SSH dispatch launch lineage", () => {
       const memorySessions: Array<ReadonlyArray<string>> = [];
       const presentedTokens: Array<string | null> = [];
       let declaresReport = remote.declaresReport === true;
+      let reportRefused = false;
       const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
         const request = JSON.parse(String(init?.body)) as {
           id?: string;
@@ -1322,7 +1341,11 @@ describe("SSH dispatch launch lineage", () => {
               id: request.id,
               result: {
                 tools: [
-                  ...(remote.advertisesMemory
+                  ...((
+                    reportRefused && remote.afterReportRefusal !== undefined
+                      ? remote.afterReportRefusal.advertisesMemory
+                      : remote.advertisesMemory
+                  )
                     ? [{ name: "memory_search", inputSchema: { type: "object", properties: {} } }]
                     : []),
                   {
@@ -1331,7 +1354,11 @@ describe("SSH dispatch launch lineage", () => {
                       type: "object",
                       properties: {
                         title: { type: "string" },
-                        ...(remote.declaresMemoryCeiling
+                        ...((
+                          reportRefused && remote.afterReportRefusal !== undefined
+                            ? remote.afterReportRefusal.declaresMemoryCeiling
+                            : remote.declaresMemoryCeiling
+                        )
                           ? { memoryGrantCeiling: { type: "string" } }
                           : {}),
                         ...(remote.declaresLaunchedBy ? { launchedBy: { type: "object" } } : {}),
@@ -1354,6 +1381,22 @@ describe("SSH dispatch launch lineage", () => {
             const report = request.params?.arguments?.report as
               | { readonly correlationId: string }
               | undefined;
+            if (remote.refuseReport && report !== undefined) {
+              reportRefused = true;
+              return Response.json({
+                jsonrpc: "2.0",
+                id: request.id,
+                result: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "goat_thread_launch does not take report, so nothing ran.",
+                    },
+                  ],
+                },
+              });
+            }
             return Response.json({
               jsonrpc: "2.0",
               id: request.id,
@@ -1409,23 +1452,73 @@ describe("SSH dispatch launch lineage", () => {
       try {
         const result = yield* Effect.gen(function* () {
           const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
-          const launch = (memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling) =>
-            dispatch.launchThread(
-              {
-                host,
-                cwd: "/home/agent/repo",
-                workspace: { type: "cwd" },
-                title: "Lineage probe",
-                ...(memoryGrantCeiling === undefined ? {} : { memoryGrantCeiling }),
-                runtimeMode: "approval-required",
-                callerRuntimeMode: "approval-required",
-                ...(remote.outside === true ? {} : { launchedBy: launcher }),
-                ...(remote.withReport === true
-                  ? { message: "Do the work", report: reportBinding, reportNote: "Report back." }
-                  : {}),
-              },
-              Effect.void,
-            );
+          const launch = (
+            memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling,
+          ) => {
+            const input: SshRemoteDispatch.SshLaunchInput = {
+              host,
+              cwd: "/home/agent/repo",
+              workspace: { type: "cwd" },
+              title: "Lineage probe",
+              ...(memoryGrantCeiling === undefined ? {} : { memoryGrantCeiling }),
+              runtimeMode: "approval-required",
+              callerRuntimeMode: "approval-required",
+              ...(remote.outside === true ? {} : { launchedBy: launcher }),
+              ...(remote.withReport === true
+                ? { message: "Do the work", report: reportBinding, reportNote: "Report back." }
+                : {}),
+            };
+            if (remote.coordinatorKind === undefined)
+              return dispatch.launchThread(input, Effect.void);
+            return Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* Migration0062;
+              yield* Migration0063;
+              yield* Migration0065;
+              yield* Migration0068;
+              yield* sql`CREATE TABLE scheduled_tasks (task_id TEXT PRIMARY KEY)`;
+              yield* Migration0073;
+              return yield* Effect.gen(function* () {
+                const coordinator = yield* Coordinator.RemoteDispatchCoordinator;
+                const launched = yield* coordinator.launch(
+                  {
+                    kind: remote.coordinatorKind!,
+                    originThreadId: launcher.threadId,
+                    delivery: "notify_only",
+                    launch: input,
+                    ...(remote.coordinatorKind === "task"
+                      ? {
+                          task: {
+                            taskId: NodeId.make("fixture-task"),
+                            parentRunId: RunId.make("fixture-parent-run"),
+                          },
+                        }
+                      : {}),
+                  },
+                  Effect.void,
+                );
+                const stored = yield* coordinator.get(launched.correlationId);
+                expect(stored?.memoryGrantCeiling).toBe(memoryGrantCeiling ?? "none");
+                return launched.launch;
+              }).pipe(
+                Effect.provide(
+                  Coordinator.layer.pipe(
+                    Layer.provide(
+                      Layer.mergeAll(
+                        Layer.succeed(SqlClient.SqlClient, sql),
+                        Layer.succeed(SshRemoteDispatch.SshRemoteDispatch, dispatch),
+                        Layer.mock(ThreadManagement.ThreadManagementService)({
+                          getThreadShell: () => Effect.succeed(null),
+                          dispatch: () => Effect.succeed({ sequence: 1, storedEvents: [] }),
+                        }),
+                        Layer.mock(LaunchWatchService.LaunchWatchService)({}),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
+          };
           if (remote.memoryCeilings !== undefined) {
             let result;
             for (const ceiling of remote.memoryCeilings) result = yield* launch(ceiling);
@@ -1461,6 +1554,7 @@ describe("SSH dispatch launch lineage", () => {
         const { launches, memorySessions, presentedTokens } = yield* launchAgainst({
           declaresLaunchedBy: true,
           declaresMemoryCeiling: true,
+          advertisesMemory: true,
           memoryCeilings: ceilings,
         });
         expect(launches.map((launch) => launch.memoryGrantCeiling)).toEqual(ceilings);
@@ -1500,21 +1594,97 @@ describe("SSH dispatch launch lineage", () => {
     }),
   );
 
-  it.effect("refuses a legacy destination that cannot carry even an explicit none ceiling", () =>
+  it.effect("allows explicit none without adding memory scope on a legacy destination", () =>
     Effect.gen(function* () {
-      let launchAttempts = 0;
-      const result = yield* launchAgainst({
+      const { launches, memorySessions } = yield* launchAgainst({
         declaresLaunchedBy: true,
         memoryCeilings: ["none"],
+      });
+      expect(launches).toHaveLength(1);
+      expect(launches[0]).not.toHaveProperty("memoryGrantCeiling");
+      expect(memorySessions).toEqual([[]]);
+    }),
+  );
+
+  it.effect.each([
+    ["ordinary omitted", "thread", undefined, false, false, true],
+    ["task none", "task", "none", false, false, true],
+    ["task none with admission without memory", "task", "none", false, true, true],
+    ["ordinary omitted memory without admission", "thread", undefined, true, false, false],
+    ["task read", "task", "read", false, false, false],
+    ["task read with admission without memory", "task", "read", false, true, true],
+    ["task read_write", "task", "read_write", false, false, false],
+    ["memory without admission none", "task", "none", true, false, false],
+    ["memory without admission read", "task", "read", true, false, false],
+    ["memory with admission none", "task", "none", true, true, true],
+    ["memory with admission read", "task", "read", true, true, true],
+  ] as const)("coordinator → SSH consumer: %s", ([, kind, ceiling, memory, admission, allowed]) =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const result = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        coordinatorKind: kind,
+        ...(ceiling === undefined ? {} : { memoryCeilings: [ceiling] }),
+        advertisesMemory: memory,
+        declaresMemoryCeiling: admission,
         onMemoryLaunch: () => {
-          launchAttempts += 1;
+          attempts += 1;
         },
       }).pipe(Effect.result);
-      expect(result._tag).toBe("Failure");
-      expect(launchAttempts).toBe(0);
-      if (result._tag === "Failure")
+      expect(attempts).toBe(allowed ? 1 : 0);
+      expect(result._tag).toBe(allowed ? "Success" : "Failure");
+      if (result._tag === "Failure") {
         expect(result.failure).toMatchObject({ reason: "remote_refused" });
+      } else {
+        expect(result.success.memorySessions).toEqual([ceiling === "read" ? ["memory:read"] : []]);
+        if (admission && (memory || ceiling === "read"))
+          expect(result.success.launches[0]?.memoryGrantCeiling).toBe(ceiling);
+        else expect(result.success.launches[0]).not.toHaveProperty("memoryGrantCeiling");
+      }
     }),
+  );
+
+  it.effect.each([
+    ["ordinary omitted legacy", "thread", undefined, false, false, true],
+    ["task none legacy", "task", "none", false, false, true],
+    ["task read loses admission", "task", "read", false, false, false],
+    ["memory none loses admission", "task", "none", true, false, false],
+    ["memory read loses admission", "task", "read", true, false, false],
+    ["memory none keeps admission", "task", "none", true, true, true],
+    ["memory read keeps admission", "task", "read", true, true, true],
+  ] as const)(
+    "coordinator report fallback → SSH consumer: %s",
+    ([, kind, ceiling, memory, admission, allowed]) =>
+      Effect.gen(function* () {
+        let attempts = 0;
+        const result = yield* launchAgainst({
+          declaresLaunchedBy: true,
+          coordinatorKind: kind,
+          ...(ceiling === undefined ? {} : { memoryCeilings: [ceiling] }),
+          declaresMemoryCeiling: ceiling === "read",
+          declaresReport: true,
+          refuseReport: true,
+          afterReportRefusal: { advertisesMemory: memory, declaresMemoryCeiling: admission },
+          onMemoryLaunch: () => {
+            attempts += 1;
+          },
+        }).pipe(Effect.result);
+        expect(attempts).toBe(allowed ? 2 : 1);
+        expect(result._tag).toBe(allowed ? "Success" : "Failure");
+        if (result._tag === "Failure") {
+          expect(result.failure).toMatchObject({ reason: "remote_refused" });
+        } else {
+          const launches = result.success.launches;
+          expect(launches[0]).toHaveProperty("report");
+          expect(launches[1]).not.toHaveProperty("report");
+          if (admission) expect(launches[1]?.memoryGrantCeiling).toBe(ceiling);
+          else
+            for (const launch of launches) expect(launch).not.toHaveProperty("memoryGrantCeiling");
+          expect(result.success.memorySessions).toEqual([
+            ceiling === "read" ? ["memory:read"] : [],
+          ]);
+        }
+      }),
   );
 
   it.effect("asks a remote that can be told not to watch the launch it is forwarded", () =>

@@ -977,7 +977,9 @@ const make = Effect.gen(function* () {
       if (stored === null) return yield* new RemoteDispatchError({ stage: "not_found" });
       const storedLaunch = {
         ...input.launch,
-        memoryGrantCeiling: stored.memory_grant_ceiling ?? "none",
+        ...(input.kind === "task" || input.launch.memoryGrantCeiling !== undefined
+          ? { memoryGrantCeiling: stored.memory_grant_ceiling ?? "none" }
+          : {}),
       };
       const register = beforeLaunch.pipe(Effect.tap(() => Deferred.succeed(owner, undefined)));
       const result = yield* ssh

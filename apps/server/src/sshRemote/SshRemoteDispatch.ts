@@ -472,7 +472,13 @@ const make = Effect.gen(function* () {
   >();
   // Per session key: the arguments that remote's goat_thread_launch declares.
   // Cleared with each new session, since the remote may have been updated meanwhile.
-  const launchArguments = new Map<string, ReadonlySet<string>>();
+  const launchArguments = new Map<
+    string,
+    {
+      readonly declared: ReadonlySet<string>;
+      readonly advertisesMemory: boolean;
+    }
+  >();
   const connected = new Set<string>();
 
   const withRuntime = <A, E>(
@@ -644,9 +650,10 @@ const make = Effect.gen(function* () {
           "remote_refused",
           "Remote memory tools require explicit task ceiling admission.",
         );
+      const capabilities = { declared, advertisesMemory };
       if (declared.has("report") && declared.has("standingInstructions"))
-        launchArguments.set(key, declared);
-      return declared;
+        launchArguments.set(key, capabilities);
+      return capabilities;
     },
   );
 
@@ -1167,9 +1174,11 @@ const make = Effect.gen(function* () {
       notes.push(`Registered ${folder.path} as a new project on ${target.alias}.`);
     }
 
-    const declared = yield* remoteLaunchArguments(remote);
-    // A task must never reach a tool that silently strips its server-owned ceiling.
-    if (input.memoryGrantCeiling !== undefined && declared?.has("memoryGrantCeiling") !== true)
+    const capabilities = yield* remoteLaunchArguments(remote);
+    const declared = capabilities?.declared;
+    // None adds no memory scope on legacy destinations without memory tools.
+    // Memory-advertising destinations already require admission in the catalog probe.
+    if (memoryGrantCeiling !== "none" && declared?.has("memoryGrantCeiling") !== true)
       return yield* failure("remote_refused", "Remote GOAT does not accept task memory ceilings.");
     const forwardLaunchedBy =
       input.launchedBy !== undefined && declared?.has("launchedBy") === true;
@@ -1188,7 +1197,7 @@ const make = Effect.gen(function* () {
     // sends it, and a remote that refuses it is relaunched without it by the coordinator.
     const forwardReport =
       input.report !== undefined &&
-      (declared === null || declared.size === 0 || declared.has("report"));
+      (declared === undefined || declared.size === 0 || declared.has("report"));
     const message =
       forwardReport && input.reportNote !== undefined && input.message?.trim()
         ? `${input.message}\n\n${input.reportNote}`
@@ -1215,7 +1224,10 @@ const make = Effect.gen(function* () {
             title: input.title,
             workspaceStrategy,
             runtimeMode: input.runtimeMode,
-            ...(declared?.has("memoryGrantCeiling") === true ? { memoryGrantCeiling } : {}),
+            ...(declared?.has("memoryGrantCeiling") === true &&
+            (memoryGrantCeiling !== "none" || capabilities?.advertisesMemory === true)
+              ? { memoryGrantCeiling }
+              : {}),
             ...(input.interactionMode === undefined
               ? {}
               : { interactionMode: input.interactionMode }),
