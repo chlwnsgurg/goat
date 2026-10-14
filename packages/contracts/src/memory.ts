@@ -2416,7 +2416,9 @@ export function validateMemoryCheckpointRecords(
   const metadata = [
     ...identities,
     ...fences,
-    ...receipts.map((r) => ({ ...r, memoryId: r.receipt.memoryId })),
+    ...receipts
+      .filter((r) => r.receipt.outcome !== "rejected")
+      .map((r) => ({ ...r, memoryId: r.receipt.memoryId })),
     ...revisions.map((r) => r.revision),
     ...resolutions.map((r) => r.resolution),
     ...tombstones,
@@ -2438,6 +2440,7 @@ export function validateMemoryCheckpointRecords(
   if (
     !receipts.every(
       (r) =>
+        r.receipt.outcome === "rejected" ||
         r.operationKind !== "resolve" ||
         (fence(r.receipt.memoryId)?.highestFencingToken ?? -1) >= (r.fencingToken ?? 0),
     )
@@ -2445,7 +2448,10 @@ export function validateMemoryCheckpointRecords(
     return false;
   if (
     !receipts.every(
-      (r) => r.receipt.hubSequence !== null && r.receipt.hubSequence <= first.checkpointSequence,
+      (r) =>
+        r.memorySpaceId === first.memorySpaceId &&
+        r.receipt.hubSequence !== null &&
+        r.receipt.hubSequence <= first.checkpointSequence,
     )
   )
     return false;
@@ -2456,8 +2462,11 @@ export function validateMemoryCheckpointRecords(
         r !== undefined &&
         r.receipt.memoryId === i.memoryId &&
         r.originEnvironmentId === i.creatingEnvironmentId &&
-        (r.receipt.outcome === "accepted" || r.receipt.outcome === "conflicted") &&
-        r.operationKind === "upsert"
+        (((r.receipt.outcome === "accepted" || r.receipt.outcome === "conflicted") &&
+          r.operationKind === "upsert") ||
+          (r.receipt.outcome === "deleted" &&
+            r.operationKind === "forget" &&
+            tombstonesById.get(i.memoryId)?.deleteOperationId === i.createOperationId))
       );
     })
   )

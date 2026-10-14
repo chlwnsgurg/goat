@@ -435,6 +435,48 @@ describe("memory sync and views", () => {
     });
     expect(M.validateMemoryCheckpointRecords([p])).toBe(true);
   });
+  it("round-trips forget-created identities and body-free refusal-only checkpoints", () => {
+    const deleted = {
+      ...compact,
+      operationKind: "forget",
+      revisionId: null,
+      receipt: { ...receipt, outcome: "deleted" },
+    };
+    const forgotten = round(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      revisions: [],
+      items: [],
+      tombstones: [tombstone],
+      compactReceipts: [deleted],
+    });
+    expect(M.validateMemoryCheckpointRecords([forgotten])).toBe(true);
+    const refusal = round(M.MemoryHubCheckpointPage, {
+      ...checkpoint,
+      identities: [],
+      fences: [],
+      revisions: [],
+      items: [],
+      compactReceipts: [
+        {
+          ...compact,
+          revisionId: null,
+          receipt: { ...receipt, outcome: "rejected", failureCode: "identity_mismatch" },
+        },
+      ],
+    });
+    expect(M.validateMemoryCheckpointRecords([refusal])).toBe(true);
+    expect(M.validateMemoryCheckpointRecords([{ ...forgotten, tombstones: [] }])).toBe(false);
+    expect(
+      M.validateMemoryCheckpointRecords([
+        decode(M.MemoryHubCheckpointPage, { ...checkpoint, identities: [], fences: [] }),
+      ]),
+    ).toBe(false);
+    expect(
+      M.validateMemoryCheckpointRecords([
+        { ...refusal, compactReceipts: [decode(M.MemoryCompactReceipt, compact)] },
+      ]),
+    ).toBe(false);
+  });
   it("preserves original digest outcome and report retry identities", () => {
     expect(round(M.MemoryCompactReceipt, compact).receipt).toEqual(receipt);
     rejects(M.MemoryCompactReceipt, {
@@ -568,11 +610,11 @@ describe("memory sync and views", () => {
         ]),
       ).toBe(false);
     }
+    const { resolutionApproval: _approval, ...withoutApproval } = resolveReceipt.receipt;
     const rejectedAttempt = {
       ...resolveReceipt,
       receipt: {
-        ...resolveReceipt.receipt,
-        resolutionApproval: undefined,
+        ...withoutApproval,
         operationId: id(30),
         outcome: "rejected",
         failureCode: "fenced",
