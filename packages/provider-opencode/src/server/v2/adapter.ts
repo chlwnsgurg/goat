@@ -75,6 +75,8 @@ import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
 import * as OpenCode2Server from "./OpenCode2Server.ts";
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
 import { goatOrchestrationSystemPrompt } from "@goat/provider-core/server/orchestrationInstructions";
@@ -419,6 +421,8 @@ interface ThreadState {
     | { readonly name: string; readonly directory: string; readonly credential: string }
     | undefined;
   instructions: string | undefined;
+  /** Digest of the last successfully installed value; memory bodies are never retained locally. */
+  memoryDigest: string | undefined;
 }
 
 type TurnTerminal =
@@ -680,6 +684,7 @@ const isWakeTurn = (turn: OrchestrationV2ProviderTurn) =>
 const INTERRUPT_TIMEOUT = "10 seconds";
 /** The session instructions entry T3 writes its per-turn system prompt to. */
 const INSTRUCTIONS_KEY = "goat";
+const MEMORY_INSTRUCTIONS_KEY = "goat_memory";
 /** A lost event stream is resubscribed this many times, this far apart, before the session breaks. */
 const RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = "2 seconds";
@@ -981,6 +986,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       strandedSteers: new Set(),
       mcp: undefined,
       instructions: undefined,
+      memoryDigest: undefined,
     });
 
     /** The thread whose session started this one, through any nesting. */
@@ -3417,9 +3423,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           );
         if (added) state.mcp = wanted;
       }
+      const availability = McpProviderSession.memoryToolAvailability(
+        state.mcp !== undefined && state.mcp.credential === mcpSession?.authorizationHeader
+          ? mcpSession
+          : undefined,
+      );
       const instructions = [
         buildRuntimeInstructions({ harness: "OpenCode", model: turnInput.modelSelection.model }),
         goatOrchestrationSystemPrompt(state.mcp !== undefined),
+        MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER,
+        `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
       ]
         .filter((part) => part !== undefined && part.length > 0)
         .join("\n\n");
@@ -3702,6 +3715,36 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
      * directory only when the text could use them. A turn stopped meanwhile
      * sends nothing.
      */
+    const prepareMemory = Effect.fnUntraced(function* (
+      sessionId: string,
+      state: ThreadState,
+      turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+    ) {
+      const snapshot = turnInput.refreshMemoryContext
+        ? yield* turnInput.refreshMemoryContext()
+        : turnInput.memoryContext;
+      const value =
+        snapshot === undefined
+          ? ""
+          : yield* Effect.try({
+              try: () => MemoryContext.memoryContextText(snapshot),
+              catch: () =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: OPENCODE_PROVIDER,
+                  detail: "Invalid memory context frame",
+                }),
+            });
+      // Always replace, including empty clear; no local body survives this admission.
+      yield* client.session.instructions.entry.put({
+        sessionID: Session.ID.make(sessionId),
+        key: MEMORY_INSTRUCTIONS_KEY,
+        value,
+      });
+      state.memoryDigest = Hex.encode(
+        yield* crypto.digest("SHA-256", new TextEncoder().encode(value)),
+      );
+    });
+
     const submit = Effect.fnUntraced(function* (
       sessionId: string,
       turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -3736,6 +3779,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           // so the turn remembers where the history stood before it.
           const newest = yield* client.message.list({ sessionID, order: "desc", limit: 1 });
           yield* markBefore(sessionId, newest.data[0]?.id ?? null);
+          yield* prepareMemory(sessionId, state, turnInput);
           if (!sending()) return;
           return yield* client.session.command({ sessionID, ...command });
         }
@@ -3750,6 +3794,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ),
           )
         : [];
+      yield* prepareMemory(sessionId, state, turnInput);
       if (!sending()) return;
       return yield* client.session
         .prompt({
