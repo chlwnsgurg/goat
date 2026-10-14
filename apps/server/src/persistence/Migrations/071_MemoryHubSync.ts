@@ -378,4 +378,121 @@ export default Effect.gen(function* () {
     yield* sql.unsafe(`CREATE TRIGGER memory_tombstones_snapshot_forget_${action.toLowerCase()} AFTER ${action} ON memory_tombstones BEGIN
       UPDATE memory_quota_counters SET value=value+${sign}*8 WHERE space=${prefix}.space AND dimension='hub_snapshot_rows' AND scope_key='' AND EXISTS(SELECT 1 FROM memory_identity_ledger i WHERE i.space=${prefix}.space AND i.memory_id=${prefix}.memory_id);
     END`);
+  // Fixed counters per space; no text index, history ring or per-operation status rows.
+  const processingInventory = [
+    {
+      table: "memory_items",
+      columns:
+        "space,status,index_state,indexed_generation,generation,cleanup_pending,deferred_json,availability_json",
+      values: (p: string) => [
+        ["quarantined", `${p}.status='quarantined'`],
+        ["eligible", `${p}.status='active'`],
+        [
+          "indexed",
+          `${p}.status='active' AND ${p}.index_state='ready' AND ${p}.indexed_generation=${p}.generation`,
+        ],
+        ["cleanup", `${p}.cleanup_pending=1`],
+        [
+          "scanner_held",
+          `EXISTS(SELECT 1 FROM json_each(${p}.availability_json,'$.reasons') WHERE value='secret_detected')`,
+        ],
+        [
+          "scanner_pending",
+          `EXISTS(SELECT 1 FROM json_each(${p}.availability_json,'$.reasons') WHERE value='scanner_pending')`,
+        ],
+        [
+          "missing_parent",
+          `EXISTS(SELECT 1 FROM json_each(${p}.availability_json,'$.reasons') WHERE value='missing_parent')`,
+        ],
+        [
+          "deferred",
+          `(SELECT count(*) FROM json_each(${p}.deferred_json) WHERE json_extract(value,'$.state')!='ready')`,
+        ],
+      ],
+    },
+    {
+      table: "memory_outbox",
+      columns: "space,kind,status",
+      values: (p: string) => [
+        [
+          "pending_sync",
+          `${p}.kind IN ('sync','revert_intent') AND ${p}.status IN ('pending','retry','running')`,
+        ],
+      ],
+    },
+    {
+      table: "memory_inbox_pending",
+      columns: "space,record_kind",
+      values: (p: string) => [["parked", `${p}.record_kind='operation'`]],
+    },
+    {
+      table: "memory_report_outbox",
+      columns: "space,state",
+      values: (p: string) => [
+        ["report_backlog", `${p}.state IN ('pending','failed')`],
+        ["report_failed", `${p}.state='failed'`],
+      ],
+    },
+    // The event and compact forms of a refusal count once across compaction.
+    {
+      table: "memory_events",
+      columns: "memory_space_id,operation_id,receipt_json",
+      values: (p: string) => [
+        [
+          "admission_failures",
+          `json_extract(${p}.receipt_json,'$.outcome')='rejected' AND NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE c.space=${p}.memory_space_id AND c.operation_id=${p}.operation_id)`,
+        ],
+      ],
+    },
+    {
+      table: "memory_compact_receipts",
+      columns: "space,operation_id,receipt_json",
+      values: (p: string) => [
+        [
+          "admission_failures",
+          `(json_extract(${p}.receipt_json,'$.outcome')='rejected')-EXISTS(SELECT 1 FROM memory_events e WHERE e.memory_space_id=${p}.space AND e.operation_id=${p}.operation_id AND json_extract(e.receipt_json,'$.outcome')='rejected')`,
+        ],
+      ],
+    },
+  ];
+  for (const entry of processingInventory) {
+    const spaceColumn = entry.table === "memory_events" ? "memory_space_id" : "space";
+    for (const [dimension, originalExpression] of entry.values("seed")) {
+      const expression =
+        entry.table === "memory_compact_receipts"
+          ? "json_extract(seed.receipt_json,'$.outcome')='rejected'"
+          : originalExpression;
+      yield* sql.unsafe(
+        `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT seed.${spaceColumn},'processing_${dimension}','',coalesce(sum(coalesce((${expression}),0)),0) FROM ${entry.table} seed GROUP BY seed.${spaceColumn} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+      );
+    }
+    const delta = (p: string, sign: number) =>
+      entry
+        .values(p)
+        .map(([dimension, expression]) =>
+          sign < 0
+            ? `UPDATE memory_quota_counters SET value=value-coalesce((${expression}),0) WHERE space=${p}.${spaceColumn} AND dimension='processing_${dimension}' AND scope_key='';`
+            : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${p}.${spaceColumn},'processing_${dimension}','',coalesce((${expression}),0)) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`,
+        )
+        .join("\n");
+    // UPDATE uses subtraction before addition, so moving a row between spaces is exact.
+    for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
+      yield* sql.unsafe(
+        `CREATE TRIGGER ${entry.table}_processing_${action.toLowerCase()} AFTER ${action}${action === "UPDATE" ? ` OF ${entry.columns}` : ""} ON ${entry.table} BEGIN ${action !== "INSERT" ? delta("OLD", -1) : ""} ${action !== "DELETE" ? delta("NEW", 1) : ""} END`,
+      );
+    }
+  }
+  // One scalar per deferred item and a narrow partial index supply the exact
+  // oldest timestamp with LIMIT 1, without a status-time scan or timestamp ledger.
+  yield* sql`ALTER TABLE memory_items ADD COLUMN processing_oldest_at TEXT`;
+  const oldest = (json: string) =>
+    `(SELECT min(json_extract(value,'$.sinceAtUtc')) FROM json_each(${json}) WHERE json_extract(value,'$.state')!='ready')`;
+  yield* sql.unsafe(`UPDATE memory_items SET processing_oldest_at=${oldest("deferred_json")}`);
+  yield* sql`CREATE INDEX memory_processing_oldest ON memory_items(space,processing_oldest_at) WHERE processing_oldest_at IS NOT NULL`;
+  yield* sql.unsafe(
+    `CREATE TRIGGER memory_processing_oldest_insert AFTER INSERT ON memory_items BEGIN UPDATE memory_items SET processing_oldest_at=${oldest("NEW.deferred_json")} WHERE rowid=NEW.rowid; END`,
+  );
+  yield* sql.unsafe(
+    `CREATE TRIGGER memory_processing_oldest_update AFTER UPDATE OF deferred_json ON memory_items BEGIN UPDATE memory_items SET processing_oldest_at=${oldest("NEW.deferred_json")} WHERE rowid=NEW.rowid; END`,
+  );
 });

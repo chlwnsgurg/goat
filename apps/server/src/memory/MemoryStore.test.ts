@@ -4605,3 +4605,86 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "processing reads durable counters exactly across restart status transitions and rollback without table scans",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const input = { memorySpaceId: space, hubEnvironmentId: env };
+      const empty = yield* store.readProcessing(input);
+      assert.strictEqual(empty.processing.deferred, 0);
+      assert.strictEqual(empty.processing.oldestDeferredAtUtc, null);
+      yield* store.apply(decision());
+      yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) VALUES ('status-sync',${space},${memory},'sync','pending','{}',0)`;
+      const since = "2026-10-13T00:00:00.000Z";
+      const later = "2026-10-14T00:00:00.000Z";
+      const deferred = [
+        {
+          kind: "index",
+          state: "pending",
+          reason: null,
+          revisionId: null,
+          generation: 0,
+          sinceAtUtc: later,
+        },
+        {
+          kind: "scanner",
+          state: "held",
+          reason: "secret_detected",
+          revisionId: null,
+          generation: 0,
+          sinceAtUtc: since,
+        },
+      ];
+      yield* sql`UPDATE memory_items SET deferred_json=${JSON.stringify(deferred)},availability_json='{"exposure":"held","reasons":["secret_detected","scanner_pending","missing_parent"],"deferred":[],"cleanupPending":true}',cleanup_pending=1 WHERE space=${space}`;
+      yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,metadata_json) VALUES (${space},'parked','operation','[]','missing_parent','{}')`;
+      yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolving_environment_id,outcome,state,failure_code,created_at) VALUES ('report',${space},${memory},${id(999)},${env},'failed','failed','scanner_pending',0)`;
+      yield* store.withReceivedCursor(
+        { ...input, afterSequence: 7, expectedSequence: 0 },
+        Effect.void,
+      );
+      const before = yield* store.readProcessing(input).pipe(Effect.provide(Store.layer));
+      assert.strictEqual(before.pendingSync, 1);
+      assert.strictEqual(before.parked, 1);
+      assert.strictEqual(before.processing.lastReceivedHubSequence, 7);
+      assert.strictEqual(before.processing.deferred, 2);
+      assert.strictEqual(before.processing.oldestDeferredAtUtc, since);
+      assert.strictEqual(before.processing.scannerHeldItems, 1);
+      assert.strictEqual(before.processing.scannerPendingItems, 1);
+      assert.strictEqual(before.processing.missingParentItems, 1);
+      assert.strictEqual(before.processing.pendingCleanupItems, 1);
+      assert.strictEqual(before.processing.reportBacklog, 1);
+      assert.strictEqual(before.processing.reportFailed, 1);
+      assert.deepStrictEqual(before.processing.indexCoverage, {
+        status: "unavailable",
+        eligibleItems: 1,
+        indexedItems: 0,
+        unindexedItems: 1,
+        projectionWatermark: 1,
+      });
+      yield* store
+        .transact(
+          sql`DELETE FROM memory_items WHERE space=${space}`.pipe(
+            Effect.andThen(Effect.fail("rollback")),
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* store.readProcessing(input), before);
+      yield* sql`UPDATE memory_items SET index_state='ready',indexed_generation=generation,deferred_json=${JSON.stringify([deferred[0]])},cleanup_pending=0 WHERE space=${space}`;
+      const next = yield* store.readProcessing(input);
+      assert.strictEqual(next.processing.deferred, 1);
+      assert.strictEqual(next.processing.oldestDeferredAtUtc, later);
+      assert.strictEqual(next.processing.unindexedItems, 0);
+      yield* sql`UPDATE memory_items SET deferred_json='[]' WHERE space=${space}`;
+      assert.strictEqual((yield* store.readProcessing(input)).processing.oldestDeferredAtUtc, null);
+      const plan = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT processing_oldest_at FROM memory_items WHERE space=${space} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`;
+      assert.isTrue(plan.some((r) => r.detail.includes("memory_processing_oldest")));
+      assert.isFalse(
+        plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")),
+      );
+    }).pipe(Effect.provide(live)),
+);

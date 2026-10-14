@@ -928,6 +928,18 @@ export class MemoryStore extends Context.Service<
     readonly readPendingHubAdmins: (
       limit: number,
     ) => Effect.Effect<readonly AdminRecord[], MemoryStorageError>;
+    readonly readProcessing: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+    }) => Effect.Effect<
+      {
+        processing: M.MemoryProcessingStatus;
+        pendingSync: number;
+        quarantined: number;
+        parked: number;
+      },
+      MemoryStorageError
+    >;
     readonly readBootstrap: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -4005,7 +4017,7 @@ const make = Effect.gen(function* () {
             space: string;
             memory_id: string;
             item_json: string;
-          }>`SELECT rowid,space,memory_id,item_json FROM memory_items WHERE rowid>${after} ORDER BY rowid LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS}`,
+          }>`SELECT rowid,space,memory_id,item_json FROM memory_items WHERE rowid>${after} ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
         );
         if (!rows.length && after > 0)
           rows = yield* stored(
@@ -4015,7 +4027,7 @@ const make = Effect.gen(function* () {
               space: string;
               memory_id: string;
               item_json: string;
-            }>`SELECT rowid,space,memory_id,item_json FROM memory_items ORDER BY rowid LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS}`,
+            }>`SELECT rowid,space,memory_id,item_json FROM memory_items ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
           );
         yield* advance("frontier", rows.at(-1)?.rowid ?? 0);
         for (const row of rows) {
@@ -4090,7 +4102,7 @@ const make = Effect.gen(function* () {
             rowid: number;
             id: string;
             gone: number;
-          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphanAfter} ORDER BY o.rowid LIMIT ${M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS}`,
+          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphanAfter} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
         );
         yield* advance("orphan", work.at(-1)?.rowid ?? 0);
         for (const row of work)
@@ -6046,6 +6058,74 @@ const make = Effect.gen(function* () {
     });
     return next;
   });
+  const readProcessing: MemoryStore["Service"]["readProcessing"] = Effect.fn(
+    "MemoryStore.readProcessing",
+  )(function* (input) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const rows = yield* stored(
+          "processing-counters",
+          sql<{
+            dimension: string;
+            value: number;
+          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.memorySpaceId} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
+        );
+        const values = new Map(rows.map((r) => [r.dimension, r.value]));
+        const count = (name: string) => values.get(`processing_${name}`) ?? 0;
+        const oldest = yield* stored(
+          "processing-oldest",
+          sql<{
+            processing_oldest_at: string;
+          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.memorySpaceId} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
+        );
+        const bootstrap = yield* readBootstrap(input);
+        const state = yield* stored(
+          "processing-watermark",
+          sql<{
+            projection_watermark: number;
+          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}`,
+        );
+        const eligible = count("eligible");
+        const indexed = count("indexed");
+        const processing = yield* stored(
+          "processing-codec",
+          codec(M.MemoryProcessingStatus).decode(
+            yield* codec(M.MemoryProcessingStatus).encode({
+              lastReceivedHubSequence: bootstrap.afterSequence,
+              receiveLag: null,
+              deferred: count("deferred"),
+              oldestDeferredAtUtc: oldest[0]
+                ? M.MemoryUtcTimestamp.make(oldest[0].processing_oldest_at)
+                : null,
+              unindexedItems: eligible - indexed,
+              scannerHeldItems: count("scanner_held"),
+              scannerPendingItems: count("scanner_pending"),
+              missingParentItems: count("missing_parent"),
+              pendingCleanupItems: count("cleanup"),
+              reportBacklog: count("report_backlog"),
+              reportFailed: count("report_failed"),
+              hubAdmissionFailures: count("admission_failures"),
+              indexCoverage: {
+                status:
+                  eligible === indexed ? "available" : indexed === 0 ? "unavailable" : "partial",
+                eligibleItems: eligible,
+                indexedItems: indexed,
+                unindexedItems: eligible - indexed,
+                projectionWatermark: state[0]?.projection_watermark ?? 0,
+              },
+            }),
+            strict,
+          ),
+        );
+        return {
+          processing,
+          pendingSync: count("pending_sync"),
+          quarantined: count("quarantined"),
+          parked: count("parked"),
+        };
+      }),
+    );
+  });
   const readBootstrap: MemoryStore["Service"]["readBootstrap"] = Effect.fn(
     "MemoryStore.readBootstrap",
   )(function* (input) {
@@ -7946,6 +8026,7 @@ const make = Effect.gen(function* () {
     activateHubMemberTx: (input) => withHubBudget(activateHubMemberTx(input)),
     readPendingHubAdmins,
     readActivatedHubAdminTx,
+    readProcessing,
     readBootstrap,
     discardBootstrapTx,
     retireFrozenClaimTx,
