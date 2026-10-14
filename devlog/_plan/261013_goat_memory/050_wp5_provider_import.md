@@ -1,547 +1,492 @@
 # 050 — WP5: read-only provider memory import
 
-Enforcement limits and claim wording: [000 Enforcement inventory](000_plan.md#enforcement-inventory). Audit r1 rev 4 amendments supersede incompatible rev 2/3 recipes.
+A user can explicitly bring supported Codex, Claude and omo memories into GOAT with their
+source provenance. GOAT never changes those sources. Re-import observes stable source keys,
+content changes and permanent forget suppression; every environment submits the same ordinary
+local intents to the configured hub. Imported text is untrusted inference, not instructions.
 
-- Date: 2026-10-13
-- Status: executable implementation plan; implementation and runtime verification NOT RUN.
-- Baseline: `goat-si/goat`, `goat/goat-cross-device-provider-memory`, HEAD and local `origin/dev` = `1e2418fafb625604de1eb89250a10d971bcfd0fe`.
-- Owns: M17, import application of M3/M4/M5/M7/M18. Decisions and names: [000](000_plan.md#shared-names-all-phase-docs-must-use-these). Proposal details: [001](001_architect_proposal.md), especially lines 249-257. WP0 dispositions override the proposal's old provider-support and hub-location defaults.
-- Original phase-author scope: this file only; rev 2 covers the seven allowed plans. No commits, pushes, provider-state writes, servers, tests, or builds on juns-macbook-pro.
+- Date: 2026-10-14. Status: current P plan, **READY_FOR_REFLECTION**; reflection and independent
+  A remain coordinator work. WP5 implementation, focused tests and runtime evidence: **NOT RUN**.
+- Authoring branch: `goat/memory-wp5-provider-import`, worktree `goat-wp5-plan`, input HEAD
+  `cfa07255fa5a3dcc74fa0f2abe6f7973b5ec84af` (040 A near-pass after audit r2).
+  Actual WP2 is integrated through `55d77f1f8`; its implementation head is
+  `637b3032772c50b7d3bc1d53f4ef90387768358a`. WP3 and WP4 implementation are absent.
+- Dependency pins: [030](030_wp3_hub_sync.md) §4/§12 frozen interfaces, coordinator revision
+  **11c** (the inherited document title still says 11b), and [040](040_wp4_mcp_injection.md)
+  at `cfa07255f`. Planned ports below are not current exports.
+- Fresh dev: `origin/dev` fetched and remote tip checked at
+  `8aa674910542868a7f6bf66fa689778fbd071dc9`. From the WP2-integrated dev ancestor
+  `637a98351`, only `packages/ssh/package.json` and three SSH test files changed; no import,
+  memory, authorization or provider port drift. Dev itself does not contain the WP1/WP2 stack.
+  Do not interpret a branch-to-dev diff deleting memory files as a dev regression.
+- Authority: [000 decisions](000_plan.md#decisions-main-dispositions-of-m1-m20) M17/M19/M20,
+  [shared names](000_plan.md#shared-names-all-phase-docs-must-use-these) and
+  [enforcement limits](000_plan.md#enforcement-inventory). Research is evidence, not authority.
 
-## 1. Purpose, inputs, and acceptance
+Loop spec: **satisfy-spec**, triggered by this WP5 stale-check/rewrite request. Goal: a bounded,
+source-grounded implementation handoff for read-only import. Non-goals: implementation, other
+plan edits, home-corpus inspection, provider execution, UI, watchers, write-back, push or PR
+creation. Verifiers for this authoring are two-file formatting/check and `git diff --check`;
+runtime acceptance is future exact-head PR CI only, NOT RUN. Stop after rewriting 050, adding
+one WP5 P record to 000 and making the requested single docs commit. Memory artifact: this
+plan and that record. Outcomes: READY_FOR_REFLECTION or BLOCKED by an unresolved requirement;
+escalate a predecessor signature/schema incompatibility to its owner before B, never hide it
+behind an import compatibility shim. No product decision is currently outstanding.
 
-Let a user explicitly import supported Codex, Claude, or omo memories into GOAT without changing the provider's memory files, Git state, settings, or generation behavior. Imported items become normal `MemoryItem` projections with durable source provenance. A second import of unchanged input is a NOOP; changed input proposes a revision of the same `MemoryId`; forgotten items and exact copies remain suppressed. File removal never implies GOAT forget.
+## 1. Stale check and evidence boundary
 
-This is a bounded, deterministic parser and ingestion phase, not an LLM extraction phase. A file or Codex task group is the supported item unit. Do not split arbitrary paragraphs using a model or pretend every bullet is independently identifiable. All imported assertions are initially `inference`, with evidence origin `import`: a provider's label `fact`, `user`, or `project` does not verify truth in GOAT.
+**15 stale assumptions replaced**, counted by semantic decision rather than moved citations:
 
-Required predecessor results:
+| ID  | Superseded assumption                                                                     | Current disposition                                                                                                                                      |
+| --- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S01 | Baseline is `1e2418faf` and the original authoring ban prevents a commit.                 | Use the branch/dependency/dev pins above and this request's two-file, one-commit authorization.                                                          |
+| S02 | Memory modules are absent.                                                                | WP2 Store/Service/Quota/Worker/FTS, contracts and migration are implemented here.                                                                        |
+| S03 | All source/batch/item receipt APIs already exist in WP2.                                  | Tables exist; registration, session, batch/item codecs and CAS APIs are WP5 additions.                                                                   |
+| S04 | `apply(operation, { importSource, ... })` is an existing extension seam.                  | Store.apply accepts MemoryDecision; extend the existing service transaction, not Store.apply's operation shape.                                          |
+| S05 | `resolveProjectKey(project)` or current remote/cwd determines scope.                      | Use `resolveProjectKey(space, project)` and persisted binding version; explicit per-item scope.                                                          |
+| S06 | Readiness/bootstrap is an existing service or a network check.                            | Consume future 030 §12 persisted local readiness and requireBootstrap; bootstrapped offline is allowed.                                                  |
+| S07 | Materialization can construct changed imports with any parent.                            | Existing materializeLocalIntent hardcodes empty parents; it is only the initial-intent seam. Revisions use the normal parent-aware local operation path. |
+| S08 | Import upserts immediately prove hub acceptance.                                          | Local receipt/intent is pending; hub admission and canonical settlement are sole M20 authority, including on the hub environment.                        |
+| S09 | Existing forget already gathers imported aliases and content hashes.                      | MemoryService.forget currently produces empty imported source/content arrays; WP5 must supply them before import activation.                             |
+| S10 | Provider exclusion is a provider session masquerading as a GOAT thread.                   | MemorySourceKey suppresses provider items; MemorySourceExclusion is only actual GOAT thread/watermark/messages.                                          |
+| S11 | Source-local session counters are already persisted, or chunks alone bound growth.        | WP5 persists source/session ownership and cumulative counters atomically; new session IDs cannot reset lifetime/space admission.                         |
+| S12 | Full local alias/key/work budgets may refuse approved replica metadata.                   | Canonical approved union/receipt/cursor persists; local scanner/FTS holds defer exposure only.                                                           |
+| S13 | WP5 must build the guarded client command.                                                | 040 L4 provides importProvider({ environmentId, input }); WP5 owns only server activation.                                                               |
+| S14 | Prior real-home observations and the old omo checkout establish current supported shapes. | No provider home is inspected in this run. Codex/public-source pin and Claude research profile; omo beta.63 pin, not current 4.5.12 checkout.            |
+| S15 | Old static coverage counts/CI paths/appendices prove this new plan.                       | Reconcile the actual lane map and current server shards below; fold revisions into this body, all implementation proof NOT RUN.                          |
 
-| Owner                           | Consumed result                                                                                                                                                             | Gate before implementation                                                                                                                          |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [WP1](010_wp1_contracts.md)     | `MemoryImportSourceId`, `MemoryScope`, `MemoryProjectKey`, `MemoryProvenance`, `MemoryOperation`, import RPC input/result/error schemas                                     | Consume the settled import-specific schemas in 010; use the Shared names without aliases.                                                           |
-| [WP2](020_wp2_store_service.md) | `MemoryService`, `MemoryStore`, `MemorySecretScanner`, `memory_import_receipts`, permanent tombstones, payload purge, transactional receipts/outbox and deterministic drain | Receipt, revision and outbox must share a transaction; source aliases and content suppression survive forget.                                       |
-| [WP3](030_wp3_hub_sync.md)      | `memorySpaceId`, joined membership, completed bootstrap, received tombstones, pending-sync operation transport                                                              | A newly joined member cannot import before installing bootstrap; a previously bootstrapped offline member can import with `pendingSync`.            |
-| [WP4](040_wp4_mcp_injection.md) | Core RPC authorization, environment-scoped guarded import command factory, actual memory capability; import handler/group activated by WP5                                  | This phase registers the handler calling `MemoryService.importProvider`; require both `memory:write` and `filesystem:read`, including after a wait. |
-| Existing server                 | Persisted environment identity, project repository identity and shared SQL client                                                                                           | Source roots belong to the destination environment, never the browser or desktop renderer.                                                          |
+Read-only evidence: initiative `research/075_cross_provider_memory_cases.md:31–49,81–117`,
+`100_omo_memory.md:3–25`, `110_omo_memory_layer.md:3–47,49–78`,
+`120_goat_memory_source_terrain.md:13–43,61–102`. These dated investigations distinguish
+provider canonical text from navigation, transcripts and execution state. Their Git-canonical
+GOAT proposal, provider-disable option and older test results are not adopted as current GOAT
+behavior. WP2 SQLite plus 030 hub admission supersede that storage/sync proposal.
 
-Acceptance is the focused CI evidence in section 7. No actual provider corpus is an acceptance fixture. All fixtures are synthetic and run against temporary homes/databases/repositories in goat-ci.
+Provider source references in §2 are pinned local **public source repositories**, read via
+`git show` without checkout or execution. Claude's corpus is a dated research account; no
+fresh Claude implementation or installed layout is claimed. No actual provider memory corpus,
+settings, credentials, transcripts or provider Git state was inspected or changed. The small
+Codex/Aside/wiki guidance lookup supplied no relevant WP5 implementation history.
 
-## 2. Evidence and supported formats
+## 2. Provider source and parser decisions
 
-GOAT citations below refer to the baseline above. Memory modules do not exist there: source maps and proposed diffs below are changes **after** WP1-WP4, not claims about current functions. Verify predecessor heads and signatures before implementing; resolve a mismatched contract in its owning phase rather than adding compatibility shims.
+Roots are resolved inside the **selected destination environment**, never the browser,
+Electron renderer, mobile device or coordinator machine. Trusted immutable server root slots
+can replace defaults for deployment overrides and temporary fixtures. The RPC contains no
+absolute path or free-form profile. Do not read provider settings to discover overridden roots.
+An unsupported layout is explicit `unsupported_format`, not arbitrary Markdown fallback.
 
-| Evidence read                                                          | What it establishes                                                                                                                                |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docs/internals/overview.md:3-19,53-71,123-128`                        | Environment owns filesystem; commit intent/receipt/outbox together; external I/O outside the transaction; deterministic worker completion.         |
-| `docs/internals/effect-services.md:11-22,40-90,95-116`                 | Extend the domain service; thin transports; `Context.Service`, private `make`, `layer`; dependency injection; bounded errors without raw payloads. |
-| `apps/server/src/project/GoatProjectFileLoader.ts:43-54,67-79,100-120` | Actual Effect filesystem/decode service pattern. Its best-effort absent-file fallback is **not** the import error policy.                          |
-| `apps/server/src/remoteReports/RemoteReportService.ts:107-142,198-229` | Service interface and transactional dedup/receipt precedent.                                                                                       |
-| `packages/contracts/src/environment.ts:293-309,319-329`                | `repositoryGroupingKeyOf` preserves fork identity; `ScopedThreadRef` includes environment.                                                         |
-| `apps/server/src/vcs/VcsProcess.ts:23-55,129-143`                      | Existing injected argument-vector process service with timeout/output limit, no shell required.                                                    |
-| `apps/server/src/server.ts:239-242`                                    | Shared SQL/settings composition precedent.                                                                                                         |
-| Initiative `research/100_omo_memory.md:14-25`                          | Earlier beta.23 investigation; push-only backup is not sync. Past tests there are not evidence for this phase.                                     |
-| Initiative `research/110_omo_memory_layer.md:3-22,37-47,53-78`         | Correct target is beta.63 `ebfa564862`; proposed file-canonical GOAT layout there is superseded by WP0's SQLite decision.                          |
+| Provider / parser profile           | Source location and item unit                                                                                                                                                                                                      | Parser decision and exclusions                                                                                                                                                                                                                                                                                                                                                                                           | Evidence / version policy                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex / `codex-handbook-v1`         | `<codex-home>/memories/MEMORY.md`, default `~/.codex/memories`; one `# Task Group:` block requiring `scope:`, optional supported `applies_to:` routing metadata. Key `MEMORY.md#task-group:<NFC title>`.                           | Pure UTF-8 Markdown parser tracks fences; duplicate normalized group titles reject the file. Keep guidance/task text; remove scope/routing/evidence-list metadata from assertion text. `memory_summary.md`, `raw_memories.md`, rollout summaries, sessions/JSONL, SQLite, skills, workspace diffs and Git internals are excluded. No links or rollout_path are followed. Missing handbook does not fall back to summary. | Public Codex repo pin `816fa702ec66a4c81b204701a03371a1ac3511e6`: `codex-rs/memories/write/src/lib.rs:37–41,112–131`; `codex-rs/memories/write/templates/memories/consolidation.md:119–140,179–210,235–273`. The old shortened template path was wrong. Grammar, not an inferred installed app version, selects support.                                                                                                                                                  |
+| Codex / `codex-ad-hoc-v1`           | Same root, `extensions/ad_hoc/notes/*.md`; one whole nonempty note, `<relativePath>#body`.                                                                                                                                         | Strict UTF-8 Markdown; reject NUL/JSONL transcript envelopes. Exclude all other extensions/resources and instructions.md; no recursive extension scan. Notes may be selected without a handbook.                                                                                                                                                                                                                         | Same public pin, `codex-rs/ext/memories/src/local/ad_hoc_note.rs:12–23,26–39`. Source bytes are never edited.                                                                                                                                                                                                                                                                                                                                                             |
+| Claude / `claude-topic-v1`          | Default `~/.claude/projects/<opaque>/memory/*.md`, one explicitly selected immediate memory directory; whole root-level topic, `<relativePath>#body`.                                                                              | YAML frontmatter has scalar name/description/type; type is user/feedback/project/reference; nonempty body. Reject duplicate keys, tags, anchors, unsupported nested data/types. MEMORY.md is navigation only. Exclude agent-memory, CLAUDE.md/rules, episodes, settings, sessions, symlinks and linked outside files. Encoded dirname is not project identity.                                                           | Research `110:28–30`, corpus `010_memory-pipeline/10_cc_memory.md:89–138`, referenced by that research. AutoMemoryDirectory/remote overrides exist in the account but are not discovered from private settings. Unknown header returns unsupported_format.                                                                                                                                                                                                                |
+| Claude / `claude-topic-metadata-v1` | Same registered source and whole-file key.                                                                                                                                                                                         | Compatibility profile for scalar name/description plus metadata.type. If direct type also appears it must agree. Optional metadata.node_type/originSessionId are ignored; neither is shared or treated as a GOAT identity. All other nested objects reject.                                                                                                                                                              | Prior 050 recorded this shape from a home observation; it is **historical, unverified here**, not public-source confirmation. Keep narrowly isolated synthetic fixtures; no broad YAML fallback or claim of current universal compatibility.                                                                                                                                                                                                                              |
+| omo / `omo-memory-core-beta63`      | Default `~/.omo/memory/agents/<explicitly selected id>/repo`; pin one HEAD commit. Regular Git Markdown blobs under system/, notes/, people/, reference/, projects/. Whole monthly ledger/observation file, `<relativePath>#body`. | Reproduce first-colon scalar frontmatter: required nonempty description, optional string read_only/kind, JSON string-array aliases; tolerate limit/other scalar fields but do not share them. Reject malformed/ambiguous headers. system/persona.md and identity.md are untrusted data only. Exclude runtime, worktrees, locks, skills, transcripts, jobs, untracked/dirty bytes, symlink blobs and gitlinks.            | Public repo pin `ebfa564862e82cfd1a8c3b45daa4993a40dc7cd6`: `packages/memory-core/src/identity/layout.ts:47–78`, `memfs/frontmatter.ts:22–90`, `compile/compile.ts:25–43`, `recall/provider.ts:25–58`, `facts/person-routing.ts:68–70,112–131`. Current reference checkout HEAD `f83f934325d72d15a85d4a797d7f9a3c0798bf9a` is 4.5.12 without memory-core; do not parse its task/session state as this profile. beta.23 tests in 100 are historical, not WP5 verification. |
+| Cursor                              | Unsupported.                                                                                                                                                                                                                       | No supported file profile in MemoryImportFormat and no pinned canonical source contract here; do not scrape settings/session caches.                                                                                                                                                                                                                                                                                     | Import scope is separate from WP4 common-memory delivery.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Grok                                | Unsupported.                                                                                                                                                                                                                       | No researched, pinned provider-native durable memory format in these inputs; ACP delivery does not establish a source importer.                                                                                                                                                                                                                                                                                          | Future profile needs owner contract and fixtures.                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| OpenCode without omo                | Unsupported.                                                                                                                                                                                                                       | OpenCode sessions/plugin state are not the omo committed memory repository.                                                                                                                                                                                                                                                                                                                                              | omo is a source format, not a new GOAT provider driver.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Antigravity                         | Unsupported.                                                                                                                                                                                                                       | No researched, pinned provider-native memory file contract here; do not infer it from ACP.                                                                                                                                                                                                                                                                                                                               | WP4 delivery remains supported independently.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Other providers/extensions          | Unsupported.                                                                                                                                                                                                                       | MemoryImportFormat accepts only codex/claude/omo; instructions, arbitrary Markdown and conversation archives are outside import.                                                                                                                                                                                                                                                                                         | Adding support requires a new explicit format/profile decision, never a generic fallback.                                                                                                                                                                                                                                                                                                                                                                                 |
 
-Provider source pins are read from local Git without checkout:
+Parser versions are explicit constants; known native app version is not in the current import
+DTO and must not be invented in provenance. A profile/parser update re-previews under the same
+source ID/item key, preserving suppression and accepted history. Never key identity by version,
+mtime or Git HEAD. Ambiguous key migration stops with unsupported_format; a deliberate source
+registration migration must transfer old aliases/suppression before enabling a new key. A path
+or title rename is a new source key, checked against exact-content suppression; rename plus
+paraphrase has no semantic erasure guarantee. Oversized whole-file items reject, never truncate.
 
-- Codex: `/Users/jun/developer/codex/121_openai-codex` at `816fa702ec` (local HEAD observed while authoring). `git show 816fa702ec:codex-rs/memories/write/src/lib.rs`, lines 37-41,112-131, names `rollout_summaries`, `raw_memories.md`, `phase2_workspace_diff.md`, `extensions`, and `memories`. `storage.rs:12-25,57-74,118-133` distinguishes generated raw input and rollout summary metadata. `templates/memories/consolidation.md:119-140,179-190,201-211,235-273` defines handbook task groups, `applies_to`, task evidence links, consolidated sections and the derived `v1` summary. These are pinned source facts, not claims about every installed Codex version.
-- Claude: the source corpus `/Users/jun/developer/codex/010_memory-pipeline/10_cc_memory.md:89-138` records `MEMORY.md` as an index and topic frontmatter `name/description/type`, with types `user/feedback/project/reference`. Its referenced deobfuscated `150_claude_code/src` checkout is absent on this host; do not describe it as freshly read. Read-only inspection of actual `~/.claude/projects/*/memory/*.md` confirmed both direct-type and nested `metadata.type` shapes. Record only shape keys, never private values, in this document or fixtures.
-- omo: `/Users/jun/developer/codex/172_oh-my-openagent`, **`ebfa564862e82cfd1a8c3b45daa4993a40dc7cd6`**, accessed by `git show` only. `packages/memory-core/src/identity/layout.ts:47-78` defines `agents/<id>/{repo,runtime}`. `compile/compile.ts:25-43,56-69,106-111` reads committed files and separates `system` from external projections. `recall/provider.ts:25-58` pins HEAD and parses Markdown blobs. `memfs/frontmatter.ts:22-39,42-90` requires nonempty `description`, supports string `read_only`, `kind`, JSON-array `aliases`, tolerates `limit`, and preserves extra scalars. `facts/person-routing.ts:68-70,112-131` establishes monthly facts and people observation files. Do not import this source tree itself; it specifies the runtime memory repo format.
+## 3. Implemented / WP3-provided / WP4-provided / WP5 adds
 
-Actual Codex structure was read-only inventoried: `MEMORY.md`, `memory_summary.md`, `raw_memories.md`, `rollout_summaries/`, `skills/`, `extensions/`, `.git`. Sample rollout summaries and ad-hoc notes were Markdown on this host. Reject JSONL in a `.md` file; session stores or historical JSONL wrappers are not this parser profile. Never traverse a `rollout_path` or use a provider session UUID as a GOAT `ThreadId`.
+`S` = `apps/server/src`, `C` = `packages/contracts/src`, `M` = `@goat/contracts`,
+`E<A, X>` = `Effect.Effect<A, X>`, `Permit` = repeatable `E<void, MemoryAccessError>`.
+Path:line references are at the input branch SHA, or the named frozen plan. All future
+signatures below are planned seam definitions, not compile evidence.
 
-### 2.1 Allowlist and item keys
+| Port / owner state                       | Exact signature / shape and source anchor                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | WP5 use or addition                                                                                                                                                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Implemented — binding                    | MemoryService.getProjectBinding(input: M.MemoryProjectBindingGetInput, permit: Permit): E<M.MemoryProjectBinding, MemoryServiceError>; resolveProjectKey(space: M.MemorySpaceId, project: M.ScopedProjectRef): E<M.MemoryProjectKey \| null, MemoryServiceError>. `S/memory/MemoryService.ts:47–58,187–215,281–284`.                                                                                                                                                                                                                                                                                                                                                                  | Use selected readiness space. Capture binding.version and resolved key under live import permit; recheck inside commit. resolveProjectKey internally uses Effect.void, so it is not the authorization boundary.                                                                                  |
+| Implemented — transactional operation    | MemoryStore.transact<A,E,R>(effect: Effect.Effect<A,E,R>): Effect.Effect<A,E \| MemoryStorageError,R>; apply(decision: MemoryDecision): E<StoredReceipt, MemoryStorageError \| MemoryStoreConflict>; receipt(space: M.MemorySpaceId, id: M.MemoryOperationId): E<StoredReceipt \| undefined, MemoryStorageError>. `S/memory/MemoryStore.ts:426–439`. MemoryService.upsert(input: M.MemoryUpsertInput, permit: Permit): E<StoredReceipt, MemoryServiceError>, `:67–70,357–399`.                                                                                                                                                                                                        | Extend the parent-aware service's local-intent transaction with import provenance and receipt CAS. Current public upsert builds only environment provenance; calling it then saving provenance/receipt is insufficient.                                                                          |
+| Implemented — initial intents            | putLocalIntent(input: Store.LocalMemoryIntent): E<void, MemoryStorageError \| MemoryStoreConflict>; materializeLocalIntent(input: {environmentId: M.EnvironmentId; intentId: string; memorySpaceId: M.MemorySpaceId; operationId: M.MemoryOperationId; revisionId: M.MemoryRevisionId}): E<{operation: M.MemoryOperation; operationDigest: string}, MemoryStorageError \| MemoryStoreConflict>. `S/memory/MemoryStore.ts:93–103,684–703,3506–3572`.                                                                                                                                                                                                                                   | Requires published=1; empty expectedHeads/parents at :3549–3556. Do not use it for changed/aliased items or rewrite its frozen signature. Established-space imports can submit normal parent-aware operations directly through WP3's local pending path.                                         |
+| Implemented — receipt storage, not APIs  | 070_Memory source/batch/item columns and unique indexes, `S/persistence/Migrations/070_Memory.ts:173–201,322–324`; memory_import_keys `(space,key_kind,key,memory_id,record_json)`, :260–267. No importProvider or registration/batch/item methods in MemoryService/Store.                                                                                                                                                                                                                                                                                                                                                                                                            | WP5 adds strict private codecs, source/session/batch/item transaction helpers and bounded key lookup. Reuse tables; no direct SQL in reader/parsers/transport.                                                                                                                                   |
+| Implemented — suppression primitives     | readSuppressions(space: M.MemorySpaceId, id: M.MemoryId): E<readonly M.MemorySuppressionRecord[], MemoryStorageError>, `S/memory/MemoryStore.ts:641–644`; write/restore suppression `:1416–1424,3332–3345`; forget(input: M.MemoryForgetInput, permit: Permit): E<StoredReceipt, MemoryServiceError>, `S/memory/MemoryService.ts:74–77,433–466`.                                                                                                                                                                                                                                                                                                                                      | Existing forget gathers thread exclusions but imported source keys and content hashes are empty. WP5 must gather durable import aliases/history before forget, use WP3 split-fragment pipeline, and query source/content keys before re-import.                                                  |
+| Implemented — quota, scanner, metrics    | MemoryQuotaService.withAdmission<A,E,R>(input: {operation: M.MemoryOperation; admission: Store.MemoryAdmissionContext; environmentId: M.EnvironmentId; receipt?: M.MemoryHubReceipt \| M.MemoryMutationReceipt}, commit: Effect.Effect<A,E,R>): Effect.Effect<A,E \| MemoryStorageError \| MemoryCapacityError,R>; recordStorageSample(environmentId, sharedMetrics?: {walBytes: number \| null}): E<M.MemoryStorageGrowth, MemoryStorageError>, readStorageGrowth(environmentId): same. `S/memory/MemoryQuotaService.ts:13–40`. scanMemoryValue(value: unknown): MemoryScanResult, `S/memory/MemorySecretScanner.ts:32–50`.                                                          | Existing generic operation quotas are not complete import-session/receipt accounting. WP5 adds explicit import counters/reservations and scanner calls for raw/title/header strings; arbitrary field names are not scanned by the contentFields walker. Reuse physical sampling/FTS maintenance. |
+| Implemented — wire contracts             | M.MemoryImportProviderInput/Result and Receipt, `C/memory.ts:1559–1718`; WsMemoryImportProviderRpc payload/success/error, `C/rpc.ts:2373–2376`; WsMemoryImportRpcGroup with RpcScopeAuthorization, :2394–2396; compound clientRpcRequiredScopes(method,input), `C/clientRpcPermissions.ts:80–85`.                                                                                                                                                                                                                                                                                                                                                                                     | Consume existing discover/preview/apply/status and dual grants unchanged. Current WsRpcGroup at C/rpc.ts:2294 omits staged memory groups; client guard alone is not server activation.                                                                                                           |
+| WP3-provided — readiness/status          | MemorySyncService.readLocalReadiness(): E<{memorySpaceId: M.MemorySpaceId \| null; bootstrap: "unbound" \| "staging" \| "ready"}, MemoryServiceError>; requireBootstrap(space: M.MemorySpaceId): E<void, MemoryServiceError>; syncStatus(input: M.MemorySyncStatusInput, permit: Permit): E<M.MemorySyncStatus, MemoryServiceError>. `030:1184–1186` (§12).                                                                                                                                                                                                                                                                                                                           | Read persisted settings/bootstrap, no network. Absent/staging/mismatched space rejects import with bootstrap_required; already bootstrapped offline submits pendingSync. Status needs an internal authorized read, not an added public memory:read prerequisite.                                 |
+| WP3-provided — initial assignment        | listMaterializableIntents(environment: M.EnvironmentId, limit: number): E<readonly Store.LocalMemoryIntent[], MemoryStorageError>; assignIntentIdentityTx(input: {environmentId: M.EnvironmentId; intentId: string; memorySpaceId: M.MemorySpaceId; operationId: M.MemoryOperationId; revisionId: M.MemoryRevisionId}): InTx<AssignedIntent>. `030:331–339` (§4; aliases/error context :110–121; AssignedIntent :144–149).                                                                                                                                                                                                                                                            | Sync owns first assigned IDs and bootstrap sequencing. WP5 neither manufactures a new materializer nor rebinds immutable published space.                                                                                                                                                        |
+| WP3-provided — M20 settlement            | receiveHubPage(input: {memorySpaceId: M.MemorySpaceId; hubEnvironmentId: M.EnvironmentId; localEnvironmentId: M.EnvironmentId; expectedSequence: number; page: M.MemoryHubPullResult; reauthorize: E<void,MemoryAccessError>}): E<readonly Settlement[],MemoryServiceError>; settleHubAcknowledgement(input: {memorySpaceId: M.MemorySpaceId; hubEnvironmentId: M.EnvironmentId; localEnvironmentId: M.EnvironmentId; workId: string; receipt: M.MemoryHubReceipt; operation: {operationId: M.MemoryOperationId; operationDigest: string}; reauthorize: E<void,MemoryAccessError>}): E<Settlement,MemoryServiceError>. Settlement is frozen at `030:139–143`; ports at `030:441–457`. | Sync owns canonical receive/ACK and settlement; WP5 hooks accepted import metadata into the same transaction. approvedReplica unions aliases/suppression without local quota/scanner re-admission.                                                                                               |
+| WP4-provided — destination command/auth  | Guarded importProvider({ environmentId, input }) where environmentId is M.EnvironmentId and input is M.MemoryImportProviderInput, with permissionAtom requiring memory:write + filesystem:read. `040:319–324,355,423`; existing guard `C/clientRpcPermissions.ts:84–85`. WP4 owns repeatable live permits and core composition.                                                                                                                                                                                                                                                                                                                                                       | Consume in WP6. WP5 does not edit client-runtime or consent UI; destination unavailable never falls back locally. Recheck both grants after every wait and SQL lock.                                                                                                                             |
+| WP5 adds — public service and activation | MemoryService.importProvider(input: M.MemoryImportProviderInput, permit: Permit): E<M.MemoryImportProviderResult, MemoryServiceError \| M.MemoryImportRpcError>. Proposed addition to existing `S/memory/MemoryService.ts:44–129`; compound transport grant maps to live Permit.                                                                                                                                                                                                                                                                                                                                                                                                      | Implement reader/parsers/coordinator and transaction helpers below; activate server import group, thin handler, scope declaration and capability together after dependencies exist.                                                                                                              |
 
-Each parser has a fixed `parserVersion`; a provider app version is provenance when known, not inferred from the path. Unknown layouts return `unsupported_format`, never a generic Markdown fallback.
+Before B, re-anchor on the **merged WP3 implementation SHA and then WP4 implementation SHA**,
+record their exact hashes, compare §4/§12 and 040 handoff, and confirm source interfaces and
+canonical settlement behavior. Their absence blocks B, not this requested P artifact. Never
+claim WP3/WP4 functionality has been tested by inspecting these plans.
 
-| Format/profile                        | Allowed content and stable `sourceItemKey`                                                                                                                                                                                                                                                                      | Explicit exclusions                                                                                                                                                                                                           |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `codex` / `codex-handbook-v1`         | Each `# Task Group:` block in root `MEMORY.md`, requiring `scope:`; `applies_to:` optional for observed older handbooks. Key `MEMORY.md#task-group:<NFC title>`. Keep task-local evidence references as opaque local selectors in provenance; do not open linked raw sessions. Duplicate titles fail that file. | `memory_summary.md` is navigation only; `raw_memories.md` and `rollout_summaries/*.md` are backing evidence, not additional imported assertions; `.git`, SQLite, workspace diffs, skills, resources and transcripts excluded. |
-| `codex` / `codex-ad-hoc-v1`           | `extensions/ad_hoc/notes/*.md`, a nonempty UTF-8 Markdown note, key `<relativePath>#body`. Scan root handbook and selected notes, but exact copies use one memory and multiple sources.                                                                                                                         | Unknown extensions, `instructions.md`, arbitrary recursive Markdown, or notes with JSONL/transcript envelopes.                                                                                                                |
-| `claude` / `claude-topic-v1`          | Regular root-level topic `.md` under one selected `projects/<opaque>/memory/`; scalar `name`, `description`, `type`, type in `user/feedback/project/reference`; nonempty body; key `<relativePath>#body`.                                                                                                       | Root `MEMORY.md` is an index only; `.claude/agent-memory`, session memory, `CLAUDE.md`, rules, settings, arbitrary links, nested `structured/episodes`, symlinks.                                                             |
-| `claude` / `claude-topic-metadata-v1` | Same as above, with `metadata.type` instead of direct `type`. Only scalar `metadata.node_type` and `metadata.originSessionId` are optional observations; do not copy their values into shared payload. If both type locations exist they must agree.                                                            | Other nested objects, YAML tags/anchors/aliases, duplicate keys, unsupported types or an empty type.                                                                                                                          |
-| `omo` / `omo-memory-core-beta63`      | Selected explicit agent identity's `repo`: regular Git blob `.md` in `system/`, `notes/`, `people/`, `reference/`, `projects/`; mandatory frontmatter `description`, body nonempty. Key `<relativePath>#body`. Whole monthly ledger/observation file is one item.                                               | `runtime/`, skills, transcripts, job state, locks, worktrees, config dumps, root unknown trees, submodules, symlink blobs and untracked/dirty working-tree bytes.                                                             |
+## 4. Bounded read-only flow, identity and settlement
 
-The omo tree allowlist is deliberately narrower than its recall reader, which accepts any non-system Markdown. Unknown trees are counted as excluded; a selected unsupported item returns `unsupported_format`. `system/persona.md` and `system/identity.md` may be selected as **untrusted memory data**, never installed as GOAT instructions or executed. `read_only` is source metadata only; GOAT may change its imported copy.
+### 4.1 Actions, roots and snapshots
 
-There is no fallback to importing `memory_summary.md` when the Codex handbook is missing. Return `unsupported_format` with a bounded code such as `missing_handbook`; ad-hoc notes can still be explicitly selected. A handbook without `applies_to` needs explicit scope selection. No pathname decoder guesses Claude project identity.
+All four actions require memory:write **and** filesystem:read at the destination. Discover
+uses input.memorySpaceId and format; preview uses sourceId and returns a server sessionId;
+apply supplies space/source/session/batch operationId and 1–32 selectors
+`{sourceItemKey, sourceFingerprint, scope, project?}`; status takes space and operationId.
+No body preview, caller path, free-form parserVersion, start/cancel job or new wire field.
+Results obey 64-KiB encoded limit as well as item counts (`C/memory.ts:1683–1716`).
 
-### 2.2 Scope mapping
+The reader registers an opaque UUID sourceId once per `(space, environment, format, trusted
+logical root slot, selected Claude directory/omo agent)`. Persist registration in the source
+arm of memory_import_receipts; paths stay server-local. Display labels and item selectors are
+scanner-checked, bounded metadata without home paths. Provider settings/CLI are never used to
+resolve identity. Changing trusted root requires explicit registration migration preserving
+source IDs/suppression, not minting a new ID to bypass forget.
 
-The caller selects a `MemoryScope` per item, or one explicit batch scope plus per-item overrides. Absence is `scope_unmapped`. Scope suggestions are hints, never authorization or automatic assignment.
+Filesystem reader: reject symlink roots/ancestors/final files, escapes and nonregular files;
+open read-only with no-follow and descriptor identity checks, bounded reads, strict UTF-8 and
+restat. Detect identity/size/mtime change during read as source_changed. On platforms without a
+safe no-follow/ancestor check, fail path_rejected rather than silently follow a link. If Effect
+filesystem cannot provide descriptor safety, inject a narrow Node read-only adapter inside
+MemoryImportReader only. No provider-side temp file, lock, chmod, mkdir or write capability.
 
-- `user`: explicitly selected by the owner. Claude `user/feedback` can suggest it; do not promote all Claude feedback or omo human records to global scope silently.
-- `project`: resolve an environment-local `ScopedProjectRef` using the existing project/repository service. Call WP2 resolveProjectKey for the ScopedProjectRef: persisted explicit MemoryProjectKey first, otherwise its pinned repositoryGroupingKeyOf fallback. No remote/no explicit key means `scope_unmapped`. A supplied local ID from another environment is rejected; a supplied shared project key must match the resolved project binding. Do not rewrite the key after remote changes.
-- `thread`: require a real `ScopedThreadRef` owned by the destination environment, nondeleted and authorized at preview and commit. Provider thread IDs are evidence labels only. If a project key accompanies the thread, validate that binding against its project. No automatic cross-environment lookup or fallback.
-- Codex `applies_to.cwd`, Claude encoded directory names and omo auto-agent cwd hashes can suggest a local mapping, never establish cross-device identity. omo requires an explicitly selected agent id and supported profile; do not execute omo or read its provider configuration to discover identity.
-- Changing scope for an existing source receipt is `mapping_changed`. Moving a receipt or re-remembering is a separate explicit user operation, not an import retry. Re-remember creates a new memory through WP2's explicit operation, retaining the old suppression record.
+omo reader: use existing VcsProcess.run argument vectors (`S/vcs/VcsProcess.ts:23–55`),
+`GIT_OPTIONAL_LOCKS=0`, no shell. Resolve HEAD^{commit} once, bounded `ls-tree -rz --full-tree`
+on that OID, then size-check/read regular blobs by object ID with cat-file. Only modes
+100644/100755 and approved paths qualify. Gitlink/120000 rejects; dirty/untracked content is
+ignored. HEAD moves cannot mix commits. No fetch, status/index refresh, checkout, hooks,
+worktree, add/commit or provider process. Timeout/output truncation/absent objects return a
+bounded issue, never empty success; do not serialize stderr or filesystem causes.
 
-## 3. File change map for the WP5 implementation PR
+Reader-local hard ceilings: 128 discovered roots, 512 visited entries per selected root
+(including excluded entries), depth 8 and relative selector <=512 UTF-8 bytes; 256 KiB per
+file/blob; 8 MiB aggregate source bytes; 128 preview candidates; title <=256 Unicode code
+points. Omo tree output also has an 8-MiB cap independent of approved blobs. Codex's large
+handbook can therefore be refused explicitly; never read an unbounded file just to decide it
+is too large. Count before retaining; +1 yields limit_exceeded and a narrower-source request,
+not a seemingly complete partial enumeration. Request output encoding can reach its cap before
+128 items; reject a complete oversized preview rather than silently drop rows. Pure parsers
+never perform I/O, SQL, time/randomness, includes, fetches, link traversal or model extraction.
 
-These are planned changes. Only this roadmap file is written during authoring. `MODIFY (predecessor)` means the named file must already exist from its owning phase. No deletes or provider-adapter edits.
+Scan every raw allowlisted file and human-readable header/title/key before returning metadata;
+then scan normalized accepted payload. The current scanner only recognizes its configured
+patterns and content fields: a detected secret blocks the item/file, but this is not a claim
+of complete secret detection. Blocked/suppressed preview rows omit title as required by
+`C/memory.ts:1625–1640`; no rejected raw content appears in receipts/logs/errors/model input.
 
-| Exact path                                                       | Action           | Reason                                                                                                                                                        |
-| ---------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/server/src/memory/imports/MemoryImportReader.ts`           | NEW              | Read-only Effect service: discover bounded sources, register opaque source locators, read UTF-8 snapshots or pinned Git blobs, enforce size/path/type guards. |
-| `apps/server/src/memory/imports/MemoryImportTypes.ts`            | NEW              | Internal snapshot/candidate types and parser limits; no public service-shape alias.                                                                           |
-| `apps/server/src/memory/imports/CodexMemoryImporter.ts`          | NEW              | Pure handbook/ad-hoc profile parsing; summary/evidence exclusion. Shared name from WP0.                                                                       |
-| `apps/server/src/memory/imports/ClaudeMemoryImporter.ts`         | NEW              | Pure topic/direct/nested frontmatter parsing; index exclusion. Shared name from WP0.                                                                          |
-| `apps/server/src/memory/imports/OmoMemoryImporter.ts`            | NEW              | Pure beta63 frontmatter parser for committed, allowlisted blobs. Shared name from WP0.                                                                        |
-| `apps/server/src/memory/imports/ProviderMemoryImport.ts`         | NEW              | Compose discovery, preview and bounded apply under the existing `MemoryService`; no second transaction owner.                                                 |
-| `apps/server/src/memory/MemoryService.ts`                        | MODIFY (WP2/WP4) | Delegate `importProvider` to the coordinator, authorize scope/source access and use the same apply boundary as other writes.                                  |
-| `apps/server/src/memory/MemoryStore.ts`                          | MODIFY (WP2)     | Atomic source receipt/alias and revision application; lookup exact-content suppression; receipt reads for retry/status.                                       |
-| `apps/server/src/memory/MemoryDecider.ts`                        | MODIFY (WP2)     | Import receipt decision: NOOP/change/conflict/delete-wins; do not replace an existing concurrent head.                                                        |
-| `packages/contracts/src/rpc.ts`                                  | MODIFY           | Merge the WP1 WsMemoryImportRpcGroup into the live group only after import service/handler exists; no schema definition.                                      |
-| `apps/server/src/ws.ts`                                          | MODIFY           | Register one thin memory.importProvider handler consuming WP1 action/result union.                                                                            |
-| `apps/server/src/auth/RpcAuthorization.ts`                       | MODIFY           | Register import scope entry using WP1 dual-grant declaration and WP4 live permit.                                                                             |
-| `apps/server/src/environment/ServerEnvironment.ts`               | MODIFY           | Set capabilities.memory.importProvider only with ready parser/service/handler.                                                                                |
-| `packages/contracts/src/rpc.test.ts`                             | MODIFY           | Core stays usable before import group activation; complete group exposes all fifteen predeclared schemas.                                                     |
-| `apps/server/src/ws.test.ts`                                     | MODIFY           | Round-trip all four import actions; lost response status returns persisted partial/completed receipt.                                                         |
-| `apps/server/src/auth/RpcAuthorization.test.ts`                  | MODIFY           | Newly registered import method enforces both grants and post-wait revocation.                                                                                 |
-| `apps/server/src/environment/ServerEnvironment.test.ts`          | MODIFY           | importProvider stays false without implementation; ready producer advertises true.                                                                            |
-| `apps/server/src/server.ts`                                      | MODIFY           | Compose `MemoryImportReader.layer` once with filesystem, path and `VcsProcess`; provide to existing memory layer.                                             |
-| `apps/server/src/memory/imports/MemoryImportReader.test.ts`      | NEW              | Read-only guards, Git pinning, limits, no hidden state changes.                                                                                               |
-| `apps/server/src/memory/imports/CodexMemoryImporter.test.ts`     | NEW              | Handbook and synthetic note parsing.                                                                                                                          |
-| `apps/server/src/memory/imports/ClaudeMemoryImporter.test.ts`    | NEW              | Both supported frontmatter profiles and index exclusions.                                                                                                     |
-| `apps/server/src/memory/imports/OmoMemoryImporter.test.ts`       | NEW              | beta63 grammar, allowlist, inert instructions.                                                                                                                |
-| `apps/server/src/memory/MemoryImport.test.ts`                    | NEW              | Real memory service/store integration: receipts, races, scanner, suppression, provenance, scope.                                                              |
-| `apps/server/src/memory/imports/MemoryImportFixtures.fixture.ts` | NEW              | In-memory synthetic strings and temp-tree builders; imported by the five test files. No copied corpus or committed Git repo.                                  |
+### 4.2 Sessions, replay and changes
 
-No WP5 migration: WP2 already owns the complete source/batch/item receipt inventory. Refresh actual predecessor code before implementing; a missing earlier column is a WP2 acceptance gap, not a second schema definition here.
+`sourceItemKey` is stable within the parser profile. Receipt identity is
+`(memorySpaceId, environmentId, sourceId, sourceItemKey)` as in 070's item index, **not** an
+invented SQL key containing format/locator. sourceLocator/format are registered provenance.
+`sourceFingerprint = SHA256(parserVersion + canonical allowlisted title/body/metadata)`;
+`contentFingerprint = SHA256(NFC(body).replace(CRLF, LF).trim())`. No case-fold/NFKC/semantic
+matching. Exact-copy lookup includes space, scope and assertion kind. Live matches also compare
+retained canonical bodies; forgotten hash matches suppress conservatively. Hashes are not a
+privacy guarantee and are not exposed as searchable text.
 
-No WP5 new contract/client-runtime/UI definitions are planned (RPC group activation below consumes WP1 schemas). WP5 activates the predeclared WsMemoryImportRpcGroup and its handler/server scope entry after implementing the service. Their exact owner paths are in section 8. No DELETE entries: N/A, nothing is removed or moved. No new dependency: server already has `yaml` (`apps/server/package.json:66`); do not import code from the omo repo or `.repos/`.
+Persist a bounded source registration/session envelope in existing registration_json: active
+server session ID, source/profile/snapshot digest, creation/expiry, applied item charges and
+session counters; no raw bytes. Session ID <=64 bytes as required by apply/receipt; one current
+session per source, expiry bounded by MEMORY_DERIVED_CACHE_TTL_MS. Re-preview replaces transient
+bytes only, never historical item identity/accepted parent. The same snapshot's source session
+must span its 32-item chunks; concurrent callers use CAS. New session/source registrations
+still face cumulative metadata/source/live admission, so chunk/session splitting cannot reset
+M19. No persistent raw snapshot archive; staged bytes share
+MEMORY_CHECKPOINT_STAGING_MAX_BYTES and expire/purge on forget. Prefer re-read to disk caching.
 
-## 4. Contracts, signatures and change skeletons
+First validate batch `(space, environment, operationId)` and canonical selection digest
+including source/session/fingerprints/scopes/projects, **before source I/O**. Same digest returns
+stored completed outcomes/IDs; changed digest yields operation_id_reused without reading files.
+A partial exact retry processes only unfinished selectors. Stable per-item operation/revision
+IDs are assigned/persisted before first submission; uncertain retries preserve identical bytes.
+Batch completed_items_json carries a versioned strict envelope of compact selectors/outcomes,
+remaining count and session totals; no request body. Item receipt keeps accepted source hash,
+accepted content hash history, accepted revision, original scope and separate rejected hash.
+Never advance accepted fingerprint/parent for malformed, secret or failed observations.
 
-### 4.1 Bounded API consumed from WP1
+Detailed batch results expire under MEMORY_IMPORT_BATCH_RETENTION_MS; keep a bounded compact
+operation-ID/digest reuse guard charged to existing receipt/permanent-metadata budgets. Retired
+batch exact retry/status returns a typed not_found through existing MemoryRpcError, never
+reruns import; changed digest still rejects. Source/item/suppression identity remains permanent.
+Prove the compact codec maximum (MEMORY_COMPACT_RECEIPT_MAX_BYTES), or amend with the owning
+contract phase before B; a fabricated expiry issue/action is not acceptable. Status reads only
+persisted receipt and internal sync status, no source, no resume. New/pending/hub rejected/local
+held are reported by syncStatus; an import item locally created is not proof of hub approval.
+WP6 cancel stops future chunk calls; an admitted call may commit, with no rollback promise.
 
-Use [MemoryImportProviderInput/Result](010_wp1_contracts.md#import-rpc-contract-wp1-owner-wp5-producer)
-unchanged: discover/preview/apply/status. Apply selects 1..32 opaque keys/fingerprints/scopes
-and a stable batch operationId; each accepted item has its own operation ID. No arbitrary paths,
-body preview, start/cancel action or import job enum. Required dual grants apply to every action.
-A successful apply means bounded local item transactions committed, not hub acknowledgement.
+Apply re-reads a coherent snapshot, validates the session/profile/fingerprint and caller scope,
+then commits selected items serially in independent transactions. File removal/unsupported
+layout returns an issue; it never means GOAT forget. Source_changed leaves prior accepted item
+untouched and requires re-preview. Git commit is an observation only; unchanged selected
+content at a new HEAD remains noop.
 
-Discover/preview return only scanner-approved bounded metadata. Apply/status return
-MemoryImportReceipt partial/completed outcomes and MemorySyncStatus; status reads stored receipt
-without reading provider files or committing new items. A missing batch returns not_found.
-Per-item parse/mapping/change/secret failures use MemoryImportIssue rows; grant denial uses
-EnvironmentAuthorizationError and storage failure stops the call. Permission failure is never
-silently converted into an item success. Retry reuses request digest and stored completed rows.
+### 4.3 Scope, provenance, suppression and M20
 
-WP6 cancellation stops further chunks; an admitted call may finish. Reconnect uses status or
-exact apply retry/re-preview; cancellation never undoes committed items. No durable async cancel
-promise is introduced. Populate import evidence/provenance from WP1 metadata schemas only.
+User explicitly selects user/project/thread scope. Project scope requires destination-local
+ScopedProjectRef, live getProjectBinding permit, `resolveProjectKey(readinessSpace, project)`,
+non-null matching scope key and captured binding.version. Recheck project existence/key/version
+under the transaction; drift returns mapping_changed without receipt/head mutation. Current
+remote URL, Codex applies_to.cwd, encoded Claude dirname and omo auto-agent cwd hash are hints
+only. Thread scope requires a real authorized nondeleted ScopedThreadRef in the destination;
+provider UUID/session IDs are never GOAT ThreadId. No binding change migrates old receipts.
 
-### 4.2 Reader and parser skeletons
+Create MemoryPayload evidence `{origin: "import", importSourceId, messageIds: []}` and revision
+assertionKind inference. Provenance is `{environmentId, importSource: {sourceId, format,
+parserVersion, sourceLocator, sourceItemKey, sourceFingerprint, contentFingerprint,
+sourceAliases, acceptedContentFingerprints, commitOid?}}` (`C/memory.ts:334–405`). Actual known
+Codex/Claude provider can be recorded; omo uses importSource.format, not a fabricated driver.
+Do not guess providerInstanceId/model/appVersion or populate sourceThread/watermark from a
+provider transcript. Absolute source paths, raw headers and opaque foreign session values are
+not shared. Links in imported text stay data; never execute system/persona or Markdown commands.
+
+Under the existing Store.transact, reauthorize both grants after lock, verify readiness/space,
+scope/binding, receipt/session CAS, tombstone/pending forget and source/content suppression;
+reserve import metadata/session/local queue charges; persist source/item/batch outcomes and
+ordinary local intent/outbox atomically. Source/process/network I/O finishes before SQL.
+Use existing parent-aware service operation preparation, scanner and decider; do not call
+public upsert followed by a separate receipt save. After commit, existing worker/sync owns
+submission, hub-only admission, canonical settlement and indexing. No second SQL connection,
+ManagedRuntime, generation worker, hub or import network protocol.
+
+| Atomic condition / activation                                                                                       | Required result                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Source key, accepted historical content hash, confirmed alias or target tombstone suppressed; pending forget exists | Suppressed metadata-only result (or hold/reject for pending forget), no readable payload, revision resurrection or content outbox. Fresh suppressed alias metadata itself needs bounded local/hub admission.                                                                                                                                                                               |
+| Same source receipt mapped to different scope                                                                       | rejected + mapping_changed; keep accepted scope/revision. Explicit re-remember is a separate operation; never clear suppression.                                                                                                                                                                                                                                                           |
+| Same source hash and live accepted/pending item                                                                     | noop; no new identity, history, FTS work or session charge. Return current settlement state.                                                                                                                                                                                                                                                                                               |
+| New source, exact same live body/scope/assertion, single nonquarantined head                                        | aliased; one memory, union provenance revision with that head as parent, bounded new alias admission, both receipts updated after settlement.                                                                                                                                                                                                                                              |
+| New source without copy                                                                                             | created local intent with stable memory/operation/revision identity, pendingSync until hub settles.                                                                                                                                                                                                                                                                                        |
+| Same source changed                                                                                                 | revised local intent, same MemoryId, revision.parents = last accepted receipt revision, expectedHeads = current heads captured/rechecked under the local transaction; manual/remote divergence follows normal DAG/hub frontier logic, never adopts the newest head as its parent. If the accepted base is compacted, retain the intent for explicit review rather than fabricate ancestry. |
+| Rejected raw/input/scanner/capacity                                                                                 | Bounded metadata-only issue, capacity dimension/current/limit/reclaimable where applicable. No accepted parent mutation; pre-admission refusal may allocate no row.                                                                                                                                                                                                                        |
+| Hub receives any local import, even originating on hub                                                              | HubService admission through 030 §4 admitHubOperationTx; no import bypass or hub-local precommit called approval. Hub rejection settles the same immutable intent/receipt.                                                                                                                                                                                                                 |
+| Replica receives hub-approved alias/upsert/forget                                                                   | 030 canonical settlement transaction persists receipt, union keys and cursor, without local admission/scanner veto. Scanner disagreement/FTS brake defers local exposure/index on canonical refs, no duplicate body queue.                                                                                                                                                                 |
+
+The shared MemoryService hub-admission preparation must also run the indexed import source/
+content suppression lookup under HubService's transaction, immediately before the pure decider.
+A delayed offline proposal created before another environment's forget must be rejected at the
+hub even if its local replica has not received that forget yet. This is an L1 MemoryService
+change used by the existing 030 admitHubOperationTx path, not only a check in the coordinator.
+approvedReplica settlement preserves the already admitted result without rerunning that check;
+local read fences still honor a later tombstone.
+
+WP5 extends forget preparation to gather **all durable accepted** imported source keys/aliases
+and content fingerprints (including earlier accepted versions, not merely current heads) before
+payload purge. Store.firstForgetReservation/reservationForRevisions (:3602–3638) and Quota's
+reservedKeys calculation (:378–403) currently gather only thread exclusions; L1 extends both
+with the same imported source/content union so first-forget capacity is actually reserved.
+Persist accepted imported alias/content history as bounded canonical metadata before detailed
+revision compaction, and reconstruct it from approved operation/checkpoint metadata on every
+replica. Origin-local batch receipts alone cannot supply another environment's later forget;
+no accepted alias/hash may disappear merely because a detailed receipt/revision expires. Thread extraction sourceExclusions remain the existing true thread/watermark/
+message codec (`C/memory.ts:348–353`); provider sources use MemorySourceKey, not that codec.
+Persist source/content suppression in memory_import_keys with exactly the existing canonical
+key encoding/hash used at Store:1416–1424; add indexed lookup by computed key, not whole-store
+scan. Permanent keys survive restart, checkpoint install and compaction; no expiry with batch
+observations. Local rejected aliases cannot erase existing suppression. A lookup hit on any
+registered alias blocks the changed source too, even while provider original text still exists.
+
+If the union exceeds the tombstone's 100-entry wire cap (`C/memory.ts:433–445`), consume WP3's
+base-deletion plus body-free forgetExpansion fragments with distinct immutable IDs/digests and
+separate pending/rejected/accepted receipts. Preserve reserved first forget and immediate read
+fence; excess metadata admission refusal cannot undo base deletion. Re-import consults durable
+receipt/tombstone history during pending expansion, never only the first fragment. Approved
+replica union is not refused by full local alias/key/work budgets. No semantic forget or source
+file deletion claim; source-key and exact-content guarantees are the defined boundary.
+
+### 4.4 M19 budgets and growth measurement
+
+Use exported constants, not parser-specific substitutes (`C/memory.ts:103,116–127,151,167–169`):
+
+| Dimension                             | Ceiling / accounting                                                                                                                                                                                  |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Item body / encoded payload           | 16,384 / 65,536 UTF-8 bytes; oversize whole item rejects.                                                                                                                                             |
+| Source snapshot / preview / apply     | 8,388,608 bytes / 128 items / 32 items, plus 64-KiB response framing and reader limits in §4.1.                                                                                                       |
+| Session                               | 128 new items / 2,097,152 accepted body bytes across chunks; changed replacement also charges retained history/body growth. NOOP does not charge twice.                                               |
+| Import live                           | 10,000 items / 67,108,864 body bytes, alongside general user/project/thread/environment/space/live limits.                                                                                            |
+| Cumulative identity / alias / content | 50,000 source items / 100,000 aliases / 100,000 content digests; key <=512 and digest <=64 UTF-8 bytes. Count registrations, rejected identities and suppressed aliases where they allocate metadata. |
+| Staging / detailed observations       | Shared checkpoint staging 128 MiB; derived cache TTL 10 minutes; batch details 30 days, compact replay guard retained. No raw files indexed or archived.                                              |
+
+WP5's Store/Quota lane implements missing import-specific counters and receipt/session
+reservations on top of generic WP2 quota.commit/withAdmission. Local allocations have explicit
+admission; hub independently enforces space-global live/history/permanent metadata plus forget
+reserve. approvedReplica never reruns those admission checks. Capacity failure returns the
+actual dimension, not an empty success or silently truncated batch. CAS prevents simultaneous
+imports spending the same remaining quota. Sequential item commits preserve partial outcomes.
+
+Reuse MemoryQuotaService.recordStorageSample/readStorageGrowth and MemoryFtsMaintenance:
+measure before/after admitted import and after existing worker drain in CI, with logical live,
+history, permanent metadata, FTS indexed/allocated, DB/freelist and WAL metrics where available;
+reuse bounded daily samples and 1/7/30-day deltas. No per-item physical SQLite scan or DB-wide
+VACUUM/auto_vacuum/max_page_count. FTS warning/brake/resume follows WP2 contracts (96/128/96 MiB),
+never canonical admission refusal on replica. Missing dbstat/WAL/baseline stays unavailable,
+not zero growth. Repeated noop must show unchanged logical payload/revision/index counts;
+changed import shows bounded history, not an additional live identity. Source bytes never
+enter FTS/export/report, and forgotten text cannot return through rebuild/held caches.
+
+## 5. Disjoint lanes, file ownership and integration order
+
+This is a future implementation map, **not authorization to edit source in this P run**.
+`S/` and `C/` use §3 aliases. Every listed file has one WP5 owner; predecessor changes finish
+first. No parser edits a shared service/contract and no integration lane rewrites parser files.
+
+| Lane                     | Exact owned files (NEW / MODIFY)                                                                                                                                                     | Delivered boundary                                                                                                                                                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L1 durable import seam   | MODIFY S/memory/MemoryStore.ts, MemoryService.ts, MemoryQuotaService.ts and their three .test.ts files; NEW S/memory/imports/MemoryImportTypes.ts, S/memory/MemoryImport.test.ts.    | Strict private receipt/session codecs, indexed dedup/suppression lookup, CAS and quota reservation; importProvider interface/service delegation; parent-aware intents, settlement metadata and forget extraction/fragments. No reader I/O or second transaction owner. |
+| L2 read-only reader      | NEW S/memory/imports/MemoryImportReader.ts, MemoryImportReader.test.ts, MemoryImportFixtures.fixture.ts.                                                                             | Trusted root registration references, descriptor/Git snapshots, hard ceilings, read-only fault fixtures. Consumes L1 types/ports; shared synthetic fixture builder is owned here, not modified by parser lanes.                                                        |
+| L3 deterministic parsers | NEW S/memory/imports/CodexMemoryImporter.ts, CodexMemoryImporter.test.ts, ClaudeMemoryImporter.ts, ClaudeMemoryImporter.test.ts, OmoMemoryImporter.ts, OmoMemoryImporter.test.ts.    | Pure supported-profile parsers, routing/evidence exclusions, stable item keys and canonical candidates. No SQL/process/provider configuration.                                                                                                                         |
+| L4 coordinator           | NEW S/memory/imports/ProviderMemoryImport.ts, ProviderMemoryImport.test.ts.                                                                                                          | Four action orchestration, raw/title/output scans, profile/session/source-change fences, per-item selection and errors, dependency calls to L1 without direct SQL. L1 owns the new real-store MemoryImport.test.ts and imports this module for integrated cases.       |
+| L5 server activation     | MODIFY C/rpc.ts, rpc.test.ts; S/ws.ts, ws.test.ts; S/auth/RpcAuthorization.ts, RpcAuthorization.test.ts; S/environment/ServerEnvironment.ts, ServerEnvironment.test.ts; S/server.ts. | Merge only the staged import group into WP4's live core group; one thin handler, dual-grant scope coverage/live permits and real capability; compose reader once with existing memory layer. No new wire schema/client command/MCP tool/UI.                            |
+
+Integration: merged WP3 and WP4 code → L1 types/service/store seam → L2 and L3 in parallel →
+L4 composition → L5 activation → one integrated exact-head CI pass. L1 owns final integration
+of its service/test files after L4 lands; L5 owns server composition after all implementation
+ports exist. This ordering encodes dependencies, not effort. No new migration, package,
+dependency, enum, memory.ts field, client-runtime, provider adapter, mobile/web/desktop UI or
+other plan file is currently assigned. If real codecs cannot fit existing storage/framing,
+return to the schema owner before B rather than adding an undeclared field/migration.
+
+Planned private additions (L1; fields bound by §4 and encoded only under Store):
 
 ```ts
-// imports/MemoryImportTypes.ts; internal only
-export interface MemoryImportSnapshot {
-  readonly sourceId: MemoryImportSourceId;
-  readonly format: MemoryImportFormat;
-  readonly parserVersion: string;
-  readonly sourceLocator: string; // opaque environment-local locator, no home path
-  readonly commitOid?: string; // observation, excluded from receipt identity
-  readonly files: readonly { relativePath: string; bytes: Uint8Array }[];
-}
-export interface MemoryImportCandidate {
-  readonly sourceId: MemoryImportSourceId;
-  readonly sourceLocator: string;
-  readonly sourceItemKey: string;
-  readonly sourceFingerprint: string;
-  readonly contentFingerprint: string;
-  readonly parserVersion: string;
-  readonly title: string;
-  readonly body: string;
-  readonly assertionKind: "inference";
-}
-
-// imports/MemoryImportReader.ts
-export class MemoryImportReader extends Context.Service<
-  MemoryImportReader,
-  {
-    readonly discover: (
-      format: MemoryImportFormat,
-    ) => Effect.Effect<MemoryImportSources, MemoryImportError>;
-    readonly snapshot: (
-      sourceId: MemoryImportSourceId,
-    ) => Effect.Effect<MemoryImportSnapshot, MemoryImportError>;
-  }
->()("goat/memory/MemoryImportReader") {}
-const make = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const vcs = yield* VcsProcess.VcsProcess;
-  // Resolve immutable configured roots from destination-server configuration.
-  // Discover only immediate Claude project/omo agent directories, with limits.
-  // Reconstruct stable handles from env + format + registered logical root.
-  // snapshot: validate selected handle; read regular files without following links;
-  // omo: pin commit, list allowlisted regular blobs, size-check then read by OID.
-  return MemoryImportReader.of({ discover, snapshot });
-});
-export const layer = Layer.effect(MemoryImportReader, make);
-
-// Each named importer exports a consumed pure parser, not a runtime/service.
-export const parseCodexMemory: (snapshot: MemoryImportSnapshot) => ParseResult;
-export const parseClaudeMemory: (snapshot: MemoryImportSnapshot) => ParseResult;
-export const parseOmoMemory: (snapshot: MemoryImportSnapshot) => ParseResult;
-// ParseResult = ordered candidates + bounded metadata-only issue rows.
+// Proposed non-wire Store ports; all Tx methods require Store.Transaction.
+type InTx<A> = Effect.Effect<
+  A,
+  Store.MemoryStorageError | Store.MemoryStoreConflict | Store.MemoryCapacityError,
+  Store.Transaction
+>;
+readImportRegistrationTx: (
+  space: M.MemorySpaceId,
+  environment: M.EnvironmentId,
+  source: M.MemoryImportSourceId,
+) => InTx<ImportRegistration | undefined>;
+writeImportRegistrationTx: (input: { next: ImportRegistration; expectedVersion: number | null }) =>
+  InTx<ImportRegistration>;
+readImportBatchTx: (
+  space: M.MemorySpaceId,
+  environment: M.EnvironmentId,
+  operation: M.MemoryOperationId,
+) => InTx<ImportBatch | undefined>;
+readImportItemTx: (
+  space: M.MemorySpaceId,
+  environment: M.EnvironmentId,
+  source: M.MemoryImportSourceId,
+  key: string,
+) => InTx<ImportItem | undefined>;
+findImportMatchTx: (input: {
+  memorySpaceId: M.MemorySpaceId;
+  source: M.MemorySourceKey;
+  content: M.MemoryContentSuppression;
+}) => InTx<ImportMatch>;
+commitImportItemTx: (input: {
+  registrationVersion: number;
+  batch: ImportBatch;
+  previous: ImportItem | null;
+  next: ImportItem;
+  commitIntent: Effect.Effect<void, MemoryServiceError, Store.Transaction>;
+}) => InTx<M.MemoryImportItemResult>;
 ```
 
-Bodies for the three parsers follow these steps:
-
-The coordinator scans each raw allowlisted input before it is parsed or displayed. A rejected file contributes only safe source/key/digest metadata; it is never handed to a model or retained as raw evidence.
-
-1. Decode strictly as UTF-8, reject NUL/JSONL envelope, normalize CRLF to LF for parsing. Preserve provider bytes on disk.
-2. Match only section 2.1's profile. Codex splits at root task-group headings outside fenced code blocks, validates unique titles and strips routing-only fields (`scope`, `applies_to`, `rollout_summary_files`, `keywords`, cwd/rollout-path annotations) from the imported assertion body. Source metadata references become opaque local selectors; absolute provider paths are not shared. It imports the task descriptions/consolidated guidance, not full evidence files. Claude parses a YAML document with duplicate-key rejection and forbidden tag/anchor detection before selecting only allowlisted scalar fields. omo reproduces the first-colon scalar grammar and JSON aliases validation; unknown scalar frontmatter is tolerated but never serialized into GOAT.
-3. Reject empty/malformed body, ambiguous keys or unsupported nested data. Treat Markdown links and instructions as data; no includes, fetches, command execution or recursive link traversal.
-4. Set stable item key; compute fingerprints; emit `assertionKind: "inference"`. Do not infer scope or mutate files in the parser.
-
-Source reading is an Effect dependency; pure parsers do not use `fs`, spawn, SQL, current time or random IDs. Errors follow `Schema.TaggedError` with bounded sourceId/item selector and normalized issue. Retain lower-level cause only internally, with no cause/stderr serialization or logging.
-
-### 4.3 Read-only implementation details
-
-Roots are server-owned: default Codex `~/.codex/memories`, Claude `~/.claude/projects`, omo `~/.omo/memory`. An immutable trusted server-root configuration may replace them for explicit deployment overrides and test layers; a client cannot supply an absolute root. Changes to a root binding require an explicit source registration migration, not a new handle that silently evades receipts.
-
-Persist logical source registrations with receipts in WP2, keyed by environment + format + logical root slot + selected Claude directory/omo agent identity. `MemoryImportSourceId` remains stable across restarts and Git HEAD moves. Raw filesystem paths stay local to the reader. Omo profile and selected explicit identity must accompany registration; dirname alone does not prove an auto-generated identity is shared.
-
-For filesystem sources: validate root/ancestors with no symlink following, require regular final files, check containment, size and file identity, then read through a no-follow descriptor and restat the same descriptor. Reject changed identity/size/mtime as `source_changed`; atomic pathname replacement can leave a coherent old descriptor snapshot, but apply's fingerprint comparison catches a new version. If Effect's filesystem port cannot expose this safely, implement the descriptor read inside this named reader using a narrowly injected Node filesystem adapter; do not place Node I/O in pure helpers. Reject root symlinks rather than resolve them to an arbitrary home. No temporary files in provider directories.
-
-For omo use `VcsProcess.run` with argument vectors and `GIT_OPTIONAL_LOCKS=0`, no shell, hooks, fetch, checkout, worktree, add, commit or index refresh:
-
-```text
-git -C <registered-repo> rev-parse --verify HEAD^{commit}    -> fixed commitOid
-git -C <registered-repo> ls-tree -rz --full-tree <commitOid> -> mode/type/OID/path
-git -C <registered-repo> cat-file -s <blobOid>              -> size guard
-git -C <registered-repo> cat-file blob <blobOid>            -> bounded bytes
-```
-
-Accept only mode `100644`/`100755`, type `blob`, approved `.md` path. Reject mode `120000` and gitlinks; no filenames interpolated into revision expressions. No commit means `unsupported_format`. HEAD moving while reading does not mix commits: all blobs use the initially pinned OIDs. Missing objects, timeout (30 seconds, existing `VcsProcess` default at lines 57,138) or output truncation are explicit `source_unreadable`/`limit_exceeded`, not empty success. Set read command output caps explicitly; map errors without stderr. Binary-invalid UTF-8 flags (`VcsProcess.ts:43-47`) are checked before parsing.
-
-Parser-local limits in `MemoryImportTypes.ts`: 128 discovered source roots, 512 enumerated files, 256 KiB per file/blob, title <=256 characters. Import memory admission constants come only from WP1: MEMORY_BODY_MAX_UTF8_BYTES, MEMORY_PAYLOAD_MAX_UTF8_BYTES, MEMORY_IMPORT_SNAPSHOT_MAX_UTF8_BYTES, MEMORY_IMPORT_PREVIEW_MAX_ITEMS, MEMORY_IMPORT_APPLY_MAX_ITEMS and MEMORY_IMPORT_KEY_MAX_UTF8_BYTES. At a boundary equal to the limit is allowed; the next unit fails. Whole-file item granularity deliberately rejects an oversized ledger rather than truncate facts. Partial enumeration never masquerades as a complete preview: return `limit_exceeded` with counts and ask for a narrower source/selection. These are import limits, separate from WP4's 6,000-character/24-KiB injection limits.
-
-### 4.4 Apply boundary and source receipts
-
-```ts
-// imports/ProviderMemoryImport.ts; called by MemoryService, dependencies from Effect
-export const importProvider = Effect.fn("MemoryService.importProvider")(function* (
-  input: MemoryImportProviderInput,
-) {
-  yield* authorizeImportAtDestination(); // memory:write AND filesystem:read
-  yield* requireEstablishedMemorySpaceAndBootstrap();
-  const reader = yield* MemoryImportReader.MemoryImportReader;
-  if (input.action === "status") return yield* readBatchReceiptWithSyncStatus(input.operationId);
-  if (input.action === "discover") return yield* reader.discover(input.format);
-  if (input.action === "apply") yield* checkExistingBatchRetry(input);
-  const snapshot = yield* reader.snapshot(input.sourceId);
-  const inputChecked = yield* scanInputFilesBeforeParsing(snapshot);
-  const parsed = parseByFormat(inputChecked);
-  const scanned = yield* scanCandidatesAndSafeMetadata(parsed);
-  if (input.action === "preview") return yield* previewWithReceiptStatus(scanned);
-  return yield* Effect.forEach(
-    input.items,
-    Effect.fn(function* (selection) {
-      const candidate = requireMatchingFingerprint(scanned, selection);
-      const scope = yield* resolveAndAuthorizeScope(selection.scope);
-      // Source I/O and input scanning finish BEFORE entering SQL transaction.
-      return yield* commitImportedCandidate({
-        candidate,
-        scope,
-        batchOperationId: input.operationId,
-      }).pipe(Effect.catchTags({ MemoryImportItemError: metadataOnlyRejectedRow }));
-    }),
-    { concurrency: 1 },
-  );
-});
-```
-
-Validate/load the batch retry receipt before reading apply files; reject a changed request digest. The skeleton's helper functions also perform this batch comparison and save each outcome atomically with its item result.
-
-The named helpers above are private coordinator functions, not extra services. `commitImportedCandidate` is the existing WP2 apply pipeline extended with an import source argument. Under the same transaction it rechecks caller permission, project/thread existence, membership, tombstone, suppression keys, receipt and heads; scans the accepted payload again; calls the pure decider; writes revision/payload/projection/receipt/outbox together. No provider I/O or network I/O occurs under SQL. Postcommit it signals WP2's existing worker/sync pipeline; do not start another `ManagedRuntime`.
-
-Proposed predecessor extension (the actual baseline has no memory service):
-
-```diff
- // apps/server/src/memory/MemoryService.ts: add the predeclared WP1 import port in WP5.
-+ importProvider: ProviderMemoryImport.importProvider,
- // make dependencies also include MemoryImportReader via the application layer.
-
- // MemoryStore's atomic apply, not a second call after upsert
-- apply(operation)
-+ apply(operation, { importSource, sourceFingerprint, contentFingerprint,
-+   parserVersion, expectedReceiptRevision })
- // same SQL transaction: receipt CAS + tombstone check + event/projection + outbox
-```
-
-Receipt identity is `(memorySpaceId, environmentId, format, sourceLocator, sourceItemKey)`. `MemoryImportSourceId` identifies the registered source root; the locator is an opaque value referring back to the origin environment. Absolute home path, cwd, hostname, provider instance/model guesses and Git commit are not identity. A parser version change does not mint a new source identity or clear suppression.
-
-Consume the sole local receipt/table inventory in [WP2 section 3](020_wp2_store_service.md#3-sql-layout-and-commit-boundary):
-source registration, batch retry and item arms with their partial unique indexes. WP5 populates
-these existing columns through MemoryStore transactions; it adds no physical fields/migration.
-Keep canonical accepted digests/source alias/suppression keys durable within hub-global admission;
-local alias generation reserves local quota. approvedReplica preserves/union-applies admitted
-metadata without local quota or scanner reapproval; only operation fragments are shared, not registration rows.
-`sourceFingerprint = SHA256(parserVersion + canonical allowlisted parsed title/body/metadata)`. Do not include mtime, Git commit or mutable path labels. `contentFingerprint = SHA256(NFC(body).replace(CRLF, LF).trim())`; the exact-copy lookup additionally keys by `memorySpaceId`, canonical `MemoryScope` and assertion kind. No lowercase/semantic/NFKC equality: false-positive merging is worse than a visible duplicate. Hash collision candidates require equality of retained canonical bodies while live; a forgotten hash match is suppressed conservatively. Hashes are metadata, not public searchable content or a secrecy guarantee.
-
-| Receipt/head condition, checked atomically in this order                           | Decision and writes                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source identity or exact-content key suppressed, or existing `memoryId` tombstoned | `suppressed`; metadata-only source alias receipt linked to the deleting memory; no payload, revision, resurrection or content-bearing outbox.                                                                                                                                                                                                           |
-| Same identity has different mapped scope                                           | `mapping_changed`; leave old receipt and item unchanged.                                                                                                                                                                                                                                                                                                |
-| Same identity, same source fingerprint, still live                                 | `noop`; no new revision/event/content outbox. May read current sync status.                                                                                                                                                                                                                                                                             |
-| No receipt, same canonical live body in same scope                                 | `aliased`; preserve both sources and map the new receipt to that memory. Emit a normal `upsert` provenance revision with unchanged live payload, parent = its sole current head, and all source aliases; update both receipts to the resulting revision. There is one memory, not two. Only single-head nonquarantined live items qualify for aliasing. |
-| No receipt and no exact copy                                                       | `created`; allocate new `MemoryId`, revision and operation, with empty parents.                                                                                                                                                                                                                                                                         |
-| Existing receipt, changed fingerprint                                              | `revised` using the receipt's last accepted revision as parent, not whatever current head happens to be. Allocate one new operation/revision; same memoryId. If manual/remote edits advanced heads, the normal DAG decider retains both and returns `conflicted`.                                                                                       |
-| A rejected new source                                                              | Metadata-only rejected receipt with issue/fingerprints; memoryId/revision nullable. Changed fingerprint can retry; suppression is permanent and always wins.                                                                                                                                                                                            |
-
-The batch receipt stores only retry key, canonical selection digest and completed-item IDs/outcomes; it retains no request body. `operation_id_reused` does not read input files. Item receipt includes `sourceId`, identity fields, `parserVersion`, last accepted source/content fingerprints, `memoryId`, last accepted revision, original scope, outcome/issue and observed timestamp. Keep rejected observation fingerprint separate from last accepted fingerprint: a malformed/secret-changing source must not advance its parent revision. Source registration rows contain no body. Forget retains receipt/source aliases and all historical accepted content fingerprints, while purging payloads and derived copies. A path rename is a new source item; an exact copy attaches an alias or is suppressed. Rename plus paraphrase is outside exact-source/exact-content forget guarantees; never claim complete semantic forget.
-
-Local live alias creation uses normal upsert provenance revision; local suppressed alias extension uses body-free forget fragment and receipt, retaining first deletion audit. Both local generation paths reserve admission. Once hub approved, remote alias upsert/forget fragments use M20 canonical receive/union despite full local alias/key/work budget; scanner hold delays local exposure/index only. No new operation kind or table replication. Retry/CAS returns committed IDs; no payload duplication or new admission on approved replay.
-
-## 5. Full field and enum chain
-
-No field may exist only in this parser or only in a report. WP1 owns schema codecs; WP2 owns SQL codecs/purge; WP3 owns explicit operation serialization. Every private field is listed with its non-wire reason.
-
-| Field/value                                                                                                           | Creation -> serialization -> decoding -> every consumer                                                                                                                                                                                                                                                                                                                                   |
-| --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MemoryImportFormat`: `codex/claude/omo`; `action`: see WP1 MemoryImportProviderInput (including receipt-only status) | WP6 environment command -> WP1 RPC schema -> server RPC decode -> WP4 authorization -> `MemoryService.importProvider` -> reader/profile dispatch. Unsupported format/action fails schema decode; older servers hide capability, never fallback.                                                                                                                                           |
-| apply `operationId` and batch request digest                                                                          | WP6 command creates a stable retry key -> WP1 apply schema -> RPC decode -> body-free batch receipt codec -> resume/conflicting-key guard -> per-item apply/results -> reconnect retry. Per-item operations, not the batch key, enter WP3 sync.                                                                                                                                           |
-| `sourceId: MemoryImportSourceId`, `sourceLocator`, logical-root slot/profile                                          | Destination reader registration -> `memory_import_receipts` registration codec; opaque handle in RPC result -> WP1 decode -> WP6 selections -> reader stable resolution. Absolute root is local only; wire serialization N/A because exposing another user's host paths is unnecessary.                                                                                                   |
-| `sourceItemKey`, `parserVersion`, `sourceFingerprint`                                                                 | Parser -> preview metadata schema -> client selection schema -> server comparison -> receipt SQL codec -> `MemoryProvenance.importSource` explicit encoder -> WP3 operation decoder -> WP2 provenance/history and suppression -> WP4 read responses -> WP6 detail/status. ParserVersion belongs in provenance so remote decoding does not guess grammar.                                  |
-| `contentFingerprint`, historical fingerprints, source aliases/suppressedSourceKeys                                    | Parser/transaction -> WP2 receipt and tombstone codecs plus explicit operation metadata -> WP3 push/pull/bootstrap -> WP2 receiver suppression lookup and forget -> subsequent local/remote imports. Not inserted into a prompt or FTS. This chain prevents a different environment/provider copy reviving deleted content.                                                               |
-| Resolved `MemoryScope`/`MemoryProjectKey`/`ScopedThreadRef`                                                           | Explicit selection including project ScopedProjectRef + destination resolver -> existing WP1 memory schema -> revision/projection/receipt encode -> WP2 SQL decode -> WP3 operation codec -> scope filters in WP2 search and WP4 snapshots/readSource -> WP6 display. No local-path identity and no provider-session-id casting.                                                          |
-| assertionKind inference, evidence import                                                                              | Parser → pre-admission scanner → WP1 payload/operation codec → hub admission → approvedReplica canonical receive with local exposure hold → eligible WP4 context/read and WP6 detail. Replica rescan never discards approval or changes cursor.                                                                                                                                           |
-| `created/revised/noop/aliased/suppressed/rejected/conflicted`, issue values in 4.1                                    | Transaction/reader outcome -> WP1 RPC result/error codec + receipt SQL codec where meaningful -> RPC/client decode -> WP6 counts, retry and result reporting. Suppressed/rejected data never reaches memory search/injection; conflict exclusion uses WP2's existing conflict states. Error-only issues need not persist a receipt when reading failed before an item identity was known. |
-| `MemoryId`, revision/operation IDs, parents, `MemorySyncStatus`                                                       | WP2 transaction -> existing event/operation/projection/outbox schemas -> SQL and WP3 codec -> receiver decider -> WP4 readers and WP6 status. Never present a local committed receipt as a hub ACK.                                                                                                                                                                                       |
-| `commitOid`, raw bytes, filesystem descriptor identity/mtime, parser-only YAML extras                                 | Reader snapshot -> parser/consistency guards only. Shared serialization N/A: not GOAT content/provenance beyond optional safe commit observation; never serialize raw bytes, YAML extras, local root or process output. Commit observation is optional provenance, never identity/dedup.                                                                                                  |
-| New auth scope, MCP tool, `memoryContext`, generation operation                                                       | N/A in WP5: WP1/WP4 already own memory scopes/capability and delivery. WP5 activates only the predeclared importProvider flag. Import is deliberately not an agent arbitrary-path MCP tool; no provider generation or adapter change.                                                                                                                                                     |
-
-Local source/preview/import strings are scanned before display/storage/sharing; recognized secrets refuse local admission with metadata only. Already-approved remote alias payload retains canonical content under M20 hold; expose only eligible explicit fields, never frontmatter/Error/raw cause. Missing optional legacy import metadata never authorizes dropping tombstone/approved metadata.
-
-## 6. Branch activation and observable evidence
-
-The following table is the branch checklist. Every row maps to a focused test below; outcomes must be observable through receipts/projections/events or bounded errors, not debug logs containing source bodies.
-
-| Guard or branch                   | Activation scenario                                                                                                      | Observable evidence                                                                                                                                                 |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Destination capability/permission | Old server, no memory grant, no filesystem grant, revoked grant after reader waits                                       | Typed unavailable/auth failure; reader not entered for initial denial; zero accepted transactions after revocation.                                                 |
-| Bootstrap gate/offline allowance  | New member has not installed tombstones; existing member loses hub                                                       | `bootstrap_required` with zero reads/commits for new member; existing member commits `pendingSync`, later converges.                                                |
-| Path and source handle            | Foreign source handle, symlink root/ancestor/file, `../`, absolute/link target, Git symlink/submodule                    | `path_rejected`; sentinel outside source never read; no provider writes or index refresh.                                                                           |
-| Missing/unreadable input          | Root absent, selected note disappeared, permission failure, Git object absent or process failure                         | `source_missing`/`source_unreadable` per selected source/item; no fallback to another root/environment and no GOAT forget.                                          |
-| UTF-8/grammar/profile             | Invalid bytes, NUL, JSONL `.md`, duplicate Codex group, unsupported YAML or omo description absent                       | `invalid_utf8`/`unsupported_format`; metadata-only issue, zero accepted body.                                                                                       |
-| Limits                            | 256-KiB blob or 64-KiB encoded payload plus one byte, >512 files, >128 roots/items, >8-MiB aggregate, 33 apply selectors | `limit_exceeded`; no truncation/import of partial facts. Equality boundary passes; over-boundary fails.                                                             |
-| Preview/apply drift               | Source changes, file identity changes, new parser fingerprint differs after preview                                      | `source_changed`, unchanged old receipt; other selected items continue. Git HEAD change alone keeps pinned snapshot coherent.                                       |
-| Mapping                           | No explicit scope, no repository/explicit key, foreign/deleted thread, same receipt new scope                            | `scope_unmapped`/`mapping_changed` or auth failure; no arbitrary global promotion.                                                                                  |
-| Secret scanner                    | Credential in YAML description, title or body; safe sibling item                                                         | `secret_detected`, metadata-only rejected receipt; captured logs/errors/RPC/outbox/FTS contain no sentinel; sibling imports.                                        |
-| First import/repeat/change        | Fresh source; identical retry; edit retained item key                                                                    | Created once; second run `noop`; third has same memoryId and parent = last accepted source revision.                                                                |
-| Alias and forget                  | Same body from Codex and Claude in same scope; forget; reimport either or same body on another member                    | One live item, retained multiple source aliases; permanent suppression records; no new body/revision, empty search/snapshot after forget.                           |
-| Different scope/text              | Identical text in distinct project keys; changed case/paraphrase                                                         | Separate items; exact-copy lookup never crosses scopes; semantic guarantees not claimed.                                                                            |
-| Concurrent edit/forget            | Manual edit while read is blocked; forget between preview and apply                                                      | Changed import becomes variant/conflict, never overwrites unrelated head; forget wins and suppresses all accepted fingerprints.                                     |
-| Crash/parallel retry              | Inject fault before commit, after commit before response; two same-source calls                                          | Precommit rollback includes receipt; postcommit retry is NOOP with same IDs; concurrent unique/CAS yields one accepted revision.                                    |
-| Bounded cancellation              | WP6 stops chunking or request interruption between transactions                                                          | Earlier receipts persist; later chunks are not sent; in-flight atomic transaction completes or rolls back, never half-written. Re-preview explains persisted items. |
-
-No automatic retry of malformed formats, secrets or mapping failures; users fix/select input and retry. Transient source/storage errors are explicitly retriable without clearing suppression. No timer/backoff worker is introduced. A failure on one memory cannot stop unrelated memory sync; existing WP2/WP3 own that guarantee.
-
-## 7. Focused tests and verification commands
-
-Write these tests in the paths from section 3. Fixtures contain invented repo names, synthetic note bodies and fake credential sentinels accepted by scanner test-rule policy; never copy a user's memory text. Temp Git commits are CI-only fixture construction, not provider-repo mutations. Read-only proof covers contents, index/ref/config bytes and filesystem calls, rather than treating access-time updates as content changes.
-
-| Test file                              | Exact case name                                                                     | Assertion                                                                                                                    |
-| -------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `imports/CodexMemoryImporter.test.ts`  | `imports handbook groups and ignores derived summary and backing evidence`          | One candidate/group; no summary/raw/rollout assertions; references inert.                                                    |
-| same                                   | `accepts legacy scope header only with explicit mapping`                            | Missing applies_to preserves mapping requirement; does not infer global scope.                                               |
-| same                                   | `imports ad hoc notes and rejects unknown extensions and jsonl`                     | Correct allowlist/key; metadata-only unsupported rows.                                                                       |
-| same                                   | `keeps a group key stable across body edits and rejects duplicate titles`           | Same key, changed fingerprint; duplicate heading is error.                                                                   |
-| `imports/ClaudeMemoryImporter.test.ts` | `imports direct and metadata type profiles without importing the index`             | Both topic shapes; index contributes zero candidates.                                                                        |
-| same                                   | `rejects disagreeing types duplicate keys aliases and unknown nested fields`        | Each rejected grammar branch explicitly checked.                                                                             |
-| same                                   | `does not derive project identity from the encoded directory`                       | Scope required regardless of plausible directory spelling.                                                                   |
-| `imports/OmoMemoryImporter.test.ts`    | `parses beta63 descriptions quoted scalars and json aliases`                        | Pinned grammar parity; read_only not coerced into GOAT permission.                                                           |
-| same                                   | `treats system instructions as data and imports a ledger as one item`               | No instruction execution; stable file key for updated monthly body.                                                          |
-| same                                   | `rejects missing description and excludes skills runtime and unknown trees`         | No hidden fallback; selected unsupported files report issue.                                                                 |
-| `imports/MemoryImportReader.test.ts`   | `reads only regular contained files and rejects unsafe handles and symlinks`        | Spy outside-root reader never called; root/ancestor/final-link cases.                                                        |
-| same                                   | `pins omo commit and ignores dirty untracked and later head bytes`                  | Real temp Git repo; all candidates from one commit; index/refs/config unchanged by reader.                                   |
-| same                                   | `reports missing unreadable and invalid utf8 sources without fallback`              | Error codes discriminate absence from access failure; no alternate root.                                                     |
-| same                                   | `enforces all import limits without truncation`                                     | Parameterized equality/+1 cases for every limit in 4.3.                                                                      |
-| same                                   | `rejects changed file identity and changed preview fingerprint`                     | Injected descriptor barrier and replacement; no stale apply.                                                                 |
-| `memory/MemoryImport.test.ts`          | `commits receipt revision projection and outbox atomically`                         | Real temp SQL store; before-commit fail leaves none, postcommit-response fail retains all.                                   |
-| same                                   | `repeats as noop and revises the existing memory after source change`               | IDs/counts/parents and outbox cardinality, not just result label.                                                            |
-| same                                   | `serializes concurrent same source retries to one revision`                         | Deferred barriers, one receipt and accepted revision; batch key reuse with altered request is rejected before reads.         |
-| same                                   | `aliases exact copies within scope and preserves every source through sync`         | Two formats, one item, alias metadata reaches second environment.                                                            |
-| same                                   | `suppresses forgotten sources changed versions and copied content after bootstrap`  | Forget after several accepted versions; each prior digest and alias suppressed on third member; payload/FTS/snapshot purged. |
-| same                                   | `never forgets goat memory when a provider file disappears`                         | Existing item/history retained, source_missing visible.                                                                      |
-| same                                   | `quarantines a changed import racing a manual revision`                             | DAG has both heads; only that memory excluded from search; sibling remains available.                                        |
-| same                                   | `rechecks tombstone and permissions after source reads wait`                        | Deferred barrier, forget/revoke then resume: no new payload/revision.                                                        |
-| same                                   | `rejects secrets before preview commit logs and sync while importing safe siblings` | Known fake secret sentinel absent from RPC/error/log/storage/outbox/FTS captures.                                            |
-| same                                   | `rejects missing or changed scope and foreign or deleted thread bindings`           | All mapping branches leave receipts/heads unchanged.                                                                         |
-| same                                   | `requires initial bootstrap but permits bootstrapped offline pending imports`       | Typed new-member failure; old member pendingSync then converges.                                                             |
-| same                                   | `preserves committed chunks when a caller stops further import requests`            | Re-preview reports prior receipt outcomes; no implicit rollback or duplicated revisions.                                     |
-| same                                   | `leaves every synthetic provider file and git state unchanged`                      | Before/after byte hashes + write-call spy for all three formats; provider settings untouched.                                |
-
-`same` paths are the preceding fully named test path under `apps/server/src/memory/`. Use real service logic and test layers only for filesystem/process/auth/fault signals. Subscribe to the persisted event before dispatch; use `Deferred.await` barriers for controlled races. After accepted operations, await `MemoryWorker.drain` and the WP3 sync drain/persisted receipt. If the fixture dispatches thread orchestration, also drain `OrchestrationEffectWorkerV2.drain`. Pure parser/reader tests await the effect return. No sleeps, timeout-based success, random polling, provider network calls or real-home fallback.
-
-### 7.1 Local static checks only (implementation phase)
-
-From the repository root, after predecessor contracts and WP5 code exist:
-
-```sh
-vp exec tsc --noEmit -p apps/server/tsconfig.json
-vp exec tsc --noEmit -p packages/contracts/tsconfig.json
-vp lint apps/server/src/memory apps/server/src/server.ts apps/server/src/ws.ts apps/server/src/auth/RpcAuthorization.ts apps/server/src/environment/ServerEnvironment.ts packages/contracts/src/rpc.ts packages/contracts/src/rpc.test.ts apps/server/src/ws.test.ts apps/server/src/auth/RpcAuthorization.test.ts apps/server/src/environment/ServerEnvironment.test.ts
-```
-
-- Typecheck coverage: explicit `-p apps/server/tsconfig.json`; `apps/server/tsconfig.json:7` includes `src`, so every new reader/parser/integration test and modified service/server source is read. Base `tsconfig.base.json:6-13` sets noEmit/strict options; `apps/server/package.json:23` alternatively exposes package `typecheck` as `tsc-rs --noEmit`. Compiler may resolve imported contracts/shared packages, but no recursive workspace check is invoked.
-- Lint coverage: explicit `apps/server/src/memory` directory plus `apps/server/src/server.ts`; root `vite.config.ts:109-125` has no memory/server exclusion and loads the repo plugin. `vp lint` is source lint, not Markdown verification. Do not claim it validates this document or future contract fields that are not yet written.
-- WP1 owns these schema checks; its static check is `vp exec tsc --noEmit -p packages/contracts/tsconfig.json` and `vp lint packages/contracts/src/memory.ts packages/contracts/src/memory.test.ts`; the explicit paths and `packages/contracts/tsconfig.json:4` (`include: ["src"]`) cover those schemas. Those commands are **not** extra WP5 checks unless WP5 actually changes contracts.
-
-No `bun/pnpm/vp test`, vitest, e2e, full build, `vp check`, recursive checks or server launch here. This host policy overrides generic AGENTS verification defaults. This documentation-only authoring does not execute package typechecks/lint against unchanged code. Authoring-only checks: `git diff --no-index --check /dev/null devlog/_plan/261013_goat_memory/050_wp5_provider_import.md` and a Python structure check of this file (required sections, balanced fences, Shared names and command text); neither runs tests nor establishes implementation correctness.
-
-### 7.2 Test evidence: PR CI only
-
-PR CI **goat-ci** owns execution of the five focused files. `.github/workflows/goat-ci.yml:130-132` runs server tests via `vp run --filter goat test --shard ...`; `apps/server/package.json:24` is `vp test run`, `apps/server/vite.config.ts:155-166` configures deterministic nonparallel files and setup, and root `vite.config.ts:58-67` does not exclude `src/memory/*.test.ts`. WP1 round trips run in `test-contracts` (`goat-ci.yml:109-110`). New tests therefore land in the real package suite/shards; no workflow edit or unexecuted standalone test list is the proof.
-
-Record PR URL, exact head SHA, all relevant shard terminal conclusions and focused case counts from CI logs. Cancelled/skipped CI is not a pass. Check that all newly added files were discovered, not merely that the job went green. CI uses temp provider homes with test layers; never configure its fixtures to use real installed memory. This plan records no CI success.
-
-## 8. Settled phase boundaries
-
-| Owner            | Assigned implementation / WP5 consumption                                                                                                                                                            |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WP1              | Sole import wire owner, source/provenance/suppression metadata, bounded action/result/issue schemas and dual grants. Consume those exported schemas; no MemoryImportInput alias.                     |
-| WP2              | Sole receipt/table/migration owner; source/batch/item atomic helpers, suppression/alias history and report metadata already created. WP5 never writes tables through a separate connection.          |
-| WP3              | Established bootstrap guard and tombstone/import-provenance propagation before import. Previously bootstrapped offline apply remains pendingSync.                                                    |
-| WP4              | Guarded import command factory and live permit/auth infrastructure; no stub import handler or availability advertised yet.                                                                           |
-| WP5 (this phase) | Parser/coordinator plus receipt-only status; register import group/handler/server scope and capability using WP1 definitions after implementation.                                                   |
-| WP6              | Explicit source/profile and per-item scopes; 32-item chunks, stop subsequent calls for cancel, show persisted partial outcomes via status/re-preview. No in-flight rollback or durable cancel claim. |
-
-WP2 owns scanner/DAG/generation; WP3 owns hub-only SQL; WP4 owns six-provider delivery and MCP;
-WP6 owns clients/docs/report adapter. No late wire/table contract request remains.
-
-## 9. Implementation PR title and body
-
-Title: `feat(memory): import provider memories without changing their sources`
-
-Body outline:
-
-> Provider memories currently stay in separate local stores. Add explicit, read-only Codex, Claude and committed omo imports through MemoryService with per-item scope selection and source provenance.
->
-> Repeated sources are NOOPs, changed sources revise the existing memory, and tombstones suppress remembered sources and exact copies. Parsers read allowlisted formats, scan before storing/sharing, and keep provider bytes and settings unchanged. Import remains bounded and reports partial outcomes explicitly.
->
-> Validation: targeted server typecheck/lint (commands and exit codes); exact-head goat-ci focused fixture evidence, including races, rollback, secret rejection, bootstrap and read-only byte checks. Tests were not run on juns-macbook-pro. No UI changes in this PR; WP6 owns the client surface.
->
-> Model and harness: record the actual implementation runtime. This roadmap was authored by gpt-6.1-sol through the Codex harness in GOAT.
-
-This is a future implementation PR brief, not authorization to create a PR or commit this plan. Follow WP0 stack ordering when authorized; do not merge or push protected branches.
-
-## 10. Non-goals, traps and completion record
-
-- No export/write-back, provider memory disablement, credentials/settings reads, provider CLI launch, Git backup mirroring, automatic import watcher, LLM parsing, semantic dedup or semantic erasure claim.
-- No raw sessions, SQLite provider internals, rollout JSONL, unknown Codex extension resources, Claude nested episode trees or omo runtime/worktree ingestion. Markdown extension alone is not support.
-- No broad recursive home scan. Remote/hosted-web/mobile callers operate on the selected server's memory roots. An unavailable destination cannot switch to the client home or another connected environment.
-- No stable identity from content hash alone, mtime, absolute cwd, provider UUID or current Git SHA. Path/title rename plus content change cannot be reliably linked without a native stable item ID; show the new candidate and apply exact-source/content suppression, without promising alias inference.
-- No replacing a concurrently edited GOAT item with a changed provider file; use the receipt revision as parent so WP2 exposes the real conflict.
-- No receipt written after an already committed upsert, no raw rejected body retained for debugging, no scanner bypass on sync/alias paths. A rejected fingerprint is not an accepted parent.
-- No inferred forget when a source disappears, is archived, or becomes unsupported. Minimal tombstones, aliases and historical accepted fingerprints remain indefinitely per M5.
-- Source fingerprints observe content, not validity or verified truth. Git committed content is a consistent snapshot, not trusted instructions. Imported inference still needs evidence and review before a separate GOAT edit promotes it.
-- Do not broaden this plan to other providers: Codex/Claude/omo import is distinct from six-provider common memory delivery and generation, which remain mandatory in their owning phases.
-
-Completion record for authoring: the single requested English roadmap exists; baseline and cited source shapes inspected read-only; no implementation/test/build/server/commit/push performed. Implementation completion requires settled predecessor contracts implemented, all section 6 branches covered by the named tests, targeted static checks passing and exact-head goat-ci evidence. Do not label this phase DONE from document creation alone.
-
-Status accepts operationId, returns the persisted MemoryImportReceipt without source reads,
-and never resumes apply. Source/batch/item writes use only the WP2 inventory; rejected issue
-observations do not overwrite accepted fingerprint/revision. Add focused status-after-lost-
-response and core/import group activation tests to existing server/contract test files in
-this phase; local verification remains document/static-only on this Mac.
-
-## Cross-phase contract reconciliation (rev 2)
-
-Uses WP1 discover/preview/apply/status schemas and WP2 sole receipt inventory. Activates the predeclared import RPC/capability only here; cancellation stops subsequent chunks and status reads durable receipts without source I/O.
-
-## Reflection r1 fixes (rev 3)
-
-G1 consumes the new earlier binding producer; import does not own another project map.
-
-| Action              | Exact path                                             | Diff to implement                                                                                                |
-| ------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| MODIFY (NEW in WP5) | apps/server/src/memory/imports/ProviderMemoryImport.ts | Replace free-form/current-remote project key derivation with WP2 resolveProjectKey and captured binding version. |
-| MODIFY (NEW in WP5) | apps/server/src/memory/MemoryImport.test.ts            | Two-environment explicit mapping, remote change/restart and preview-to-commit binding race.                      |
-
-```diff
- // preview/apply scope validation
--const key = explicitKey ?? repositoryGroupingKeyOf(currentRemote);
-+const project = selection.project; // WP1 apply selector, required for project scope
-+const binding = yield* memory.getProjectBinding({ memorySpaceId, project }, importMemoryWritePermit);
-+// Existing WP2 service get; result is the WP1 MemoryProjectBinding, not a new wire DTO
-+const key = yield* memory.resolveProjectKey(project);
-+// Capture binding.version; repeat key/version/existence validation in item transaction.
-```
-
-The binding get uses the existing earlier service method and a repeatable live memory:write
-permit; no second map or permission bypass. Import already requires
-memory:write plus filesystem:read. An apply scope must equal the server-resolved key. No explicit
-key and no pinned repositoryKey returns scope_unmapped. A changed key since preview is rejected by scope-vs-binding validation; a binding change between apply source read
-and item commit returns mapping_changed and leaves accepted receipt scope/heads untouched.
-Changing a project binding does not migrate existing source receipts. A fresh explicit memory
-is required for a deliberate new scope; retry cannot evade suppression.
-
-Chain: WP6 binding picker → WP4 guarded command → WP1 input/SQL binding codec → WP2 persisted
-view → WP5 apply/version capture → strict MemoryScope/receipt encode → transaction recheck →
-WP3 shared operation → WP4 snapshot. Local ScopedProjectRef is never synchronized.
-
-Activation/CI cases in apps/server/src/memory/MemoryImport.test.ts: `two environments import
-project sources under the same explicit binding`; `remote change and restart retain import
-project key`; `binding change while source read waits returns mapping_changed without receipt
-mutation`; `use repository does not reassign existing source receipts`. Use Deferred and real
-store transactions; run existing server shards in PR CI only. G3 import cache purge follows
-WP4 signals and WP6 view cleanup; no provider source is deleted or changed.
-
-## Audit r1 fixes (rev 4)
-
-B2/B4: import conflict commits use WP2’s same transactional claim candidate and approved-replica
-merge paths; import does not directly start generation or bypass hub CAS. B7:
-[Enforcement inventory](000_plan.md#enforcement-inventory) bounds scanner/suppression claims.
-B8: the final change map is reconciled with static commands below; no parser, contract, runtime
-or test execution is claimed by this documentation change.
-
-### B8 — mechanical static-input coverage receipt
-
-Final NEW/MODIFY map (including rev 2/3/4 additions): **24 TS/TSX paths**.
-Compared path equality/explicit-directory ancestry against every `vp lint` argument and
-package ownership against explicit `-p` / exact package-filter typecheck commands: **0 uncovered
-lint targets, 0 uncovered typecheck targets** after declared generated-file exclusions.
-Typecheck owners: `apps/server/tsconfig.json`, `packages/contracts/tsconfig.json`.
-This is path/config reconciliation, not successful compiler/linter execution. Workflow YAML,
-package manifests and prose are outside TS lint; review their diffs and validate in CI. At phase P
-repeat with the actual diff, compiler file collection and lint ignores; an exit 0 without target
-collection is insufficient. Authoring uses Python text checks only; no installation/check runner.
-
-## Requirement 7 / M19 (rev 6)
-
-Keep MEMORY_IMPORT_SNAPSHOT_MAX_UTF8_BYTES, MEMORY_IMPORT_PREVIEW_MAX_ITEMS and
-MEMORY_IMPORT_APPLY_MAX_ITEMS; additionally enforce MEMORY_IMPORT_SESSION_MAX_NEW_ITEMS and
-MEMORY_IMPORT_SESSION_MAX_BODY_BYTES across every chunk in one source snapshot/session.
-WP1 adds opaque sessionId to preview/apply receipt and bounded session counters; WP2 persists
-session ownership/first fingerprint and counters in the batch receipt codec before WP5 uses
-it. Accepted local NOOP does not re-charge; local replacement consumes history and session/cumulative identity/alias/digest budgets. Splitting chunks/session IDs cannot reset local/space admission counters. Hub applies space-global metadata/live limits and forget reserve. WP2 unique keys/compact guards retain permanent suppression with bounded row codec; detailed observations expire/replace. New local rejected identity/registration/alias, even forgotten-copy alias, requires admission; otherwise metadata-free pre-admission refusal. Approved remote alias/upsert/forget fragment never reruns those local limits: persist canonical approved metadata, union keys, account usage, defer local index/hold via canonical refs. No approved payload copied into work queue.
-
-At apply, each selected item checks scope/live/import/history/identity/metadata/work budgets
-and reserves atomically with its receipt/revision/outbox. Partial success returns exact per-item
-operation/revision IDs and outcome; capacity_exceeded includes safe dimension/current/limit/
-reclaimable for each refused item. Retry same batch digest returns compact recorded outcome,
-not reapply successes. Changed import content revises the same MemoryId. Retained raw source
-files/snapshot bytes are transient TTL cache only, never canonical source archive, FTS or log;
-only selected approved memory text may become active/indexed. Preview staging consumes shared
-MEMORY_CHECKPOINT_STAGING_MAX_BYTES and expires/replaces under MEMORY_DERIVED_CACHE_TTL_MS.
-
-Future importer/service CI uses real WP2 transactions for local equality/+1 session/cumulative/multibyte/history quotas, split-session bypass, concurrent reservation, partial exact replay, permanent alias/digest limits, observation replacement and receipt expiry/retry guard. Add approved alias/suppression catch-up with full local alias/key/work budgets: all approved fragment keys union, canonical alias receipt/payload preserved, cursor advances, re-import stays suppressed; only new local alias refuses. Scanner disagreement preserves approved canonical body with local hold; forget/bootstrap/reindex purges and source files remain unchanged. NOT RUN here.
-
-### apps/server/src/memory/MemoryImport.test.ts — M20 activation (NOT RUN)
-
-| Case                                               | Activation                                                                                                                                                     | Required observation                                                                                                                                                                                                                                              |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Approved alias/suppression under full local quotas | Fill local source/alias/digest/work budgets; normal WP3 pull delivers hub-approved alias upsert and multiple bounded forget fragments through real WP2 service | Every admitted alias/receipt and full suppression union retained; cursor advances; approved body is canonical once and local index may defer. New local alias alone refuses; re-import after restart/bootstrap stays suppressed; provider source files unchanged. |
-
-## M20 replan (rev 8)
-
-Directly keeps local import/new alias admission while approved alias upsert/forget union bypasses replica quota/scanner reapproval. Field chain and cumulative-key/CI clauses now distinguish modes; owning importer/service CI covers approved alias/suppression at full local budgets.
-
-Docs-only amendment; no source edits, installation, tests, builds, server/user-data writes, commit
-or push. All newly specified runtime/CI cases are NOT RUN; no runtime CLOSED or requirement 7
-completion is claimed.
+ImportRegistration owns source/profile/locator and bounded active session/CAS version;
+ImportBatch owns request digest, immutable selected IDs, outcomes/remaining and counters;
+ImportItem owns stable scope/accepted hashes/revision/aliases versus rejected observations;
+ImportMatch distinguishes source/content suppression, pending forget and live exact copy.
+Their strict codecs live in MemoryImportTypes and are consumed by Store; these are additions,
+not WP2 exports. commitImportItemTx runs inside existing transaction journal and charges the
+session/receipt allocation before invoking the ordinary local-intent callback. It is not an
+approved-replica API. L1 adds separate canonical-settlement receipt update using 030's existing
+transaction, not by recursively invoking local import.
+
+Field chain: sourceId/profile/sessionId are created by destination reader/coordinator, encoded
+in the existing source registration and RPC result, decoded by existing strict DTO/private
+Store codecs, then consumed by WP6 selectors/L4 apply/L1 CAS. Import aliases/content history
+are created by L1, encoded in existing MemoryProvenance/receipt arms, decoded on Store reload
+and WP3 operation/checkpoint receive, consumed by matching/forget/settlement and WP4 injection.
+Private absolute roots never cross the wire; raw snapshot bytes have no persistent codec;
+provider app version has no field. Existing format/action/outcome/issue values stay unchanged;
+unknown values reject via contracts, not default parser dispatch. New capability creation →
+ServerEnvironment descriptor/events → strict capability DTO → WP4 destination availability/
+WP6 consumption is tested by L5. Direct generic upserts cannot fabricate import receipts;
+no client flag can select approvedReplica or bypass hub admission.
+
+## 6. Focused acceptance — temporary fixtures, PR CI only, NOT RUN
+
+All scenarios use temporary homes, SQLite databases and synthetic repositories. Override roots
+and inject FS/Vcs/auth/clock/fault layers; never fall back to process HOME or installed provider
+state. Byte hashes, directory inventories, Git refs/index/config and write-call spies before/
+after prove fixture sources unchanged, including failure and cancellation paths. No corpus,
+settings, credentials, provider network/model call or provider binary is a test dependency.
+
+| Owner / focused file                                                            | Activation scenario → observable requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L2 imports/MemoryImportReader.test.ts                                           | Root/ancestor/file symlink, traversal, Git symlink/gitlink, malformed UTF-8, NUL, missing file/object, file swap during read, Git HEAD move, process timeout/truncation → typed issue/no mixed snapshot, no stderr/path leakage and zero writes. Equality/+1 for roots/visited entries/depth/file/tree/snapshot/preview framing → explicit refusal, bounded reads/allocations.                                                                                                                                                                                                                                                                                                                                                         |
+| L3 imports/CodexMemoryImporter.test.ts                                          | Synthetic fenced heading, duplicate NFC title, supported optional applies_to, ad-hoc note, JSONL in .md, summary/raw/rollout/skills links → only allowed units, stable keys; no linked evidence traversal or inferred scope. Oversize task/file rejects rather than slicing/truncating.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| L3 imports/ClaudeMemoryImporter.test.ts                                         | Four direct types and isolated metadata.type compatibility; disagreement, duplicate YAML keys/tags/anchors/nested fields, index/CLAUDE.md/episodes → deterministic profile/issue. Encoded dirname never assigns project; ignored foreign session values absent from provenance.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| L3 imports/OmoMemoryImporter.test.ts                                            | beta63 scalar/quoted headers, aliases JSON, tolerated limit/extra scalars, monthly ledger, persona, dirty/untracked changes, unsupported older checkout → only pinned committed units, instructions remain data, no runtime fallback.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| L4 imports/ProviderMemoryImport.test.ts                                         | All actions, no public memory:read requirement on status, changed batch digest before read, expired session, source_changed, raw/header/title secret while normalized text is safe, selected valid item after malformed file → bounded rows/no raw retention, no accepted-parent mutation; status performs no FS/Vcs/apply.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| L1 memory/MemoryImport.test.ts + MemoryStore.test.ts                            | Real transactions: unchanged retry/restart no new revision/index work; changed source same ID/receipt parent; manual/remote edit → real conflict; same-scope copy alias, another scope no false alias; rejected observation not accepted hash. Lost response/status/partial retry, compact retired batch, changed operation-ID digest → exact committed IDs or explicit not_found, never reapplication. Deferred-controlled race rollback leaves intent/receipt/session/quota all committed or all absent.                                                                                                                                                                                                                             |
+| L1 MemoryService.test.ts + memory/MemoryImport.test.ts                          | Two environments same explicit project key, pinned remote/restart, foreign thread/project, binding or permission revocation during source wait/SQL lock → mapping_changed/authorization denial without receipt mutation, no local fallback. Bootstrap unbound/staging/mismatched space → bootstrap_required; bootstrapped offline → pending, later hub settles. Hub environment follows same local submission path.                                                                                                                                                                                                                                                                                                                    |
+| L1 memory/MemoryImport.test.ts                                                  | Import multiple aliases and changed versions, forget, leave original fixture untouched, restart/re-preview/source content change/exact-copy rename → suppressed with no body exposure. >100 suppression entries → actual WP3 base+fragments and separate receipts; pending/rejected expansion does not resurrect; checkpoint/rebuild/compaction and offline third member retain suppression. An offline proposal built before remote forget is rejected by real hub admission even before local catch-up. A different environment forgets an imported item after accepted receipt/revision compaction and retains every accepted alias/hash. True GOAT thread source exclusion remains intact; provider IDs never become sourceThread. |
+| L1 MemoryQuotaService.test.ts + memory/MemoryImport.test.ts                     | Equality/+1 and multibyte session/live/source/alias/digest/metadata/history budgets; 32-item chunk split/new session/concurrent reservation; rejected/suppressed new alias → no quota bypass, exact partial receipts. Fill local alias/key/work budgets then receive real hub-approved upsert/alias/forget → full canonical union/receipt/cursor, deferred index only. Scanner disagreement holds approved body without re-admission.                                                                                                                                                                                                                                                                                                  |
+| L1 quota/store tests                                                            | Before/after import/drain and repeated noop samples, FTS brake/resume, absent dbstat/WAL/baseline, forget/rebuild → bounded growth and truthful unavailable metrics; no duplicate raw text/history identity/index, forgotten text absent. Use existing maintenance, no new physical sampler per item.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| L5 rpc.test.ts, ws.test.ts, RpcAuthorization.test.ts, ServerEnvironment.test.ts | Before activation only WP4 core; after activation discover/preview/apply/status round trips and actual capability. Missing/revoked either grant after wait/lock denies every action; no handler-local bypass, old destination unavailable. Lost WS response status returns persisted partial/completed receipt without source reads.                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+Use Deferred barriers/persisted events and existing MemoryWorker.drain plus WP3 settlement/drain
+milestones. If thread orchestration is involved, drain OrchestrationEffectWorkerV2 too. No
+sleeps or polling-based success. Measure canonical approval versus local readability separately;
+a locally committed item is not a hub approval or physical cleanup proof.
+
+Current CI wiring: `.github/workflows/goat-ci.yml:147–149` runs server package shards;
+`apps/server/package.json:24` runs its test suite; `apps/server/vite.config.ts:155–169` uses
+nonparallel files and weighted shards, with all new server .test.ts files in scope. Contracts
+run at `goat-ci.yml:125–127`. L5 does not edit workflow or claim old r4 static counts apply.
+Future targeted static checks belong to changed server/contracts files in PR CI; no local
+compiler/linter/test/build command is executed in this authoring. Capture exact PR head,
+discovered focused files/case counts and actual logs/steps; cancelled/skipped/toolchain failures
+are not passing tests. No local bun/pnpm/vp test, vitest, e2e, repo checks, full build, pnpm,
+dependency installation or dev server on this Mac.
+
+## 7. Risks, ownership and reflection handoff
+
+User decisions required: **none**. Explicit selections (source and per-item scope) are ordinary
+future product inputs, not a new design approval request. WP6 owns web/desktop/mobile import
+screens, settings/command-palette/keybinding reachability, chunk stop/status presentation and
+user guidance. WP4 owns common delivery to all six providers, MCP/core auth and guarded
+import command. WP3 owns hub bootstrap/materialization, admission/settlement and canonical
+receive. WP5 owns read-only source import and server import group/handler/capability activation.
+Local/remote/relay/tunnel calls always use selected environment roots; all environments are
+equal writers. No new MCP import tool or provider adapter/UI is needed in this phase.
+
+Implementation risks for reflection: complete source/receipt/session private codecs on the
+actual WP2 table inventory; parent-aware intent integration without hub-local precommit;
+accepted-vs-pending receipt reconciliation; permanent imported alias/content extraction before
+forget purge; compact batch guard framing/retention; filesystem no-follow portability and
+large Codex/omo ledger refusal; narrow historically observed Claude metadata profile. Each has
+an owner and activation case above. None authorizes an undeclared schema change, corpus read,
+source rewrite or semantic-erasure promise. Scanner pattern misses, rename+paraphrase and
+privileged direct DB edits remain limits; tested service paths are the enforcement surface,
+not a guarantee over arbitrary external writers. Root bypasses/profile changes require
+migration retaining suppression, not a downgrade of the read-only claim.
+
+Coordinator reflection packet: this input SHA/dependency/dev pins, S01–S15, §2 parser decisions,
+§3 actual versus planned ports, L1–L5 ownership, and §6 NOT RUN evidence. Obtain architect
+reflection and independent A on this concrete rewrite before B. This bounded planner produced
+no architect consultation handle or A result; READY_FOR_REFLECTION does not claim either.
+Before B replace future WP3/WP4 references with their real implementation hashes/anchors and
+verify private import codecs fit existing public contracts. Source-of-truth target is this
+050 and the one 000 WP5 cycle record for P; a future code PR updates structure docs only if a
+real module boundary/decision changes, not as an implementation diary.
+
+Authoring verification: only 050 and the new 000 WP5 P record are written. From the installed
+formatter checkout `goat-78999bf5`, `vp fmt <both absolute paths>` then
+`vp fmt --check <both absolute paths>` cover these exact documents; `git diff --check` checks
+the target worktree. Results are recorded in the P handoff/000 record. Runtime tests, typecheck,
+lint, source implementation, PR creation and push: NOT RUN. No dependency install is needed.
+
+## Folded revision correspondence
+
+| Previous amendment                    | Current home                                                                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| rev 2 action/receipt ownership        | §3 and §4.1–2: implemented DTO/table versus WP5 private helpers, no cancel job, status without source I/O.                                        |
+| reflection r1 / rev 3 project binding | §3 and §4.3: corrected two-argument resolveProjectKey, live permit/version recheck and real scoped identity.                                      |
+| audit r1 / rev 4 B2/B4/B7/B8          | §4.3, §5–7: existing decider and hub settlement, limits of claims, current owned-file/CI map instead of historical coverage counts.               |
+| M19 / rev 6                           | §4.2/4.4 and §6: source session across chunks, permanent suppression/cumulative admission, bounded staging and measured growth.                   |
+| M20 / rev 8                           | §3/4.3–4.4 and §6: every environment submits ordinary intents, hub-only admission, approved replica canonical union with local exposure deferral. |
