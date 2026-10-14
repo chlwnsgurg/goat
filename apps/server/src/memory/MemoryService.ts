@@ -41,6 +41,17 @@ type SummaryCommit = {
   /** Re-read committed source/exclusions inside the commit transaction. */
   readonly recheckSource: Effect.Effect<void, MemoryServiceError>;
 };
+export type IntentBinding = {
+  memorySpaceId: M.MemorySpaceId | null;
+  coordinatorEpoch: number;
+  enabled: boolean;
+};
+export type IntentCommitInput = {
+  assignment: Omit<Store.IntentIdentityInput, "environmentId">;
+  expectedEpoch: number;
+  /** Fresh shared settings/stop authority; called inside the writer Tx, never cached or networked. */
+  readBinding: Effect.Effect<IntentBinding, MemoryAccessError>;
+};
 export type ValidatedSourceRequest = {
   request: M.MemoryHubSourceReadRequestInput;
   generation: number;
@@ -60,6 +71,12 @@ export type MemoryOwnerCommittedReader = {
 export class MemoryService extends Context.Service<
   MemoryService,
   {
+    readonly commitLocalIntent: (
+      input: IntentCommitInput,
+    ) => Effect.Effect<
+      Store.MaterializedIntent & { receipt: Store.StoredReceipt },
+      MemoryServiceError
+    >;
     readonly prepareSourceRead: (
       input: M.MemoryReadSourceInput,
       permit: Permit,
@@ -440,6 +457,37 @@ const make = Effect.gen(function* () {
         }
         const decision = yield* decide(current, op, admission, approval, ancestry);
         return yield* quota.commit(decision, environmentId, permit);
+      }),
+    );
+  });
+  const commitLocalIntent: MemoryService["Service"]["commitLocalIntent"] = Effect.fn(
+    "MemoryService.commitLocalIntent",
+  )(function* (input) {
+    const permit = Effect.gen(function* () {
+      const binding = yield* input.readBinding;
+      if (
+        !binding.enabled ||
+        binding.coordinatorEpoch !== input.expectedEpoch ||
+        binding.memorySpaceId !== input.assignment.memorySpaceId
+      )
+        return yield* new MemoryAccessError({ code: "fenced" });
+    });
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        const materialized = yield* store.materializeLocalIntentTx({
+          ...input.assignment,
+          environmentId,
+        });
+        const receipt = yield* apply(materialized.operation, Store.localIntent, permit);
+        yield* permit;
+        yield* store.completeLocalIntentTx({
+          environmentId,
+          intentId: input.assignment.intentId,
+          materialized,
+          now: yield* Clock.currentTimeMillis,
+        });
+        return { ...materialized, receipt };
       }),
     );
   });
@@ -1611,6 +1659,7 @@ const make = Effect.gen(function* () {
     );
   });
   return MemoryService.of({
+    commitLocalIntent,
     prepareSourceRead,
     validateSourceOutcome,
     admitHubOperation,

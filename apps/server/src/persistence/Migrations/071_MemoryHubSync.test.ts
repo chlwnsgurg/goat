@@ -124,3 +124,42 @@ it.effect(
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it.effect("processing counter upgrade and refusal compaction count canonical receipts once", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* memory;
+    yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,'space','memory','refusal','forget','env','digest','{}','{"outcome":"rejected"}',0)`;
+    yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES ('space','refusal','digest',1,'{"outcome":"rejected"}','{}')`;
+    yield* hub;
+    const count = () =>
+      sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space='space' AND dimension='processing_admission_failures' AND scope_key=''`.pipe(
+        Effect.map((rows) => rows[0]!.value),
+      );
+    assert.strictEqual(yield* count(), 1);
+    yield* sql`DELETE FROM memory_events WHERE operation_id='refusal'`;
+    assert.strictEqual(yield* count(), 1);
+    yield* sql`DELETE FROM memory_compact_receipts WHERE operation_id='refusal'`;
+    assert.strictEqual(yield* count(), 0);
+    yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,'space','memory','refusal','forget','env','digest','{}','{"outcome":"rejected"}',0)`;
+    assert.strictEqual(yield* count(), 1);
+    yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES ('space','refusal','digest',1,'{"outcome":"rejected"}','{}')`;
+    assert.strictEqual(yield* count(), 1);
+    yield* sql`DELETE FROM memory_events WHERE operation_id='refusal'`;
+    assert.strictEqual(yield* count(), 1);
+    yield* sql
+      .withTransaction(
+        sql`DELETE FROM memory_compact_receipts WHERE operation_id='refusal'`.pipe(
+          Effect.andThen(Effect.fail("rollback")),
+        ),
+      )
+      .pipe(Effect.flip);
+    assert.strictEqual(yield* count(), 1);
+    const plan = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT dimension,value FROM memory_quota_counters WHERE space='space' AND scope_key='' AND dimension IN ('processing_admission_failures','processing_pending_sync')`;
+    assert.isFalse(plan.some((r) => r.detail.includes("SCAN")));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

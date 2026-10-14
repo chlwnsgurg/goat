@@ -46,6 +46,19 @@ export default Effect.gen(function* () {
   ) WHERE kind IN ('sync','revert_intent')`;
   yield* sql`CREATE INDEX memory_outbox_sync_due ON memory_outbox(space,kind,status,next_attempt_at,claimed_until)`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN terminal_at INTEGER`;
+  yield* sql`ALTER TABLE memory_outbox ADD COLUMN hold_class TEXT CHECK(hold_class IN ('authorization','protocol','identity','availability'))`;
+  yield* sql`ALTER TABLE memory_outbox ADD COLUMN failure_code TEXT CHECK(length(failure_code)<=64)`;
+
+  yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN pull_retry_json TEXT CHECK(length(CAST(pull_retry_json AS BLOB))<=512)`;
+  yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN checkpoint_page_count INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_page_count>=0)`;
+  yield* sql`ALTER TABLE memory_payloads ADD COLUMN checkpoint_stage_id TEXT`;
+  yield* sql`UPDATE memory_sync_cursors SET checkpoint_page_count=(SELECT count(*) FROM memory_inbox_pending p WHERE p.space=memory_sync_cursors.space AND p.checkpoint_id=memory_sync_cursors.checkpoint_id AND p.record_kind='checkpoint')`;
+  yield* sql`CREATE TRIGGER memory_bootstrap_page_insert AFTER INSERT ON memory_inbox_pending WHEN NEW.record_kind='checkpoint' BEGIN
+    UPDATE memory_sync_cursors SET checkpoint_page_count=checkpoint_page_count+1 WHERE space=NEW.space AND checkpoint_id=NEW.checkpoint_id AND bootstrap_state='staging';
+  END`;
+  yield* sql`CREATE TRIGGER memory_bootstrap_page_delete AFTER DELETE ON memory_inbox_pending WHEN OLD.record_kind='checkpoint' BEGIN
+    UPDATE memory_sync_cursors SET checkpoint_page_count=checkpoint_page_count-1 WHERE space=OLD.space AND checkpoint_id=OLD.checkpoint_id AND bootstrap_state='staging';
+  END`;
   const counterSpace = "_hub_global";
   // Seed once from the upgrade snapshot. Every later row delta is maintained by SQLite in its writer transaction.
   const receiptBytes = 336;
@@ -68,7 +81,7 @@ export default Effect.gen(function* () {
     ],
     [
       "memory_outbox",
-      "coalesce(length(CAST(admin_json AS BLOB)),0)+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)",
+      "coalesce(length(CAST(admin_json AS BLOB)),0)+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)+coalesce(length(CAST(hold_class AS BLOB)),0)+coalesce(length(CAST(failure_code AS BLOB)),0)",
     ],
     [
       "memory_report_outbox",
@@ -119,7 +132,7 @@ export default Effect.gen(function* () {
   for (const [table, expression] of privateInventory) {
     const qualify = (prefix: string) =>
       expression.replace(
-        /\b(space|environment|credential_digest|credential_version|status|joined_at|memory_id|highest_token|lease_json|locator_json|request_digest|response_digest|boundary_json|handles_json|compaction_json|admin_json|ticket_json|frozen_claim_json|report_id|operation_id|resolving_environment_id|resolution_id|report_thread_json)\b/g,
+        /\b(space|environment|credential_digest|credential_version|status|joined_at|memory_id|highest_token|lease_json|locator_json|request_digest|response_digest|boundary_json|handles_json|compaction_json|admin_json|ticket_json|frozen_claim_json|hold_class|failure_code|report_id|operation_id|resolving_environment_id|resolution_id|report_thread_json)\b/g,
         `${prefix}.$1`,
       );
     const charge = (value: string) =>
@@ -239,10 +252,15 @@ export default Effect.gen(function* () {
     ["memory_compact_receipts", "space", "compact_json,receipt_json"],
     ["memory_import_keys", "space", "record_json"],
     ["memory_events", "memory_space_id", "metadata_json,receipt_json"],
-    ["memory_outbox", "space", "metadata_json,admin_json,ticket_json,frozen_claim_json"],
+    [
+      "memory_outbox",
+      "space",
+      "metadata_json,admin_json,ticket_json,frozen_claim_json,hold_class,failure_code",
+    ],
     ["memory_hub_members", "space", "space,environment,credential_digest,status"],
     ["memory_hub_leases", "space", "lease_json"],
     ["memory_hub_source_reads", "space", "locator_json,request_digest,response_digest"],
+    ["memory_sync_cursors", "space", "pull_retry_json"],
   ] as const;
   for (const [table, spaceColumn, columns] of snapshotByteBounds) {
     const rawBytes = (prefix: string) =>
@@ -261,10 +279,15 @@ export default Effect.gen(function* () {
         : table === "memory_import_keys"
           ? `CASE WHEN ${prefix}key_kind='hub_checkpoint_token' THEN 0 ELSE 1 END`
           : "1";
-    for (const [dimension, expression] of [
-      ["hub_snapshot_bytes", bytes("")],
-      ["hub_snapshot_rows", recordRows("")],
-    ] as const) {
+    // Retry extends an existing cursor row; it adds bounded bytes, not canonical snapshot records.
+    const dimensions =
+      table === "memory_sync_cursors"
+        ? ([["hub_snapshot_bytes", bytes("")]] as const)
+        : ([
+            ["hub_snapshot_bytes", bytes("")],
+            ["hub_snapshot_rows", recordRows("")],
+          ] as const);
+    for (const [dimension, expression] of dimensions) {
       yield* sql.unsafe(
         `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
         SELECT ${spaceColumn},?,'',sum(${expression}) FROM ${table} GROUP BY ${spaceColumn}
@@ -369,4 +392,120 @@ export default Effect.gen(function* () {
     yield* sql.unsafe(`CREATE TRIGGER memory_tombstones_snapshot_forget_${action.toLowerCase()} AFTER ${action} ON memory_tombstones BEGIN
       UPDATE memory_quota_counters SET value=value+${sign}*8 WHERE space=${prefix}.space AND dimension='hub_snapshot_rows' AND scope_key='' AND EXISTS(SELECT 1 FROM memory_identity_ledger i WHERE i.space=${prefix}.space AND i.memory_id=${prefix}.memory_id);
     END`);
+  // Fixed counters per space; no text index, history ring or per-operation status rows.
+  const processingInventory = [
+    {
+      table: "memory_items",
+      columns:
+        "space,status,index_state,indexed_generation,generation,cleanup_pending,deferred_json,availability_json",
+      values: (p: string) => [
+        ["quarantined", `${p}.status='quarantined'`],
+        ["eligible", `${p}.status='active'`],
+        [
+          "indexed",
+          `${p}.status='active' AND ${p}.index_state='ready' AND ${p}.indexed_generation=${p}.generation`,
+        ],
+        ["cleanup", `${p}.cleanup_pending=1`],
+        [
+          "scanner_held",
+          `EXISTS(SELECT 1 FROM json_each(${p}.availability_json,'$.reasons') WHERE value='secret_detected')`,
+        ],
+        [
+          "scanner_pending",
+          `EXISTS(SELECT 1 FROM json_each(${p}.availability_json,'$.reasons') WHERE value='scanner_pending')`,
+        ],
+        [
+          "missing_parent",
+          `EXISTS(SELECT 1 FROM json_each(${p}.availability_json,'$.reasons') WHERE value='missing_parent')`,
+        ],
+        [
+          "deferred",
+          `(SELECT count(*) FROM json_each(${p}.deferred_json) WHERE json_extract(value,'$.state')!='ready')`,
+        ],
+      ],
+    },
+    {
+      table: "memory_outbox",
+      columns: "space,kind,status",
+      values: (p: string) => [
+        [
+          "pending_sync",
+          `${p}.kind IN ('sync','revert_intent') AND ${p}.status IN ('pending','retry','running')`,
+        ],
+      ],
+    },
+    {
+      table: "memory_inbox_pending",
+      columns: "space,record_kind",
+      values: (p: string) => [["parked", `${p}.record_kind='operation'`]],
+    },
+    {
+      table: "memory_report_outbox",
+      columns: "space,state",
+      values: (p: string) => [
+        ["report_backlog", `${p}.state IN ('pending','failed')`],
+        ["report_failed", `${p}.state='failed'`],
+      ],
+    },
+    // The event and compact forms of a refusal count once across compaction.
+    {
+      table: "memory_events",
+      columns: "memory_space_id,operation_id,receipt_json",
+      values: (p: string) => [
+        [
+          "admission_failures",
+          `json_extract(${p}.receipt_json,'$.outcome')='rejected' AND NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE c.space=${p}.memory_space_id AND c.operation_id=${p}.operation_id)`,
+        ],
+      ],
+    },
+    {
+      table: "memory_compact_receipts",
+      columns: "space,operation_id,receipt_json",
+      values: (p: string) => [
+        [
+          "admission_failures",
+          `(json_extract(${p}.receipt_json,'$.outcome')='rejected')-EXISTS(SELECT 1 FROM memory_events e WHERE e.memory_space_id=${p}.space AND e.operation_id=${p}.operation_id AND json_extract(e.receipt_json,'$.outcome')='rejected')`,
+        ],
+      ],
+    },
+  ];
+  for (const entry of processingInventory) {
+    const spaceColumn = entry.table === "memory_events" ? "memory_space_id" : "space";
+    for (const [dimension, originalExpression] of entry.values("seed")) {
+      const expression =
+        entry.table === "memory_compact_receipts"
+          ? "json_extract(seed.receipt_json,'$.outcome')='rejected'"
+          : originalExpression;
+      yield* sql.unsafe(
+        `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT seed.${spaceColumn},'processing_${dimension}','',coalesce(sum(coalesce((${expression}),0)),0) FROM ${entry.table} seed GROUP BY seed.${spaceColumn} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+      );
+    }
+    const delta = (p: string, sign: number) =>
+      entry
+        .values(p)
+        .map(([dimension, expression]) =>
+          sign < 0
+            ? `UPDATE memory_quota_counters SET value=value-coalesce((${expression}),0) WHERE space=${p}.${spaceColumn} AND dimension='processing_${dimension}' AND scope_key='';`
+            : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${p}.${spaceColumn},'processing_${dimension}','',coalesce((${expression}),0)) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`,
+        )
+        .join("\n");
+    // UPDATE uses subtraction before addition, so moving a row between spaces is exact.
+    for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
+      yield* sql.unsafe(
+        `CREATE TRIGGER ${entry.table}_processing_${action.toLowerCase()} AFTER ${action}${action === "UPDATE" ? ` OF ${entry.columns}` : ""} ON ${entry.table} BEGIN ${action !== "INSERT" ? delta("OLD", -1) : ""} ${action !== "DELETE" ? delta("NEW", 1) : ""} END`,
+      );
+    }
+  }
+  // Six deferred kinds, one per kind. A virtual scalar and narrow partial
+  // index give the exact oldest row without another writer UPDATE or body index.
+  const noDeferred = "9999-12-31T23:59:59.999Z";
+  const deferredTimes = Array.from(
+    { length: 6 },
+    (_, slot) =>
+      `coalesce(CASE WHEN json_extract(deferred_json,'$[${slot}].state')!='ready' THEN json_extract(deferred_json,'$[${slot}].sinceAtUtc') END,'${noDeferred}')`,
+  ).join(",");
+  yield* sql.unsafe(
+    `ALTER TABLE memory_items ADD COLUMN processing_oldest_at TEXT GENERATED ALWAYS AS (nullif(min(${deferredTimes}),'${noDeferred}')) VIRTUAL`,
+  );
+  yield* sql`CREATE INDEX memory_processing_oldest ON memory_items(space,processing_oldest_at) WHERE processing_oldest_at IS NOT NULL`;
 });

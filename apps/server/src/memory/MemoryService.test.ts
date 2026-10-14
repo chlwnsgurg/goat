@@ -1701,3 +1701,112 @@ it.effect(
       assert.isTrue((yield* store.loadAggregate(space, memoryId)).item?.pendingSync);
     }).pipe(Effect.provide(live)),
 );
+
+it.effect("commits 100 frozen local intents atomically and advances the next intent", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
+    const createdAtUtc = "2026-10-13T01:02:03.000Z";
+    const assignments = [];
+    for (let n = 0; n < 101; n++) {
+      const intentId = `frozen:${String(n).padStart(3, "0")}`;
+      yield* store.putLocalIntent({
+        intentId,
+        environmentId,
+        memoryId: M.MemoryId.make(id(10000 + n)),
+        scope: { kind: "user" },
+        assertionKind: "inference",
+        provenance: { environmentId, effectiveModel: "original-model" },
+        createdAtUtc,
+        payload: { text: `synthetic intent ${n}`, evidence: [], derivedFromMemoryRevisions: [] },
+      });
+      assignments.push({
+        intentId,
+        memorySpaceId: space,
+        operationId: M.MemoryOperationId.make(id(11000 + n)),
+        revisionId: M.MemoryRevisionId.make(id(12000 + n)),
+      });
+    }
+    const readBinding = Effect.succeed({
+      memorySpaceId: space,
+      coordinatorEpoch: 7,
+      enabled: true,
+    });
+    const first = yield* service.commitLocalIntent({
+      assignment: assignments[0]!,
+      expectedEpoch: 7,
+      readBinding,
+    });
+    if (first.operation.kind !== "upsert") throw new Error("fixture");
+    assert.strictEqual(first.operation.revision.createdAtUtc, createdAtUtc);
+    assert.strictEqual(first.operation.revision.provenance.effectiveModel, "original-model");
+    assert.strictEqual(first.operation.revision.revisionId, assignments[0]!.revisionId);
+    const replay = yield* service.commitLocalIntent({
+      assignment: {
+        ...assignments[0]!,
+        operationId: M.MemoryOperationId.make(id(13000)),
+        revisionId: M.MemoryRevisionId.make(id(13001)),
+      },
+      expectedEpoch: 7,
+      readBinding,
+    });
+    assert.deepStrictEqual(replay, first);
+    for (const assignment of assignments.slice(1, 100))
+      yield* service.commitLocalIntent({ assignment, expectedEpoch: 7, readBinding });
+    assert.deepStrictEqual(
+      (yield* store.listMaterializableIntents(environmentId, 100)).map((i) => i.intentId),
+      [assignments[100]!.intentId],
+    );
+    const target = assignments[100]!;
+    // Failure after canonical/outbox writes must roll mapping, receipt and completion back.
+    yield* sql.unsafe(
+      "CREATE TRIGGER fail_intent_complete BEFORE UPDATE OF status ON memory_outbox WHEN OLD.id='local:fixture:frozen:100' AND NEW.status='completed' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END",
+    );
+    assert.strictEqual(
+      (yield* service
+        .commitLocalIntent({ assignment: target, expectedEpoch: 7, readBinding })
+        .pipe(Effect.exit))._tag,
+      "Failure",
+    );
+    assert.isUndefined(yield* store.receipt(space, target.operationId));
+    assert.isUndefined(yield* store.readWork(`sync:${space}:${target.operationId}`));
+    const row = yield* sql<{
+      metadata_json: string;
+    }>`SELECT metadata_json FROM memory_outbox WHERE id=${`local:${environmentId}:${target.intentId}`}`;
+    assert.isNull(JSON.parse(row[0]!.metadata_json).mapping);
+    yield* sql`DROP TRIGGER fail_intent_complete`;
+    const changed = Effect.succeed({
+      memorySpaceId: M.MemorySpaceId.make(id(14000)),
+      coordinatorEpoch: 8,
+      enabled: true,
+    });
+    assert.strictEqual(
+      (yield* service
+        .commitLocalIntent({ assignment: target, expectedEpoch: 7, readBinding: changed })
+        .pipe(Effect.flip))._tag,
+      "MemoryAccessError",
+    );
+    assert.isUndefined(yield* store.receipt(space, target.operationId));
+    let reads = 0;
+    const changedDuringCommit = Effect.sync(() =>
+      ++reads === 1
+        ? { memorySpaceId: space, coordinatorEpoch: 7, enabled: true }
+        : { memorySpaceId: space, coordinatorEpoch: 8, enabled: true },
+    );
+    assert.strictEqual(
+      (yield* service
+        .commitLocalIntent({
+          assignment: target,
+          expectedEpoch: 7,
+          readBinding: changedDuringCommit,
+        })
+        .pipe(Effect.flip))._tag,
+      "MemoryAccessError",
+    );
+    assert.isUndefined(yield* store.receipt(space, target.operationId));
+    yield* service.commitLocalIntent({ assignment: target, expectedEpoch: 7, readBinding });
+    assert.deepStrictEqual(yield* store.listMaterializableIntents(environmentId, 100), []);
+  }).pipe(Effect.provide(live)),
+);
