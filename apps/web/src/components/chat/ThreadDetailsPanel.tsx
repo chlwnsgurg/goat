@@ -6,7 +6,9 @@ import type {
   ThreadId,
 } from "@goat/contracts";
 
-import type { DraftId } from "../../composerDraftStore";
+import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
+import { type DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import { useServerConfigs, useThreadProjection, useThreadShell } from "../../state/entities";
 import { type EnvMode, type EnvironmentOption } from "../BranchToolbar.logic";
 import { BranchToolbar } from "../BranchToolbar";
 import BaseGitActionsControl from "../GitActionsControl";
@@ -68,6 +70,18 @@ export interface ThreadDetailsPanelProps
 
 export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
   const activeThreadRef = { environmentId: props.environmentId, threadId: props.threadId };
+  const thread = useThreadShell(props.draftId ? null : activeThreadRef);
+  const projection = useThreadProjection(props.draftId ? null : activeThreadRef)?.projection;
+  const selectedInstanceId = useComposerDraftStore(
+    (store) =>
+      store.getComposerDraft(props.draftId ?? activeThreadRef)?.activeProvider ??
+      projection?.thread.providerInstanceId ??
+      thread?.providerInstanceId,
+  );
+  const selectedProvider = useServerConfigs()
+    .get(props.environmentId)
+    ?.providers.find((provider) => provider.instanceId === selectedInstanceId);
+  const { showLocalWorkspace } = deriveCloudTaskState(projection, selectedProvider);
   const branchToolbarProps = {
     showGitControls: props.isGitRepo,
     sshDestination: props.sshDestination,
@@ -111,7 +125,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
             showHeading={false}
           >
             <div className="flex flex-col">
-              {density === "full" ? (
+              {density === "full" && showLocalWorkspace ? (
                 <BranchToolbar
                   layout="panel"
                   panelSection="workspace"
@@ -148,7 +162,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
             </div>
           </ThreadDetailsSection>
 
-          {props.gitCwd ? (
+          {props.gitCwd && showLocalWorkspace ? (
             <ThreadDetailsSection
               headingId="thread-details-version-control-heading"
               title="Version Control"

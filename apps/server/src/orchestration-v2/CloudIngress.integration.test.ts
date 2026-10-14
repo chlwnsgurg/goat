@@ -1,0 +1,2078 @@
+import { assert, it } from "@effect/vitest";
+import {
+  CommandId,
+  EventId,
+  MessageId,
+  NodeId,
+  ProjectId,
+  ProviderInstanceId,
+  ProviderTurnId,
+  RunAttemptId,
+  RunId,
+  ThreadId,
+  TurnItemId,
+  EnvironmentId,
+  OrchestratorMcpTaskCancelResult,
+  OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadStatusResult,
+  type Project,
+  type OrchestrationV2Command,
+  type OrchestrationV2ThreadProjection,
+} from "@goat/contracts";
+import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Ref from "effect/Ref";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { McpServer, McpSchema } from "effect/ai";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+import {
+  ProviderAdapterOpenSessionError,
+  ProviderAdapterTurnStartError,
+} from "@goat/provider-core/server/ProviderAdapter";
+import * as TestClock from "effect/testing/TestClock";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as CommandReceipts from "./CommandReceiptStore.ts";
+import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
+import * as ProviderSessions from "./ProviderSessionManager.ts";
+import * as RuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProviderContinuationRequests from "@goat/provider-core/server/ProviderContinuationRequests";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as CloudSource from "./CloudTaskSourceService.ts";
+import * as Projects from "../project/ProjectService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ScheduledTasks from "../scheduledTasks/ScheduledTaskService.ts";
+import * as Secrets from "../secrets/SecretRequests.ts";
+import * as RemoteDispatch from "../remoteReports/RemoteDispatchCoordinator.ts";
+import * as SshDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as LaunchWatches from "../mcp/LaunchWatchService.ts";
+import * as ThreadResults from "../threadResults/ThreadResultService.ts";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as Registry from "./ProviderAdapterRegistry.ts";
+import { layerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import { makeFakeCloudAdapter } from "./testkit/FakeCloudAdapter.ts";
+
+const cloudMcpClient = McpSchema.McpServerClient.of({
+  clientId: 1,
+  protocolVersion: "2025-06-18",
+  clientCapabilities: {},
+  clientInfo: { name: "cloud-ingress-ci", version: "1.0.0" },
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "cloud-ingress-ci", version: "1.0.0" },
+  },
+  getClient: Effect.die("unused"),
+});
+const decodeTaskCancelResult = Schema.decodeUnknownSync(OrchestratorMcpTaskCancelResult);
+const decodeThreadStatus = Schema.decodeUnknownEffect(OrchestratorMcpThreadStatusResult);
+const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
+const decodeTaskStatus = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
+
+function assertCloudResultItem(projection: OrchestrationV2ThreadProjection, runId: RunId) {
+  const results = projection.turnItems.filter(
+    (item) => item.runId === runId && item.type === "assistant_message",
+  );
+  assert.equal(results.length, 1);
+  const result = results[0]!;
+  assert.equal(result.type, "assistant_message");
+  if (result.type !== "assistant_message") throw new Error("Missing assistant result");
+  assert.equal(result.id, `turn-item:cloud-result:${runId}`);
+  assert.equal(result.messageId, `message:cloud-result:${runId}`);
+  assert.equal(result.status, "completed");
+  assert.isFalse(result.streaming);
+  const messages = projection.messages.filter((message) => message.id === result.messageId);
+  assert.equal(messages.length, 1);
+  assert.equal(result.text, messages[0]!.text);
+  const visible = projection.visibleTurnItems.filter((row) => row.sourceItemId === result.id);
+  assert.equal(visible.length, 1);
+  assert.deepEqual(visible[0]!.item, result);
+  const run = projection.runs.find((candidate) => candidate.id === runId)!;
+  assert.isAbove(result.ordinal, run.ordinal * 1_000_000);
+  return result;
+}
+
+it.effect.each([
+  { providerText: "same", projectFolder: false },
+  { providerText: "different", projectFolder: false },
+  { providerText: "same", projectFolder: true },
+  { providerText: "different", projectFolder: true },
+] as const)(
+  "cloud finalization reuses only $providerText provider assistant text (projectFolder=$projectFolder)",
+  ({ providerText, projectFolder }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeCloudAdapter();
+      const fs = yield* FileSystem.FileSystem;
+      const outputWorktree = projectFolder
+        ? yield* fs.makeTempDirectoryScoped({ prefix: "cloud-output-" })
+        : null;
+      const capabilities = yield* fake.adapter.getCapabilities();
+      const sourceRestriction = projectFolder ? "project-folder" : "published-ref";
+      const adapter = {
+        ...fake.adapter,
+        getCapabilities: () =>
+          Effect.succeed({
+            ...capabilities,
+            sessions: { ...capabilities.sessions, sourceRestriction },
+          }),
+      } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+      const projectId = ProjectId.make("project:cloud-result");
+      const runtime = layerWithRegistry(
+        { name: `cloud-result-${providerText}-${projectFolder}` },
+        Registry.layerFromAdapters([adapter]),
+        {
+          runEffectWorker: false,
+          projects: Layer.mock(Projects.ProjectService)({
+            getById: () =>
+              Effect.succeed(Option.some({ id: projectId, workspaceRoot: "/repo" } as Project)),
+          }),
+          cloudSources: Layer.succeed(CloudSource.CloudTaskSourceService, {
+            resolve: (input) => {
+              assert.equal(input.cwd, "/repo");
+              assert.equal(input.restriction, sourceRestriction);
+              return Effect.succeed({
+                source: { repository: "https://github.com/acme/repo", branch: "dev" },
+                launchSource: { cwd: input.cwd, restriction: sourceRestriction },
+                localChangesExcluded: !projectFolder,
+                ...(projectFolder ? { localChangesIncluded: true } : {}),
+              });
+            },
+          }),
+        },
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = ThreadId.make("thread:cloud-result");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:cloud-result-thread"),
+          threadId,
+          projectId,
+          title: "Cloud result",
+          modelSelection: { instanceId: fake.adapter.instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "dev",
+          worktreePath: outputWorktree,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:cloud-result-run"),
+          threadId,
+          messageId: MessageId.make("message:cloud-result-user"),
+          text: "Run in the cloud",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        const input = yield* Ref.get(fake.current);
+        assert.isNotNull(input);
+        if (input === null) throw new Error("Cloud adapter did not start");
+        assert.equal(
+          input.providerThread.cloudTask?.localChangesIncluded,
+          projectFolder ? true : undefined,
+        );
+        assert.deepEqual(input.cloudLaunchSource, { cwd: "/repo", restriction: sourceRestriction });
+        const accepted = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          accepted.providerThreads[0]?.cloudTask?.localChangesIncluded,
+          projectFolder ? true : undefined,
+        );
+        const itemId = TurnItemId.make("turn-item:provider-result");
+        const now = yield* DateTime.now;
+        const finalText =
+          "Completed fake task\n\n- Pull request: https://github.com/acme/repo/pull/1\n- Branch: `agent/fix`\n- Cloud task: https://example.com/tasks/1";
+        const providerItem = {
+          id: itemId,
+          type: "assistant_message" as const,
+          threadId,
+          runId: input.runId,
+          nodeId: input.rootNodeId,
+          providerThreadId: input.providerThread.id,
+          providerTurnId: ProviderTurnId.make(`provider-turn:fake-cloud:${input.attemptId}`),
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 101,
+          status: "completed" as const,
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          messageId: MessageId.make("message:provider-result"),
+          text: providerText === "same" ? finalText : "I started working on the task.",
+          attachments: [],
+          streaming: false,
+        };
+        const itemPersisted = yield* sink.stream({ threadId, eventType: "turn-item.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" && stored.event.payload.id === itemId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* fake.publish({
+          type: "turn_item.updated",
+          driver: fake.adapter.driver,
+          turnItem: providerItem,
+        });
+        yield* Fiber.join(itemPersisted);
+        const completed = yield* sink.stream({ threadId, eventType: "run.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "run.updated" &&
+              stored.event.payload.id === input.runId &&
+              stored.event.payload.status === "completed",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* fake.finish();
+        yield* Fiber.join(completed);
+        yield* worker.drain();
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          projection.providerThreads[0]?.cloudTask?.localChangesIncluded,
+          projectFolder ? true : undefined,
+        );
+        const assistants = projection.turnItems.filter((item) => item.type === "assistant_message");
+        assert.equal(assistants.length, providerText === "same" ? 1 : 2);
+        const results = assistants.filter(
+          (item) => item.type === "assistant_message" && item.text === finalText,
+        );
+        assert.equal(results.length, 1);
+        assert.equal(
+          results[0]!.id,
+          providerText === "same" ? itemId : `turn-item:cloud-result:${input.runId}`,
+        );
+        assert.deepEqual(
+          projection.visibleTurnItems.find((row) => row.sourceItemId === results[0]!.id)?.item,
+          results[0],
+        );
+        assert.equal(
+          projection.messages.find(
+            (message) => message.id === `message:cloud-result:${input.runId}`,
+          )?.text,
+          finalText,
+        );
+      }).pipe(Effect.provide(runtime));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("reattaches a fully running SQLite cloud crash snapshot once without resubmission", () =>
+  Effect.gen(function* () {
+    const instanceId = ProviderInstanceId.make("codex");
+    const previous = yield* makeFakeCloudAdapter(true, instanceId);
+    const resumed = yield* makeFakeCloudAdapter(true, instanceId);
+    let opens = 0;
+    const adapter = {
+      ...resumed.adapter,
+      openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+        (++opens === 1 ? previous : resumed).adapter.openSession(input),
+    };
+    const runtime = layerWithRegistry(
+      { name: "cloud-crash-recovery" },
+      Registry.layerFromAdapters([adapter]),
+      { runEffectWorker: false },
+    );
+    const recovery = RuntimeRecovery.layer.pipe(
+      Layer.provideMerge(runtime),
+      Layer.provideMerge(CommandReceipts.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+      Layer.provide(IdAllocator.layer),
+      Layer.provide(ServerSettings.layerTest()),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const manager = yield* ProviderSessions.ProviderSessionManagerV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+      const threadId = ThreadId.make("thread:cloud-crash");
+      const modelSelection = { instanceId, model: "fake" };
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("command:cloud-crash-thread"),
+        threadId,
+        projectId: ProjectId.make("project:cloud-crash"),
+        title: "Recover accepted cloud work",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "dev",
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:cloud-crash-run"),
+        threadId,
+        messageId: MessageId.make("message:cloud-crash"),
+        text: "Already accepted remotely",
+        attachments: [],
+        dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root" } },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const run = initial.runs[0]!;
+      const attempt = initial.attempts[0]!;
+      const root = initial.nodes.find((node) => node.id === run.rootNodeId)!;
+      const providerThread = initial.providerThreads[0]!;
+      const providerTurnId = ProviderTurnId.make(`provider-turn:fake-cloud:${attempt.id}`);
+      const session = yield* manager.open({
+        threadId,
+        providerSessionId: providerThread.providerSessionId!,
+        modelSelection,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: null,
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        },
+      });
+      const now = yield* DateTime.now;
+      // Persist the crash boundary after remote acceptance, without executing a submission.
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:cloud-crash-run"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...run, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make("event:cloud-crash-attempt"),
+            type: "run-attempt.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...attempt, providerTurnId, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make("event:cloud-crash-root"),
+            type: "node.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...root, providerTurnId, status: "running", startedAt: now },
+          },
+          {
+            id: EventId.make("event:cloud-crash-turn"),
+            type: "provider-turn.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerTurnId,
+              providerThreadId: providerThread.id,
+              nodeId: root.id,
+              runAttemptId: attempt.id,
+              nativeTurnRef: {
+                driver: adapter.driver,
+                nativeId: "remote-task-1",
+                strength: "strong",
+              },
+              ordinal: 1,
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("event:cloud-crash-session"),
+            type: "provider-session.updated",
+            threadId,
+            occurredAt: now,
+            payload: session.providerSession,
+          },
+          {
+            id: EventId.make("event:cloud-crash-task"),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...providerThread,
+              status: "active",
+              nativeThreadRef: {
+                driver: adapter.driver,
+                nativeId: "native-session-1",
+                strength: "strong",
+              },
+              cloudTask: {
+                taskId: "remote-task-1",
+                status: "running",
+                tracking: "live",
+                source: {
+                  repository: "https://github.com/acme/repo",
+                  branch: "dev",
+                  sha: "a".repeat(40),
+                },
+                localChangesExcluded: true,
+                updatedAt: DateTime.formatIso(now),
+              },
+            },
+          },
+        ],
+      });
+      yield* manager.shutdown;
+      assert.isTrue(Option.isNone(yield* manager.get(session.providerSessionId)));
+      assert.equal(yield* Ref.get(previous.detaches), 1);
+      const crash = yield* orchestrator.getThreadProjection(threadId);
+      const sequence = yield* sink.latestSequence({ threadId });
+      const summary = yield* (yield* RuntimeRecovery.ProviderRuntimeRecoveryService).reconcile(
+        "startup",
+      );
+      assert.equal(summary.terminalizedRuns, 0);
+      assert.equal(yield* sink.latestSequence({ threadId }), sequence);
+      assert.deepEqual(yield* orchestrator.getThreadProjection(threadId), crash);
+      const pending = yield* outbox.claimNext({ workerId: "inspect-recovery", leaseDurationMs: 1 });
+      const reattach = Option.getOrThrow(pending);
+      assert.deepEqual(reattach.request, { type: "provider-turn.reattach", runId: run.id });
+      const receipt = Option.getOrThrow(yield* receipts.getByCommandId(reattach.commandId));
+      assert.equal(receipt.status, "accepted");
+      assert.equal(receipt.resultSequence, sequence);
+      assert.equal((yield* outbox.listByCommandId(reattach.commandId)).length, 1);
+      assert.deepEqual(
+        yield* sink.readByCommandId({ commandId: reattach.commandId }).pipe(Stream.runCollect),
+        [],
+      );
+      yield* outbox.reconcileAfterProcessLoss;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* worker.drain();
+      yield* worker.drain();
+      assert.equal(yield* Ref.get(resumed.attachments), 1);
+      assert.equal(yield* Ref.get(resumed.submissions), 0);
+      assert.equal(yield* Ref.get(resumed.creations), 0);
+      assert.equal(yield* Ref.get(previous.submissions), 0);
+      assert.equal(yield* Ref.get(resumed.cancellations), 0);
+      assert.equal(Option.getOrThrow(yield* outbox.get(reattach.id)).status, "succeeded");
+    }).pipe(Effect.provide(recovery));
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "serializes cloud direct, queued and MCP admission before durable second messages exist",
+  () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeCloudAdapter(false);
+      // Reuse an enabled test slot; the registered adapter is still the test fakeCloud driver.
+      // No provider session opens because the first run is explicitly deferred.
+      const instanceId = ProviderInstanceId.make("codex");
+      const adapter = { ...fake.adapter, instanceId };
+      const layer = layerWithRegistry(
+        { name: "cloud-ingress" },
+        Registry.layerFromAdapters([adapter]),
+        { runEffectWorker: false },
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("thread:cloud-ingress");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:cloud-create"),
+          threadId,
+          projectId: ProjectId.make("project:cloud-ingress"),
+          title: "Cloud task",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "dev",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:cloud-first"),
+          threadId,
+          messageId: MessageId.make("message:cloud-first"),
+          text: "First cloud task",
+          attachments: [],
+          dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root", branch: "dev" } },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(before.runs.length, 1);
+        assert.equal(before.checkpointScopes.length, 0);
+        assert.isTrue(before.nodes.every((node) => node.checkpointScopeId === null));
+        const calls: ReadonlyArray<
+          Pick<
+            Extract<OrchestrationV2Command, { type: "message.dispatch" }>,
+            "dispatchMode" | "createdBy" | "creationSource"
+          >
+        > = [
+          { dispatchMode: { type: "start_immediately" }, createdBy: "user", creationSource: "web" },
+          {
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          },
+          {
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+          {
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        ];
+        for (const [index, call] of calls.entries()) {
+          const error = yield* orchestrator
+            .dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`command:cloud-second:${index}`),
+              threadId,
+              messageId: MessageId.make(`message:cloud-second:${index}`),
+              text: "Must not submit",
+              attachments: [],
+              ...call,
+            })
+            .pipe(Effect.flip);
+          assert.isTrue(Cause.pretty(Cause.fail(error)).includes("Fake Cloud has no follow-up"));
+        }
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.runs.length, 1);
+        assert.equal(after.messages.length, before.messages.length);
+        assert.equal(yield* Ref.get(fake.submissions), 0);
+        // Round-trip the provider-thread payload through the real SQLite projection.
+        const thread = after.providerThreads[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:cloud-task-roundtrip"),
+              type: "provider-thread.updated",
+              threadId,
+              providerInstanceId: instanceId,
+              occurredAt: now,
+              payload: {
+                ...thread,
+                cloudTask: {
+                  taskId: "remote-1",
+                  status: "running",
+                  tracking: "polled",
+                  source: {
+                    repository: "https://github.com/acme/repo",
+                    branch: "dev",
+                    sha: "a".repeat(40),
+                  },
+                  localChangesExcluded: true,
+                  updatedAt: DateTime.formatIso(now),
+                },
+              },
+            },
+          ],
+        });
+        const reconnect = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(reconnect.providerThreads[0]?.cloudTask?.taskId, "remote-1");
+        assert.equal(reconnect.providerThreads[0]?.cloudTask?.source.branch, "dev");
+        assert.isTrue(reconnect.providerThreads[0]?.cloudTask?.localChangesExcluded);
+        // Older queued state must not bypass the new one-shot guard on promote or resume.
+        const original = reconnect.runs[0]!;
+        const originalNode = reconnect.nodes.find((node) => node.id === original.rootNodeId)!;
+        const originalAttempt = reconnect.attempts.find(
+          (attempt) => attempt.id === original.activeAttemptId,
+        )!;
+        const originalMessage = reconnect.messages.find(
+          (message) => message.id === original.userMessageId,
+        )!;
+        const queuedId = RunId.make("run:legacy-cloud-queue");
+        const queuedNodeId = NodeId.make("node:legacy-cloud-queue");
+        const queuedAttemptId = RunAttemptId.make("attempt:legacy-cloud-queue");
+        const queuedMessageId = MessageId.make("message:legacy-cloud-queue");
+        const queued = {
+          ...original,
+          id: queuedId,
+          ordinal: original.ordinal + 1,
+          userMessageId: queuedMessageId,
+          rootNodeId: queuedNodeId,
+          activeAttemptId: queuedAttemptId,
+          status: "queued" as const,
+          queueHeld: true,
+          queuePosition: 1,
+          startedAt: null,
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:legacy-cloud-run"),
+              type: "run.created",
+              threadId,
+              occurredAt: now,
+              payload: queued,
+            },
+            {
+              id: EventId.make("event:legacy-cloud-node"),
+              type: "node.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...originalNode,
+                id: queuedNodeId,
+                rootNodeId: queuedNodeId,
+                runId: queuedId,
+                status: "pending",
+                startedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:legacy-cloud-attempt"),
+              type: "run-attempt.created",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...originalAttempt,
+                id: queuedAttemptId,
+                runId: queuedId,
+                rootNodeId: queuedNodeId,
+                status: "pending",
+                startedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:legacy-cloud-message"),
+              type: "message.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...originalMessage,
+                id: queuedMessageId,
+                runId: queuedId,
+                nodeId: queuedNodeId,
+                text: "Cannot follow up",
+              },
+            },
+          ],
+        });
+        const promoteError = yield* orchestrator
+          .dispatch({
+            type: "queued-message.promote-to-steer",
+            commandId: CommandId.make("command:cloud-promote"),
+            threadId,
+            queuedRunId: queuedId,
+            targetRunId: original.id,
+          })
+          .pipe(Effect.flip);
+        assert.isTrue(
+          Cause.pretty(Cause.fail(promoteError)).includes("Fake Cloud has no follow-up"),
+        );
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:cloud-first-completed"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...original, status: "completed", startedAt: now, completedAt: now },
+            },
+            {
+              id: EventId.make("event:cloud-first-node-completed"),
+              type: "node.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...originalNode, status: "completed", completedAt: now },
+            },
+            {
+              id: EventId.make("event:cloud-first-attempt-completed"),
+              type: "run-attempt.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...originalAttempt, status: "completed", completedAt: now },
+            },
+          ],
+        });
+        const resumeError = yield* orchestrator
+          .dispatch({
+            type: "queue.resume",
+            commandId: CommandId.make("command:cloud-resume-queue"),
+            threadId,
+          })
+          .pipe(Effect.flip);
+        assert.isTrue(
+          Cause.pretty(Cause.fail(resumeError)).includes("Fake Cloud has no follow-up"),
+        );
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(resumed.runs.find((run) => run.id === queuedId)?.status, "queued");
+        assert.equal(yield* Ref.get(fake.submissions), 0);
+        assert.equal(resumed.checkpointScopes.length, 0);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { outcome: "succeeded", resultBeforeStop: false },
+  { outcome: "cancelled", resultBeforeStop: false },
+  { outcome: "unknown", resultBeforeStop: false },
+  { outcome: "succeeded", resultBeforeStop: true },
+  { outcome: "cancelled", resultBeforeStop: true },
+] as const)(
+  "cloud $outcome settlement retains parent delivery resultBeforeStop=$resultBeforeStop",
+  ({ outcome, resultBeforeStop }) =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const fake = yield* makeFakeCloudAdapter(true, instanceId);
+      const interruptEntered = yield* Deferred.make<void>();
+      const acknowledge = yield* Deferred.make<void>();
+      const delivered = yield* Deferred.make<void>();
+      const observerReady = yield* Deferred.make<void>();
+      const observerRelease = yield* Deferred.make<void>();
+      const observerClosed = yield* Deferred.make<void>();
+      const resultPersisted = yield* Deferred.make<void>();
+      const releaseTerminal = yield* Deferred.make<void>();
+      const lateCallbacks = yield* Ref.make(0);
+      const offers: ProviderContinuationRequests.ProviderContinuationRequest[] = [];
+      const adapter = {
+        ...fake.adapter,
+        openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+          Effect.gen(function* () {
+            const session = yield* fake.adapter.openSession(input);
+            const scope = yield* Scope.Scope;
+            return {
+              ...session,
+              startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+                session.startTurn(turn).pipe(
+                  Effect.andThen(
+                    Effect.gen(function* () {
+                      // The attached observer belongs to the provider runtime, not the run.
+                      yield* Deferred.await(observerRelease).pipe(
+                        Effect.andThen(Ref.update(lateCallbacks, (count) => count + 1)),
+                        Effect.andThen(
+                          turn.commitCloudTaskMetadata!("native-session-1", {
+                            title: "Disposed observer",
+                          }),
+                        ),
+                        Effect.ensuring(Deferred.succeed(observerClosed, undefined)),
+                        Effect.forkIn(scope),
+                      );
+                      yield* Deferred.succeed(observerReady, undefined);
+                    }),
+                  ),
+                ),
+              interruptTurn: (request: ProviderAdapter.ProviderAdapterV2InterruptInput) =>
+                Deferred.succeed(interruptEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(acknowledge)),
+                  Effect.andThen(session.interruptTurn(request)),
+                ),
+            };
+          }),
+      };
+      const registry = Registry.layerFromAdapters([adapter]);
+      const projectId = ProjectId.make("project:cloud-cancel");
+      const projects = Layer.mock(Projects.ProjectService)({
+        getById: () =>
+          Effect.succeed(
+            Option.some({
+              id: projectId,
+              workspaceRoot: "/repo",
+              defaultModelSelection: { instanceId, model: "fake" },
+            } as Project),
+          ),
+      });
+      const runtime = layerWithRegistry({ name: `cloud-cancel-${outcome}` }, registry, {
+        runEffectWorker: false,
+        projects,
+        cloudSources: Layer.succeed(CloudSource.CloudTaskSourceService, {
+          resolve: (input) =>
+            Effect.succeed({
+              source: { repository: "https://github.com/acme/repo", branch: "dev" },
+              launchSource: { cwd: input.cwd, restriction: "published-ref" },
+              localChangesExcluded: true,
+            }),
+        }),
+        continuationRequests: Layer.succeed(
+          ProviderContinuationRequests.ProviderContinuationRequests,
+          {
+            offer: (request) =>
+              Effect.sync(() => {
+                offers.push(request);
+              }).pipe(Effect.andThen(Deferred.succeed(delivered, undefined)), Effect.asVoid),
+            take: Effect.never,
+          },
+        ),
+      });
+      const mcp = McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(runtime),
+        Layer.provide(registry),
+        Layer.provide(projects),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        ),
+        Layer.provide(Layer.mock(ScheduledTasks.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(Secrets.SecretRequests)({})),
+        Layer.provide(Layer.mock(RemoteDispatch.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatches.LaunchWatchService)({ find: () => Effect.succeed(null) }),
+        ),
+        Layer.provide(
+          ThreadResults.layer.pipe(
+            Layer.provide(runtime),
+            Layer.provide(SqlitePersistence.layerMemory),
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const parentId = ThreadId.make("thread:cloud-cancel-parent");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:cancel-parent"),
+          threadId: parentId,
+          projectId,
+          title: "Parent",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "dev",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:cancel-parent-run"),
+          threadId: parentId,
+          messageId: MessageId.make("message:cancel-parent"),
+          text: "Delegate",
+          attachments: [],
+          dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root", branch: "dev" } },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const before = yield* orchestrator.getThreadProjection(parentId);
+        const parentRun = before.runs[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:parent-running"),
+              type: "run.updated",
+              threadId: parentId,
+              occurredAt: now,
+              payload: { ...parentRun, status: "running", startedAt: now },
+            },
+          ],
+        });
+        const delegation = yield* orchestrator.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make("command:cloud-child"),
+          parentThreadId: parentId,
+          parentRunId: parentRun.id,
+          parentNodeId: parentRun.rootNodeId!,
+          task: "Cloud work",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          completionWake: "always",
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const taskEvent = delegation.storedEvents.find(
+          (stored) => stored.event.type === "subagent.updated",
+        );
+        assert.equal(taskEvent?.event.type, "subagent.updated");
+        if (taskEvent?.event.type !== "subagent.updated") return;
+        const taskId = taskEvent.event.payload.id;
+        const childId = taskEvent.event.payload.childThreadId!;
+        const accepted = yield* orchestrator
+          .streamStoredEventsFrom({ threadId: childId, eventType: "provider-turn.updated" })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "provider-turn.updated" &&
+                stored.event.payload.status === "running",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkChild,
+          );
+        yield* worker.drain();
+        yield* Fiber.join(accepted);
+        const childBeforeStop = yield* orchestrator.getThreadProjection(childId);
+        const childRun = childBeforeStop.runs[0]!;
+        assert.equal(childBeforeStop.providerThreads[0]?.cloudTask?.acceptedAppRunId, childRun.id);
+        const finishing = resultBeforeStop
+          ? yield* fake
+              .finish(
+                false,
+                outcome,
+                Deferred.succeed(resultPersisted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseTerminal)),
+                ),
+              )
+              .pipe(Effect.forkChild)
+          : null;
+        if (finishing !== null) yield* Deferred.await(resultPersisted);
+        const savedTask = (yield* orchestrator.getThreadProjection(childId)).providerThreads[0]
+          ?.cloudTask;
+        if (resultBeforeStop) assert.equal(savedTask?.status, outcome);
+        const scope: McpInvocationContext.McpInvocationScope = {
+          environmentId: EnvironmentId.make("env:cloud-cancel"),
+          requestNamespace: `cloud-cancel-${outcome}`,
+          thread: {
+            threadId: parentId,
+            providerSessionId: "ps:parent",
+            providerInstanceId: instanceId,
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 0,
+        };
+        const result = yield* (yield* McpServer.McpServer)
+          .callTool({ name: "task_cancel", arguments: { taskId, clientRequestId: "stop-child" } })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+            Effect.provideService(McpSchema.McpServerClient, cloudMcpClient),
+          );
+        assert.isFalse(result.isError === true);
+        assert.equal(decodeTaskCancelResult(result.structuredContent).status, "cancel_requested");
+        const draining = yield* worker.drain().pipe(Effect.forkChild);
+        yield* Deferred.await(interruptEntered);
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(parentId)).subagents[0]?.completionDelivery
+            ?.state,
+          "pending",
+        );
+        yield* Deferred.succeed(acknowledge, undefined);
+        yield* Fiber.join(draining);
+        const acknowledged = yield* orchestrator.getThreadProjection(childId);
+        assert.equal(acknowledged.runs[0]?.status, "running");
+        assert.equal(acknowledged.attempts[0]?.status, "running");
+        assert.deepEqual(acknowledged.providerThreads[0]?.cloudTask, savedTask);
+        assert.equal(yield* Ref.get(fake.cancellations), 1);
+        const captured = (yield* Ref.get(fake.current))!;
+        const terminal: ProviderAdapter.ProviderAdapterV2Event = {
+          type: "turn.terminal",
+          driver: fake.adapter.driver,
+          providerThreadId: captured.providerThread.id,
+          providerTurnId: ProviderTurnId.make(`provider-turn:fake-cloud:${captured.attemptId}`),
+          runOrdinal: captured.runOrdinal,
+          ...(outcome === "unknown"
+            ? {
+                status: "failed" as const,
+                failureItemOrdinal: 101,
+                failure: {
+                  class: "unknown" as const,
+                  message: "Observation lost",
+                  code: null,
+                  retryable: null,
+                },
+              }
+            : {
+                status: outcome === "cancelled" ? ("cancelled" as const) : ("completed" as const),
+                failure: null,
+              }),
+          threadDisposition: "reusable",
+        };
+        if (outcome === "unknown") {
+          yield* captured.commitCloudTask!({ ...savedTask!, summary: "Last observed summary" });
+          yield* fake.publish(terminal);
+        } else if (finishing !== null) {
+          yield* Deferred.succeed(releaseTerminal, undefined);
+          yield* Fiber.join(finishing);
+        } else {
+          yield* fake.finish(false, outcome);
+        }
+        yield* Deferred.await(delivered);
+        yield* worker.drain();
+        const finished = yield* orchestrator.getThreadProjection(childId);
+        assert.equal(
+          finished.runs[0]?.status,
+          outcome === "unknown" ? "failed" : outcome === "cancelled" ? "cancelled" : "completed",
+        );
+        assert.equal(finished.providerThreads[0]?.cloudTask?.status, outcome);
+        assert.equal(
+          finished.messages.filter(
+            (message) => message.id === `message:cloud-result:${childRun.id}`,
+          ).length,
+          1,
+        );
+        const resultBefore = finished.messages.find(
+          (message) => message.id === `message:cloud-result:${childRun.id}`,
+        )!;
+        assert.isFalse(resultBefore.streaming);
+        assert.isTrue(
+          resultBefore.text.includes(
+            outcome === "unknown" ? "Last observed summary" : "Completed fake task",
+          ),
+        );
+        const resultItemBefore = assertCloudResultItem(finished, childRun.id);
+        if (outcome !== "unknown") {
+          assert.include(
+            resultItemBefore.text,
+            "Pull request: https://github.com/acme/repo/pull/1",
+          );
+          assert.include(resultItemBefore.text, "Branch: `agent/fix`");
+        }
+        const metadata = {
+          url: "https://example.com/tasks/refreshed",
+          title: "Late title",
+          progress: "Blocked after end_turn",
+        };
+        // This callback must wait for real ingestion cleanup, including the final full-thread write.
+        const untrustedMetadata = {
+          ...metadata,
+          acceptedAppRunId: RunId.make("run:foreign-metadata"),
+        };
+        yield* captured.commitCloudTaskMetadata!("native-session-1", untrustedMetadata);
+        const refreshed = yield* orchestrator.getThreadProjection(childId);
+        const beforeProvider = finished.providerThreads[0]!;
+        const afterProvider = refreshed.providerThreads[0]!;
+        const { updatedAt: _beforeAt, ...beforeTask } = beforeProvider.cloudTask!;
+        const { updatedAt: _afterAt, ...afterTask } = afterProvider.cloudTask!;
+        assert.deepEqual(afterTask, { ...beforeTask, ...metadata });
+        assert.equal(afterTask.acceptedAppRunId, childRun.id);
+        assert.equal(afterProvider.status, beforeProvider.status);
+        assert.deepEqual(refreshed.runs, finished.runs);
+        assert.deepEqual(refreshed.attempts, finished.attempts);
+        assert.deepEqual(refreshed.nodes, finished.nodes);
+        assert.deepEqual(refreshed.messages, finished.messages);
+        assert.deepEqual(refreshed.turnItems, finished.turnItems);
+        assert.equal(refreshed.thread.settledAt, finished.thread.settledAt);
+        const sequence = yield* sink.latestSequence();
+        yield* captured.commitCloudTaskMetadata!("native-session-1", metadata);
+        yield* captured.commitCloudTaskMetadata!("foreign-session", { title: "Foreign title" });
+        assert.equal(yield* sink.latestSequence(), sequence);
+
+        // Observe the manager pump's duplicate terminal, after the original run subscriber closed.
+        const session = Option.getOrThrow(
+          yield* (yield* ProviderSessions.ProviderSessionManagerV2).get(
+            afterProvider.providerSessionId!,
+          ),
+        );
+        const duplicateSubscription = yield* session.subscribeEvents!;
+        const duplicateSeen = yield* duplicateSubscription.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* fake.publish(terminal);
+        yield* Fiber.join(duplicateSeen);
+        yield* duplicateSubscription.close;
+        yield* worker.drain();
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(childId)).messages,
+          finished.messages,
+        );
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(childId)).turnItems,
+          finished.turnItems,
+        );
+        assert.equal(offers.length, 1);
+        const delivery = offers[0]!.delegatedCompletion!;
+        if (outcome !== "unknown") {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("command:deliver-cloud-result"),
+            threadId: parentId,
+            messageId: delivery.messageId,
+            text: "The delegated cloud task has returned its result.",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+            delegatedCompletion: {
+              parentRunId: delivery.parentRunId,
+              generation: delivery.generation,
+              taskIds: [taskId],
+            },
+          });
+        }
+        if (outcome !== "unknown") yield* orchestrator.recoverDelegatedTasks;
+        assert.equal(offers.length, 1);
+        const parent = yield* orchestrator.getThreadProjection(parentId);
+        assert.equal(parent.subagents[0]?.completionDelivery?.state, "claimed");
+        assert.equal(
+          parent.runs.filter((run) => run.delegatedCompletion?.delivery != null).length,
+          1,
+        );
+        assert.equal(
+          parent.messages.filter((message) => message.delegatedCompletion !== undefined).length,
+          outcome === "unknown" ? 0 : 1,
+        );
+        assert.equal(yield* Ref.get(fake.submissions), 1);
+        const mcpServer = yield* McpServer.McpServer;
+        const invoke = (name: string, arguments_: Record<string, unknown>) =>
+          mcpServer
+            .callTool({ name, arguments: arguments_ })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+              Effect.provideService(McpSchema.McpServerClient, cloudMcpClient),
+            );
+        const statusResult = yield* invoke("goat_thread_status", { threadId: childId });
+        assert.isFalse(statusResult.isError === true, JSON.stringify(statusResult.content));
+        const statusView = yield* decodeThreadStatus(statusResult.structuredContent);
+        const readResult = yield* invoke("goat_thread_read", { threadId: childId });
+        assert.isFalse(readResult.isError === true, JSON.stringify(readResult.content));
+        const readView = yield* decodeThreadRead(readResult.structuredContent);
+        const taskResult = yield* invoke("task_status", { taskId });
+        assert.isFalse(taskResult.isError === true, JSON.stringify(taskResult.content));
+        const taskView = yield* decodeTaskStatus(taskResult.structuredContent);
+        for (const view of [statusView, readView, taskView]) {
+          assert.equal(view.cloudTask?.url, metadata.url);
+          assert.equal(view.cloudTask?.progress, metadata.progress);
+          assert.equal(view.cloudTask?.status, outcome);
+          assert.isFalse(Object.hasOwn(view.cloudTask!, "acceptedAppRunId"));
+          assert.isFalse(Object.values(view.cloudTask!).includes(undefined));
+        }
+        assert.isTrue(statusView.terminal);
+        assert.equal(offers.length, 1);
+        if (outcome !== "unknown") {
+          // Hold the old observer's callback while a real follow-up claims the same native session.
+          const staleReady = yield* Deferred.make<void>();
+          const staleRelease = yield* Deferred.make<void>();
+          const stale = yield* Deferred.succeed(staleReady, undefined).pipe(
+            Effect.andThen(Deferred.await(staleRelease)),
+            Effect.andThen(
+              captured.commitCloudTaskMetadata!("native-session-1", {
+                title: "Old observer",
+                progress: "Stale activity",
+              }),
+            ),
+            Effect.forkChild,
+          );
+          yield* Deferred.await(staleReady);
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("command:metadata-followup"),
+            threadId: childId,
+            messageId: MessageId.make("message:metadata-followup"),
+            text: "Follow up in the same session",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          const successorInput = (yield* Ref.get(fake.current))!;
+          const successorAccepted = yield* sink
+            .stream({ threadId: childId, eventType: "provider-turn.updated" })
+            .pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "provider-turn.updated" &&
+                  stored.event.payload.runAttemptId === successorInput.attemptId,
+              ),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkChild,
+            );
+          yield* Fiber.join(successorAccepted);
+          assert.notEqual(successorInput.runId, captured.runId);
+          // startTurn sees the submitting intent before the provider commits the new acceptance.
+          assert.equal(successorInput.providerThread.cloudTask?.status, "submitting");
+          assert.equal(successorInput.providerThread.cloudTask?.acceptedAppRunId, captured.runId);
+          assert.deepEqual(
+            successorInput.providerThread.nativeThreadRef,
+            afterProvider.nativeThreadRef,
+          );
+          const {
+            status: _status,
+            updatedAt: _updatedAt,
+            ...submittingTask
+          } = successorInput.providerThread.cloudTask!;
+          const {
+            status: _previousStatus,
+            updatedAt: _previousUpdatedAt,
+            ...previousTask
+          } = afterProvider.cloudTask!;
+          assert.deepEqual(submittingTask, previousTask);
+          const successor = yield* orchestrator.getThreadProjection(childId);
+          assert.equal(successor.providerThreads[0]!.nativeThreadRef?.nativeId, "native-session-1");
+          assert.equal(successor.providerThreads[0]!.cloudTask?.status, "running");
+          assert.equal(
+            successor.providerThreads[0]!.cloudTask?.acceptedAppRunId,
+            successorInput.runId,
+          );
+          const successorSequence = yield* sink.latestSequence();
+          yield* Deferred.succeed(staleRelease, undefined);
+          yield* Fiber.join(stale);
+          assert.equal(yield* sink.latestSequence(), successorSequence);
+          assert.deepEqual(yield* orchestrator.getThreadProjection(childId), successor);
+          // Settle the successor before proving runtime disposal never reopens either run.
+          yield* fake.finish();
+          yield* successorInput.commitCloudTaskMetadata!("native-session-1", {});
+          yield* worker.drain();
+          const followedUp = yield* orchestrator.getThreadProjection(childId);
+          assert.deepEqual(assertCloudResultItem(followedUp, childRun.id), resultItemBefore);
+          const successorResult = assertCloudResultItem(followedUp, successorInput.runId);
+          assert.include(successorResult.text, "Completed fake task");
+          assert.include(successorResult.text, "https://github.com/acme/repo/pull/1");
+          assert.equal(
+            followedUp.turnItems.filter((item) => item.type === "assistant_message").length,
+            2,
+          );
+        }
+        const beforeDisposal = yield* orchestrator.getThreadProjection(childId);
+        // Runtime disposal interrupts the attached observer without a remote cancel or new terminal.
+        yield* Deferred.await(observerReady);
+        yield* (yield* ProviderSessions.ProviderSessionManagerV2).close(
+          afterProvider.providerSessionId!,
+        );
+        yield* Deferred.await(observerClosed);
+        yield* Deferred.succeed(observerRelease, undefined);
+        assert.equal(yield* Ref.get(lateCallbacks), 0);
+        assert.equal(yield* Ref.get(fake.cancellations), 1);
+        assert.equal(yield* Ref.get(fake.detaches), 1);
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(childId)).runs,
+          beforeDisposal.runs,
+        );
+      }).pipe(Effect.provide(mcp));
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { ownershipLost: false, stage: "open", taskStatus: "running" },
+  { ownershipLost: false, stage: "open", taskStatus: "unknown" },
+  { ownershipLost: true, stage: "open", taskStatus: "running" },
+  { ownershipLost: false, stage: "resume", taskStatus: "running" },
+  { ownershipLost: false, stage: "resume", taskStatus: "unknown" },
+  { ownershipLost: true, stage: "resume", taskStatus: "running" },
+] as const)(
+  "final attach $stage failure settles $taskStatus task only for its original attempt ownershipLost=$ownershipLost",
+  ({ ownershipLost, stage, taskStatus }) =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const fake = yield* makeFakeCloudAdapter(true, instanceId);
+      let opening = yield* Deferred.make<void>();
+      let failOpen = yield* Deferred.make<void>();
+      const adapter = {
+        ...fake.adapter,
+        openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+          Effect.gen(function* () {
+            const failure = () =>
+              Deferred.succeed(opening, undefined).pipe(
+                Effect.andThen(Deferred.await(failOpen)),
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterOpenSessionError({
+                      driver: fake.adapter.driver,
+                      providerSessionId: input.providerSessionId,
+                      cause: "Tracking transport unavailable",
+                    }),
+                  ),
+                ),
+              );
+            if (stage === "open") return yield* failure();
+            const session = yield* fake.adapter.openSession(input);
+            return { ...session, resumeTurn: failure };
+          }),
+      };
+      const runtime = Layer.merge(
+        layerWithRegistry(
+          { name: `cloud-attach-${stage}-failure-${ownershipLost}-${taskStatus}` },
+          Registry.layerFromAdapters([adapter]),
+          { runEffectWorker: false },
+        ),
+        EventStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const eventStore = yield* EventStore.EventStoreV2;
+        const threadId = ThreadId.make("thread:cloud-open-failure");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:open-failure-thread"),
+          threadId,
+          projectId: ProjectId.make("project:open-failure"),
+          title: "Recover cloud task",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "deleted-local-branch",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:open-failure-run"),
+          threadId,
+          messageId: MessageId.make("message:open-failure"),
+          text: "Original prompt",
+          attachments: [],
+          dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root" } },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const initial = yield* orchestrator.getThreadProjection(threadId);
+        const run = initial.runs[0]!;
+        const attempt = initial.attempts[0]!;
+        const root = initial.nodes.find((node) => node.id === run.rootNodeId)!;
+        const providerThread = initial.providerThreads[0]!;
+        const now = yield* DateTime.now;
+        const task = {
+          taskId: "accepted-before-restart",
+          status: taskStatus,
+          tracking: "live" as const,
+          url: "https://example.com/tasks/saved",
+          source: {
+            repository: "https://github.com/acme/repo",
+            branch: "dev",
+            sha: "a".repeat(40),
+          },
+          localChangesExcluded: true,
+          updatedAt: DateTime.formatIso(now),
+        };
+        const savedThread = {
+          ...providerThread,
+          cloudTask: task,
+          nativeThreadRef: {
+            driver: fake.adapter.driver,
+            nativeId: "accepted-native-session",
+            strength: "strong" as const,
+          },
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:open-failure-run"),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make("event:open-failure-attempt"),
+              type: "run-attempt.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...attempt, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make("event:open-failure-node"),
+              type: "node.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...root, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make("event:open-failure-task"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: savedThread,
+            },
+          ],
+        });
+        const savedTurnId =
+          stage === "resume" ? ProviderTurnId.make("provider-turn:saved-cloud") : null;
+        if (savedTurnId !== null)
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("event:open-failure-provider-turn"),
+                type: "provider-turn.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  id: savedTurnId,
+                  providerThreadId: providerThread.id,
+                  nodeId: root.id,
+                  runAttemptId: attempt.id,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "running",
+                  startedAt: now,
+                  completedAt: null,
+                },
+              },
+            ],
+          });
+        const starter = yield* ProviderTurnStart.ProviderTurnStartServiceV2;
+        // A retryable attach failure must leave the task live and emit no result.
+        const retrying = yield* starter
+          .start({ threadId, runId: run.id, reattach: true, willRetry: true })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(opening);
+        yield* Deferred.succeed(failOpen, undefined);
+        assert.equal((yield* Fiber.join(retrying))._tag, "Failure");
+        const afterRetry = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(afterRetry.runs[0]?.status, "running");
+        assert.equal(afterRetry.providerThreads[0]?.cloudTask?.status, taskStatus);
+        assert.isFalse(
+          afterRetry.turnItems.some((item) => item.id === `turn-item:cloud-result:${run.id}`),
+        );
+        assert.isFalse(
+          afterRetry.messages.some((message) => message.id === `message:cloud-result:${run.id}`),
+        );
+        // Gate the final attempt independently so the ownership race stays deterministic.
+        opening = yield* Deferred.make<void>();
+        failOpen = yield* Deferred.make<void>();
+        const beforeFailureSequence = yield* sink.latestSequence({ threadId });
+        const starting = yield* starter
+          .start({
+            threadId,
+            runId: run.id,
+            reattach: true,
+          })
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(opening);
+        const newerAttemptId = RunAttemptId.make("attempt:newer-cloud-owner");
+        if (ownershipLost)
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("event:newer-cloud-attempt"),
+                type: "run-attempt.created",
+                threadId,
+                occurredAt: now,
+                payload: { ...attempt, id: newerAttemptId, attemptOrdinal: 2, status: "running" },
+              },
+              {
+                id: EventId.make("event:newer-cloud-owner"),
+                type: "run.updated",
+                threadId,
+                occurredAt: now,
+                payload: {
+                  ...run,
+                  status: "running",
+                  activeAttemptId: newerAttemptId,
+                  startedAt: now,
+                },
+              },
+            ],
+          });
+        yield* Deferred.succeed(failOpen, undefined);
+        assert.equal((yield* Fiber.join(starting))._tag, "Failure");
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.runs[0]?.status, ownershipLost ? "running" : "failed");
+        assert.equal(
+          after.providerThreads[0]?.cloudTask?.status,
+          ownershipLost ? taskStatus : "unknown",
+        );
+        assert.deepEqual(after.providerThreads[0]?.nativeThreadRef, savedThread.nativeThreadRef);
+        assert.deepEqual(after.providerThreads[0]?.cloudTask?.source, task.source);
+        assert.equal(after.providerThreads[0]?.cloudTask?.url, task.url);
+        if (ownershipLost) {
+          assert.equal(after.runs[0]?.activeAttemptId, newerAttemptId);
+          assert.isFalse(
+            after.turnItems.some((item) => item.id === `turn-item:cloud-result:${run.id}`),
+          );
+          assert.isFalse(
+            after.visibleTurnItems.some(
+              (row) => row.sourceItemId === `turn-item:cloud-result:${run.id}`,
+            ),
+          );
+          assert.equal(
+            after.messages.filter((message) => message.id === `message:cloud-result:${run.id}`)
+              .length,
+            0,
+          );
+        } else {
+          assert.equal(after.attempts[0]?.status, "failed");
+          assert.equal(after.nodes.find((node) => node.id === root.id)?.status, "failed");
+          assert.isTrue(
+            after.providerThreads[0]?.cloudTask?.error?.includes("remote work may continue"),
+          );
+          const result = assertCloudResultItem(after, run.id);
+          assert.equal(
+            result.text,
+            "Cloud tracking could not be reattached. Open the task link; remote work may continue.\n\n- Cloud task: https://example.com/tasks/saved",
+          );
+          assert.equal(result.providerThreadId, providerThread.id);
+          assert.equal(result.providerTurnId, savedTurnId);
+          const resultEvents = yield* eventStore
+            .read({ threadId, afterSequence: beforeFailureSequence })
+            .pipe(Stream.runCollect);
+          const persistedResults = resultEvents.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" && stored.event.payload.id === result.id,
+          );
+          assert.equal(persistedResults.length, 1);
+          // Replay the pair with fresh event ids: EventSink must keep its text, time and position.
+          const replay = yield* sink.write({
+            events: yield* Effect.forEach(
+              resultEvents.filter(
+                (stored) =>
+                  stored.event.type === "message.updated" ||
+                  stored.event.type === "turn-item.updated",
+              ),
+              (stored, index) =>
+                Effect.succeed({
+                  ...stored.event,
+                  id: EventId.make(`event:attach-result-replay:${index}`),
+                }),
+            ),
+          });
+          assert.equal(replay.length, 0);
+          yield* starter.start({ threadId, runId: run.id, reattach: true }).pipe(Effect.result);
+          const replayed = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(assertCloudResultItem(replayed, run.id), result);
+          const replayedResults = yield* eventStore
+            .read({
+              threadId,
+              afterSequence: beforeFailureSequence,
+              eventType: "turn-item.updated",
+            })
+            .pipe(Stream.runCollect);
+          assert.equal(
+            replayedResults.filter(
+              (stored) =>
+                stored.event.type === "turn-item.updated" && stored.event.payload.id === result.id,
+            ).length,
+            1,
+          );
+        }
+        assert.equal(yield* Ref.get(fake.submissions), 0);
+        assert.equal(yield* Ref.get(fake.creations), 0);
+      }).pipe(Effect.provide(runtime));
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  {
+    taskStatus: "unknown",
+    previousOrdinal: 0,
+    recordedOrdinal: null,
+    expectedOrdinal: 1,
+    failure: "open",
+    savedStart: true,
+  },
+  {
+    taskStatus: "unknown",
+    previousOrdinal: 0,
+    recordedOrdinal: 1,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "succeeded",
+    previousOrdinal: 4,
+    recordedOrdinal: 5,
+    expectedOrdinal: 5,
+    failure: "resume",
+    savedStart: true,
+  },
+  {
+    taskStatus: "succeeded",
+    previousOrdinal: 4,
+    recordedOrdinal: null,
+    expectedOrdinal: 5,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "failed",
+    previousOrdinal: 0,
+    recordedOrdinal: null,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: false,
+  },
+  {
+    taskStatus: "cancelled",
+    previousOrdinal: 0,
+    recordedOrdinal: null,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "running",
+    previousOrdinal: 4,
+    recordedOrdinal: 2,
+    expectedOrdinal: 2,
+    failure: "none",
+    savedStart: true,
+  },
+  {
+    taskStatus: "running",
+    previousOrdinal: 0,
+    recordedOrdinal: 1,
+    expectedOrdinal: 1,
+    failure: "none",
+    savedStart: true,
+  },
+] as const)(
+  "recovers accepted $taskStatus task ordinal=$expectedOrdinal after $failure failure savedStart=$savedStart",
+  (scenario) =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const fake = yield* makeFakeCloudAdapter(true, instanceId);
+      const delivered = yield* Deferred.make<void>();
+      const offers: ProviderContinuationRequests.ProviderContinuationRequest[] = [];
+      const originalStart = DateTime.makeUnsafe(1_000);
+      const adapterStart = DateTime.makeUnsafe(10_000);
+      let opens = 0;
+      let resumes = 0;
+      const adapter = {
+        ...fake.adapter,
+        openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+          Effect.gen(function* () {
+            opens += 1;
+            if (scenario.failure === "open" && opens === 1)
+              return yield* new ProviderAdapterOpenSessionError({
+                driver: fake.adapter.driver,
+                providerSessionId: input.providerSessionId,
+                cause: "Transient open failure",
+              });
+            const session = yield* fake.adapter.openSession(input);
+            return {
+              ...session,
+              resumeTurn: (
+                turn: Parameters<
+                  NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeTurn"]>
+                >[0],
+              ) =>
+                Effect.gen(function* () {
+                  resumes += 1;
+                  if (scenario.failure === "resume" && resumes === 1)
+                    return yield* new ProviderAdapterTurnStartError({
+                      driver: fake.adapter.driver,
+                      threadId: turn.threadId,
+                      providerThreadId: turn.providerThread.id,
+                      runId: turn.runId,
+                      cause: "Transient observer failure",
+                    });
+                  yield* session.resumeTurn!(turn);
+                  yield* fake.publish({
+                    type: "provider_turn.updated",
+                    driver: fake.adapter.driver,
+                    threadId: turn.threadId,
+                    providerTurn: {
+                      id: ProviderTurnId.make(`provider-turn:fake-cloud:${turn.attemptId}`),
+                      providerThreadId: turn.providerThread.id,
+                      nodeId: turn.rootNodeId,
+                      runAttemptId: turn.attemptId,
+                      nativeTurnRef: {
+                        driver: fake.adapter.driver,
+                        nativeId: turn.cloudTask.taskId,
+                        strength: "strong",
+                      },
+                      ordinal: turn.providerTurnOrdinal,
+                      status: "running",
+                      startedAt: scenario.taskStatus === "unknown" ? null : adapterStart,
+                      completedAt: null,
+                    },
+                  });
+                }),
+            };
+          }),
+      };
+      const runtime = layerWithRegistry(
+        { name: `cloud-recovery-regression-${scenario.taskStatus}` },
+        Registry.layerFromAdapters([adapter]),
+        {
+          runEffectWorker: false,
+          continuationRequests: Layer.succeed(
+            ProviderContinuationRequests.ProviderContinuationRequests,
+            {
+              offer: (request) =>
+                Effect.sync(() => offers.push(request)).pipe(
+                  Effect.andThen(Deferred.succeed(delivered, undefined)),
+                  Effect.asVoid,
+                ),
+              take: Effect.never,
+            },
+          ),
+        },
+      );
+      const mcp = McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(
+          Layer.merge(
+            runtime,
+            CommandReceipts.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+          ),
+        ),
+        Layer.provide(Registry.layerFromAdapters([adapter])),
+        Layer.provide(Layer.mock(Projects.ProjectService)({ getById: () => Effect.succeedNone })),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        ),
+        Layer.provide(Layer.mock(ScheduledTasks.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(Secrets.SecretRequests)({})),
+        Layer.provide(Layer.mock(RemoteDispatch.RemoteDispatchCoordinator)({})),
+        Layer.provide(Layer.mock(SshDispatch.SshRemoteDispatch)({})),
+        Layer.provide(
+          Layer.mock(LaunchWatches.LaunchWatchService)({ find: () => Effect.succeed(null) }),
+        ),
+        Layer.provide(
+          ThreadResults.layer.pipe(
+            Layer.provide(runtime),
+            Layer.provide(SqlitePersistence.layerMemory),
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const receipts = yield* CommandReceipts.CommandReceiptStoreV2;
+        const parentId = ThreadId.make("thread:recovery-parent");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("command:recovery-parent"),
+          threadId: parentId,
+          projectId: ProjectId.make("project:recovery"),
+          title: "Parent",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "dev",
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:recovery-parent-run"),
+          threadId: parentId,
+          messageId: MessageId.make("message:recovery-parent"),
+          text: "Delegate",
+          attachments: [],
+          dispatchMode: { type: "defer_start", workspaceStrategy: { type: "root", branch: "dev" } },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const parentRun = (yield* orchestrator.getThreadProjection(parentId)).runs[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:recovery-parent-running"),
+              type: "run.updated",
+              threadId: parentId,
+              occurredAt: now,
+              payload: { ...parentRun, status: "running", startedAt: now },
+            },
+          ],
+        });
+        yield* orchestrator.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make("command:recovery-delegate"),
+          parentThreadId: parentId,
+          parentRunId: parentRun.id,
+          parentNodeId: parentRun.rootNodeId!,
+          task: "Accepted cloud work",
+          modelSelection: { instanceId, model: "fake" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          completionWake: "always",
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const task = (yield* orchestrator.getThreadProjection(parentId)).subagents[0]!;
+        const childId = task.childThreadId!;
+        const initial = yield* orchestrator.getThreadProjection(childId);
+        const run = initial.runs[0]!;
+        const attempt = initial.attempts[0]!;
+        const root = initial.nodes.find((node) => node.id === run.rootNodeId)!;
+        const thread = initial.providerThreads[0]!;
+        const cloudTask = {
+          taskId: "accepted-before-restart",
+          status: scenario.taskStatus,
+          tracking: "live" as const,
+          source: {
+            repository: "https://github.com/acme/repo",
+            branch: "dev",
+            sha: "a".repeat(40),
+          },
+          url: "https://example.com/tasks/saved",
+          localChangesExcluded: true,
+          updatedAt: DateTime.formatIso(now),
+        };
+        const startedAt = scenario.savedStart ? originalStart : null;
+        for (const event of [
+          { type: "run.updated", payload: { ...run, status: "running", startedAt } },
+          { type: "run-attempt.updated", payload: { ...attempt, status: "running", startedAt } },
+          { type: "node.updated", payload: { ...root, status: "running", startedAt } },
+          {
+            type: "provider-thread.updated",
+            payload: {
+              ...thread,
+              cloudTask,
+              nativeThreadRef: {
+                driver: fake.adapter.driver,
+                nativeId: "accepted-native-session",
+                strength: "strong",
+              },
+            },
+          },
+        ] as const)
+          yield* sink.write({
+            events: [
+              {
+                ...event,
+                id: EventId.make(`event:recovery:${event.type}`),
+                threadId: childId,
+                occurredAt: now,
+              },
+            ],
+          });
+        const turnId = ProviderTurnId.make(`provider-turn:fake-cloud:${attempt.id}`);
+        for (const savedTurn of [
+          ...(scenario.previousOrdinal === 0
+            ? []
+            : [
+                {
+                  id: ProviderTurnId.make("turn:earlier"),
+                  runAttemptId: RunAttemptId.make("attempt:earlier"),
+                  ordinal: scenario.previousOrdinal,
+                },
+              ]),
+          ...(scenario.recordedOrdinal === null
+            ? []
+            : [{ id: turnId, runAttemptId: attempt.id, ordinal: scenario.recordedOrdinal }]),
+        ])
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`event:${savedTurn.id}`),
+                type: "provider-turn.updated",
+                threadId: childId,
+                occurredAt: now,
+                payload: {
+                  ...savedTurn,
+                  providerThreadId: thread.id,
+                  nodeId: root.id,
+                  nativeTurnRef: {
+                    driver: fake.adapter.driver,
+                    nativeId: cloudTask.taskId,
+                    strength: "strong",
+                  },
+                  status: "running",
+                  startedAt: originalStart,
+                  completedAt: null,
+                },
+              },
+            ],
+          });
+        const saved = yield* orchestrator.getThreadProjection(childId);
+        if (scenario.recordedOrdinal === null) {
+          const stop = yield* orchestrator
+            .dispatch({
+              type: "run.interrupt",
+              commandId: CommandId.make("command:recovery-stop-untracked"),
+              threadId: childId,
+              runId: run.id,
+            })
+            .pipe(Effect.exit);
+          assert.equal(stop._tag, "Failure");
+          assert.deepEqual(yield* orchestrator.getThreadProjection(childId), saved);
+          assert.equal(yield* Ref.get(fake.cancellations), 0);
+        }
+        // Both public Stop paths must refuse recorded cloud work before recovery attaches
+        // a runtime, including unknown status and results awaiting terminal ingestion.
+        const stopCommandId = CommandId.make("command:recovery-thread-stop-untracked");
+        const stopError = yield* orchestrator
+          .dispatch({ type: "thread.stop", commandId: stopCommandId, threadId: childId })
+          .pipe(Effect.flip);
+        assert.include(Cause.pretty(Cause.fail(stopError)), "Remote work may continue");
+        assert.equal(
+          Option.getOrThrow(yield* receipts.getByCommandId(stopCommandId)).status,
+          "rejected",
+        );
+        assert.deepEqual(yield* outbox.listByCommandId(stopCommandId), []);
+        const scope: McpInvocationContext.McpInvocationScope = {
+          environmentId: EnvironmentId.make("env:cloud-recovery"),
+          requestNamespace: "cloud-recovery",
+          thread: {
+            threadId: parentId,
+            providerSessionId: "ps:recovery-parent",
+            providerInstanceId: instanceId,
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 0,
+        };
+        const cancelled = yield* (yield* McpServer.McpServer)
+          .callTool({
+            name: "task_cancel",
+            arguments: { taskId: task.id, clientRequestId: "stop-untracked" },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+            Effect.provideService(McpSchema.McpServerClient, cloudMcpClient),
+          );
+        assert.isTrue(cancelled.isError);
+        assert.isUndefined(cancelled.structuredContent);
+        const failureText = cancelled.content[0];
+        assert.equal(failureText?.type, "text");
+        if (failureText?.type !== "text") return;
+        const failure = JSON.parse(failureText.text);
+        assert.equal(failure.code, "task_not_cancellable");
+        assert.include(failure.message, "Remote work may continue");
+        assert.include(failure.message, "retry");
+        const cancelCommandId = CommandId.make(
+          "command:mcp:cloud-recovery:cancel-task:stop-untracked",
+        );
+        assert.equal(
+          Option.getOrThrow(yield* receipts.getByCommandId(cancelCommandId)).status,
+          "rejected",
+        );
+        assert.deepEqual(yield* outbox.listByCommandId(cancelCommandId), []);
+        const afterStops = yield* orchestrator.getThreadProjection(childId);
+        assert.deepEqual(afterStops, saved);
+        assert.isFalse(afterStops.turnItems.some((item) => item.type === "run_interrupt_request"));
+        assert.equal(afterStops.runs[0]?.status, "running");
+        assert.equal(afterStops.attempts[0]?.status, "running");
+        assert.equal(afterStops.nodes.find((node) => node.id === root.id)?.status, "running");
+        const parentAfterStops = yield* orchestrator.getThreadProjection(parentId);
+        assert.deepEqual(parentAfterStops.subagents[0], task);
+        assert.equal(yield* Ref.get(fake.cancellations), 0);
+        const commandId = CommandId.make("command:recovery-reattach");
+        const effectId = "effect:recovery-reattach";
+        const afterSequence = yield* orchestrator.getThreadEventSequence(childId);
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId,
+            threadId: childId,
+            request: { type: "provider-turn.reattach", runId: run.id },
+          },
+        ]);
+        // The original start effect sees the saved running run and does no work.
+        yield* worker.drain();
+        if (scenario.failure !== "none") {
+          const retry = Option.getOrThrow(yield* outbox.get(effectId));
+          assert.equal(retry.status, "pending");
+          assert.equal(retry.attemptCount, 1);
+          const afterFailure = yield* orchestrator.getThreadProjection(childId);
+          assert.equal(afterFailure.runs[0]?.status, "running");
+          assert.equal(afterFailure.attempts[0]?.status, "running");
+          assert.equal(afterFailure.nodes.find((node) => node.id === root.id)?.status, "running");
+          assert.deepEqual(afterFailure.providerThreads[0]?.cloudTask, cloudTask);
+          assert.isFalse(
+            afterFailure.turnItems.some((item) => item.id === `turn-item:cloud-result:${run.id}`),
+          );
+          assert.isFalse(
+            afterFailure.visibleTurnItems.some(
+              (row) => row.sourceItemId === `turn-item:cloud-result:${run.id}`,
+            ),
+          );
+          assert.equal(
+            afterFailure.messages.filter(
+              (message) => message.id === `message:cloud-result:${run.id}`,
+            ).length,
+            0,
+          );
+          yield* TestClock.adjust("100 millis");
+          yield* worker.drain();
+        }
+        assert.equal(Option.getOrThrow(yield* outbox.get(effectId)).status, "succeeded");
+        assert.equal((yield* Ref.get(fake.current))?.providerTurnOrdinal, scenario.expectedOrdinal);
+        const recovered = yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: childId,
+            eventType: "provider-turn.updated",
+            afterSequence,
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "provider-turn.updated" && stored.event.payload.id === turnId,
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkChild,
+          );
+        yield* Fiber.join(recovered);
+        const attached = yield* orchestrator.getThreadProjection(childId);
+        const turn = attached.providerTurns.find((candidate) => candidate.id === turnId)!;
+        assert.equal(turn.ordinal, scenario.expectedOrdinal);
+        assert.equal(
+          DateTime.toEpochMillis(turn.startedAt!),
+          DateTime.toEpochMillis(scenario.savedStart ? originalStart : adapterStart),
+        );
+        assert.equal(attached.runs[0]?.activeAttemptId, attempt.id);
+        for (const recoveredStart of [
+          attached.runs[0]!.startedAt,
+          attached.attempts[0]!.startedAt,
+          attached.nodes.find((node) => node.id === root.id)!.startedAt,
+        ])
+          assert.equal(
+            recoveredStart === null ? null : DateTime.toEpochMillis(recoveredStart),
+            startedAt === null ? null : DateTime.toEpochMillis(startedAt),
+          );
+        assert.equal(opens, scenario.failure === "open" ? 2 : 1);
+        assert.equal(resumes, scenario.failure === "resume" ? 2 : 1);
+        assert.equal(yield* Ref.get(fake.attachments), 1);
+        assert.equal(yield* Ref.get(fake.creations), 0);
+        assert.equal(yield* Ref.get(fake.submissions), 0);
+        assert.equal(
+          (yield* Ref.get(fake.current))?.providerThread.nativeThreadRef?.nativeId,
+          "accepted-native-session",
+        );
+        assert.equal(
+          (yield* Ref.get(fake.current))?.providerThread.cloudTask?.taskId,
+          cloudTask.taskId,
+        );
+        yield* fake.finish();
+        yield* Deferred.await(delivered);
+        yield* worker.drain();
+        const finished = yield* orchestrator.getThreadProjection(childId);
+        assert.equal(finished.runs[0]?.status, "completed");
+        const result = assertCloudResultItem(finished, run.id);
+        assert.include(result.text, "Completed fake task");
+        assert.include(result.text, "Cloud task: https://example.com/tasks/1");
+        // A replayed recovery effect after settlement cannot attach or emit a second result.
+        yield* outbox.enqueue([
+          {
+            id: "effect:recovery-reattach-replay",
+            commandId: CommandId.make("command:recovery-reattach-replay"),
+            threadId: childId,
+            request: { type: "provider-turn.reattach", runId: run.id },
+          },
+        ]);
+        yield* worker.drain();
+        assert.deepEqual(
+          assertCloudResultItem(yield* orchestrator.getThreadProjection(childId), run.id),
+          result,
+        );
+        assert.equal(yield* Ref.get(fake.attachments), 1);
+        assert.equal(
+          finished.messages.filter((message) => message.id === `message:cloud-result:${run.id}`)
+            .length,
+          1,
+        );
+        assert.equal(offers.length, 1);
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(parentId)).subagents[0]?.completionDelivery
+            ?.state,
+          "claimed",
+        );
+      }).pipe(Effect.provide(mcp));
+    }).pipe(Effect.scoped),
+);

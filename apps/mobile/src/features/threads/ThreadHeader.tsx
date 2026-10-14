@@ -47,12 +47,14 @@ export function ThreadHeader(
         onPress: () => onOpenTerminal(null),
       });
     }
-    actions.push({
-      accessibilityLabel: "Open git controls",
-      icon: "point.topleft.down.curvedto.point.bottomright.up",
-      onPress: props.onOpenGitInspector,
-    });
-    if (onMergeBack) {
+    if (props.localWorkspaceAvailable !== false) {
+      actions.push({
+        accessibilityLabel: "Open git controls",
+        icon: "point.topleft.down.curvedto.point.bottomright.up",
+        onPress: props.onOpenGitInspector,
+      });
+    }
+    if (props.localWorkspaceAvailable !== false && onMergeBack) {
       actions.push({
         accessibilityLabel: "Merge back to source",
         icon: "arrow.triangle.merge",
@@ -69,6 +71,7 @@ export function ThreadHeader(
     props.onOpenGitInspector,
     toggleAuxiliaryPane,
     props.onReturnToThread,
+    props.localWorkspaceAvailable,
     props.hasThreadCwd,
     props.hasWorkspaceRoot,
     props.gitControls.canOpenTerminal,

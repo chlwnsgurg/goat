@@ -1,3 +1,6 @@
+import type { CloudTaskState } from "@goat/client-runtime/state/cloud-task";
+import { CloudTaskStatus } from "./CloudTaskStatus";
+import { AppText as Text } from "../../components/AppText";
 import { useAtomValue } from "@effect/atom-react";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
@@ -154,6 +157,7 @@ import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
 import { useGlobalVoiceInput } from "../voice-input/VoiceInputProvider";
 
 export interface ThreadDetailScreenProps {
+  readonly cloudState: CloudTaskState;
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
   readonly canOperateThread: boolean;
@@ -1011,6 +1015,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
 
   const handleSendMessage = useCallback(
     async (followUp?: ActiveTurnComposerAction) => {
+      if (props.cloudState.composerBlockReason !== null) return null;
       const targetThreadKey = selectedThreadKey;
       const hasUserMessage = selectedThreadFeed.some(
         (entry) => entry.type === "message" && entry.message.role === "user",
@@ -1039,6 +1044,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     [
       anchorMessageId,
       clearUsageLimitsFor,
+      props.cloudState.composerBlockReason,
       props.onSendMessage,
       props.selectedThread.latestRun,
       props.selectedThreadQueueCount,
@@ -1425,6 +1431,16 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     </View>
                   ) : (
                     <>
+                      {props.cloudState.cloudTask ? (
+                        <CloudTaskStatus task={props.cloudState.cloudTask} />
+                      ) : null}
+                      {props.cloudState.composerBlockReason ? (
+                        <View>
+                          <Text accessibilityLiveRegion="polite">
+                            {props.cloudState.composerBlockReason}
+                          </Text>
+                        </View>
+                      ) : null}
                       <ThreadComposer
                         canOperateThread={props.canOperateThread}
                         reportedModelSelection={reportedModelSelection}
@@ -1449,10 +1465,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                         // the draft: queueing them against a thread id the server may
                         // still reject would strand them in the outbox.
                         sendBlockedReason={
-                          props.creationState?.kind === "preparing" &&
+                          props.cloudState.composerBlockReason ??
+                          (props.creationState?.kind === "preparing" &&
                           !props.creationState.serverOwned
                             ? "Starting the task…"
-                            : null
+                            : null)
                         }
                         draftKey={props.composerDraftKey ?? undefined}
                         followUpBehavior={props.followUpBehavior}

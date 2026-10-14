@@ -1,3 +1,4 @@
+import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
 import { AuthOrchestrationOperateScope } from "@goat/contracts";
 import { readEnvironmentScope } from "./session";
 import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
@@ -338,6 +339,7 @@ export function useThreadComposerState() {
   const selectedProvider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
     (provider) => provider.instanceId === modelSelection?.instanceId,
   );
+  const cloudState = deriveCloudTaskState(selectedThreadProjection?.projection, selectedProvider);
   const interactionMode = selectedThread
     ? resolveProviderInteractionMode(
         selectedProvider,
@@ -1070,6 +1072,7 @@ export function useThreadComposerState() {
   );
 
   return {
+    cloudState,
     feedbackSubmissions,
     dismissFeedback,
     selectedThreadFeed,
