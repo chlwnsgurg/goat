@@ -784,6 +784,8 @@ it.effect(
           }),
         ),
       );
+      yield* replica.worker.start();
+      yield* replica.worker.drain;
       assert.strictEqual(replica.generated(), 0);
       yield* replica.sync.shutdown;
       assert.strictEqual(yield* replica.sync.activeResolutions, 0);
