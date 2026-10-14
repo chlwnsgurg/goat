@@ -605,7 +605,7 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * The arguments the remote's goat_thread_launch declares, or null when the listing
+   * Current launch capabilities, with optional declarations from cache if listing
    * failed. Only a listing that declares report and standingInstructions is cached; a
    * failure or an older remote is asked again on the next launch, so an upgrade takes
    * effect without a new session.
@@ -628,7 +628,7 @@ const make = Effect.gen(function* () {
           strict: true,
         }).pipe(Effect.timeout(LAUNCH_LINEAGE_PROBE_TIMEOUT)),
       );
-      if (Exit.isFailure(listed)) return null;
+      if (Exit.isFailure(listed)) return { capabilities: null, declared: launchArguments.get(key) };
       const declared = new Set(
         listed.value.find((tool) => tool.name === "goat_thread_launch")?.argumentNames ?? [],
       );
@@ -645,7 +645,7 @@ const make = Effect.gen(function* () {
       const capabilities = { declared, advertisesMemory };
       if (declared.has("report") && declared.has("standingInstructions"))
         launchArguments.set(key, declared);
-      return capabilities;
+      return { capabilities, declared };
     },
   );
 
@@ -1166,19 +1166,34 @@ const make = Effect.gen(function* () {
       notes.push(`Registered ${folder.path} as a new project on ${target.alias}.`);
     }
 
-    const capabilities = yield* remoteLaunchArguments(remote);
-    if (capabilities === null && input.memoryGrantCeiling !== undefined)
-      return yield* failure(
-        "remote_refused",
-        "Remote task memory admission could not be verified.",
-      );
-    const declared =
-      capabilities?.declared ??
-      launchArguments.get(sessionKey(target, input.runtimeMode, false, memoryGrantCeiling));
-    // None adds no memory scope on legacy destinations without memory tools.
-    // Memory-advertising destinations already require admission in the catalog probe.
-    if (memoryGrantCeiling !== "none" && capabilities?.declared.has("memoryGrantCeiling") !== true)
-      return yield* failure("remote_refused", "Remote GOAT does not accept task memory ceilings.");
+    // Each attempt admits memory from its current catalog; cached declarations are
+    // only for optional lineage/UI arguments when an ordinary launch cannot list.
+    const launchAdmission = Effect.fn("SshRemoteDispatch.launchAdmission")(function* () {
+      const { capabilities, declared } = yield* remoteLaunchArguments(remote);
+      if (capabilities === null && input.memoryGrantCeiling !== undefined)
+        return yield* failure(
+          "remote_refused",
+          "Remote task memory admission could not be verified.",
+        );
+      if (
+        memoryGrantCeiling !== "none" &&
+        capabilities?.declared.has("memoryGrantCeiling") !== true
+      )
+        return yield* failure(
+          "remote_refused",
+          "Remote GOAT does not accept task memory ceilings.",
+        );
+      return {
+        declared,
+        memoryArguments:
+          capabilities?.declared.has("memoryGrantCeiling") === true &&
+          (memoryGrantCeiling !== "none" || capabilities.advertisesMemory)
+            ? { memoryGrantCeiling }
+            : {},
+      };
+    });
+    const admission = yield* launchAdmission();
+    const declared = admission.declared;
     const forwardLaunchedBy =
       input.launchedBy !== undefined && declared?.has("launchedBy") === true;
     // This machine owns any watch of a launch it forwards. Without this, a remote that
@@ -1213,7 +1228,7 @@ const make = Effect.gen(function* () {
       );
       // Authority may have changed while the last upload completed.
       yield* beforeLaunch;
-      const launch = (withLaunchedBy: boolean) =>
+      const launch = (withLaunchedBy: boolean, memoryArguments: typeof admission.memoryArguments) =>
         callRemote({
           ...remote,
           tool: "goat_thread_launch",
@@ -1223,10 +1238,7 @@ const make = Effect.gen(function* () {
             title: input.title,
             workspaceStrategy,
             runtimeMode: input.runtimeMode,
-            ...(capabilities?.declared.has("memoryGrantCeiling") === true &&
-            (memoryGrantCeiling !== "none" || capabilities?.advertisesMemory === true)
-              ? { memoryGrantCeiling }
-              : {}),
+            ...memoryArguments,
             ...(input.interactionMode === undefined
               ? {}
               : { interactionMode: input.interactionMode }),
@@ -1246,14 +1258,15 @@ const make = Effect.gen(function* () {
             ...(forwardWatchOptOut ? { notifyOnCompletion: false } : {}),
           },
         });
-      const rawLaunched = yield* launch(forwardLaunchedBy).pipe(
+      const rawLaunched = yield* launch(forwardLaunchedBy, admission.memoryArguments).pipe(
         Effect.catch((error) =>
           error instanceof SshRemoteDispatchError &&
           forwardLaunchedBy &&
           (error.reason === "remote_refused" || error.reason === "ssh_failed") &&
           error.message.includes("goat_thread_launch does not take launchedBy, so nothing ran")
             ? Effect.gen(function* () {
-                const result = yield* launch(false);
+                const retryAdmission = yield* launchAdmission();
+                const result = yield* launch(false, retryAdmission.memoryArguments);
                 notes.push(
                   'This remote does not record its launcher, so scope:"launched" cannot find its questions; use host and threadId.',
                 );
