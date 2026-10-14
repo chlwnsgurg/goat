@@ -1711,6 +1711,10 @@ const layer: Layer.Layer<
 );
 
 export interface CodexAdapterV2Options {
+  /** L5 binds committed snapshot authority, including snapshot-only sessions. */
+  readonly currentMemoryPolicy?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<MemorySnapshot.MemorySnapshotPolicy>;
   /** L5 supplies the manager's scoped credential publication stream. */
   readonly mcpCredentialRotations?: Stream.Stream<{
     readonly threadId: ThreadId;
@@ -1755,6 +1759,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   );
   const currentMemoryPolicy = (threadId: ThreadId) =>
     Effect.gen(function* () {
+      if (adapterOptions.currentMemoryPolicy)
+        return yield* adapterOptions.currentMemoryPolicy(threadId);
       const config = yield* mcpSessions.read(threadId);
       return config && memoryRegistry?.currentMemoryPolicy
         ? ((yield* memoryRegistry.currentMemoryPolicy(config.providerSessionId)) ?? {
@@ -1768,8 +1774,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
       if (threadId === null) return undefined;
       const config = yield* mcpSessions.read(threadId);
       if (!config) return undefined;
-      const policy = yield* currentMemoryPolicy(threadId);
-      return policy.grant === "none" ? { ...config, grantedScopes: [] } : config;
+      const policy = memoryRegistry?.currentMemoryPolicy
+        ? yield* memoryRegistry.currentMemoryPolicy(config.providerSessionId)
+        : undefined;
+      return !policy || policy.grant === "none" ? { ...config, grantedScopes: [] } : config;
     });
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
