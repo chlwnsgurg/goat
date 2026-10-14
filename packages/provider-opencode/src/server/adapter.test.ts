@@ -263,7 +263,8 @@ describe("OpenCodeAdapterV2", () => {
       Effect.gen(function* () {
         const snapshot = wp4Snapshot();
         let memory: typeof snapshot | undefined = snapshot;
-        const payloads: Array<{ system?: string }> = [];
+        const payloads: Array<{ system?: string; messageID: string }> = [];
+        const nativeEvents = asyncEventStream();
         const sessions = yield* McpProviderSessions.McpProviderSessions;
         const suffix = `memory-${external}`;
         yield* sessions.set({
@@ -281,7 +282,7 @@ describe("OpenCodeAdapterV2", () => {
           suffix,
           "memory-root",
           {
-            event: { subscribe: async () => ({ stream: asyncEventStream().stream }) },
+            event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
             mcp: {
               add: async (input: unknown) => {
                 registrations.push(input);
@@ -293,7 +294,7 @@ describe("OpenCodeAdapterV2", () => {
                 data: { id: "memory-root", time: { created: 1, updated: 1 } },
               }),
               get: async () => ({ data: { id: "memory-root", time: { created: 1, updated: 1 } } }),
-              promptAsync: async (input: { system?: string }) => {
+              promptAsync: async (input: { system?: string; messageID: string }) => {
                 payloads.push(input);
                 return { data: true };
               },
@@ -305,7 +306,39 @@ describe("OpenCodeAdapterV2", () => {
             memory: { memoryContext: snapshot, refreshMemoryContext: () => Effect.succeed(memory) },
           },
         );
+        const finish = () =>
+          Effect.gen(function* () {
+            const terminal = yield* harness.runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runDrain,
+              Effect.forkScoped,
+            );
+            const messageID = payloads.at(-1)!.messageID;
+            yield* Effect.promise(() =>
+              nativeEvents.push({
+                type: "message.updated",
+                properties: {
+                  sessionID: "memory-root",
+                  info: { id: messageID, role: "user", time: { created: 1 } },
+                },
+              }),
+            );
+            yield* Effect.promise(() =>
+              nativeEvents.push({
+                type: "session.status",
+                properties: { sessionID: "memory-root", status: { type: "busy" } },
+              }),
+            );
+            yield* Effect.promise(() =>
+              nativeEvents.push({
+                type: "session.status",
+                properties: { sessionID: "memory-root", status: { type: "idle" } },
+              }),
+            );
+            yield* Fiber.join(terminal);
+          });
         yield* harness.startTurn();
+        yield* finish();
         assert.include(payloads[0]?.system ?? "", memoryContextText(snapshot));
         assert.equal(registrations.length, external ? 0 : 1);
         assert.include(payloads[0]?.system ?? "", `read=${!external}`);
@@ -322,6 +355,7 @@ describe("OpenCodeAdapterV2", () => {
         });
         memory = undefined;
         yield* harness.startTurn("second", resumed);
+        yield* finish();
         assert.notInclude(payloads[1]?.system ?? "", "external_goat_memory");
         const resumedAgain = yield* harness.runtime.resumeThread({
           threadId: harness.threadId,
