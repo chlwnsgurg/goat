@@ -81,6 +81,15 @@ const approval = (op: M.MemoryOperation): M.MemoryHubReceipt => ({
   operationDigest: memoryOperationDigest(op),
   hubSequence: 1,
   outcome: op.kind === "forget" ? "deleted" : "accepted",
+  ...(op.kind === "resolve"
+    ? {
+        resolutionApproval: {
+          resolutionId: op.resolution.resolutionId,
+          appliedAtUtc: M.MemoryUtcTimestamp.make(time),
+          revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-11-13T00:00:00.000Z"),
+        },
+      }
+    : {}),
 });
 const forget = (): Extract<M.MemoryOperation, { kind: "forget" }> => ({
   protocolVersion: 1,
@@ -332,4 +341,18 @@ describe("published ancestry boundary", () => {
       }),
     );
   });
+});
+
+it("admits hub siblings from a known parent while local CAS rejects the stale edit", () => {
+  const parent = root();
+  const first = root(4, [parent.revision.revisionId]);
+  const second = root(5, [parent.revision.revisionId]);
+  const current = { ...state([parent, first]), heads: [first.revision.revisionId] };
+  assert.throws(() => decideMemoryOperation(current, second, localIntent, allowed));
+  const result = decideMemoryOperation(current, second, hubAdmission, allowed);
+  assert.strictEqual(result.item?.status, "quarantined");
+  assert.deepStrictEqual(
+    result.heads,
+    [first.revision.revisionId, second.revision.revisionId].sort(),
+  );
 });
