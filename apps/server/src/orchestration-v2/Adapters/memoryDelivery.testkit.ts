@@ -130,7 +130,10 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
               command: process.execPath,
               args: [mockAgentPath],
               cwd: input.cwd,
-              env: { GOAT_ACP_SESSION_LIFECYCLE: "1" },
+              env: {
+                GOAT_ACP_SESSION_LIFECYCLE: "1",
+                ...(kind === "antigravity" ? { GOAT_ACP_ANTIGRAVITY: "1" } : {}),
+              },
             },
           }).pipe(
             Layer.provide(
@@ -298,8 +301,12 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
           );
         }
       } else {
-        assert.isUndefined(connect);
-        assert.isUndefined(message);
+        assert.isDefined(connect);
+        assert.isTrue(
+          Exit.isFailure(
+            yield* connect!({ serverId: "goat" }, undefined as never).pipe(Effect.exit),
+          ),
+        );
       }
     }
     const before = prompts.length;

@@ -2198,6 +2198,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         let runtimeScope: Scope.Closeable | undefined;
         let runtime!: AcpSessionRuntime.AcpSessionRuntime["Service"];
         let runtimeMcpBridge: AcpMcpOverAcpBridge | undefined;
+        let runtimeMcpContext: AcpMcpContext | undefined;
         yield* Effect.addFinalizer(() =>
           runtimeScope === undefined
             ? Effect.void
@@ -5575,7 +5576,20 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           targetRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"],
           mcpBridge: AcpMcpOverAcpBridge | undefined,
         ) {
-          if (mcpBridge === undefined) return;
+          if (mcpBridge === undefined) {
+            const denied = () =>
+              Effect.fail(
+                new EffectAcpErrors.AcpRequestError({
+                  code: -32603,
+                  errorMessage: "GOAT MCP is unavailable",
+                }),
+              );
+            yield* targetRuntime.handleMcpConnect(denied);
+            yield* targetRuntime.handleMcpMessage(denied);
+            yield* targetRuntime.handleMcpNotification(denied);
+            yield* targetRuntime.handleMcpDisconnect(denied);
+            return;
+          }
           const mapMcpBridgeError = Effect.mapError(
             (error: Error) =>
               new EffectAcpErrors.AcpRequestError({
@@ -6017,6 +6031,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           runtimeScope = yield* Scope.make();
           const mcpContext = yield* readMcpContext(threadId);
           runtimeMcpBridge = yield* makeRuntimeMcpBridge(mcpContext, runtimeScope);
+          runtimeMcpContext = mcpContext;
           const runtimeGeneration = yield* Ref.get(runtimeCallbackGeneration);
           runtime = yield* flavor
             .makeRuntime(makeRuntimeInput(runtimeGeneration, mcpContext, resumeSessionId))
@@ -6274,6 +6289,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   driver,
                   detail: `ACP driver cannot load or resume session ${sessionId}`,
                 });
+          if (
+            runtimeMcpContext?.authorization !== mcpContext.authorization ||
+            runtimeMcpContext?.endpoint !== mcpContext.endpoint
+          ) {
+            yield* runtimeMcpBridge?.dispose ?? Effect.void;
+            runtimeMcpBridge = yield* makeRuntimeMcpBridge(mcpContext, runtimeScope!);
+            yield* wireAcpRuntimeMcpHandlers(runtime, runtimeMcpBridge);
+            runtimeMcpContext = mcpContext;
+          }
           rememberTerminalEnvironment(activated.sessionId, yield* readMcpContext(threadId));
           return activated;
         });
@@ -6896,8 +6920,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
               turnInput.threadId,
             );
+            const currentMcpContext = yield* readMcpContext(turnInput.threadId);
+            const installedEnvironment = terminalEnvironmentBySessionId.get(requestedSessionId);
+            const attachmentChanged =
+              installedEnvironment?.GOAT_ACP_MCP_AUTHORIZATION !==
+                currentMcpContext.authorization ||
+              installedEnvironment?.GOAT_ACP_MCP_ENDPOINT !== currentMcpContext.endpoint;
             const needsSessionActivation =
-              (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
+              (yield* Ref.get(activeSessionId)) !== requestedSessionId ||
+              restartAfterInterrupt ||
+              attachmentChanged;
             if (needsSessionActivation) {
               const activated = yield* activateSession(requestedSessionId, turnInput.threadId);
               yield* Ref.set(activeSessionId, activated.sessionId);
@@ -7187,7 +7219,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const attached = terminalEnvironmentBySessionId.get(requestedSessionId);
               const availability = McpProviderSession.memoryToolAvailability(
                 config !== undefined &&
-                  attached?.GOAT_ACP_MCP_AUTHORIZATION === config.authorizationHeader
+                  attached?.GOAT_ACP_MCP_AUTHORIZATION === config.authorizationHeader &&
+                  attached?.GOAT_ACP_MCP_ENDPOINT === config.endpoint
                   ? config
                   : undefined,
               );
