@@ -1,3 +1,5 @@
+import * as Scope from "effect/Scope";
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -52,6 +54,7 @@ import {
 import {
   type ChatAttachment,
   ClaudeSettings,
+  MemoryContextSnapshot,
   defaultInstanceIdForDriver,
   type ModelSelection,
   type OrchestrationV2ConversationMessage,
@@ -2973,8 +2976,16 @@ function formatClaudeUsageLimitWait(waitMs: number): string {
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
+const encodeMemorySnapshot = Schema.encodeSync(Schema.fromJsonString(MemoryContextSnapshot));
+
+const withoutMemoryBody = (input: ProviderAdapter.ProviderAdapterV2TurnInput) => {
+  const { memoryContext: _body, ...rest } = input;
+  return rest;
+};
+
 interface ActiveClaudeTurnContext {
-  readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  memoryRelease?: Effect.Effect<void>;
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
   nativeMessageCursor: string | null;
@@ -3431,6 +3442,7 @@ export interface ClaudeAdapterV2Options {
 export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
 ) {
+  const derivedCache = yield* MemoryDerivedCache.MemoryDerivedCache;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const memoryRegistry = Option.getOrUndefined(
     yield* Effect.serviceOption(McpSessionRegistry.McpSessionRegistry),
@@ -3530,7 +3542,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   rotation.threadId !== input.threadId
                 )
                   return;
+                const active = yield* Ref.get(activeTurn);
+                if (active?.memoryRelease) yield* active.memoryRelease;
                 const existing = yield* Ref.get(queryContext);
+                if (existing?.lastTurn?.memoryRelease) yield* existing.lastTurn.memoryRelease;
                 if (!existing || existing.stopping) return;
                 const config = yield* readMcpSession(rotation.threadId);
                 if (existing.mcpCredentialId === config?.providerSessionId) return;
@@ -5837,6 +5852,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
         }) {
+          if (input.context.memoryRelease) yield* input.context.memoryRelease;
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
           if (input.status !== "completed") {
             // The run stops following its subagents once its root turn fails or is
@@ -8655,7 +8671,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               goalsByNativeThread.set(nativeThreadId, turnInput.providerThread.goal ?? null);
             }
             const context: ActiveClaudeTurnContext = {
-              input: turnInput,
+              input: turnInput.refreshMemoryContext
+                ? withoutMemoryBody(turnInput)
+                : { ...turnInput },
               nativeThreadId,
               nativeTurnId,
               nativeMessageCursor: null,
@@ -8729,6 +8747,17 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const admittedMessage = nativeControl
                 ? userMessage
                 : yield* withFreshMemory(userMessage, turnInput);
+              if (context.input.memoryContext) {
+                const body = context.input.memoryContext;
+                context.memoryRelease = yield* derivedCache
+                  .retain({
+                    bytes: new TextEncoder().encode(encodeMemorySnapshot(body)).length,
+                    release: Effect.sync(() => {
+                      context.input = withoutMemoryBody(context.input);
+                    }),
+                  })
+                  .pipe(Effect.provideService(Scope.Scope, sessionScope));
+              }
               yield* attachTurn;
               // A user turn that races a wake leaves the buffer alone: the
               // continuation run the worker queued behind this run drains it
@@ -9410,6 +9439,7 @@ export type ClaudeAdapterV2DriverEnv =
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | MemoryDerivedCache.MemoryDerivedCache
   | Path.Path
   | ServerConfig.ServerConfig;
 
@@ -9503,6 +9533,7 @@ const layer: Layer.Layer<
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | MemoryDerivedCache.MemoryDerivedCache
   | Path.Path
   | ServerConfig.ServerConfig
 > = Layer.effect(ProviderAdapter.ProviderAdapterV2, makeDefaultClaudeAdapterV2());

@@ -1,3 +1,4 @@
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
 import * as CodexInstallation from "../CodexInstallation.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
@@ -63,6 +64,7 @@ const layerDeps = ServerConfig.layerTest(process.cwd(), {
       getEnvironmentId: Effect.succeed(EnvironmentId.make("00000000-0000-4000-8000-000000000001")),
     }),
   ),
+  Layer.provideMerge(MemoryDerivedCache.layer),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(ModelManifest.layerTest),
   Layer.provideMerge(ResetCreditCoordinator.layerTest),

@@ -1,3 +1,4 @@
+import * as MemoryDerivedCache from "../memory/MemoryDerivedCache.ts";
 import * as Layer from "effect/Layer";
 
 import * as ClaudeAdapterV2 from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
@@ -14,7 +15,8 @@ export type ProviderOrchestrationAdapterInfrastructure =
   | CursorAgentSdk.CursorAgentSdkRunner
   | CursorSdk.CursorSdk
   | CursorKeychain.CursorKeychain
-  | IdAllocator.IdAllocatorV2;
+  | IdAllocator.IdAllocatorV2
+  | MemoryDerivedCache.MemoryDerivedCache;
 
 /**
  * Infrastructure shared by the V2 adapters materialized inside provider
@@ -23,6 +25,7 @@ export type ProviderOrchestrationAdapterInfrastructure =
  * Effect layer memoization yields one shared queue.
  */
 export const layer = Layer.mergeAll(
+  MemoryDerivedCache.layer,
   ClaudeAdapterV2.layerQueryRunner,
   CodexAdapterV2.layerAppServerClientFactory,
   CursorAgentSdk.layer.pipe(Layer.provideMerge(CursorSdk.layer)),

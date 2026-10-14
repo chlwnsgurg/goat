@@ -1,3 +1,6 @@
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as Queue from "effect/Queue";
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
 import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as Exit from "effect/Exit";
@@ -894,7 +897,12 @@ describe("CodexAdapterV2 process spawning", () => {
       assert.deepEqual(spawnedCommands, [path.join(NodeOS.homedir(), "bin", "codex")]);
     }).pipe(
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
       Effect.provideService(HostProcess.Platform, "linux"),
     ),
@@ -1887,7 +1895,12 @@ describe("CodexAdapterV2 session initialize", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -1918,7 +1931,12 @@ describe("CodexAdapterV2 session initialize", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -1966,7 +1984,12 @@ describe("CodexAdapterV2 session initialize", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -1990,6 +2013,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1999,7 +2023,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
         open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+          Effect.gen(function* () {
+            const driver = yield* CodexReplay.makeReplayDriver(
+              transcript,
+              beforeEmitInbound ? { beforeEmitInbound } : {},
+            );
+            return yield* Layer.build(CodexReplay.layerReplayWithDriver(driver));
+          }).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -2212,7 +2242,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
   );
@@ -2253,7 +2288,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2296,7 +2336,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2335,7 +2380,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2434,7 +2484,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2521,7 +2576,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2586,7 +2646,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2650,7 +2715,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -2804,10 +2874,91 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isEmpty(assistantMessages(harness.events));
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
+  );
+
+  it.effect.each(["ttl", "stop"] as const)(
+    "releases the adapter's retained memory body without another turn (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = `wp4-cache-${mode}`;
+          const snapshot = wp4Memory();
+          const preamble = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "cache-turn",
+            prompt: "work",
+          });
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            memoryContext: snapshot,
+          });
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario: `wp4-cache-${mode}`,
+              entries: [
+                ...preamble.slice(0, 5),
+                { type: "expect_outbound", frame: { id: 3, method: "turn/start", params } },
+                ...preamble.slice(6),
+                {
+                  type: "emit_inbound",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: "cache-turn", status: "completed" }),
+                    },
+                  },
+                },
+              ],
+            }),
+          );
+          const base = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("cache-turn"),
+            text: "work",
+          });
+          yield* harness.runtime.startTurn({
+            ...base,
+            refreshMemoryContext: () => Effect.succeed(snapshot),
+          });
+          yield* harness.firstTerminal;
+          const cache = yield* MemoryDerivedCache.MemoryDerivedCache;
+          assert.equal((yield* cache.usage).owners, 1);
+          if (mode === "ttl") yield* TestClock.adjust(M.MEMORY_DERIVED_CACHE_TTL_MS);
+          else
+            yield* harness.runtime.interruptTurn({
+              providerThread: harness.providerThread,
+              providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+                driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                nativeTurnId: "cache-turn",
+              }),
+            });
+          assert.deepEqual(yield* cache.usage, { bytes: 0, owners: 0 });
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
+        ),
+      ),
   );
 
   it.effect(
@@ -2931,7 +3082,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.notInclude(JSON.stringify(firstParams.collaborationMode ?? {}), "untrusted&gt;");
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -2974,7 +3130,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.equal(nativeSends, 0);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -3116,7 +3277,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           } else assert.isUndefined(memoryItem);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -3214,7 +3380,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -3294,7 +3465,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -3346,7 +3522,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -3505,7 +3686,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -3591,7 +3777,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -3743,7 +3934,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isAbove(terminalIndex, resumedCommandIndex);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -3846,7 +4042,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4014,7 +4215,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.deepEqual(assistantMessages(harness.events), []);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -4147,7 +4353,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4194,7 +4405,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4242,7 +4458,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4365,7 +4586,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4397,7 +4623,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4430,7 +4661,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4463,7 +4699,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4496,7 +4737,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4529,7 +4775,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4562,7 +4813,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -4722,7 +4978,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -4881,7 +5142,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.lengthOf(harness.continuationRequests, 0);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       );
@@ -5245,7 +5511,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(harness.terminalEvents(), 1);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -5538,7 +5809,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(commandUpdates[commandUpdates.length - 1]?.turnItem.status, "interrupted");
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -5770,7 +6046,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -5859,7 +6140,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -5951,7 +6237,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -6066,7 +6357,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -6235,7 +6531,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -6504,7 +6805,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -6615,7 +6921,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -6791,7 +7102,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -6854,7 +7170,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.lengthOf(harness.terminalEvents(), 1);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -6923,7 +7244,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.lengthOf(harness.terminalEvents(), 1);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -6966,7 +7292,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -7207,7 +7538,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         if (scenario.name === "retry") assert.equal(terminal.retry?.attempt, 1);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -7309,7 +7645,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(harness.continuationRequests, 0);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -7474,7 +7815,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -7564,7 +7910,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -7810,7 +8161,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -8048,7 +8404,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(metadataRequests, name === "current Codex Sol" ? 1 : 2);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -8109,7 +8470,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.deepEqual(metadataRequests, ["thread/read", "thread/resume"]);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -8212,7 +8578,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ]);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -8278,7 +8649,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.lengthOf(harness.continuationRequests, 0);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -8362,7 +8738,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(DateTime.toEpochMillis(row!.startedAt!), 1782622470000);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     ),
@@ -8528,7 +8909,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           }
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              MemoryDerivedCache.layer,
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+            ),
           ),
         ),
       ),
@@ -8681,7 +9067,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -8825,7 +9216,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
   );
@@ -8932,7 +9328,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
   );
@@ -8993,7 +9394,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        Layer.mergeAll(
+          MemoryDerivedCache.layer,
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+        ),
       ),
     ),
   );
@@ -9162,7 +9568,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9211,7 +9622,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9307,7 +9723,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9391,7 +9812,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9498,7 +9924,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9585,7 +10016,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9687,7 +10123,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9805,7 +10246,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );
@@ -9874,7 +10320,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
         ),
       ),
     );

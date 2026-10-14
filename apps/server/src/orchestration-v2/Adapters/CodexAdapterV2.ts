@@ -1,9 +1,5 @@
-import * as Clock from "effect/Clock";
-import {
-  MemoryContextSnapshot,
-  MEMORY_DERIVED_CACHE_MAX_BYTES,
-  MEMORY_DERIVED_CACHE_TTL_MS,
-} from "@goat/contracts";
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
+import { MemoryContextSnapshot } from "@goat/contracts";
 import type { RunId } from "@goat/contracts";
 import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
@@ -1619,6 +1615,7 @@ export type CodexAdapterV2DriverEnv =
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | MemoryDerivedCache.MemoryDerivedCache
   | Path.Path
   | ServerConfig;
 
@@ -1684,6 +1681,7 @@ const layer: Layer.Layer<
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | MemoryDerivedCache.MemoryDerivedCache
   | ServerConfig
 > = Layer.effect(
   ProviderAdapter.ProviderAdapterV2,
@@ -1747,9 +1745,15 @@ export interface CodexAdapterV2Options {
   };
 }
 
+const withoutMemoryBody = (input: ProviderAdapter.ProviderAdapterV2TurnInput) => {
+  const { memoryContext: _body, ...rest } = input;
+  return rest;
+};
+
 export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
+  const derivedCache = yield* MemoryDerivedCache.MemoryDerivedCache;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const memorySnapshots = Option.getOrUndefined(
     yield* Effect.serviceOption(MemorySnapshot.MemorySnapshot),
@@ -1818,8 +1822,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             threadId: ThreadId;
             runId: RunId;
             generation: number;
-            expiresAt: number;
-            bytes: number;
+            unregister?: Effect.Effect<void>;
           }
         >();
         let memoryGeneration = 0;
@@ -1832,7 +1835,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>
           >(),
         );
-        const clearMemoryDelivery = (nativeId: string, appThreadId?: ThreadId) =>
+        const dropMemoryBody = (nativeId: string) =>
           Effect.gen(function* () {
             memoryByThread.delete(nativeId);
             yield* Ref.update(additionalContextByThread, (current) => {
@@ -1843,45 +1846,42 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 goat_memory: { kind: "untrusted", value: "" },
               });
             });
+          });
+        const clearMemoryDelivery = (nativeId: string, appThreadId?: ThreadId) =>
+          Effect.gen(function* () {
+            const selected = memoryByThread.get(nativeId);
+            if (selected?.unregister) yield* selected.unregister;
+            yield* dropMemoryBody(nativeId);
             if (appThreadId && memorySnapshots) yield* memorySnapshots.invalidate(appThreadId);
           });
-        const pruneMemory = Effect.fnUntraced(function* (reserveBytes = 0) {
-          const now = yield* Clock.currentTimeMillis;
-          const removed = new Set<string>();
-          for (const [nativeId, selected] of memoryByThread)
-            if (selected.expiresAt <= now) {
-              memoryByThread.delete(nativeId);
-              removed.add(nativeId);
-            }
-          let bytes = Array.from(memoryByThread.values()).reduce(
-            (total, entry) => total + entry.bytes,
-            0,
-          );
-          for (const [nativeId, selected] of memoryByThread) {
-            if (bytes + reserveBytes <= MEMORY_DERIVED_CACHE_MAX_BYTES) break;
-            bytes -= selected.bytes;
-            memoryByThread.delete(nativeId);
-            removed.add(nativeId);
-          }
-          if (removed.size)
-            yield* Ref.update(
-              additionalContextByThread,
-              (current) =>
-                new Map(
-                  Array.from(current, ([nativeId, context]) => [
-                    nativeId,
-                    removed.has(nativeId)
-                      ? { ...context, goat_memory: { kind: "untrusted" as const, value: "" } }
-                      : context,
-                  ]),
-                ),
-            );
+        const retainMemory = Effect.fnUntraced(function* (
+          nativeId: string,
+          snapshot: MemoryContextSnapshot,
+          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+        ) {
+          const selected: NonNullable<ReturnType<typeof memoryByThread.get>> = {
+            snapshot,
+            threadId: turnInput.threadId,
+            runId: turnInput.runId,
+            generation: ++memoryGeneration,
+          };
+          memoryByThread.set(nativeId, selected);
+          selected.unregister = yield* derivedCache
+            .retain({
+              // Snapshot encoding plus its rendered additionalContext copy.
+              bytes:
+                new TextEncoder().encode(encodeMemorySnapshot(snapshot)).length +
+                new TextEncoder().encode(snapshot.renderedText).length,
+              release: Effect.gen(function* () {
+                if (memoryByThread.get(nativeId) === selected) yield* dropMemoryBody(nativeId);
+              }),
+            })
+            .pipe(Effect.provideService(Scope.Scope, scope));
         });
         // Codex drops client developer messages during compaction but only
         // resends additionalContext when it changes. Restore the current entries.
         const restoreAdditionalContext = (threadId: string, compactionId: string) =>
           Effect.gen(function* () {
-            yield* pruneMemory();
             const cachedContext = (yield* Ref.get(additionalContextByThread)).get(threadId);
             if (!cachedContext) return;
             const context = { ...cachedContext };
@@ -2201,7 +2201,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ...(input.waitForNativeStart
                 ? { nativeStartReady: yield* Deferred.make<void>() }
                 : {}),
-              input: input.turnInput,
+              input: withoutMemoryBody(input.turnInput),
               projectionAppThread: input.turnInput.appThread,
               projectionThreadId: input.turnInput.threadId,
               projectionRunId: input.turnInput.runId,
@@ -6373,7 +6373,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           const now = yield* DateTime.now;
           const nativeId = `goal-command:${turnInput.attemptId}`;
           const context: ActiveCodexTurnContext = {
-            input: turnInput,
+            input: withoutMemoryBody(turnInput),
             projectionAppThread: turnInput.appThread,
             projectionThreadId: turnInput.threadId,
             projectionRunId: turnInput.runId,
@@ -6575,25 +6575,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const clearMemoryContext =
               memoryByThread.has(threadId) ||
               (yield* Ref.get(additionalContextByThread)).get(threadId)?.goat_memory !== undefined;
-            memoryByThread.delete(threadId);
+            yield* clearMemoryDelivery(threadId);
             const validatedMemory =
               memoryContext === undefined
                 ? undefined
                 : yield* Effect.try(() => MemoryContext.validateMemoryContext(memoryContext));
-            yield* pruneMemory(
-              memoryContext === undefined
-                ? 0
-                : 2 * new TextEncoder().encode(encodeMemorySnapshot(memoryContext!)).length,
-            );
-            if (validatedMemory)
-              memoryByThread.set(threadId, {
-                snapshot: memoryContext!,
-                threadId: turnInput.threadId,
-                runId: turnInput.runId,
-                generation: ++memoryGeneration,
-                expiresAt: (yield* Clock.currentTimeMillis) + MEMORY_DERIVED_CACHE_TTL_MS,
-                bytes: 2 * new TextEncoder().encode(encodeMemorySnapshot(memoryContext!)).length,
-              });
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
@@ -6609,7 +6595,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
             yield* Ref.update(pendingRootTurns, (current) => {
               const updated = new Map(current);
-              updated.set(threadId, turnInput);
+              updated.set(threadId, withoutMemoryBody(turnInput));
               return updated;
             });
             yield* Ref.update(additionalContextByThread, (current) => {
@@ -6619,6 +6605,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               else next.delete(threadId);
               return next;
             });
+            if (validatedMemory) yield* retainMemory(threadId, memoryContext!, turnInput);
             const started = yield* client.request("turn/start", turnStartParams);
             yield* registerRootTurn({
               turnInput,
@@ -7001,30 +6988,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 fresh === undefined
                   ? undefined
                   : yield* Effect.try(() => MemoryContext.validateMemoryContext(fresh));
-              yield* pruneMemory(
-                fresh === undefined
-                  ? 0
-                  : 2 * new TextEncoder().encode(encodeMemorySnapshot(fresh!)).length,
-              );
-              memoryByThread.delete(threadId);
+              yield* clearMemoryDelivery(threadId);
               const context = { ...previous };
               delete context.goat_memory;
-              if (fresh && validated) {
-                memoryByThread.set(threadId, {
-                  snapshot: fresh,
-                  threadId: turnInput.threadId,
-                  runId: turnInput.runId,
-                  generation: ++memoryGeneration,
-                  expiresAt: (yield* Clock.currentTimeMillis) + MEMORY_DERIVED_CACHE_TTL_MS,
-                  bytes: 2 * new TextEncoder().encode(encodeMemorySnapshot(fresh!)).length,
-                });
+              if (fresh && validated)
                 context.goat_memory = { kind: "untrusted", value: validated.renderedText };
-              }
               yield* Ref.update(additionalContextByThread, (current) =>
                 new Map(current).set(threadId, context),
               );
+              if (fresh && validated) yield* retainMemory(threadId, fresh, turnInput);
               yield* Ref.update(pendingRootTurns, (current) =>
-                new Map(current).set(threadId, turnInput),
+                new Map(current).set(threadId, withoutMemoryBody(turnInput)),
               );
               // Cleared on interrupt too, as startTurn does: an interrupted start
               // must not adopt the native turn that a late turn/started reports.
@@ -7169,7 +7143,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
-              memoryByThread.delete(nativeThreadId);
+              yield* clearMemoryDelivery(nativeThreadId);
               credentialsByThread.delete(nativeThreadId);
               yield* Ref.update(additionalContextByThread, (current) => {
                 const next = new Map(current);

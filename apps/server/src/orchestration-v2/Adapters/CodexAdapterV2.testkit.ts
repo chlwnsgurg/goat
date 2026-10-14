@@ -1,3 +1,4 @@
+import * as MemoryDerivedCache from "../../memory/MemoryDerivedCache.ts";
 import * as OtelEnvironment from "@goat/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@goat/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -223,6 +224,7 @@ export function layer(input: {
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
+        MemoryDerivedCache.layer,
         layerReplayClientFactory,
         layerServerConfig,
         NodeServices.layer,
