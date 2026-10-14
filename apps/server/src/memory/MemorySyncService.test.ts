@@ -151,7 +151,7 @@ const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) =>
           outcome: "accepted" as const,
         })),
       }),
-    claim: (_c, claim) =>
+    claim: (_c, { protocolVersion: _protocolVersion, ...claim }) =>
       Effect.succeed({
         ...claim,
         fencingToken: 1,

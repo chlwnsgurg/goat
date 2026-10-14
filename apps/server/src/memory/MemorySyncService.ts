@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -87,6 +88,13 @@ export class MemorySyncService extends Context.Service<
       input: M.MemoryHubSettingsGetInput,
       permit: Permit,
     ) => Effect.Effect<M.MemoryHubSettingsView, Error>;
+    readonly updateHubSettings: (
+      input: M.MemoryHubSettingsUpdateInput,
+      permit: Permit,
+    ) => Effect.Effect<
+      M.MemoryHubSettingsUpdateResult,
+      Hub.MemoryHubAdministrationError | Service.MemoryAccessError
+    >;
     readonly readSource: Service.MemorySourceReadAuthority["readSource"];
     readonly activeResolutions: Effect.Effect<number>;
   }
@@ -193,7 +201,11 @@ const make = Effect.gen(function* () {
     };
     return (
       r.connection ? client.release(r.connection, input) : hub.release(input, r.principal!)
-    ).pipe(Effect.timeout("15 seconds"), Effect.ignore);
+    ).pipe(
+      Effect.timeout("15 seconds"),
+      Effect.map((result) => result.released),
+      Effect.catch(() => Effect.succeed(false)),
+    );
   };
   const eligibility = Effect.fnUntraced(function* (ticket: M.MemoryResolutionLease) {
     const aggregate = yield* store.loadAggregate(ticket.memorySpaceId, ticket.memoryId);
@@ -229,10 +241,12 @@ const make = Effect.gen(function* () {
   ) {
     let row = initial;
     let renewable = true;
+    let definitiveFailure = false;
     const transition = Effect.fnUntraced(function* (
       state: Store.TicketState,
       approval?: M.MemoryHubReceipt,
       retireClaim?: { expectedGeneration: number; attemptId: string },
+      relinquish = false,
     ) {
       const now = yield* Clock.currentTimeMillis;
       const next = yield* store.transact(
@@ -241,10 +255,11 @@ const make = Effect.gen(function* () {
           nextState: state,
           now,
           ownedUntil:
-            state === "terminal" || state === "recoverable" || state === "submitting"
+            relinquish || state === "terminal" || state === "recoverable" || state === "submitting"
               ? null
               : now + 60000,
-          nextAttemptAt: now + (state === "recoverable" || state === "submitting" ? 30000 : 0),
+          nextAttemptAt:
+            now + (relinquish || state === "recoverable" || state === "submitting" ? 30000 : 0),
           ...(approval ? { approval } : {}),
           ...(retireClaim ? { retireClaim } : {}),
         }),
@@ -428,17 +443,45 @@ const make = Effect.gen(function* () {
       yield* settle(receipt);
     });
     yield* execute.pipe(
+      Effect.tapError((error) =>
+        Effect.sync(() => {
+          definitiveFailure = !row.submission && !transient(error);
+        }),
+      ),
       Effect.ensuring(
         Effect.gen(function* () {
           renewable = false;
+          const released = yield* release(r, row.ticket);
           if (row.state !== "terminal") {
-            // Unknown apply outcomes and known approvals retain the immutable submission.
-            yield* transition(
-              row.submission ? (row.approval ? "approved" : "submitting") : "recoverable",
-            ).pipe(Effect.ignore);
+            if (definitiveFailure && released) {
+              const candidates = yield* store.readDueClaimCandidates(
+                100,
+                yield* Clock.currentTimeMillis,
+              );
+              const candidate = candidates.find(
+                (work) => work.memoryId === row.ticket.memoryId && work.metadata.kind === "claim",
+              );
+              if (candidate?.metadata.kind === "claim") {
+                const retired = yield* Effect.result(
+                  transition("terminal", undefined, {
+                    expectedGeneration: candidate.metadata.generation ?? 0,
+                    attemptId: row.ticket.attemptId,
+                  }),
+                );
+                if (retired._tag === "Success") return;
+              }
+            }
+            {
+              // Unknown apply outcomes and known approvals retain the immutable submission.
+              yield* transition(
+                row.submission ? (row.approval ? "approved" : "submitting") : "recoverable",
+                undefined,
+                undefined,
+                true,
+              ).pipe(Effect.ignore);
+            }
           }
-          yield* release(r, row.ticket);
-        }),
+        }).pipe(Effect.ignore),
       ),
     );
   });
@@ -482,6 +525,9 @@ const make = Effect.gen(function* () {
             }),
           ),
           Effect.ensuring(store.wake),
+          Effect.ensuring(
+            Effect.suspend(() => sweep).pipe(Effect.ignore, Effect.forkIn(scope), Effect.asVoid),
+          ),
           Effect.forkIn(scope),
         );
         const slot = executions.get(saved.ticket.memoryId);
@@ -495,12 +541,18 @@ const make = Effect.gen(function* () {
       ),
     );
   });
-  const sweep = registryMutex.withPermit(
+  const sweep: Effect.Effect<void, Error> = registryMutex.withPermit(
     Effect.gen(function* () {
       const r = yield* route();
       if (!r || !r.space || stopped) return;
       const now = yield* Clock.currentTimeMillis;
-      yield* store.recoverClaimCandidates(now);
+      // The current L1 recovery sweep cancels all resolve rows; do not destroy a durable ticket.
+      // L1 must make that sweep frontier-aware before concurrent new-conflict recovery is enabled.
+      const existing = yield* store.readRecoverableResolutionTickets({
+        now: Number.MAX_SAFE_INTEGER,
+        limit: 100,
+      });
+      if (existing.length === 0 && executions.size === 0) yield* store.recoverClaimCandidates(now);
       const saved = yield* store.readRecoverableResolutionTickets({ now, limit: 100 });
       for (const ticket of saved) yield* register(r, ticket);
       const candidates = yield* store.readDueClaimCandidates(100, now);
@@ -849,6 +901,7 @@ const make = Effect.gen(function* () {
       for (const entry of executions.values())
         if (entry.epoch !== r.settings.memoryHubVersion && entry.fiber)
           yield* Fiber.interrupt(entry.fiber);
+      lastFailure = undefined;
       const budget = { pages: 0, entries: 0 };
       if (!(yield* bootstrap(r, budget))) return;
       yield* pullTail(r, budget);
@@ -944,6 +997,18 @@ const make = Effect.gen(function* () {
         Effect.andThen(readSettings),
         Effect.map((s) => ({ settings: s.memoryHub, version: s.memoryHubVersion })),
       ),
+    updateHubSettings: (input, permit) =>
+      Effect.gen(function* () {
+        yield* permit;
+        const admin = yield* Effect.serviceOption(Hub.MemoryHubAdministrator);
+        if (Option.isNone(admin)) return yield* new M.MemoryHubError({ code: "route_unavailable" });
+        const result = yield* admin.value.update(
+          input,
+          permit.pipe(Effect.mapError(() => new M.MemoryHubForbiddenError({}))),
+        );
+        yield* guardedSync;
+        return result;
+      }),
     syncStatus: (_input, permit) =>
       Effect.gen(function* () {
         yield* permit;
