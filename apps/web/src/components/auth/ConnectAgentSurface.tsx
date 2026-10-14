@@ -3,6 +3,7 @@ import {
   type AuthMcpApprovalDetails,
   AuthMcpApprovalError,
   AuthMcpClientAccess,
+  AuthMcpMemoryScope,
   type AuthMcpAuthorizationRequest,
 } from "@goat/contracts";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
@@ -97,14 +98,23 @@ function readAuthorizationRequest(): AuthMcpAuthorizationRequest {
  * Whether this browser's session may approve `access` without a pairing code.
  * A session may only grant access whose scopes it holds itself.
  */
-function oneClickApproves(details: AuthMcpApprovalDetails, access: AuthMcpClientAccess) {
-  return details.csrfToken !== undefined && (details.oneClickAccess ?? []).includes(access);
+function oneClickApproves(
+  details: AuthMcpApprovalDetails,
+  access: AuthMcpClientAccess,
+  memoryScopes: ReadonlyArray<AuthMcpMemoryScope>,
+) {
+  return (
+    details.csrfToken !== undefined &&
+    (details.oneClickAccess ?? []).includes(access) &&
+    memoryScopes.every((scope) => (details.oneClickMemoryScopes ?? []).includes(scope))
+  );
 }
 
 export function ConnectAgentSurface() {
   const [authorization] = useState(readAuthorizationRequest);
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [access, setAccess] = useState<AuthMcpClientAccess>("read-only");
+  const [memoryScopes, setMemoryScopes] = useState<ReadonlyArray<AuthMcpMemoryScope>>([]);
   const [pairingCode, setPairingCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [pending, setPending] = useState<"approve" | "deny" | null>(null);
@@ -139,9 +149,9 @@ export function ConnectAgentSurface() {
       const decision: AuthMcpApprovalDecision =
         choice === "deny"
           ? { _tag: "deny" }
-          : csrfToken !== undefined && oneClickApproves(loaded.details, access)
-            ? { _tag: "browser-session", access, csrfToken }
-            : { _tag: "pairing-code", access, code: pairingCode.trim() };
+          : csrfToken !== undefined && oneClickApproves(loaded.details, access, memoryScopes)
+            ? { _tag: "browser-session", access, csrfToken, memoryScopes }
+            : { _tag: "pairing-code", access, code: pairingCode.trim(), memoryScopes };
       const answer = await runApproval((client) =>
         client.mcpOAuth.decision({ payload: { authorization, decision } }),
       );
@@ -152,7 +162,7 @@ export function ConnectAgentSurface() {
       setPending(null);
       setErrorMessage(answer.kind === "error" ? answer.message : "The sign-in could not continue.");
     },
-    [access, authorization, loaded, pairingCode],
+    [access, authorization, loaded, pairingCode, memoryScopes],
   );
 
   if (loaded.status === "loading") {
@@ -179,7 +189,7 @@ export function ConnectAgentSurface() {
   }
 
   const { details } = loaded;
-  const oneClick = oneClickApproves(details, access);
+  const oneClick = oneClickApproves(details, access, memoryScopes);
   const canApprove = pending === null && (oneClick || pairingCode.trim().length > 0);
 
   return (
@@ -233,6 +243,30 @@ export function ConnectAgentSurface() {
             more than the mode you pick.
           </p>
         </div>
+
+        <fieldset disabled={pending !== null} className="space-y-2">
+          <legend className="text-sm font-medium">Memory access (optional)</legend>
+          <p className="text-xs text-muted-foreground">
+            Choose memory permissions separately from thread access. Nothing is selected by default.
+          </p>
+          {AuthMcpMemoryScope.literals.map((scope) => (
+            <label key={scope} className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={memoryScopes.includes(scope)}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setMemoryScopes((previous) =>
+                    checked
+                      ? [...previous.filter((selected) => selected !== scope), scope]
+                      : previous.filter((selected) => selected !== scope),
+                  );
+                }}
+              />
+              {scope === "memory:read" ? "Read memory" : "Write memory"}
+            </label>
+          ))}
+        </fieldset>
 
         {oneClick ? null : (
           <div className="space-y-2">
