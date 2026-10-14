@@ -13659,6 +13659,7 @@ describe("Claude WP4 memory delivery", () => {
           prefix: "goat-wp4-claude-",
         });
         const offers: SDKUserMessage[] = [];
+        const sdkMessages = yield* Queue.unbounded<SDKMessage>();
         const registrations: unknown[] = [];
         const opened: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions[] = [];
         let closes = 0;
@@ -13677,7 +13678,7 @@ describe("Claude WP4 memory delivery", () => {
               Effect.sync(() => {
                 opened.push(input.options);
                 return {
-                  messages: Stream.never,
+                  messages: Stream.fromQueue(sdkMessages),
                   offer: (message) =>
                     Effect.sync(() => {
                       offers.push(message);
@@ -13719,6 +13720,60 @@ describe("Claude WP4 memory delivery", () => {
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
+        const terminalSignals = [yield* Deferred.make<void>(), yield* Deferred.make<void>()];
+        let terminals = 0;
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) => {
+            if (event.type !== "turn.terminal") return Effect.void;
+            const signal = terminalSignals[terminals++];
+            return signal ? Deferred.succeed(signal, undefined) : Effect.void;
+          }),
+          Effect.forkScoped,
+        );
+        const finish = (message: SDKUserMessage) =>
+          Effect.gen(function* () {
+            yield* Queue.offer(sdkMessages, { ...message, session_id: "wp4-claude-native" });
+            if (message === offers[0])
+              yield* Queue.offer(sdkMessages, {
+                type: "system",
+                subtype: "task_started",
+                task_id: "wp4-background",
+                tool_use_id: "wp4-bg-tool",
+                description: "fixture background work",
+                is_backgrounded: true,
+                task_type: "local_bash",
+                uuid: "00000000-0000-4000-8000-000000000122",
+                session_id: "wp4-claude-native",
+              });
+            yield* Queue.offer(sdkMessages, {
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              duration_ms: 0,
+              duration_api_ms: 0,
+              num_turns: 1,
+              result: "done",
+              stop_reason: "end_turn",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 },
+                inference_geo: "fixture",
+                iterations: [],
+                server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+                service_tier: "standard",
+                speed: "standard",
+              },
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "00000000-0000-4000-8000-000000000123",
+              session_id: "wp4-claude-native",
+              terminal_reason: "completed",
+            });
+          });
         const providerThread = yield* runtime.ensureThread({
           threadId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -13757,6 +13812,9 @@ describe("Claude WP4 memory delivery", () => {
         });
         assert.equal(offers[1]?.priority, "now");
         assert.include(JSON.stringify(offers[1]?.message.content), "&lt;untrusted&gt;");
+        yield* finish(offers[0]!);
+        yield* Deferred.await(terminalSignals[0]!);
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
         yield* sessions.set({
           ...config,
           providerSessionId: "second-credential",
@@ -13777,9 +13835,12 @@ describe("Claude WP4 memory delivery", () => {
         });
         assert.equal(opened.length, 1);
         assert.equal(closes, 0);
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
         assert.equal(registrations.length, 1);
         assert.include(JSON.stringify(registrations), "fixture-second");
         assert.notInclude(JSON.stringify(offers[2]?.message.content), "external_goat_memory");
+        yield* finish(offers[2]!);
+        yield* Deferred.await(terminalSignals[1]!);
         const rejected = yield* runtime
           .startTurn({
             ...base,

@@ -1849,9 +1849,8 @@ function claudeRuntimeQueryPolicyKey(policy: ClaudeRuntimeQueryPolicy): string {
   });
 }
 
-// Live-query reuse must key on the effective allowlist (including the
-// MCP-derived pre-approvals), not just the runtime policy: policies that
-// share a policy key can still differ in MCP pre-approvals.
+// Runtime permissions and connection routing determine query identity. Credential
+// rotation uses setMcpServers on the live query; memory preapprovals are excluded by openQuery.
 export function claudeEffectiveQueryPolicyKey(
   queryPolicy: ClaudeRuntimeQueryPolicy,
   mcpOverrides: {
@@ -8002,6 +8001,27 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             } satisfies PermissionResult;
           }
 
+          if (toolName.startsWith("mcp__goat__memory_")) {
+            const availability = McpProviderSession.memoryToolAvailability(
+              yield* readMcpSession(context.input.threadId),
+            );
+            const write = CLAUDE_MEMORY_WRITE_TOOLS.some((name) => name === toolName);
+            if (
+              !availability.read ||
+              (write &&
+                (!availability.write ||
+                  sandboxPolicyKindForClaudeRuntimePolicy(context.input.runtimePolicy) ===
+                    "readOnly")) ||
+              (toolName === "mcp__goat__memory_read_source" && !availability.source)
+            ) {
+              return {
+                behavior: "deny",
+                message: "GOAT memory tool unavailable for this credential.",
+                toolUseID: callbackOptions.toolUseID,
+              } satisfies PermissionResult;
+            }
+          }
+
           const nativeRequestId = callbackOptions.toolUseID;
           const nativeToolInput = claudeNativeToolInputFromRecord(toolInput);
           // While root output awaits its prompt echo, the tool's streamed
@@ -8706,15 +8726,16 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
             });
             if (userMessage !== null) {
+              const admittedMessage = nativeControl
+                ? userMessage
+                : yield* withFreshMemory(userMessage, turnInput);
               yield* attachTurn;
               // A user turn that races a wake leaves the buffer alone: the
               // continuation run the worker queued behind this run drains it
               // afterwards with correct attribution.
               // Counted only here, so a turn that failed to start does not age reports.
               yield* startUserTurnForWakeReports(nativeThreadId);
-              yield* querySession.query.offer(
-                nativeControl ? userMessage : yield* withFreshMemory(userMessage, turnInput),
-              );
+              yield* querySession.query.offer(admittedMessage);
               return;
             }
             // Transcript reads suspend replay. Hold live SDK frames until the whole

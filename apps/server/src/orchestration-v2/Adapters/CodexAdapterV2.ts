@@ -1,3 +1,9 @@
+import * as Clock from "effect/Clock";
+import {
+  MemoryContextSnapshot,
+  MEMORY_DERIVED_CACHE_MAX_BYTES,
+  MEMORY_DERIVED_CACHE_TTL_MS,
+} from "@goat/contracts";
 import type { RunId } from "@goat/contracts";
 import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
@@ -201,6 +207,7 @@ export function codexProviderTurnTokenUsage(
     updatedAt,
   };
 }
+const encodeMemorySnapshot = Schema.encodeSync(Schema.fromJsonString(MemoryContextSnapshot));
 const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
 const CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS = 50;
 const CodexBackgroundTerminalTerminateResponse = Schema.Struct({
@@ -1805,6 +1812,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             threadId: ThreadId;
             runId: RunId;
             generation: number;
+            expiresAt: number;
+            bytes: number;
           }
         >();
         let memoryGeneration = 0;
@@ -1817,10 +1826,43 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>
           >(),
         );
+        const pruneMemory = Effect.fnUntraced(function* (reserveBytes = 0) {
+          const now = yield* Clock.currentTimeMillis;
+          const removed = new Set<string>();
+          for (const [nativeId, selected] of memoryByThread)
+            if (selected.expiresAt <= now) {
+              memoryByThread.delete(nativeId);
+              removed.add(nativeId);
+            }
+          let bytes = Array.from(memoryByThread.values()).reduce(
+            (total, entry) => total + entry.bytes,
+            0,
+          );
+          for (const [nativeId, selected] of memoryByThread) {
+            if (bytes + reserveBytes <= MEMORY_DERIVED_CACHE_MAX_BYTES) break;
+            bytes -= selected.bytes;
+            memoryByThread.delete(nativeId);
+            removed.add(nativeId);
+          }
+          if (removed.size)
+            yield* Ref.update(
+              additionalContextByThread,
+              (current) =>
+                new Map(
+                  Array.from(current, ([nativeId, context]) => [
+                    nativeId,
+                    removed.has(nativeId)
+                      ? { ...context, goat_memory: { kind: "untrusted" as const, value: "" } }
+                      : context,
+                  ]),
+                ),
+            );
+        });
         // Codex drops client developer messages during compaction but only
         // resends additionalContext when it changes. Restore the current entries.
         const restoreAdditionalContext = (threadId: string, compactionId: string) =>
           Effect.gen(function* () {
+            yield* pruneMemory();
             const cachedContext = (yield* Ref.get(additionalContextByThread)).get(threadId);
             if (!cachedContext) return;
             const context = { ...cachedContext };
@@ -6495,21 +6537,41 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               });
               credentialsByThread.set(threadId, mcpSession.providerSessionId);
             }
+            if (!mcpSession && credentialsByThread.has(threadId)) {
+              yield* client.raw.request("thread/resume", {
+                threadId,
+                excludeTurns: true,
+                config: {
+                  ...CODEX_THREAD_CONFIG,
+                  mcp_servers: { goat: { enabled: false } },
+                },
+              });
+              credentialsByThread.delete(threadId);
+            }
             const memoryContext = turnInput.refreshMemoryContext
               ? yield* turnInput.refreshMemoryContext()
               : turnInput.memoryContext;
-            const clearMemoryContext = memoryByThread.has(threadId);
+            const clearMemoryContext =
+              memoryByThread.has(threadId) ||
+              (yield* Ref.get(additionalContextByThread)).get(threadId)?.goat_memory !== undefined;
             memoryByThread.delete(threadId);
             const validatedMemory =
               memoryContext === undefined
                 ? undefined
                 : yield* Effect.try(() => MemoryContext.validateMemoryContext(memoryContext));
+            yield* pruneMemory(
+              memoryContext === undefined
+                ? 0
+                : 2 * new TextEncoder().encode(encodeMemorySnapshot(memoryContext!)).length,
+            );
             if (validatedMemory)
               memoryByThread.set(threadId, {
                 snapshot: memoryContext!,
                 threadId: turnInput.threadId,
                 runId: turnInput.runId,
                 generation: ++memoryGeneration,
+                expiresAt: (yield* Clock.currentTimeMillis) + MEMORY_DERIVED_CACHE_TTL_MS,
+                bytes: 2 * new TextEncoder().encode(encodeMemorySnapshot(memoryContext!)).length,
               });
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
@@ -6912,18 +6974,26 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const fresh = turnInput.refreshMemoryContext
                 ? yield* turnInput.refreshMemoryContext()
                 : turnInput.memoryContext;
+              const validated =
+                fresh === undefined
+                  ? undefined
+                  : yield* Effect.try(() => MemoryContext.validateMemoryContext(fresh));
+              yield* pruneMemory(
+                fresh === undefined
+                  ? 0
+                  : 2 * new TextEncoder().encode(encodeMemorySnapshot(fresh!)).length,
+              );
               memoryByThread.delete(threadId);
               const context = { ...previous };
               delete context.goat_memory;
-              if (fresh) {
-                const validated = yield* Effect.try(() =>
-                  MemoryContext.validateMemoryContext(fresh),
-                );
+              if (fresh && validated) {
                 memoryByThread.set(threadId, {
                   snapshot: fresh,
                   threadId: turnInput.threadId,
                   runId: turnInput.runId,
                   generation: ++memoryGeneration,
+                  expiresAt: (yield* Clock.currentTimeMillis) + MEMORY_DERIVED_CACHE_TTL_MS,
+                  bytes: 2 * new TextEncoder().encode(encodeMemorySnapshot(fresh!)).length,
                 });
                 context.goat_memory = { kind: "untrusted", value: validated.renderedText };
               }
