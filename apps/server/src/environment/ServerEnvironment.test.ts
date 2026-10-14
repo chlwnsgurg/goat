@@ -105,6 +105,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
             ownRuntimeProtocolRanges(ORCHESTRATION_PROTOCOL_VERSION),
           );
           expect(descriptor.capabilities.drainRestart).toBe(true);
+          expect(descriptor.capabilities.memoryHubProtocolVersion).toBe(1);
           return identity.instanceId;
         }).pipe(Effect.provide(Layer.fresh(layerServerEnvironment(baseDir))));
         expect(yield* observe).not.toBe(yield* observe);

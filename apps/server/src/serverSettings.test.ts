@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
+  MemoryOperationId,
   ModelSelection,
   ProjectId,
   ProjectScript,
@@ -2286,3 +2287,60 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 });
+
+it.effect("generic hub-key rejection has the declared settings error and changes no settings", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const before = yield* service.getSettings;
+    for (const key of ["memoryHub", "memoryHubVersion"]) {
+      const patch = { standingInstructions: "must not land", [key]: undefined };
+      const result = yield* Effect.result(service.updateSettings(patch));
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.strictEqual(result.failure._tag, "ServerSettingsError");
+        assert.strictEqual(result.failure.operation, "normalize");
+      }
+      const mutated = yield* Effect.result(
+        service.updateProviderInstance(
+          {
+            operation: "remove",
+            instanceId: ProviderInstanceId.make("codex"),
+          },
+          patch,
+        ),
+      );
+      assert.strictEqual(mutated._tag, "Failure");
+      assert.deepStrictEqual(yield* service.getSettings, before);
+    }
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect(
+  "dedicated hub CAS replaces the union, repeats permission, and persists secret references only",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const transitions = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      let checks = 0;
+      const permit = Effect.sync(() => {
+        checks++;
+      });
+      const requestId = MemoryOperationId.make("00000000-0000-4000-8000-000000000099");
+      const before = yield* service.getSettings;
+      const input = {
+        requestId,
+        expectedVersion: before.memoryHubVersion,
+        settings: { mode: "disabled" as const },
+      };
+      assert.strictEqual((yield* transitions.applyMemoryHubTransition(input, permit)).version, 1);
+      const retry = yield* Effect.result(transitions.applyMemoryHubTransition(input, permit));
+      assert.strictEqual(retry._tag, "Failure");
+      assert.strictEqual(checks, 2);
+      const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+      assert.deepStrictEqual(persisted.memoryHub, { mode: "disabled" });
+      assert.strictEqual(persisted.memoryHubVersion, 1);
+      assert.strictEqual(persisted.standingInstructions, before.standingInstructions);
+    }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);

@@ -12,6 +12,10 @@
  */
 import {
   DEFAULT_SERVER_SETTINGS,
+  MemoryHubSettings,
+  MemoryHubError,
+  type MemoryHubSettingsView,
+  type MemoryOperationId,
   ModelSelection,
   ProjectId,
   ProjectScript,
@@ -56,6 +60,7 @@ import { type DeepPartial, deepMerge } from "@goat/shared/Struct";
 import { fromJsonStringPretty, fromLenientJson } from "@goat/shared/schemaJson";
 import {
   applyServerSettingsPatch,
+  assertNoMemoryHubSettingsPatch,
   deriveLegacyProjectOverrides,
   fallbackTextGenerationModelSelection,
   isModelSelectionProviderEnabled,
@@ -75,6 +80,7 @@ export {
 
 const encodeServerSettings = Schema.encodeEffect(ServerSettings);
 const encodeServerSettingsJson = Schema.encodeUnknownEffect(fromJsonStringPretty(ServerSettings));
+const decodeMemoryHubSettings = Schema.decodeUnknownEffect(MemoryHubSettings);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 
 const textEncoder = new TextEncoder();
@@ -187,6 +193,54 @@ function ensureProviderInstanceMutationAllowed(
   return Effect.void;
 }
 
+/** Used before any generic settings side effect, including device-host normalization. */
+export const rejectMemoryHubSettingsPatch = (patch: unknown, settingsPath: string) =>
+  Effect.try({
+    try: () => assertNoMemoryHubSettingsPatch(patch),
+    catch: (cause) => new ServerSettingsError({ settingsPath, operation: "normalize", cause }),
+  });
+
+export type MemoryHubTransition = {
+  readonly requestId: MemoryOperationId;
+  readonly expectedVersion: number;
+  readonly settings: MemoryHubSettings;
+};
+
+// Durable request-id recovery belongs to HubService's administration ledger. This helper
+// only performs the settings CAS while holding the existing settings write lock.
+const transitionMemoryHubSettings = <E, R>(
+  current: ServerSettings,
+  input: MemoryHubTransition,
+  permit: Effect.Effect<void, E, R>,
+) =>
+  Effect.gen(function* () {
+    yield* permit;
+    if (current.memoryHubVersion !== input.expectedVersion) {
+      return yield* new MemoryHubError({ code: "revision_changed" });
+    }
+    const settings = yield* decodeMemoryHubSettings(input.settings).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ServerSettingsError({
+            settingsPath: "memory hub transition",
+            operation: "normalize",
+            cause,
+          }),
+      ),
+    );
+    return { ...current, memoryHub: settings, memoryHubVersion: current.memoryHubVersion + 1 };
+  });
+
+export class MemoryHubSettingsTransitions extends Context.Service<
+  MemoryHubSettingsTransitions,
+  {
+    readonly applyMemoryHubTransition: <E, R>(
+      input: MemoryHubTransition,
+      permit: Effect.Effect<void, E, R>,
+    ) => Effect.Effect<MemoryHubSettingsView, E | ServerSettingsError | MemoryHubError, R>;
+  }
+>()("goat/serverSettings/MemoryHubSettingsTransitions") {}
+
 export class ServerSettingsService extends Context.Service<
   ServerSettingsService,
   {
@@ -248,9 +302,11 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
     const writeSemaphore = yield* Semaphore.make(1);
     const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
 
-    const updateTestSettings = (
-      update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
-    ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    const updateTestSettings = <E, R>(
+      update: (
+        current: ServerSettings,
+      ) => Effect.Effect<ServerSettings, E | ServerSettingsError, R>,
+    ): Effect.Effect<ServerSettings, E | ServerSettingsError, R> =>
       writeSemaphore.withPermits(1)(
         Ref.get(currentSettingsRef).pipe(
           Effect.flatMap(update),
@@ -266,11 +322,14 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       getSettings,
       updateSettings: (patch) =>
         updateTestSettings((currentSettings) =>
-          Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
+          rejectMemoryHubSettingsPatch(patch, "test settings").pipe(
+            Effect.map(() => applyServerSettingsPatch(currentSettings, patch)),
+          ),
         ),
       updateProviderInstance: (mutation, patch = {}) =>
         updateTestSettings((currentSettings) =>
           Effect.gen(function* () {
+            yield* rejectMemoryHubSettingsPatch(patch, "test settings");
             yield* ensureProviderInstanceMutationAllowed(
               currentSettings,
               mutation,
@@ -280,15 +339,21 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
             return applyProviderInstanceMutation(patched, mutation);
           }),
         ),
+      applyMemoryHubTransition: (input, permit) =>
+        updateTestSettings((current) => transitionMemoryHubSettings(current, input, permit)).pipe(
+          Effect.map((next) => ({ settings: next.memoryHub, version: next.memoryHubVersion })),
+        ),
       withSettingsSnapshot: (use) =>
         writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
       streamChanges: Stream.empty,
       subscribeChanges: Effect.succeed(Stream.empty),
-    } satisfies ServerSettingsService["Service"];
+    } satisfies ServerSettingsService["Service"] & MemoryHubSettingsTransitions["Service"];
   });
 
-export const layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
-  Layer.effect(ServerSettingsService, makeTest(overrides));
+export const layerTest = (
+  overrides: DeepPartial<ServerSettings> = {},
+): Layer.Layer<ServerSettingsService, ServerSettingsError> =>
+  Layer.unwrap(makeTest(overrides).pipe(Effect.map(settingsLayers)));
 
 // Migrate saved token delivery without accepting it in settings writes or
 // letting one retired value reset the rest of the environment's settings.
@@ -1068,9 +1133,9 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const updateAndPersistSettings = (
-    update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+  const updateAndPersistSettings = <E, R>(
+    update: (current: ServerSettings) => Effect.Effect<ServerSettings, E | ServerSettingsError, R>,
+  ): Effect.Effect<ServerSettings, E | ServerSettingsError, R> =>
     writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
@@ -1223,16 +1288,23 @@ const make = Effect.gen(function* () {
     ),
     updateSettings: (patch) =>
       updateAndPersistSettings((current) =>
-        Effect.succeed(applyServerSettingsPatch(current, patch)),
+        rejectMemoryHubSettingsPatch(patch, settingsPath).pipe(
+          Effect.map(() => applyServerSettingsPatch(current, patch)),
+        ),
       ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateAndPersistSettings((current) =>
         Effect.gen(function* () {
+          yield* rejectMemoryHubSettingsPatch(patch, settingsPath);
           yield* ensureProviderInstanceMutationAllowed(current, mutation, settingsPath);
           const patched = applyServerSettingsPatch(current, patch);
           return applyProviderInstanceMutation(patched, mutation);
         }),
       ),
+    applyMemoryHubTransition: (input, permit) =>
+      updateAndPersistSettings((current) =>
+        transitionMemoryHubSettings(current, input, permit),
+      ).pipe(Effect.map((next) => ({ settings: next.memoryHub, version: next.memoryHubVersion }))),
     withSettingsSnapshot,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
@@ -1242,7 +1314,17 @@ const make = Effect.gen(function* () {
         Effect.map((subscription) => materializeChanges(Stream.fromSubscription(subscription))),
       );
     },
-  } satisfies ServerSettingsService["Service"];
+  } satisfies ServerSettingsService["Service"] & MemoryHubSettingsTransitions["Service"];
 });
 
-export const layer = Layer.effect(ServerSettingsService, make);
+const settingsLayers = (
+  service: ServerSettingsService["Service"] & MemoryHubSettingsTransitions["Service"],
+) =>
+  Layer.mergeAll(
+    Layer.succeed(ServerSettingsService, service),
+    Layer.succeed(MemoryHubSettingsTransitions, {
+      applyMemoryHubTransition: service.applyMemoryHubTransition,
+    }),
+  );
+
+export const layer = Layer.unwrap(make.pipe(Effect.map(settingsLayers)));

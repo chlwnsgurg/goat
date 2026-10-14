@@ -1193,3 +1193,13 @@ describe("synchronized model preferences", () => {
     });
   });
 });
+
+it("rejects reserved hub keys before merging even a mixed settings patch", () => {
+  for (const key of ["memoryHub", "memoryHubVersion"]) {
+    const patch = { standingInstructions: "must not land", [key]: undefined };
+    expect(() => applyServerSettingsPatch(FOLDED_SERVER_SETTINGS, patch)).toThrow(
+      "dedicated transition",
+    );
+    expect(FOLDED_SERVER_SETTINGS.standingInstructions).not.toBe("must not land");
+  }
+});

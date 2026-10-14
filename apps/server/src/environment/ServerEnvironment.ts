@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  MEMORY_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_VERSION,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
@@ -226,6 +227,7 @@ export const make = Effect.gen(function* () {
     sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
+      memoryHubProtocolVersion: MEMORY_PROTOCOL_VERSION,
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,
@@ -291,7 +293,11 @@ export const make = Effect.gen(function* () {
     getDescriptor: readAgentActivityPublishingActive(secrets).pipe(
       Effect.map((agentActivityPublishing) => ({
         ...descriptor,
-        capabilities: { ...descriptor.capabilities, agentActivityPublishing },
+        capabilities: {
+          memoryHubProtocolVersion: MEMORY_PROTOCOL_VERSION,
+          ...descriptor.capabilities,
+          agentActivityPublishing,
+        },
       })),
     ),
   });
