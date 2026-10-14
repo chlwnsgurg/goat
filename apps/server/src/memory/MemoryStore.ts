@@ -818,6 +818,7 @@ export class MemoryStore extends Context.Service<
       proposedClaim?: M.MemoryHubClaimInput;
     }) => InTx<{ claim: M.MemoryHubClaimInput; generation: number } | null>;
     readonly readRecoverableResolutionTickets: (input: {
+      memorySpaceId: M.MemorySpaceId;
       now: number;
       limit: number;
     }) => Effect.Effect<readonly TicketRow[], MemoryStorageError>;
@@ -1396,7 +1397,13 @@ export class MemoryStore extends Context.Service<
     readonly readDueClaimCandidates: (
       limit: number,
       now: number,
+      memorySpaceId: M.MemorySpaceId,
     ) => Effect.Effect<ReadonlyArray<MemoryWork>, MemoryStorageError>;
+    readonly findClaimCandidate: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      candidateId: string;
+      attemptId: M.MemoryOperationId;
+    }) => Effect.Effect<MemoryWork | null, MemoryStorageError>;
     readonly recoverClaimCandidates: (now: number) => Effect.Effect<void, MemoryStorageError>;
     readonly claimCandidate: (
       id: string,
@@ -3973,13 +3980,23 @@ const make = Effect.gen(function* () {
   const readDueClaimCandidates = Effect.fn("MemoryStore.readDueClaimCandidates")(function* (
     limit: number,
     now: number,
+    memorySpaceId: M.MemorySpaceId,
   ) {
     return yield* workRows(
       yield* stored(
         "claim-candidates",
-        sql<WorkRow>`SELECT o.* FROM memory_outbox o JOIN memory_items i ON i.space=o.space AND i.memory_id=o.memory_id WHERE o.kind='claim' AND o.status IN ('pending','retry') AND o.next_attempt_at<=${now} AND i.status='quarantined' AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=i.space AND f.memory_id=i.memory_id) AND NOT EXISTS (SELECT 1 FROM json_each(i.availability_json,'$.reasons') r WHERE r.value IN ('scanner_pending','secret_detected','missing_parent','dependency_invalidated','forget_pending')) ORDER BY o.next_attempt_at,o.id LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
+        sql<WorkRow>`SELECT o.* FROM memory_outbox o JOIN memory_items i ON i.space=o.space AND i.memory_id=o.memory_id WHERE o.space=${memorySpaceId} AND o.kind='claim' AND o.status IN ('pending','retry') AND o.next_attempt_at<=${now} AND i.status='quarantined' AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=i.space AND f.memory_id=i.memory_id) AND NOT EXISTS (SELECT 1 FROM json_each(i.availability_json,'$.reasons') r WHERE r.value IN ('scanner_pending','secret_detected','missing_parent','dependency_invalidated','forget_pending')) ORDER BY o.next_attempt_at,o.id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS))}`,
       ),
     );
+  });
+  const findClaimCandidate: MemoryStore["Service"]["findClaimCandidate"] = Effect.fn(
+    "MemoryStore.findClaimCandidate",
+  )(function* (input) {
+    const rows = yield* stored(
+      "claim-keyed",
+      sql<WorkRow>`SELECT o.* FROM memory_outbox o WHERE o.id=${input.candidateId} AND o.space=${input.memorySpaceId} AND o.kind='claim' AND json_extract(o.frozen_claim_json,'$.attemptId')=${input.attemptId}`,
+    );
+    return (yield* workRows(rows))[0] ?? null;
   });
   const recoverClaimCandidates = Effect.fn("MemoryStore.recoverClaimCandidates")(function* (
     now: number,
@@ -5495,7 +5512,7 @@ const make = Effect.gen(function* () {
         "ticket-recovery",
         sql<{
           ticket_json: string;
-        }>`SELECT ticket_json FROM memory_outbox WHERE kind='resolve' AND status NOT IN ('cancelled','completed','failed') AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) AND NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_outbox.space AND t.memory_id=memory_outbox.memory_id) AND ticket_json IS NOT NULL AND json_extract(ticket_json,'$.state')!='terminal' AND json_extract(ticket_json,'$.nextAttemptAt')<=${input.now} AND (json_extract(ticket_json,'$.ownedUntil') IS NULL OR json_extract(ticket_json,'$.ownedUntil')<=${input.now}) ORDER BY next_attempt_at,id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
+        }>`SELECT ticket_json FROM memory_outbox WHERE space=${input.memorySpaceId} AND kind='resolve' AND status NOT IN ('cancelled','completed','failed') AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) AND NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_outbox.space AND t.memory_id=memory_outbox.memory_id) AND ticket_json IS NOT NULL AND json_extract(ticket_json,'$.state')!='terminal' AND json_extract(ticket_json,'$.nextAttemptAt')<=${input.now} AND (json_extract(ticket_json,'$.ownedUntil') IS NULL OR json_extract(ticket_json,'$.ownedUntil')<=${input.now}) ORDER BY next_attempt_at,id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
       );
       return yield* Effect.forEach(rows, (row) => decodeTicketRow(row.ticket_json));
     });
@@ -8138,6 +8155,7 @@ const make = Effect.gen(function* () {
     installCheckpointPage,
     completeCheckpoint,
     readDueClaimCandidates,
+    findClaimCandidate,
     recoverClaimCandidates,
     claimCandidate,
     retryClaimCandidate,
