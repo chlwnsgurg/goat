@@ -190,6 +190,32 @@ export const layer: Layer.Layer<
       };
     };
 
+    // Run workers keep this callback after startup. Capture only service references
+    // and scalar ids, outside start's scope containing the projection and history.
+    const makeRefreshMemoryContext = (threadId: ThreadId, runId: RunId) => () =>
+      Effect.gen(function* () {
+        if (Option.isNone(memorySnapshot) || !providerSessions.currentMemoryPolicy)
+          return undefined;
+        const currentPolicy = providerSessions.currentMemoryPolicy(threadId);
+        const policy = yield* currentPolicy;
+        if (policy.grant === "none") return undefined;
+        if ((yield* projectionStore.getThreadShell(threadId))?.activeRunId !== runId)
+          return undefined;
+        const snapshot = yield* memorySnapshot.value.forThread(threadId, policy, currentPolicy);
+        return (yield* projectionStore.getThreadShell(threadId))?.activeRunId === runId
+          ? snapshot
+          : undefined;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("Memory refresh unavailable", {
+                threadId,
+                runId,
+              }).pipe(Effect.as(undefined)),
+        ),
+      );
+
     const makeDeliverySession = (
       session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
       startWithHandoffs: (
@@ -1384,36 +1410,7 @@ export const layer: Layer.Layer<
         ...(input.reattach === true
           ? {}
           : {
-              refreshMemoryContext: () =>
-                Effect.gen(function* () {
-                  if (Option.isNone(memorySnapshot) || !providerSessions.currentMemoryPolicy)
-                    return undefined;
-                  const currentPolicy = providerSessions.currentMemoryPolicy(input.threadId);
-                  const policy = yield* currentPolicy;
-                  if (policy.grant === "none") return undefined;
-                  if (
-                    (yield* projectionStore.getThreadShell(input.threadId))?.activeRunId !== runId
-                  )
-                    return undefined;
-                  const snapshot = yield* memorySnapshot.value.forThread(
-                    input.threadId,
-                    policy,
-                    currentPolicy,
-                  );
-                  return (yield* projectionStore.getThreadShell(input.threadId))?.activeRunId ===
-                    runId
-                    ? snapshot
-                    : undefined;
-                }).pipe(
-                  Effect.catchCause((cause) =>
-                    Cause.hasInterruptsOnly(cause)
-                      ? Effect.interrupt
-                      : Effect.logWarning("Memory refresh unavailable", {
-                          threadId: input.threadId,
-                          runId,
-                        }).pipe(Effect.as(undefined)),
-                  ),
-                ),
+              refreshMemoryContext: makeRefreshMemoryContext(input.threadId, runId),
             }),
         providerThread: runningProviderThread,
         attempt: runningAttempt,

@@ -39,6 +39,7 @@ vi.mock("~/lib/runtime", async () => {
 });
 vi.mock("./AuthSurfaceShell", () => ({ AuthSurfaceShell: "auth-shell" }));
 vi.mock("../ui/button", () => ({ Button: "button" }));
+vi.mock("../ui/checkbox", () => ({ Checkbox: "checkbox" }));
 vi.mock("../ui/input", () => ({ Input: "input" }));
 vi.mock("../ui/radio-group", () => ({ RadioGroup: "radio-group" }));
 vi.mock("@base-ui/react/radio", () => ({ Radio: { Root: "radio" } }));
@@ -46,6 +47,8 @@ vi.mock("../ui/spinner", () => ({ Spinner: "spinner" }));
 vi.mock("../ui/alert", () => ({ Alert: "alert", AlertDescription: "alert-description" }));
 
 import { ConnectAgentSurface } from "./ConnectAgentSurface";
+// Mocked above as the host element "checkbox".
+import { Checkbox } from "../ui/checkbox";
 
 let renderer: ReactTestRenderer;
 const replace = vi.fn();
@@ -71,9 +74,10 @@ async function mount() {
     renderer = create(createElement(ConnectAgentSurface));
   });
 }
+const memoryCheckboxes = () => renderer.root.findAllByType(Checkbox);
 async function select(index: number, checked: boolean) {
-  const checkbox = renderer.root.findAllByProps({ type: "checkbox" })[index]!;
-  await act(() => checkbox.props.onChange({ currentTarget: { checked } }));
+  const checkbox = memoryCheckboxes()[index]!;
+  await act(() => checkbox.props.onCheckedChange(checked));
 }
 async function pair() {
   await act(() =>
@@ -103,11 +107,7 @@ describe("ConnectAgentSurface memory consent", () => {
           .findByProps({ "aria-labelledby": "connect-agent-access-label" })
           .props.onValueChange("full-access"),
       );
-      expect(
-        renderer.root
-          .findAllByProps({ type: "checkbox" })
-          .map((checkbox) => checkbox.props.checked),
-      ).toEqual([false, false]);
+      expect(memoryCheckboxes().map((checkbox) => checkbox.props.checked)).toEqual([false, false]);
       if (!browser) await pair();
       await approve();
       expect(calls.requests[0]?.decision).toMatchObject({

@@ -906,6 +906,9 @@ effectIt.effect("refreshes each send, omits none and failures, and fences a move
   Effect.gen(function* () {
     let grant: MemoryTaskGrantCeiling = "read_write";
     let fail = false;
+    let interrupt = false;
+    let threadReads = 0;
+    let policyReads = 0;
     let moved = false;
     let selections = 0;
     let moveDuringRead = false;
@@ -916,11 +919,19 @@ effectIt.effect("refreshes each send, omits none and failures, and fences a move
       text: "Continue",
       failReadsAfterRunning: true,
       memory: {
-        policy: () => Effect.sync(() => ({ grant, policyEpoch: 7 })),
-        currentRun: () => (moved ? undefined : RunId.make("run-native-account-command")),
+        policy: () =>
+          Effect.sync(() => {
+            policyReads++;
+            return { grant, policyEpoch: 7 };
+          }),
+        currentRun: () => {
+          threadReads++;
+          return moved ? undefined : RunId.make("run-native-account-command");
+        },
         select: (_threadId, policy, currentPolicy) =>
           Effect.gen(function* () {
             selections++;
+            if (interrupt) return yield* Effect.interrupt;
             expect(policy).toEqual(yield* currentPolicy);
             if (fail)
               return yield* new MemorySnapshot.MemorySnapshotError({
@@ -939,8 +950,12 @@ effectIt.effect("refreshes each send, omits none and failures, and fences a move
     expect(yield* refresh!()).toBe(snapshot);
     expect(selections).toBe(2);
     grant = "none";
+    const readsBeforeNone = threadReads;
+    const policiesBeforeNone = policyReads;
     expect(yield* refresh!()).toBeUndefined();
     expect(selections).toBe(2);
+    expect(threadReads).toBe(readsBeforeNone);
+    expect(policyReads).toBe(policiesBeforeNone + 1);
     grant = "read";
     expect(yield* refresh!()).toBe(snapshot);
     fail = true;
@@ -959,5 +974,12 @@ effectIt.effect("refreshes each send, omits none and failures, and fences a move
     moved = true;
     expect(yield* refresh!()).toBeUndefined();
     expect(selections).toBe(5);
+    moved = false;
+    moveDuringRead = false;
+    interrupt = true;
+    const exit = yield* Effect.exit(refresh!().pipe(Effect.provide(Logger.layer([logger]))));
+    expect(exit._tag).toBe("Failure");
+    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+    expect(diagnostics).toHaveLength(1);
   }),
 );

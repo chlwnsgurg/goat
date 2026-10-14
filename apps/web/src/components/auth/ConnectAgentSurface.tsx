@@ -20,6 +20,7 @@ import { cn } from "~/lib/utils";
 import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { Spinner } from "../ui/spinner";
@@ -244,29 +245,32 @@ export function ConnectAgentSurface() {
           </p>
         </div>
 
-        <fieldset disabled={pending !== null} className="space-y-2">
-          <legend className="text-sm font-medium">Memory access (optional)</legend>
+        <div className="space-y-2">
+          <span id="connect-agent-memory-label" className="text-sm font-medium">
+            Memory access (optional)
+          </span>
+          <div role="group" aria-labelledby="connect-agent-memory-label" className="space-y-2">
+            {AuthMcpMemoryScope.literals.map((scope) => (
+              <label key={scope} className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={memoryScopes.includes(scope)}
+                  disabled={pending !== null}
+                  onCheckedChange={(checked) =>
+                    setMemoryScopes((previous) =>
+                      checked === true
+                        ? [...previous.filter((selected) => selected !== scope), scope]
+                        : previous.filter((selected) => selected !== scope),
+                    )
+                  }
+                />
+                {scope === "memory:read" ? "Read memory" : "Write memory"}
+              </label>
+            ))}
+          </div>
           <p className="text-xs text-muted-foreground">
-            Choose memory permissions separately from thread access. Nothing is selected by default.
+            Memory permissions are separate from thread access. Nothing is selected by default.
           </p>
-          {AuthMcpMemoryScope.literals.map((scope) => (
-            <label key={scope} className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={memoryScopes.includes(scope)}
-                onChange={(event) => {
-                  const checked = event.currentTarget.checked;
-                  setMemoryScopes((previous) =>
-                    checked
-                      ? [...previous.filter((selected) => selected !== scope), scope]
-                      : previous.filter((selected) => selected !== scope),
-                  );
-                }}
-              />
-              {scope === "memory:read" ? "Read memory" : "Write memory"}
-            </label>
-          ))}
-        </fieldset>
+        </div>
 
         {oneClick ? null : (
           <div className="space-y-2">
