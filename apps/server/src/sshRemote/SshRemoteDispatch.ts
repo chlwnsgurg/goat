@@ -470,15 +470,8 @@ const make = Effect.gen(function* () {
     string,
     { readonly token: string; readonly expiresAt: number; readonly ceilingApplied: boolean }
   >();
-  // Per session key: the arguments that remote's goat_thread_launch declares.
-  // Cleared with each new session, since the remote may have been updated meanwhile.
-  const launchArguments = new Map<
-    string,
-    {
-      readonly declared: ReadonlySet<string>;
-      readonly advertisesMemory: boolean;
-    }
-  >();
+  // Cache only optional launch arguments; memory admission always uses a fresh catalog.
+  const launchArguments = new Map<string, ReadonlySet<string>>();
   const connected = new Set<string>();
 
   const withRuntime = <A, E>(
@@ -626,14 +619,13 @@ const make = Effect.gen(function* () {
       readonly token: string;
     }) {
       const key = sessionKey(remote.target, remote.ceiling, false, remote.memoryGrantCeiling);
-      const known = launchArguments.get(key);
-      if (known !== undefined) return known;
-      // Effect.exit also catches defects, so even a malformed listing only
-      // leaves the optional launch arguments undecided and never fails the launch.
+      // Never use session-lifetime cache entries to decide memory admission.
+      // Ordinary omitted-ceiling launches retain their optional-argument compatibility.
       const listed = yield* Effect.exit(
         listAcpMcpTools({
           endpoint: new URL("mcp", remote.httpBaseUrl).toString(),
           authorization: `Bearer ${remote.token}`,
+          strict: true,
         }).pipe(Effect.timeout(LAUNCH_LINEAGE_PROBE_TIMEOUT)),
       );
       if (Exit.isFailure(listed)) return null;
@@ -652,7 +644,7 @@ const make = Effect.gen(function* () {
         );
       const capabilities = { declared, advertisesMemory };
       if (declared.has("report") && declared.has("standingInstructions"))
-        launchArguments.set(key, capabilities);
+        launchArguments.set(key, declared);
       return capabilities;
     },
   );
@@ -1175,10 +1167,17 @@ const make = Effect.gen(function* () {
     }
 
     const capabilities = yield* remoteLaunchArguments(remote);
-    const declared = capabilities?.declared;
+    if (capabilities === null && input.memoryGrantCeiling !== undefined)
+      return yield* failure(
+        "remote_refused",
+        "Remote task memory admission could not be verified.",
+      );
+    const declared =
+      capabilities?.declared ??
+      launchArguments.get(sessionKey(target, input.runtimeMode, false, memoryGrantCeiling));
     // None adds no memory scope on legacy destinations without memory tools.
     // Memory-advertising destinations already require admission in the catalog probe.
-    if (memoryGrantCeiling !== "none" && declared?.has("memoryGrantCeiling") !== true)
+    if (memoryGrantCeiling !== "none" && capabilities?.declared.has("memoryGrantCeiling") !== true)
       return yield* failure("remote_refused", "Remote GOAT does not accept task memory ceilings.");
     const forwardLaunchedBy =
       input.launchedBy !== undefined && declared?.has("launchedBy") === true;
@@ -1224,7 +1223,7 @@ const make = Effect.gen(function* () {
             title: input.title,
             workspaceStrategy,
             runtimeMode: input.runtimeMode,
-            ...(declared?.has("memoryGrantCeiling") === true &&
+            ...(capabilities?.declared.has("memoryGrantCeiling") === true &&
             (memoryGrantCeiling !== "none" || capabilities?.advertisesMemory === true)
               ? { memoryGrantCeiling }
               : {}),

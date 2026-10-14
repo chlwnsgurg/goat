@@ -229,6 +229,8 @@ export interface AcpMcpListedTool {
 export function listAcpMcpTools(options: {
   readonly endpoint: string;
   readonly authorization: string;
+  /** Reject incomplete catalogs when the caller uses them for admission. */
+  readonly strict?: boolean;
   readonly fetchImplementation?:
     | ((url: string, init?: RequestInit) => Promise<Response>)
     | undefined;
@@ -239,6 +241,37 @@ export function listAcpMcpTools(options: {
     const responses = yield* send({ jsonrpc: "2.0", id: listId, method: "tools/list" });
     const result = yield* requestResult(responses, listId, "GOAT MCP tool listing");
     const tools = (result as { readonly tools?: unknown } | null)?.tools;
+    if (
+      options.strict === true &&
+      (!Array.isArray(tools) ||
+        tools.some((tool) => {
+          if (typeof tool !== "object" || tool === null || Array.isArray(tool)) return true;
+          const entry = tool as { readonly name?: unknown; readonly inputSchema?: unknown };
+          if (typeof entry.name !== "string" || entry.name.length === 0) return true;
+          if (
+            typeof entry.inputSchema !== "object" ||
+            entry.inputSchema === null ||
+            Array.isArray(entry.inputSchema)
+          )
+            return true;
+          const schema = entry.inputSchema as {
+            readonly type?: unknown;
+            readonly properties?: unknown;
+          };
+          return (
+            schema.type !== "object" ||
+            (schema.properties !== undefined &&
+              (typeof schema.properties !== "object" ||
+                schema.properties === null ||
+                Array.isArray(schema.properties)))
+          );
+        }))
+    )
+      return yield* Effect.fail(
+        new AcpMcpBridgeError("GOAT MCP returned a malformed tool catalog.", {
+          kind: "protocol",
+        }),
+      );
     if (!Array.isArray(tools)) return [];
     return tools.flatMap((tool): ReadonlyArray<AcpMcpListedTool> => {
       // A remote can return anything here; skip entries that are not objects.
