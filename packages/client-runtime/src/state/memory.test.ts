@@ -132,6 +132,11 @@ const item = Schema.decodeUnknownSync(MemoryItem)({
     derivedFromMemoryRevisions: [],
   },
 });
+const unrelatedItem = Schema.decodeUnknownSync(MemoryItem)({
+  ...item,
+  memoryId: unrelated,
+  ...(item.status === "active" ? { revision: { ...item.revision, memoryId: unrelated } } : {}),
+});
 const page = Schema.decodeUnknownSync(MemoryPage)({
   items: [item],
   projectionWatermark: 1,
@@ -1016,7 +1021,7 @@ describe("shared memory client", () => {
           h.registry.mount(edit);
           h.registry.set(edit, { text: "Derived before absence", memoryIds: [unrelated] });
           if (phase === "visible") {
-            yield* Deferred.succeed(first.reply, { ...item, memoryId: unrelated });
+            yield* Deferred.succeed(first.reply, unrelatedItem);
             yield* waitFor(h.registry, body, Boolean);
           }
           const entries = yield* SubscriptionRef.get(h.entries);
@@ -1028,7 +1033,7 @@ describe("shared memory client", () => {
           expect(h.ledger.space(env, space)).toBe(retained);
           expect(retained.forgotten.has(id)).toBe(true);
           yield* Deferred.await(first.finalized);
-          yield* Deferred.succeed(first.reply, { ...item, memoryId: unrelated });
+          yield* Deferred.succeed(first.reply, unrelatedItem);
           expect(h.registry.get(body)).toBe(false);
           // Removing a different registration must not clean the retained E ledger either.
           yield* SubscriptionRef.set(h.entries, new Map());
@@ -1055,7 +1060,7 @@ describe("shared memory client", () => {
             }),
           );
           h.registry.mount(list);
-          yield* Deferred.succeed(restoredRead.reply, { ...item, memoryId: unrelated });
+          yield* Deferred.succeed(restoredRead.reply, unrelatedItem);
           yield* waitFor(h.registry, body, Boolean);
           yield* waitFor(
             h.registry,
