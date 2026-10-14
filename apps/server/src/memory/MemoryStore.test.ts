@@ -4252,3 +4252,73 @@ it.effect("keeps the successor frontier and exposure on body-free canonical meta
     assert.deepStrictEqual(after.item, before.item);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "finds activated admin beyond a saturated ready list and excludes acknowledged records",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const make = (n: number): Store.AdminRecord => ({
+        requestId: M.MemoryOperationId.make(id(n)),
+        requestDigest: hash,
+        expectedVersion: 0,
+        stage: "prepared",
+        action: {
+          action: "configure",
+          requestId: M.MemoryOperationId.make(id(n)),
+          expectedVersion: 0,
+          settings: { mode: "disabled" },
+        },
+        secretName: null,
+        memberVersion: null,
+        result: null,
+      });
+      assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+      for (let n = 0; n <= M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS; n++) {
+        const record = make(2000 + n);
+        yield* store.transact(store.writeHubAdminTx({ record, expectedStage: null }));
+        yield* store.transact(
+          store.writeHubAdminTx({
+            record: { ...record, stage: "activated" },
+            expectedStage: "prepared",
+          }),
+        );
+        const ready: Store.AdminRecord = {
+          ...record,
+          stage: "ready",
+          result: { view: { settings: { mode: "disabled" }, version: 1 } },
+        };
+        yield* store.transact(store.writeHubAdminTx({ record: ready, expectedStage: "activated" }));
+        if (n === 0)
+          yield* store.transact(
+            store.writeHubAdminTx({
+              record: { ...ready, stage: "acknowledged" },
+              expectedStage: "ready",
+            }),
+          );
+      }
+      assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+      const prepared = make(3000);
+      yield* store.transact(store.writeHubAdminTx({ record: prepared, expectedStage: null }));
+      const target = make(4000);
+      yield* store.transact(store.writeHubAdminTx({ record: target, expectedStage: null }));
+      const activated: Store.AdminRecord = { ...target, stage: "activated" };
+      yield* store.transact(
+        store.writeHubAdminTx({ record: activated, expectedStage: "prepared" }),
+      );
+      assert.isFalse(
+        (yield* store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)).some(
+          (r) => r.requestId === activated.requestId,
+        ),
+      );
+      assert.deepStrictEqual(yield* store.transact(store.readActivatedHubAdminTx()), activated);
+      const fresh = yield* Effect.service(Store.MemoryStore).pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(yield* fresh.transact(fresh.readActivatedHubAdminTx()), activated);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin' AND json_extract(admin_json,'$.stage')='acknowledged'`)
+          .length,
+        1,
+      );
+    }).pipe(Effect.provide(live)),
+);

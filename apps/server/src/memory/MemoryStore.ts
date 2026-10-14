@@ -924,6 +924,7 @@ export class MemoryStore extends Context.Service<
       next: { credentialDigest: string; credentialVersion: number } | "revoked";
       now: number;
     }) => InTx<HubMember, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
+    readonly readActivatedHubAdminTx: () => InTx<AdminRecord | undefined, MemoryStorageError>;
     readonly readPendingHubAdmins: (
       limit: number,
     ) => Effect.Effect<readonly AdminRecord[], MemoryStorageError>;
@@ -5732,6 +5733,20 @@ const make = Effect.gen(function* () {
     );
     return record;
   });
+  const readActivatedHubAdminTx: MemoryStore["Service"]["readActivatedHubAdminTx"] = Effect.fn(
+    "MemoryStore.readActivatedHubAdminTx",
+  )(function* () {
+    yield* Transaction;
+    const rows = yield* stored(
+      "hub-admin-activated",
+      sql<{
+        admin_json: string;
+      }>`SELECT admin_json FROM memory_outbox WHERE kind='admin' AND admin_json IS NOT NULL AND json_extract(admin_json,'$.stage')='activated' ORDER BY id LIMIT 1`,
+    );
+    return rows[0]
+      ? yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict))
+      : undefined;
+  });
   const readPendingHubAdmins: MemoryStore["Service"]["readPendingHubAdmins"] = Effect.fn(
     "MemoryStore.readPendingHubAdmins",
   )(function* (limit) {
@@ -7747,6 +7762,7 @@ const make = Effect.gen(function* () {
     writeHubAdminTx: (input) => withHubBudget(writeHubAdminTx(input)),
     activateHubMemberTx: (input) => withHubBudget(activateHubMemberTx(input)),
     readPendingHubAdmins,
+    readActivatedHubAdminTx,
     advanceBootstrapTx,
     readHubMember,
     findHubMemberByCredential,
