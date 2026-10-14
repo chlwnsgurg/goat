@@ -4777,3 +4777,393 @@ it.effect.each(["stale-candidate", "ticket-write-failure"] as const)(
       );
     }),
 );
+
+it.effect(
+  "first null-space hub configure bootstraps its own replica without HTTP and exchanges writes",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const settingsLayer = Settings.layer.pipe(
+          Layer.provideMerge(Secrets.layer),
+          Layer.provideMerge(Sqlite.layerMemory),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "goat-l4-self-bootstrap-" }),
+          ),
+          Layer.provideMerge(NodeServices.layer),
+        );
+        const selfCore = Service.layer.pipe(
+          Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
+          Layer.provideMerge(settingsLayer),
+          Layer.provideMerge(identity),
+          Layer.provide(
+            Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+              resolve: () => Effect.succeed(null),
+            }),
+          ),
+        );
+        const selfHub = Hub.layer.pipe(
+          Layer.provideMerge(Hub.activityLayer),
+          Layer.provide(
+            Layer.effect(
+              Hub.MemoryHubConfiguration,
+              Effect.gen(function* () {
+                const committed = yield* Settings.MemoryHubCommittedSettings;
+                return Hub.MemoryHubConfiguration.of({
+                  read: committed.read.pipe(
+                    Effect.map((s) =>
+                      s.settings.mode === "hub" && s.settings.memorySpaceId
+                        ? { memorySpaceId: s.settings.memorySpaceId, hubEnvironmentId: local }
+                        : null,
+                    ),
+                  ),
+                });
+              }),
+            ),
+          ),
+          Layer.provideMerge(selfCore),
+        );
+        const app = Sync.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              selfHub,
+              runtimeBase.pipe(Layer.provide(selfCore)),
+              realGeneration({ resolveMemoryConflict: () => Effect.never }),
+              peer({
+                join: () => Effect.die("self HTTP join forbidden"),
+                pull: () => Effect.die("self HTTP pull forbidden"),
+                push: () => Effect.die("self HTTP push forbidden"),
+              }),
+            ),
+          ),
+        );
+        const context = yield* Layer.build(app);
+        yield* Effect.gen(function* () {
+          const admin = yield* Hub.makeAdministrator;
+          const configured = yield* admin.update(
+            {
+              requestId: M.MemoryOperationId.make(id(98000)),
+              expectedVersion: 0,
+              action: "configure",
+              settings: { mode: "hub", memorySpaceId: null },
+            },
+            Effect.void,
+          );
+          if (configured.view.settings.mode !== "hub" || !configured.view.settings.memorySpaceId)
+            throw new Error("fixture hub configure");
+          const allocated = configured.view.settings.memorySpaceId;
+          const store = yield* Store.MemoryStore;
+          const sync = yield* Sync.MemorySyncService;
+          assert.strictEqual(
+            (yield* store.readBootstrap({ memorySpaceId: allocated, hubEnvironmentId: local }))
+              .state,
+            "unbound",
+          );
+          yield* sync.start;
+          assert.deepStrictEqual(yield* sync.readLocalReadiness(), {
+            memorySpaceId: allocated,
+            bootstrap: "ready",
+          });
+          // Both directions cross authoritative HubService admission; no ready seed or SQL membership seed.
+          const hub = yield* Hub.MemoryHubService;
+          const service = yield* Service.MemoryService;
+          const h = operation(98001, M.MemoryId.make(id(98002)));
+          if (h.kind !== "upsert") throw new Error("fixture upsert");
+          const hOp = {
+            ...h,
+            memorySpaceId: allocated,
+            revision: { ...h.revision, memorySpaceId: allocated },
+          };
+          yield* service.upsert(
+            {
+              memorySpaceId: allocated,
+              memoryId: hOp.memoryId,
+              operationId: hOp.operationId,
+              expectedHeads: [],
+              scope: { kind: "user" },
+              assertionKind: "inference",
+              payload: hOp.payload,
+              baseBoundary: null,
+            },
+            Effect.void,
+          );
+          yield* sync.syncOnce;
+          const provisioned = yield* admin.update(
+            {
+              requestId: M.MemoryOperationId.make(id(98003)),
+              expectedVersion: configured.view.version,
+              action: "provisionMember",
+              environmentId: remote,
+            },
+            Effect.void,
+          );
+          assert.isNotNull(provisioned.credential);
+          const principal: M.MemoryHubPrincipal = {
+            memorySpaceId: allocated,
+            environmentId: remote,
+            credentialVersion: 1,
+            scopes: ["memory:sync"],
+          };
+          const page = yield* hub.pull(
+            {
+              protocolVersion: 1,
+              memorySpaceId: allocated,
+              environmentId: remote,
+              afterSequence: 0,
+              limit: 100,
+            },
+            principal,
+          );
+          assert.isTrue(
+            page.entries.some(
+              (e) => e.kind === "operation" && e.operation.memoryId === hOp.memoryId,
+            ),
+          );
+          const a = operation(98004, M.MemoryId.make(id(98005)));
+          if (a.kind !== "upsert") throw new Error("fixture upsert");
+          const aOp = {
+            ...a,
+            memorySpaceId: allocated,
+            originEnvironmentId: remote,
+            revision: {
+              ...a.revision,
+              memorySpaceId: allocated,
+              provenance: { environmentId: remote },
+            },
+          };
+          yield* hub.push(
+            {
+              protocolVersion: 1,
+              memorySpaceId: allocated,
+              environmentId: remote,
+              operations: [aOp],
+            },
+            principal,
+          );
+          yield* sync.syncOnce;
+          const received = (yield* service.list(
+            {
+              memorySpaceId: allocated,
+              scope: { kind: "user" },
+              limit: 20,
+              includeQuarantined: false,
+            },
+            Effect.void,
+          )).items.find((i) => i.memoryId === aOp.memoryId);
+          assert.strictEqual(received?.status, "active");
+          if (received?.status !== "active") throw new Error("fixture active memory");
+          assert.strictEqual(received.payload.text, "synthetic fact 98004");
+          assert.isAtLeast(yield* store.readCursor(allocated, local), 2);
+          yield* sync.shutdown;
+        }).pipe(Effect.provideContext(context));
+      }),
+    ),
+);
+
+const recoveredDescriptor: M.ExecutionEnvironmentDescriptor = {
+  environmentId: remote,
+  label: "fixture",
+  platform: { os: "linux", arch: "x64" },
+  serverVersion: "1",
+  capabilities: { memoryHubProtocolVersion: 1, repositoryIdentity: false },
+};
+const persistPullHold = (c: Store.MemoryHoldClass) =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    yield* store.transact(
+      store.writePullRetryTx({
+        memorySpaceId: space,
+        hubEnvironmentId: remote,
+        expectedVersion: 0,
+        retry: {
+          attempts: 1,
+          nextAttemptAt: Number.MAX_SAFE_INTEGER,
+          failureCode: "bootstrap_required",
+          holdClass: c,
+        },
+      }),
+    );
+  });
+it.effect.each(["availability", "protocol", "identity"] as const)(
+  "real descriptor recovery probe releases only the held pull class: %s",
+  (c) =>
+    Effect.gen(function* () {
+      let probes = 0;
+      let pulls = 0;
+      const pulled = yield* Deferred.make<void>();
+      const client = peer({
+        preflight: () =>
+          Effect.sync(() => {
+            probes++;
+            return recoveredDescriptor;
+          }),
+        pull: () =>
+          Deferred.succeed(pulled, undefined).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                pulls++;
+                return { highWatermark: 0, throughSequence: 0, hasMore: false, entries: [] };
+              }),
+            ),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* persistPullHold(c);
+          const store = yield* Store.MemoryStore;
+          yield* enqueue(98100);
+          // An unrelated authorization hold must survive the descriptor observation.
+          const candidate = (yield* store.readEligibleOutbox(space, 0, 1))[0]!;
+          yield* store.transact(
+            Effect.gen(function* () {
+              const acquired = yield* store.acquireSyncWorkTx({
+                workId: candidate.work.id,
+                operationId: candidate.operationId,
+                operationDigest: candidate.operationDigest,
+                expectedVersion: candidate.version,
+                owner: "fixture",
+                now: 0,
+                ownedUntil: 30000,
+              });
+              yield* store.retrySyncWorkTx({
+                ownership: acquired!,
+                now: 0,
+                nextAttemptAt: Number.MAX_SAFE_INTEGER,
+                failureCode: "route_unavailable",
+                holdClass: "authorization",
+              });
+            }),
+          );
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.start;
+          assert.strictEqual(pulls, 0);
+          yield* TestClock.adjust(29999);
+          assert.strictEqual(probes, 0);
+          assert.strictEqual(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .holdClass,
+            c,
+          );
+          yield* TestClock.adjust(1);
+          yield* Deferred.await(pulled);
+          yield* sync.syncOnce;
+          assert.strictEqual(probes, 1);
+          assert.isAtLeast(pulls, 1);
+          assert.isNull(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .holdClass,
+          );
+          assert.strictEqual((yield* store.readWorkHold("sync:98100"))?.holdClass, "authorization");
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+it.effect(
+  "failed recovery probes back off from 30 seconds to a 15 minute cap without releasing holds",
+  () =>
+    Effect.gen(function* () {
+      const times: number[] = [];
+      const client = peer({
+        preflight: () =>
+          Effect.gen(function* () {
+            times.push(yield* Clock.currentTimeMillis);
+            return yield* new M.MemoryHubError({ code: "unavailable" });
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* persistPullHold("availability");
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          yield* sync.start;
+          for (const delay of [30000, 60000, 120000, 240000, 480000, 900000, 900000]) {
+            const previous = times.length;
+            yield* TestClock.adjust(delay - 1);
+            assert.strictEqual(times.length, previous);
+            yield* TestClock.adjust(1);
+            assert.strictEqual(times.length, previous + 1);
+          }
+          assert.deepStrictEqual(times, [30000, 90000, 210000, 450000, 930000, 1830000, 2730000]);
+          assert.strictEqual(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .holdClass,
+            "availability",
+          );
+          yield* sync.shutdown;
+          yield* TestClock.adjust(900000);
+          assert.strictEqual(times.length, 7);
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+it.effect("authorization pull hold never probes the public descriptor", () =>
+  Effect.gen(function* () {
+    let probes = 0;
+    const client = peer({
+      preflight: () =>
+        Effect.sync(() => {
+          probes++;
+          return recoveredDescriptor;
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* persistPullHold("authorization");
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.start;
+        yield* TestClock.adjust(900000);
+        yield* sync.syncOnce;
+        const store = yield* Store.MemoryStore;
+        assert.strictEqual(probes, 0);
+        assert.strictEqual(
+          (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+            .holdClass,
+          "authorization",
+        );
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(client))),
+    );
+  }),
+);
+it.effect.each(["epoch", "shutdown"] as const)(
+  "inflight recovery probe is cancelled on %s",
+  (boundary) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      let probes = 0;
+      const client = peer({
+        preflight: () =>
+          Effect.gen(function* () {
+            probes++;
+            yield* Deferred.succeed(entered, undefined);
+            return yield* Effect.never;
+          }).pipe(Effect.ensuring(Deferred.succeed(interrupted, undefined))),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* persistPullHold("identity");
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          yield* sync.start;
+          yield* TestClock.adjust(30000);
+          yield* Deferred.await(entered);
+          if (boundary === "epoch") yield* changeHub(1, { mode: "disabled" });
+          else yield* sync.shutdown;
+          yield* Deferred.await(interrupted);
+          yield* TestClock.adjust(900000);
+          assert.strictEqual(probes, 1);
+          assert.strictEqual(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .holdClass,
+            "identity",
+          );
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client, undefined, false, true))),
+      );
+    }),
+);

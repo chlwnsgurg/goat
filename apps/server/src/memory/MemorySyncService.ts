@@ -296,6 +296,35 @@ const make = Effect.gen(function* () {
     };
   });
   type Route = NonNullable<Effect.Success<ReturnType<typeof route>>>;
+  // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
+  const recoveries = new Map<Store.MemoryHoldClass, { route: Route; delay: number; due: number }>();
+  let recoveryFiber: Fiber.Fiber<void, never> | null = null;
+  const scheduleRecovery = (
+    r: Route,
+    c: Store.MemoryHoldClass | null,
+  ): Effect.Effect<void, Service.MemoryAccessError> =>
+    Effect.gen(function* () {
+      if (!started || stopped || cancelling || !r.connection || !c || c === "authorization") return;
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      if (!recoveries.has(c))
+        recoveries.set(c, {
+          route: r,
+          delay: 30000,
+          due: (yield* Clock.currentTimeMillis) + 30000,
+        });
+      if (recoveryFiber) return;
+      const ready = yield* Deferred.make<void>();
+      recoveryFiber = yield* Deferred.await(ready).pipe(
+        Effect.andThen(Effect.suspend(() => recoveryLoop)),
+        Effect.ensuring(
+          Effect.sync(() => {
+            recoveryFiber = null;
+          }),
+        ),
+        Effect.forkIn(scope),
+      );
+      yield* Deferred.succeed(ready, undefined);
+    }).pipe(Effect.uninterruptible);
   const callPull = (r: Route, i: M.MemoryHubPullInput) =>
     r.connection ? client.pull(r.connection, i) : hub.pull(i, r.principal!);
   const release = (r: Route, ticket: M.MemoryResolutionLease) => {
@@ -1077,13 +1106,16 @@ const make = Effect.gen(function* () {
     if (!r.space) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
     let state = yield* runtime.readBootstrap(r.space, r.hubId);
     if (state.state === "ready") return true;
-    if (!r.connection) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
     if (state.state === "unbound") {
-      const join = yield* client.join(r.connection, {
+      const input: M.MemoryHubJoinInput = {
         protocolVersion: 1,
         environmentId: local,
         memorySpaceId: r.space,
-      });
+      };
+      // The hub device is a replica too; use its active self authority without self HTTP.
+      const join = yield* r.connection
+        ? client.join(r.connection, input)
+        : hub.join(input, r.principal!);
       yield* ensureEpoch(r.settings.memoryHubVersion);
       state = {
         state: "staging",
@@ -1187,7 +1219,10 @@ const make = Effect.gen(function* () {
   ) {
     const key = { memorySpaceId: r.space!, hubEnvironmentId: r.hubId };
     const retry = yield* store.readPullRetry(key);
-    if (retry.nextAttemptAt > (yield* Clock.currentTimeMillis)) return false;
+    if (retry.nextAttemptAt > (yield* Clock.currentTimeMillis)) {
+      yield* scheduleRecovery(r, retry.holdClass);
+      return false;
+    }
     const result = yield* Effect.result(
       Effect.gen(function* () {
         const complete = yield* bootstrap(r, budget);
@@ -1213,6 +1248,7 @@ const make = Effect.gen(function* () {
           },
         }),
       );
+      yield* scheduleRecovery(r, transient(error) ? null : holdClass(error));
       yield* wakePullRetry;
       return yield* error;
     }
@@ -1411,6 +1447,7 @@ const make = Effect.gen(function* () {
             ...(transient(result.failure) ? {} : { holdClass: holdClass(result.failure) }),
           }),
         );
+        yield* scheduleRecovery(r, transient(result.failure) ? null : holdClass(result.failure));
       }
     }
   });
@@ -1568,6 +1605,38 @@ const make = Effect.gen(function* () {
     });
   const syncOnce = requestCycle(syncCycle);
   const guardedSync = syncOnce.pipe(Effect.ignore);
+  // Timers only schedule real reads. A successful pinned descriptor is the observation;
+  // authorization is deliberately never inferred from this public, credential-free read.
+  const recoveryLoop: Effect.Effect<void> = Effect.gen(function* () {
+    while (!stopped && recoveries.size) {
+      const next = Math.min(...[...recoveries.values()].map((p) => p.due));
+      yield* Effect.sleep(Math.max(0, next - (yield* Clock.currentTimeMillis)));
+      for (const [c, pending] of recoveries) {
+        if (pending.due > (yield* Clock.currentTimeMillis)) continue;
+        const r = pending.route;
+        const observed = yield* Effect.result(
+          Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+            const descriptor = yield* client.preflight(r.connection!);
+            if (descriptor.environmentId !== r.hubId)
+              return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+            if (descriptor.capabilities.memoryHubProtocolVersion !== 1)
+              return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+          }).pipe(Effect.timeout("15 seconds")),
+        );
+        if (recoveries.get(c) !== pending) continue;
+        if (observed._tag === "Success") {
+          recoveries.delete(c);
+          enqueueRearm(r.settings.memoryHubVersion, r.space!, [c]);
+          yield* requestCycle(syncCycle, false, false).pipe(Effect.ignore);
+        } else {
+          pending.delay = Math.min(900000, pending.delay * 2);
+          pending.due = (yield* Clock.currentTimeMillis) + pending.delay;
+        }
+      }
+    }
+  }).pipe(Effect.ignore);
   const cancelEpoch = coordinator.withPermit(
     Effect.gen(function* () {
       cancelling = true;
@@ -1582,10 +1651,13 @@ const make = Effect.gen(function* () {
         )
         .map(([c]) => c);
       rearms.clear();
+      recoveries.clear();
+      const probe = recoveryFiber;
       const active = cycle;
       // No sync/registry mutex is held while cancellation is requested. Cycle interruption
       // finishes any registration reservation first; matching release has a 15s bound.
       yield* Fiber.interruptAll([
+        ...(probe ? [probe] : []),
         ...(active ? [active] : []),
         ...[...executions.values()].flatMap((e) => (e.fiber ? [e.fiber] : [])),
       ]);
