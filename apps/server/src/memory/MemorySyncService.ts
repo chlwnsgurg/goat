@@ -408,6 +408,11 @@ const make = Effect.gen(function* () {
           memoryId: row.ticket.memoryId,
           heads: row.ticket.conflictHeadSet,
         });
+        if (
+          revisions.length !== row.ticket.conflictHeadSet.length ||
+          revisions.some((h) => h.payload === null)
+        )
+          return yield* new M.MemoryHubError({ code: "missing_parent" });
         const heads = revisions
           .filter(
             (h) => row.ticket.conflictHeadSet.includes(h.revision.revisionId) && h.payload !== null,

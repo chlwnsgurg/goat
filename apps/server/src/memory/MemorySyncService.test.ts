@@ -2482,7 +2482,7 @@ it.effect.each(["rejected", "uncertain"] as const)(
           yield* sync.shutdown;
           const saved = yield* store.readRecoverableResolutionTickets({
             memorySpaceId: space,
-            now: 0,
+            now: 30000,
             limit: 100,
           });
           if (outcome === "rejected") {
@@ -2519,4 +2519,68 @@ it.effect.each(["rejected", "uncertain"] as const)(
         }).pipe(Effect.provide(fixture(client, model))),
       );
     }),
+);
+
+it.effect("a missing selected head body never exposes a partial frontier to generation", () =>
+  Effect.gen(function* () {
+    const released = yield* Deferred.make<void>();
+    let calls = 0;
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Effect.sync(() => {
+          calls++;
+        }).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const memory = yield* conflict();
+        const op = operation(6, memory);
+        const root = operation(3, memory);
+        if (op.kind !== "upsert" || root.kind !== "upsert") throw new Error("fixture");
+        yield* commit({
+          ...op,
+          expectedHeads: [root.revision.revisionId],
+          revision: { ...op.revision, parents: [root.revision.revisionId] },
+        });
+        const store = yield* Store.MemoryStore;
+        const observed = Store.MemoryStore.of({
+          ...store,
+          readResolutionHeads: (input) =>
+            store
+              .readResolutionHeads(input)
+              .pipe(
+                Effect.map((heads) =>
+                  heads.map((head, i) => (i === 0 ? { ...head, payload: null } : head)),
+                ),
+              ),
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            yield* sync.syncOnce;
+            yield* Deferred.await(released);
+            yield* sync.shutdown;
+            assert.strictEqual(calls, 0);
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Store.MemoryStore, observed)),
+              ),
+            ),
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          fixture(
+            peer({
+              release: () =>
+                Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+            }),
+            model,
+          ),
+        ),
+      ),
+    );
+  }),
 );
