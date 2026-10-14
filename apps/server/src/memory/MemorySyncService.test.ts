@@ -3677,3 +3677,57 @@ it.effect(
       );
     }),
 );
+
+it.effect("failed renewal SQL write and release retain retains the authoritative retry floor", () =>
+  Effect.gen(function* () {
+    const released = yield* Deferred.make<void>();
+    let issued: M.MemoryResolutionLease | undefined;
+    let models = 0;
+    const client = peer({
+      claim: (_c, { protocolVersion: _p, ...claim }) =>
+        Effect.sync(() => {
+          issued = {
+            ...claim,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          };
+          return issued;
+        }),
+      renew: () => Effect.succeed({ ...issued!, expiresAtHubTime: "1970-01-01T00:03:00.000Z" }),
+      release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: false })),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Effect.sync(() => {
+          models++;
+        }).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`CREATE TRIGGER review_renewal_sql_failure BEFORE UPDATE ON memory_outbox WHEN NEW.kind='resolve' AND NEW.ticket_json LIKE '%00:03:00.000Z%' BEGIN SELECT RAISE(ABORT, 'synthetic renewal storage failure'); END`;
+        const sync = yield* Sync.MemorySyncService;
+        const store = yield* Store.MemoryStore;
+        yield* sync.syncOnce;
+        yield* Deferred.await(released);
+        yield* sync.shutdown;
+        const saved = yield* store.readRecoverableResolutionTickets({
+          memorySpaceId: space,
+          now: 180000,
+          limit: 100,
+        });
+        assert.strictEqual(saved.length, 1);
+        assert.strictEqual(models, 0, "failed persistence must prevent provider input");
+        assert.isAtLeast(
+          saved[0]!.nextAttemptAt,
+          180000,
+          "renewal persistence failure must retain known hub expiry",
+        );
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
+);

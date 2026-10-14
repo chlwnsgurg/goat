@@ -349,6 +349,7 @@ const make = Effect.gen(function* () {
     let row = initial;
     let currentLease = initial.ticket;
     let renewalFailed = false;
+    let authoritativeExpiry = Date.parse(initial.ticket.expiresAtHubTime);
     let definitiveFailure = false;
     let generationAttempted = false;
     let failureRecorded = false;
@@ -369,7 +370,7 @@ const make = Effect.gen(function* () {
               ? null
               : now + 60000,
           nextAttemptAt: Math.max(
-            renewalFailed ? Date.parse(currentLease.expiresAtHubTime) : 0,
+            renewalFailed ? authoritativeExpiry : 0,
             now +
               (relinquish || retireClaim || state === "recoverable" || state === "submitting"
                 ? 30000
@@ -418,6 +419,9 @@ const make = Effect.gen(function* () {
           selectionKey(current.frozenDefaultModelSelection)
       )
         return yield* new M.MemoryHubError({ code: "fenced" });
+      // Hub authority survives a failed local write; keep the persisted lease for subsequent CAS.
+      authoritativeExpiry = Math.max(authoritativeExpiry, Date.parse(renewed.expiresAtHubTime));
+      renewalFailed = true;
       const persisted = yield* store.transact(
         store.renewResolutionTicketTx({
           ownership: ownership(row),
@@ -427,6 +431,7 @@ const make = Effect.gen(function* () {
         }),
       );
       if (!persisted) return yield* new M.MemoryHubError({ code: "fenced" });
+      renewalFailed = false;
       currentLease = renewed;
       row = persisted;
       const slot = executions.get(renewed.memoryId);
@@ -631,10 +636,7 @@ const make = Effect.gen(function* () {
                 failureCode: failureCode(error),
                 nextAttemptAt: definitiveFailure
                   ? now
-                  : Math.max(
-                      now + 30000,
-                      renewalFailed ? Date.parse(currentLease.expiresAtHubTime) : 0,
-                    ),
+                  : Math.max(now + 30000, renewalFailed ? authoritativeExpiry : 0),
                 reportConflictFailure:
                   definitiveFailure &&
                   generationAttempted &&
