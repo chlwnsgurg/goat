@@ -1,3 +1,5 @@
+import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as Exit from "effect/Exit";
 import * as M from "@goat/contracts";
 import * as MemoryContext from "@goat/provider-core/server/memoryContext";
@@ -2932,6 +2934,149 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect.each(["survives", "revoked"] as const)(
+    "revalidates the original snapshot before native restore (%s)",
+    (outcome) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = `wp4-restore-${outcome}`;
+          const nativeTurnId = "restore-turn";
+          const scenario = `wp4-restore-${outcome}`;
+          const threadId = ThreadId.make(`thread-${scenario}`);
+          const snapshot = wp4Memory();
+          const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "work" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            hasGoatMcp: true,
+            memoryContext: snapshot,
+            memoryTools: { read: true, write: false, source: true },
+          });
+          const context = { ...params.additionalContext };
+          if (outcome === "revoked") delete context.goat_memory;
+          const original = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+          const items = Object.entries(context).map(([key, entry]) => ({
+            type: "message",
+            role: entry.kind === "untrusted" ? "user" : "developer",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  entry.kind === "untrusted"
+                    ? `<external_${key}>${entry.value}</external_${key}>`
+                    : `<${key}>${entry.value}</${key}>`,
+              },
+            ],
+          }));
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...original.slice(0, 5),
+              { type: "expect_outbound", frame: { id: 3, method: "turn/start", params } },
+              ...original.slice(6),
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    item: { type: "contextCompaction", id: "restore-item" },
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/inject_items",
+                  params: { threadId: nativeThreadId, items },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: {} } },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          yield* (yield* McpProviderSessions.McpProviderSessions).set({
+            environmentId: EnvironmentId.make("fixture"),
+            threadId,
+            providerSessionId: "wp4-restore-credential",
+            providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: "Bearer fixture",
+            browserToolsAvailable: true,
+            grantedScopes: ["memory:read", "orchestration:read"],
+          });
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          let execution: { threadId: M.ThreadId; runId: M.RunId } | undefined;
+          let revalidations = 0;
+          const harness = yield* makeCodexReplayHarness(transcript).pipe(
+            Effect.provideService(MemorySnapshot.MemorySnapshot, {
+              forThread: () => Effect.die("restoration must not reselect"),
+              invalidate: () => Effect.void,
+              revalidate: (originalSnapshot, currentExecution, policy) =>
+                Effect.gen(function* () {
+                  assert.strictEqual(originalSnapshot, snapshot);
+                  execution = currentExecution;
+                  revalidations++;
+                  assert.deepEqual(yield* policy, { grant: "read", policyEpoch: 1 });
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                  return outcome === "survives" ? originalSnapshot : undefined;
+                }),
+            }),
+            Effect.provideService(McpSessionRegistry.McpSessionRegistry, {
+              issue: () => Effect.die("unused"),
+              resolve: () => Effect.succeed(undefined),
+              touch: () => Effect.void,
+              revokeProviderSession: () => Effect.void,
+              revokeThread: () => Effect.void,
+              revokeAll: Effect.void,
+              currentMemoryPolicy: () => Effect.succeed({ grant: "read", policyEpoch: 1 }),
+            }),
+          );
+          const input = makeCodexTestTurnInput({
+            threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("wp4-restore"),
+            text: "work",
+          });
+          yield* harness.runtime.startTurn({
+            ...input,
+            refreshMemoryContext: () => Effect.succeed(snapshot),
+          });
+          yield* Deferred.await(entered);
+          assert.deepEqual(execution, { threadId: input.threadId, runId: input.runId });
+          yield* Deferred.succeed(release, undefined);
+          yield* harness.firstTerminal;
+          assert.equal(revalidations, 1);
+          const memoryItem = items.find((item) =>
+            item.content[0]?.text.includes("external_goat_memory"),
+          );
+          if (outcome === "survives") {
+            assert.equal(memoryItem?.role, "user");
+            assert.include(memoryItem!.content[0]!.text, "&lt;untrusted&gt;");
+          } else assert.isUndefined(memoryItem);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect("preserves T3 context on the wire and restores it after compaction", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -3001,16 +3146,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             },
           ],
         });
-        const harness = yield* makeCodexReplayHarness(transcript);
         yield* (yield* McpProviderSessions.McpProviderSessions).set({
           environmentId: EnvironmentId.make("test"),
-          threadId: harness.threadId,
+          threadId: ThreadId.make("thread-restore-context"),
           providerSessionId: "context-session",
           providerInstanceId: ProviderInstanceId.make("codex"),
           endpoint: "http://127.0.0.1:43123/mcp",
           authorizationHeader: "Bearer test",
           browserToolsAvailable: true,
         });
+        const harness = yield* makeCodexReplayHarness(transcript);
         yield* harness.runtime.startTurn(
           makeCodexTestTurnInput({
             threadId: harness.threadId,

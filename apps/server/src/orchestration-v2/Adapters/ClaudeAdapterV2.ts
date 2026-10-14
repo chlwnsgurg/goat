@@ -1,3 +1,4 @@
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
@@ -3432,6 +3433,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const memoryRegistry = Option.getOrUndefined(
+    yield* Effect.serviceOption(McpSessionRegistry.McpSessionRegistry),
+  );
+  const readMcpSession = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const config = yield* mcpSessions.read(threadId);
+      if (!config) return undefined;
+      const policy = memoryRegistry?.currentMemoryPolicy
+        ? yield* memoryRegistry.currentMemoryPolicy(config.providerSessionId)
+        : undefined;
+      return !policy || policy.grant === "none" ? { ...config, grantedScopes: [] } : config;
+    });
+
   const { attachmentsDir, fileSystem, path, crypto, idAllocator, queryRunner } = adapterOptions;
   // Subagent model names and effort levels, including the instance's custom models.
   const subagentModelCatalog = scopeClaudeModelCatalog(
@@ -3519,7 +3533,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   return;
                 const existing = yield* Ref.get(queryContext);
                 if (!existing || existing.stopping) return;
-                const config = yield* mcpSessions.read(rotation.threadId);
+                const config = yield* readMcpSession(rotation.threadId);
                 if (existing.mcpCredentialId === config?.providerSessionId) return;
                 if (!existing.query.setMcpServers) {
                   yield* Effect.logWarning("Claude MCP credential refresh unavailable.");
@@ -8317,7 +8331,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           nativeThreadId: string,
         ) {
           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
-          const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+          const mcpSession = yield* readMcpSession(turnInput.threadId);
           const mcpOverrides = claudeMcpQueryOverrides({
             mcpSession,
             readOnlySandbox:

@@ -1759,7 +1759,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         : { grant: "none" as const, policyEpoch: -1 };
     });
   const readMcpSession = (threadId: ThreadId | null) =>
-    threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
+    Effect.gen(function* () {
+      if (threadId === null) return undefined;
+      const config = yield* mcpSessions.read(threadId);
+      if (!config) return undefined;
+      const policy = yield* currentMemoryPolicy(threadId);
+      return policy.grant === "none" ? { ...config, grantedScopes: [] } : config;
+    });
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
 
@@ -6475,7 +6481,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ) =>
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
-            const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            const mcpSession = yield* readMcpSession(turnInput.threadId);
             if (mcpSession && credentialsByThread.get(threadId) !== mcpSession.providerSessionId) {
               // Reconfigure the same native conversation; stale credentials are already denied by the registry.
               yield* client.raw.request("thread/resume", {
@@ -6786,7 +6792,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
-              Effect.andThen(mcpSessions.read(threadInput.threadId)),
+              Effect.andThen(readMcpSession(threadInput.threadId)),
               Effect.flatMap((mcpSession) =>
                 client
                   .request(
