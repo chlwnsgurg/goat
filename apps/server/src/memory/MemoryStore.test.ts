@@ -2536,6 +2536,257 @@ describe("MemoryStore durable hub checkpoints", () => {
     );
   });
   it.effect(
+    "producer staging preserves the hub member token, immutable pages and TTL floor pin",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const handle = yield* store.transact(
+          store.prepareHubCheckpointTx({
+            authority,
+            checkpointId: "member-initial",
+            snapshotToken: "member-token",
+            hubEnvironmentId: env,
+          }),
+        );
+        yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: handle.checkpointId,
+            expectedFloor: 0,
+            nextFloor: 1,
+            now: 0,
+          }),
+        );
+        const initial = yield* store.transact(
+          store.readHubCheckpointPageTx({
+            authority,
+            snapshotToken: handle.snapshotToken,
+            cursor: null,
+          }),
+        );
+        const guardBefore =
+          yield* sql`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`;
+        const memberBefore = yield* sql`SELECT * FROM memory_hub_members WHERE space=${space}`;
+        const base = operation(402);
+        if (base.kind === "forget") throw new Error("fixture");
+        const op = decodeOperation({
+          ...base,
+          expectedHeads: [M.MemoryRevisionId.make(id(411))],
+          revision: { ...base.revision, parents: [M.MemoryRevisionId.make(id(411))] },
+        });
+        yield* store.transact(
+          Effect.gen(function* () {
+            const next = yield* store.appendHubEntryTx({
+              operation: op,
+              operationDigest: memoryOperationDigest(op),
+              outcome: "accepted",
+              now: 0,
+            });
+            yield* store.apply({
+              ...decideMemoryOperation(
+                yield* store.loadAggregate(space, memory),
+                op,
+                Store.hubAdmission,
+                { kind: "allowed" },
+              ),
+              receipt: next.entry.receipt,
+            });
+          }),
+        );
+        for (const name of ["producer-next", "producer-repeat"]) {
+          yield* store.transact(
+            Effect.gen(function* () {
+              const staged = yield* store.prepareHubProducerCheckpointTx({
+                authority,
+                checkpointId: name,
+                hubEnvironmentId: env,
+              });
+              assert.strictEqual(staged.checkpointSequence, 2);
+              yield* store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: staged.checkpointId,
+                expectedFloor: 1,
+                nextFloor: 1,
+                now: 0,
+              });
+            }),
+          );
+          assert.deepStrictEqual(
+            yield* store.transact(
+              store.readHubCheckpointPageTx({
+                authority,
+                snapshotToken: handle.snapshotToken,
+                cursor: null,
+              }),
+            ),
+            initial,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`,
+            guardBefore,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM memory_hub_members WHERE space=${space}`,
+            memberBefore,
+          );
+        }
+        const guard = yield* sql<{
+          record_json: string;
+        }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token'`;
+        const parsed = JSON.parse(guard[0]!.record_json);
+        assert.strictEqual(parsed.retired, false);
+        assert.strictEqual(parsed.handle.firstIssuedAt, 0);
+        assert.strictEqual(parsed.handle.expiresAt, M.MEMORY_CHECKPOINT_TOKEN_TTL_MS);
+        assert.strictEqual(parsed.handle.credentialVersion, 1);
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: "producer-repeat",
+                expectedFloor: 1,
+                nextFloor: 2,
+                now: 0,
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryStoreConflict",
+        );
+        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_TOKEN_TTL_MS);
+        const expired = yield* store
+          .transact(
+            store.readHubCheckpointPageTx({
+              authority,
+              snapshotToken: handle.snapshotToken,
+              cursor: null,
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual(expired._tag, "MemoryHubError");
+        if (expired._tag === "MemoryHubError") assert.strictEqual(expired.code, "cursor_expired");
+        const advanced = yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: "producer-repeat",
+            expectedFloor: 1,
+            nextFloor: 2,
+            now: M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          }),
+        );
+        assert.strictEqual(advanced.retentionFloor, 2);
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "producer reauthenticates the real hub and rolls back capacity and outer publication failure",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const handle = yield* store.transact(
+          store.prepareHubCheckpointTx({
+            authority,
+            checkpointId: "producer-safe",
+            snapshotToken: "producer-safe-token",
+            hubEnvironmentId: env,
+          }),
+        );
+        yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: handle.checkpointId,
+            expectedFloor: 0,
+            nextFloor: 1,
+            now: 0,
+          }),
+        );
+        const preparation = { authority, checkpointId: "producer-failed", hubEnvironmentId: env };
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.prepareHubProducerCheckpointTx({
+                ...preparation,
+                hubEnvironmentId: M.EnvironmentId.make("foreign-hub"),
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryHubForbiddenError",
+        );
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.prepareHubProducerCheckpointTx({
+                ...preparation,
+                authority: {
+                  ...authority,
+                  reauthorize: Effect.fail(new M.MemoryHubUnauthorizedError({})),
+                },
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryHubUnauthorizedError",
+        );
+        const before = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              const staged = yield* store.prepareHubProducerCheckpointTx(preparation);
+              yield* store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: staged.checkpointId,
+                expectedFloor: 1,
+                nextFloor: 1,
+                now: 0,
+              });
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`,
+          before,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:producer-failed'`)
+            .length,
+          0,
+        );
+        yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} WHERE space=${space}`;
+        const full = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
+        const guards =
+          yield* sql`SELECT * FROM memory_import_keys WHERE key_kind='hub_checkpoint_token'`;
+        const capacity = yield* store
+          .transact(store.prepareHubProducerCheckpointTx(preparation))
+          .pipe(Effect.flip);
+        assert.strictEqual(capacity._tag, "MemoryCapacityError");
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`,
+          full,
+        );
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_import_keys WHERE key_kind='hub_checkpoint_token'`,
+          guards,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:producer-failed'`)
+            .length,
+          0,
+        );
+        assert.strictEqual(
+          (yield* store.transact(
+            store.readHubCheckpointPageTx({
+              authority,
+              snapshotToken: handle.snapshotToken,
+              cursor: null,
+            }),
+          )).checkpointSequence,
+          1,
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
     "pins complete pages with immutable expiry and publishes recovery independently of token lifetime",
     () =>
       Effect.gen(function* () {

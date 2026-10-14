@@ -1003,6 +1003,19 @@ export class MemoryStore extends Context.Service<
       | M.MemoryHubUnauthorizedError
       | M.MemoryHubForbiddenError
     >;
+    readonly prepareHubProducerCheckpointTx: (input: {
+      authority: HubAuthority;
+      checkpointId: string;
+      hubEnvironmentId: M.EnvironmentId;
+    }) => InTx<
+      { readonly checkpointId: string; readonly checkpointSequence: number },
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | MemoryCapacityError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
+    >;
     readonly readHubCheckpointPageTx: (input: {
       authority: HubAuthority;
       snapshotToken: string;
@@ -6612,6 +6625,68 @@ const make = Effect.gen(function* () {
       return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
     return pages;
   });
+  // Both producers and member joins stage the same complete immutable snapshot. Only joins issue handles.
+  const stageHubSnapshotTx = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    checkpointId: string,
+    now: number,
+  ) {
+    yield* Transaction;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(checkpointId))
+      return yield* new M.MemoryHubError({ code: "invalid_cursor" });
+    const retention = yield* readHubRetentionTx(space);
+    const rows = yield* stored(
+      "hub-snapshot-sequence",
+      sql<{
+        sequence: number;
+      }>`SELECT coalesce(max(hub_sequence),0) AS sequence FROM memory_hub_operations WHERE space=${space}`,
+    );
+    const sequence = Math.max(rows[0]!.sequence, retention.checkpointSequence);
+    let pages = yield* snapshotPages(space, checkpointId);
+    const builtNewSnapshot = pages.length === 0;
+    if (builtNewSnapshot) {
+      pages = yield* buildHubSnapshot(space, sequence, retention.retentionFloor, checkpointId, now);
+      const encoded = yield* Effect.forEach(pages, (page) => checkpointCodec.encode(page));
+      const bytes = encoded.reduce((sum, json) => sum + new TextEncoder().encode(json).length, 0);
+      const usage = yield* readHubUsageTx(space);
+      if (bytes > usage.requiredCheckpointBoundBytes)
+        return yield* new MemoryStorageError({
+          stage: "checkpoint-bound-underflow",
+          cause: undefined,
+        });
+      yield* reserveHubCheckpointTx({
+        memorySpaceId: space,
+        checkpointDeltaBytes: bytes - usage.checkpointBytes,
+        publishedPinnedDeltaBytes: bytes,
+      });
+      yield* stored(
+        "hub-snapshot-size",
+        sql`UPDATE memory_hub_retention SET last_snapshot_bytes=${bytes} WHERE space=${space}`,
+      );
+      for (let ordinal = 0; ordinal < pages.length; ordinal++)
+        yield* stored(
+          "hub-snapshot-stage",
+          sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,hub_sequence,checkpoint_id,page_ordinal,metadata_json) VALUES (${space},${`${snapshotId(checkpointId)}:${ordinal}`},'checkpoint','[]','hub_snapshot',${sequence},${snapshotId(checkpointId)},${ordinal},${encoded[ordinal]!})`,
+        );
+    }
+    const first = pages[0]!;
+    // Preparing materializes the reserved slot. Any later input mutation invalidates this credit in its writer Tx.
+    if (builtNewSnapshot)
+      yield* stored(
+        "hub-snapshot-reservation-consumed",
+        sql`UPDATE memory_hub_retention SET reserved_snapshot_id=${checkpointId},last_snapshot_bytes=(SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))),0) FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' AND checkpoint_id=${snapshotId(checkpointId)}),snapshot_generation=coalesce((SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''),0) WHERE space=${space}`,
+      );
+    return { pages, first };
+  });
+  const prepareHubProducerCheckpointTx: MemoryStore["Service"]["prepareHubProducerCheckpointTx"] =
+    Effect.fn("MemoryStore.prepareHubProducerCheckpointTx")(function* (input) {
+      const space = input.authority.principal.memorySpaceId;
+      const { member, now } = yield* authorizeSource(input.authority, space);
+      if (member.environmentId !== input.hubEnvironmentId)
+        return yield* new M.MemoryHubForbiddenError({});
+      const { first } = yield* stageHubSnapshotTx(space, input.checkpointId, now);
+      return { checkpointId: input.checkpointId, checkpointSequence: first.checkpointSequence };
+    });
   const prepareHubCheckpointTx: MemoryStore["Service"]["prepareHubCheckpointTx"] = Effect.fn(
     "MemoryStore.prepareHubCheckpointTx",
   )(function* (input) {
@@ -6663,48 +6738,7 @@ const make = Effect.gen(function* () {
         dimension: "checkpoint_handles",
         limit: M.MEMORY_CHECKPOINT_MAX_HANDLES_PER_HUB,
       });
-    const retention = yield* readHubRetentionTx(space);
-    const rows = yield* stored(
-      "hub-snapshot-sequence",
-      sql<{
-        sequence: number;
-      }>`SELECT coalesce(max(hub_sequence),0) AS sequence FROM memory_hub_operations WHERE space=${space}`,
-    );
-    const sequence = Math.max(rows[0]!.sequence, retention.checkpointSequence);
-    let pages = yield* snapshotPages(space, input.checkpointId);
-    const builtNewSnapshot = pages.length === 0;
-    if (builtNewSnapshot) {
-      pages = yield* buildHubSnapshot(
-        space,
-        sequence,
-        retention.retentionFloor,
-        input.checkpointId,
-        now,
-      );
-      const encoded = yield* Effect.forEach(pages, (page) => checkpointCodec.encode(page));
-      const bytes = encoded.reduce((sum, json) => sum + new TextEncoder().encode(json).length, 0);
-      const usage = yield* readHubUsageTx(space);
-      if (bytes > usage.requiredCheckpointBoundBytes)
-        return yield* new MemoryStorageError({
-          stage: "checkpoint-bound-underflow",
-          cause: undefined,
-        });
-      yield* reserveHubCheckpointTx({
-        memorySpaceId: space,
-        checkpointDeltaBytes: bytes - usage.checkpointBytes,
-        publishedPinnedDeltaBytes: bytes,
-      });
-      yield* stored(
-        "hub-snapshot-size",
-        sql`UPDATE memory_hub_retention SET last_snapshot_bytes=${bytes} WHERE space=${space}`,
-      );
-      for (let ordinal = 0; ordinal < pages.length; ordinal++)
-        yield* stored(
-          "hub-snapshot-stage",
-          sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,hub_sequence,checkpoint_id,page_ordinal,metadata_json) VALUES (${space},${`${snapshotId(input.checkpointId)}:${ordinal}`},'checkpoint','[]','hub_snapshot',${sequence},${snapshotId(input.checkpointId)},${ordinal},${encoded[ordinal]!})`,
-        );
-    }
-    const first = pages[0]!;
+    const { pages, first } = yield* stageHubSnapshotTx(space, input.checkpointId, now);
     const handle: HubCheckpointHandle = {
       checkpointId: input.checkpointId,
       snapshotToken: input.snapshotToken,
@@ -6740,12 +6774,6 @@ const make = Effect.gen(function* () {
       "hub-snapshot-pin",
       sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode([...active, handle])} WHERE space=${space}`,
     );
-    // Preparing materializes the reserved slot. Any later input mutation invalidates this credit in its writer Tx.
-    if (builtNewSnapshot)
-      yield* stored(
-        "hub-snapshot-reservation-consumed",
-        sql`UPDATE memory_hub_retention SET reserved_snapshot_id=${input.checkpointId},last_snapshot_bytes=(SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))),0) FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' AND checkpoint_id=${snapshotId(input.checkpointId)}),snapshot_generation=coalesce((SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''),0) WHERE space=${space}`,
-      );
     return handle;
   });
   const readHubCheckpointPageTx: MemoryStore["Service"]["readHubCheckpointPageTx"] = Effect.fn(
@@ -7704,6 +7732,7 @@ const make = Effect.gen(function* () {
     });
   return MemoryStore.of({
     prepareHubCheckpointTx: (input) => withHubBudget(prepareHubCheckpointTx(input)),
+    prepareHubProducerCheckpointTx: (input) => withHubBudget(prepareHubProducerCheckpointTx(input)),
     readHubCheckpointPageTx,
     publishCheckpointAndFloorTx,
     compactEligibleHistoryTx,
