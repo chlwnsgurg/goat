@@ -2893,26 +2893,29 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect("rejects altered memory at the actual adapter send boundary", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const entries = codexReplayPreamble({
-          nativeThreadId: "wp4-tamper",
-          nativeTurnId: "unused",
-          prompt: "work",
-        });
-        let nativeSends = 0;
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({ scenario: "wp4-tamper", entries: entries.slice(0, 5) }),
-          () => Effect.void,
-          (method) =>
-            Effect.sync(() => {
-              if (method === "turn/start") nativeSends++;
-            }),
-        );
-        const snapshot = wp4Memory();
-        const result = yield* harness.runtime
-          .startTurn({
+  it.effect.each(["ordinary", "compact"] as const)(
+    "rejects altered memory at the actual adapter %s boundary",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const entries = codexReplayPreamble({
+            nativeThreadId: "wp4-tamper",
+            nativeTurnId: "unused",
+            prompt: "work",
+          });
+          let nativeSends = 0;
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({ scenario: "wp4-tamper", entries: entries.slice(0, 5) }),
+            () => Effect.void,
+            (method) =>
+              Effect.sync(() => {
+                if (method === "turn/start" || method === "thread/compact/start") nativeSends++;
+              }),
+          );
+          const snapshot = wp4Memory();
+          const send =
+            mode === "ordinary" ? harness.runtime.startTurn : harness.runtime.compactThread!;
+          const result = yield* send({
             ...makeCodexTestTurnInput({
               threadId: harness.threadId,
               providerThread: harness.providerThread,
@@ -2922,16 +2925,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             }),
             refreshMemoryContext: () =>
               Effect.succeed({ ...snapshot, renderedText: snapshot.renderedText + " tampered" }),
-          })
-          .pipe(Effect.exit);
-        assert.isTrue(Exit.isFailure(result));
-        assert.equal(nativeSends, 0);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          }).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(result));
+          assert.equal(nativeSends, 0);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
         ),
       ),
-    ),
   );
 
   it.effect.each(["survives", "revoked"] as const)(

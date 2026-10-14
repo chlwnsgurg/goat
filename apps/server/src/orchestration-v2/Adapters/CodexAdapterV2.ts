@@ -1826,6 +1826,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             NonNullable<CodexTurnStartParamsWithCollaborationMode["additionalContext"]>
           >(),
         );
+        const clearMemoryDelivery = (nativeId: string, appThreadId?: ThreadId) =>
+          Effect.gen(function* () {
+            memoryByThread.delete(nativeId);
+            yield* Ref.update(additionalContextByThread, (current) => {
+              const context = current.get(nativeId);
+              if (!context?.goat_memory) return current;
+              return new Map(current).set(nativeId, {
+                ...context,
+                goat_memory: { kind: "untrusted", value: "" },
+              });
+            });
+            if (appThreadId && memorySnapshots) yield* memorySnapshots.invalidate(appThreadId);
+          });
         const pruneMemory = Effect.fnUntraced(function* (reserveBytes = 0) {
           const now = yield* Clock.currentTimeMillis;
           const removed = new Set<string>();
@@ -1921,6 +1934,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               restoredCompactions.delete(restoredCompactions.values().next().value!);
           }).pipe(
             restorePermit.withPermits(1),
+            Effect.onError(() => clearMemoryDelivery(threadId)),
             Effect.timeout("10 seconds"),
             Effect.catch(() =>
               Effect.logWarning("Failed to restore Codex additional context after compaction."),
@@ -6607,6 +6621,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               waitForNativeStart: started.turn.startedAt === null,
             }).pipe(turnTerminalizationPermit.withPermits(1));
           }).pipe(
+            Effect.onError(() =>
+              getNativeThreadId(turnInput.providerThread).pipe(
+                Effect.flatMap((nativeId) => clearMemoryDelivery(nativeId, turnInput.threadId)),
+                Effect.ignore,
+              ),
+            ),
             Effect.ensuring(
               Effect.flatMap(getNativeThreadId(turnInput.providerThread), (threadId) =>
                 Ref.update(pendingRootTurns, (current) => {
@@ -6967,9 +6987,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           compactThread: (turnInput) =>
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(turnInput.providerThread);
-              yield* Ref.update(pendingRootTurns, (current) =>
-                new Map(current).set(threadId, turnInput),
-              );
               const previous = (yield* Ref.get(additionalContextByThread)).get(threadId);
               const fresh = turnInput.refreshMemoryContext
                 ? yield* turnInput.refreshMemoryContext()
@@ -7000,15 +7017,22 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* Ref.update(additionalContextByThread, (current) =>
                 new Map(current).set(threadId, context),
               );
+              yield* Ref.update(pendingRootTurns, (current) =>
+                new Map(current).set(threadId, turnInput),
+              );
               // Cleared on interrupt too, as startTurn does: an interrupted start
               // must not adopt the native turn that a late turn/started reports.
               yield* client.request("thread/compact/start", { threadId }).pipe(
                 Effect.onError(() =>
-                  Ref.update(pendingRootTurns, (current) => {
-                    const next = new Map(current);
-                    next.delete(threadId);
-                    return next;
-                  }),
+                  clearMemoryDelivery(threadId, turnInput.threadId).pipe(
+                    Effect.andThen(
+                      Ref.update(pendingRootTurns, (current) => {
+                        const next = new Map(current);
+                        next.delete(threadId);
+                        return next;
+                      }),
+                    ),
+                  ),
                 ),
               );
             }).pipe(
