@@ -2126,6 +2126,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
         const resolveUserMessage = Effect.fnUntraced(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
           mcpServers: Record<string, McpServerConfig> | undefined,
+          memoryClaim: { claimed: boolean },
         ) {
           const rawText = turnInput.message.text;
           if (rawText.trim() === "/compress" && turnInput.message.attachments.length === 0) {
@@ -2216,10 +2217,12 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           );
           const hasMemoryTools = availability.read || availability.write || availability.source;
           const nativeId = agent!.nativeThreadId;
-          const announceMemoryTools = hasMemoryTools || memoryToolClaims.has(nativeId);
+          const announceMemoryTools = hasMemoryTools || memoryClaim.claimed;
           // Record admission, including attempts whose native response later fails.
-          if (hasMemoryTools) memoryToolClaims.add(nativeId);
-          else memoryToolClaims.delete(nativeId);
+          if (hasMemoryTools) {
+            memoryClaim.claimed = true;
+            memoryToolClaims.add(nativeId);
+          } else memoryToolClaims.delete(nativeId);
           const text = [
             userText,
             buildRuntimeInstructions({ harness: "Cursor", model: turnInput.modelSelection.model }),
@@ -2256,7 +2259,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               runtimePolicy: turnInput.runtimePolicy,
             });
             const mcpServers = cursorMcpServers(yield* mcpSessions.read(turnInput.threadId));
-            const message = yield* resolveUserMessage(turnInput, mcpServers);
+            // Keep the correction owed by this turn across native active-run recovery.
+            const memoryClaim = { claimed: memoryToolClaims.has(agent.nativeThreadId) };
+            const message = yield* resolveUserMessage(turnInput, mcpServers, memoryClaim);
             const pendingUpdates: Array<InteractionUpdate> = [];
             let context: ActiveCursorTurn | null = null;
             // MCP send overrides replace the ambient servers loaded when the agent opens.
@@ -2265,7 +2270,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               prepareMessage: () =>
                 Effect.gen(function* () {
                   const mcpServers = cursorMcpServers(yield* mcpSessions.read(turnInput.threadId));
-                  return yield* resolveUserMessage(turnInput, mcpServers);
+                  return yield* resolveUserMessage(turnInput, mcpServers, memoryClaim);
                 }).pipe(
                   Effect.mapError(
                     (cause) =>
