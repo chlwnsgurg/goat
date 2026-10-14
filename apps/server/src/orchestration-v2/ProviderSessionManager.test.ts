@@ -5,6 +5,10 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@goat/shared/AgentScope";
 import {
   EnvironmentId,
+  CheckpointScopeId,
+  ScheduledTaskId,
+  NodeId,
+  type OrchestrationV2ThreadProjection,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -44,6 +48,12 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
+import * as ContextHandoffService from "./ContextHandoffService.ts";
+import * as RunExecutionService from "./RunExecutionService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -5442,6 +5452,287 @@ it.effect.each(["failure", "interrupt"] as const)(
                 return yield* Effect.die("synthetic adapter handshake failure");
               }),
           }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+// Exercise recovery admission through the real turn-start service and manager.
+// The provider fixture resumes a native thread; run delivery is an explicit milestone.
+const turnStartMemoryCases = [
+  { name: "ordinary", kind: "ordinary", ceiling: undefined, expected: "read_write" },
+  ...(["scheduled", "delegated"] as const).flatMap((kind) =>
+    (["none", "read", "read_write"] as const).map(
+      (ceiling) =>
+        ({
+          name: `${kind} ${ceiling}`,
+          kind,
+          ceiling,
+          expected: ceiling,
+        }) as const,
+    ),
+  ),
+  { name: "legacy task", kind: "delegated", ceiling: undefined, expected: "none" },
+  {
+    name: "read-only sandbox",
+    kind: "ordinary",
+    ceiling: undefined,
+    expected: "read",
+    readOnly: true,
+  },
+  {
+    name: "pending admission",
+    kind: "delegated",
+    ceiling: "none",
+    expected: "read",
+    pending: true,
+  },
+  {
+    name: "pending admission plus read-only sandbox",
+    kind: "delegated",
+    ceiling: "none",
+    expected: "read",
+    pending: true,
+    readOnly: true,
+  },
+  {
+    name: "missing message",
+    kind: "ordinary",
+    ceiling: undefined,
+    expected: "none",
+    missingMessage: true,
+  },
+] as const;
+
+type TurnStartMemoryCase = (typeof turnStartMemoryCases)[number];
+
+it.effect.each(turnStartMemoryCases)(
+  "turn-start memory admission: $name",
+  (testCase: TurnStartMemoryCase) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-turn-start-memory");
+        const providerSessionId = yield* ids.allocate.providerSession({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const runId = ids.derive.run({ threadId, ordinal: 1 });
+        const rootNodeId = ids.derive.rootNode({ runId });
+        const attemptId = ids.derive.runAttempt({ runId, attemptOrdinal: 1 });
+        const messageId = yield* ids.allocate.message({ threadId, ordinal: 1 });
+        const scopeId = CheckpointScopeId.make("scope-turn-start-memory");
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const run: OrchestrationV2ThreadProjection["runs"][number] = {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId: modelSelection.instanceId,
+          modelSelection,
+          providerThreadId: providerThread.id,
+          userMessageId: messageId,
+          rootNodeId,
+          activeAttemptId: attemptId,
+          status: "starting",
+          requestedAt: now,
+          startedAt: null,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+          ...(testCase.ceiling === undefined ? {} : { memoryGrantCeiling: testCase.ceiling }),
+          ...(testCase.kind === "delegated"
+            ? { delegatedTaskId: NodeId.make("task-turn-start-memory") }
+            : {}),
+        };
+        const message: OrchestrationV2ThreadProjection["messages"][number] = {
+          id: messageId,
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          role: "user",
+          text: "Synthetic recovery prompt",
+          attachments: [],
+          streaming: false,
+          createdBy: testCase.kind === "delegated" ? "agent" : "user",
+          creationSource: "server",
+          createdAt: now,
+          updatedAt: now,
+          ...(testCase.kind === "scheduled"
+            ? { scheduledTaskId: ScheduledTaskId.make("schedule-turn-start-memory") }
+            : {}),
+        };
+        const node: OrchestrationV2ThreadProjection["nodes"][number] = {
+          id: rootNodeId,
+          threadId,
+          runId,
+          parentNodeId: null,
+          rootNodeId,
+          kind: "root_turn",
+          status: "pending",
+          countsForRun: true,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: scopeId,
+          startedAt: null,
+          completedAt: null,
+        };
+        const attempt: OrchestrationV2ThreadProjection["attempts"][number] = {
+          id: attemptId,
+          runId,
+          rootNodeId,
+          attemptOrdinal: 1,
+          providerInstanceId: modelSelection.instanceId,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          reason: "initial",
+          status: "pending",
+          startedAt: null,
+          completedAt: null,
+        };
+        const checkpoint: OrchestrationV2ThreadProjection["checkpointScopes"][number] = {
+          id: scopeId,
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          parentScopeId: null,
+          providerThreadId: providerThread.id,
+          kind: "root_run",
+          ordinalWithinParent: 0,
+          advancesAppRunCount: true,
+          cwd: process.cwd(),
+          createdAt: now,
+        };
+        const eventBase = { threadId, occurredAt: now };
+        const issued = yield* Queue.unbounded<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.runForEach((change) => Queue.offer(issued, change)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const initialEvents: Array<OrchestrationV2DomainEvent> = [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run.updated",
+            payload: run,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "node.updated",
+            payload: node,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run-attempt.updated",
+            payload: attempt,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            payload: providerThread,
+          },
+          {
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "checkpoint-scope.created",
+            payload: checkpoint,
+          },
+        ];
+        if (!("missingMessage" in testCase))
+          initialEvents.push({
+            ...eventBase,
+            id: yield* ids.allocate.event({ threadId }),
+            type: "message.updated",
+            payload: message,
+          });
+        yield* sink.write({ events: initialEvents });
+        if ("pending" in testCase) {
+          yield* manager.prepareMcpSession!({
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            memoryGrantCeiling: "read_write",
+            ...("readOnly" in testCase ? {} : { dispatchScopes: ["memory:read"] as const }),
+          });
+        }
+        const delivered = yield* Deferred.make<void>();
+        const policy = {
+          ...runtimePolicy,
+          ...("readOnly" in testCase ? { sandboxPolicy: "read-only" as const } : {}),
+        };
+        const startLayer = ProviderTurnStart.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(EventSink.EventSinkV2, sink),
+              Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
+              Layer.succeed(IdAllocator.IdAllocatorV2, ids),
+              Layer.succeed(ProviderSessionManager.ProviderSessionManagerV2, manager),
+              Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
+              FileSystem.layerNoop({}),
+              Layer.mock(GitWorkflow.GitWorkflowService)({}),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(ProviderAuthService.ProviderAuthService)({
+                tryHandlePromptCommand: () => Effect.succeed(false),
+              }),
+              Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed(policy) }),
+              Layer.mock(RunExecutionService.RunExecutionServiceV2)({
+                startRootRun: () => Deferred.succeed(delivered, undefined).pipe(Effect.asVoid),
+              }),
+            ),
+          ),
+        );
+        const start = Effect.flatMap(ProviderTurnStart.ProviderTurnStartServiceV2, (service) =>
+          service.start({ threadId, runId }),
+        ).pipe(Effect.provide(startLayer));
+        if ("missingMessage" in testCase) {
+          assert.equal((yield* start.pipe(Effect.flip))._tag, "ProviderTurnStartError");
+          assert.equal((yield* Ref.get(state)).openCount, 0);
+          assert.isUndefined(yield* configs.read(threadId));
+        } else {
+          yield* start;
+          yield* Deferred.await(delivered);
+          const config = yield* configs.read(threadId);
+          assert.isDefined(config);
+          const expectedScopes =
+            testCase.expected === "none"
+              ? []
+              : testCase.expected === "read"
+                ? ["memory:read"]
+                : ["memory:read", "memory:write"];
+          const publication = (yield* Queue.takeAll(issued)).at(-1);
+          assert.isDefined(publication);
+          assert.deepEqual(
+            publication!.grantedScopes.filter((scope) => scope.startsWith("memory:")),
+            expectedScopes,
+          );
+          assert.equal(
+            (yield* projections.getThreadProjection(threadId)).runs[0]?.status,
+            "running",
+          );
+          assert.equal((yield* Ref.get(state)).openCount, 1);
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+          ),
         ),
       );
     }).pipe(Effect.scoped),
