@@ -355,3 +355,18 @@ export const captureRpcMemoryGrantCeiling = <E, R>(input: {
     yield* input.reauthorize(scopes);
     return ceiling;
   });
+
+/** Public task metadata cannot increase a server-captured ceiling. */
+export const rejectPublicMemoryGrantCeiling = (input: unknown) =>
+  typeof input === "object" &&
+  input !== null &&
+  "memoryGrantCeiling" in input &&
+  input.memoryGrantCeiling !== undefined &&
+  input.memoryGrantCeiling !== "none"
+    ? Effect.fail(
+        new EnvironmentAuthorizationError({
+          message: "Task memory ceilings are captured by the server, not supplied by clients.",
+          requiredScope: "memory:read",
+        }),
+      )
+    : Effect.void;

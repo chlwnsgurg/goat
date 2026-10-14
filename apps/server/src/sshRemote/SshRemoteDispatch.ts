@@ -1,4 +1,6 @@
 import {
+  MEMORY_MCP_TOOLS,
+  MEMORY_ADMINISTRATION_MCP_TOOLS,
   AttachmentCreateUploadUrlInput,
   AttachmentCreateUploadUrlResult,
   ChatAttachmentId,
@@ -115,6 +117,7 @@ type SshDispatchDestination =
   | { readonly host: string; readonly target?: undefined }
   | { readonly target: DesktopSshEnvironmentTarget; readonly host?: undefined };
 export type SshLaunchInput = SshDispatchDestination & {
+  readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
   readonly cwd: string;
   readonly workspace: SshLaunchWorkspace;
   readonly title: string;
@@ -250,7 +253,9 @@ const sessionKey = (
   target: DesktopSshEnvironmentTarget,
   ceiling: RuntimeMode,
   approvals: boolean,
-) => `${targetConnectionKey(target)}\u0000${ceiling}${approvals ? "\u0000approvals" : ""}`;
+  memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling = "none",
+) =>
+  `${targetConnectionKey(target)}\u0000${ceiling}\u0000${memoryGrantCeiling}${approvals ? "\u0000approvals" : ""}`;
 const decodeRemoteCapabilities = Schema.decodeUnknownEffect(OrchestratorMcpCapabilitiesResult);
 
 const decodeRemoteProject = Schema.decodeUnknownEffect(Schema.Struct({ id: ProjectId }));
@@ -465,8 +470,7 @@ const make = Effect.gen(function* () {
     string,
     { readonly token: string; readonly expiresAt: number; readonly ceilingApplied: boolean }
   >();
-  // Per session key: the arguments that remote's goat_thread_launch declares.
-  // Cleared with each new session, since the remote may have been updated meanwhile.
+  // Cache only optional launch arguments; memory admission always uses a fresh catalog.
   const launchArguments = new Map<string, ReadonlySet<string>>();
   const connected = new Set<string>();
 
@@ -559,8 +563,9 @@ const make = Effect.gen(function* () {
     target: DesktopSshEnvironmentTarget,
     ceiling: RuntimeMode,
     approvals = false,
+    memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling = "none",
   ) {
-    const key = sessionKey(target, ceiling, approvals);
+    const key = sessionKey(target, ceiling, approvals, memoryGrantCeiling);
     const now = yield* Clock.currentTimeMillis;
     const cached = sessions.get(key);
     if (cached !== undefined && cached.expiresAt - SESSION_REFRESH_MARGIN_MS > now) return cached;
@@ -571,6 +576,12 @@ const make = Effect.gen(function* () {
         ttl: SESSION_TTL,
         runtimeModeCeiling: ceiling,
         ...(approvals ? { approvals: true } : {}),
+        memoryScopes:
+          memoryGrantCeiling === "none"
+            ? []
+            : memoryGrantCeiling === "read"
+              ? ["memory:read"]
+              : ["memory:read", "memory:write"],
       }),
     ).pipe(
       approvals
@@ -594,7 +605,7 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * The arguments the remote's goat_thread_launch declares, or null when the listing
+   * Current launch capabilities, with optional declarations from cache if listing
    * failed. Only a listing that declares report and standingInstructions is cached; a
    * failure or an older remote is asked again on the next launch, so an upgrade takes
    * effect without a new session.
@@ -604,26 +615,37 @@ const make = Effect.gen(function* () {
       readonly target: DesktopSshEnvironmentTarget;
       readonly httpBaseUrl: string;
       readonly ceiling: RuntimeMode;
+      readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
       readonly token: string;
     }) {
-      const key = `${remote.target.alias}\u0000${remote.ceiling}`;
-      const known = launchArguments.get(key);
-      if (known !== undefined) return known;
-      // Effect.exit also catches defects, so even a malformed listing only
-      // leaves the optional launch arguments undecided and never fails the launch.
+      const key = sessionKey(remote.target, remote.ceiling, false, remote.memoryGrantCeiling);
+      // Never use session-lifetime cache entries to decide memory admission.
+      // Ordinary omitted-ceiling launches retain their optional-argument compatibility.
       const listed = yield* Effect.exit(
         listAcpMcpTools({
           endpoint: new URL("mcp", remote.httpBaseUrl).toString(),
           authorization: `Bearer ${remote.token}`,
+          strict: true,
         }).pipe(Effect.timeout(LAUNCH_LINEAGE_PROBE_TIMEOUT)),
       );
-      if (Exit.isFailure(listed)) return null;
+      if (Exit.isFailure(listed)) return { capabilities: null, declared: launchArguments.get(key) };
       const declared = new Set(
         listed.value.find((tool) => tool.name === "goat_thread_launch")?.argumentNames ?? [],
       );
+      const advertisesMemory = listed.value.some((tool) =>
+        [...MEMORY_MCP_TOOLS, ...MEMORY_ADMINISTRATION_MCP_TOOLS].some(
+          (name) => tool.name === name,
+        ),
+      );
+      if (advertisesMemory && !declared.has("memoryGrantCeiling"))
+        return yield* failure(
+          "remote_refused",
+          "Remote memory tools require explicit task ceiling admission.",
+        );
+      const capabilities = { declared, advertisesMemory };
       if (declared.has("report") && declared.has("standingInstructions"))
         launchArguments.set(key, declared);
-      return declared;
+      return { capabilities, declared };
     },
   );
 
@@ -638,6 +660,7 @@ const make = Effect.gen(function* () {
     readonly target: DesktopSshEnvironmentTarget;
     readonly httpBaseUrl: string;
     readonly ceiling: RuntimeMode;
+    readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
     readonly token: string;
     readonly tool: string;
     readonly arguments: Readonly<Record<string, unknown>>;
@@ -666,7 +689,7 @@ const make = Effect.gen(function* () {
         }
         if (describe(error).includes("HTTP 401")) {
           // Revoked or expired on the remote: forget it so the next call issues a fresh one.
-          sessions.delete(sessionKey(input.target, input.ceiling, false));
+          sessions.delete(sessionKey(input.target, input.ceiling, false, input.memoryGrantCeiling));
           return failure(
             "remote_refused",
             `${input.target.alias} rejected this machine's GOAT session; call the tool again to sign in anew.`,
@@ -1087,11 +1110,13 @@ const make = Effect.gen(function* () {
     if (versionNote !== null) notes.push(versionNote);
     // Bootstrap may have taken a while; the session carries the caller's authority.
     yield* beforeLaunch;
-    const session = yield* sessionFor(target, input.callerRuntimeMode);
+    const memoryGrantCeiling = input.memoryGrantCeiling ?? "none";
+    const session = yield* sessionFor(target, input.callerRuntimeMode, false, memoryGrantCeiling);
     const remote = {
       target,
       httpBaseUrl: bootstrap.httpBaseUrl,
       ceiling: input.callerRuntimeMode,
+      memoryGrantCeiling,
       token: session.token,
     };
     if (!session.ceilingApplied && input.runtimeMode !== "approval-required") {
@@ -1141,7 +1166,34 @@ const make = Effect.gen(function* () {
       notes.push(`Registered ${folder.path} as a new project on ${target.alias}.`);
     }
 
-    const declared = yield* remoteLaunchArguments(remote);
+    // Each attempt admits memory from its current catalog; cached declarations are
+    // only for optional lineage/UI arguments when an ordinary launch cannot list.
+    const launchAdmission = Effect.fn("SshRemoteDispatch.launchAdmission")(function* () {
+      const { capabilities, declared } = yield* remoteLaunchArguments(remote);
+      if (capabilities === null && input.memoryGrantCeiling !== undefined)
+        return yield* failure(
+          "remote_refused",
+          "Remote task memory admission could not be verified.",
+        );
+      if (
+        memoryGrantCeiling !== "none" &&
+        capabilities?.declared.has("memoryGrantCeiling") !== true
+      )
+        return yield* failure(
+          "remote_refused",
+          "Remote GOAT does not accept task memory ceilings.",
+        );
+      return {
+        declared,
+        memoryArguments:
+          capabilities?.declared.has("memoryGrantCeiling") === true &&
+          (memoryGrantCeiling !== "none" || capabilities.advertisesMemory)
+            ? { memoryGrantCeiling }
+            : {},
+      };
+    });
+    const admission = yield* launchAdmission();
+    const declared = admission.declared;
     const forwardLaunchedBy =
       input.launchedBy !== undefined && declared?.has("launchedBy") === true;
     // This machine owns any watch of a launch it forwards. Without this, a remote that
@@ -1159,7 +1211,7 @@ const make = Effect.gen(function* () {
     // sends it, and a remote that refuses it is relaunched without it by the coordinator.
     const forwardReport =
       input.report !== undefined &&
-      (declared === null || declared.size === 0 || declared.has("report"));
+      (declared === undefined || declared.size === 0 || declared.has("report"));
     const message =
       forwardReport && input.reportNote !== undefined && input.message?.trim()
         ? `${input.message}\n\n${input.reportNote}`
@@ -1176,7 +1228,7 @@ const make = Effect.gen(function* () {
       );
       // Authority may have changed while the last upload completed.
       yield* beforeLaunch;
-      const launch = (withLaunchedBy: boolean) =>
+      const launch = (withLaunchedBy: boolean, memoryArguments: typeof admission.memoryArguments) =>
         callRemote({
           ...remote,
           tool: "goat_thread_launch",
@@ -1186,6 +1238,7 @@ const make = Effect.gen(function* () {
             title: input.title,
             workspaceStrategy,
             runtimeMode: input.runtimeMode,
+            ...memoryArguments,
             ...(input.interactionMode === undefined
               ? {}
               : { interactionMode: input.interactionMode }),
@@ -1205,14 +1258,15 @@ const make = Effect.gen(function* () {
             ...(forwardWatchOptOut ? { notifyOnCompletion: false } : {}),
           },
         });
-      const rawLaunched = yield* launch(forwardLaunchedBy).pipe(
+      const rawLaunched = yield* launch(forwardLaunchedBy, admission.memoryArguments).pipe(
         Effect.catch((error) =>
           error instanceof SshRemoteDispatchError &&
           forwardLaunchedBy &&
           (error.reason === "remote_refused" || error.reason === "ssh_failed") &&
           error.message.includes("goat_thread_launch does not take launchedBy, so nothing ran")
             ? Effect.gen(function* () {
-                const result = yield* launch(false);
+                const retryAdmission = yield* launchAdmission();
+                const result = yield* launch(false, retryAdmission.memoryArguments);
                 notes.push(
                   'This remote does not record its launcher, so scope:"launched" cannot find its questions; use host and threadId.',
                 );
