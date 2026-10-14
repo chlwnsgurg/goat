@@ -6136,3 +6136,52 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect("sync hold rearm advances across unrelated history within the inspected budget", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* store.apply(decision(operation()));
+    const source = (yield* sql<{
+      id: string;
+      metadata_json: string;
+    }>`SELECT id,metadata_json FROM memory_outbox WHERE kind='sync' LIMIT 1`)[0]!;
+    yield* sql`UPDATE memory_outbox SET status='retry',next_attempt_at=${Number.MAX_SAFE_INTEGER},hold_class='availability' WHERE id=${source.id}`;
+    for (let n = 0; n < 210; n++) {
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json) VALUES (${`a:${String(n).padStart(4, "0")}`},'other','sync','completed',${source.metadata_json})`;
+    }
+    const input = {
+      memorySpaceId: space,
+      holdClass: "availability" as const,
+      now: 2,
+      afterId: "",
+      limit: 100,
+    };
+    const first = yield* store.transact(store.rearmSyncHoldsTx(input));
+    assert.deepStrictEqual(first, { changedIds: [], inspected: 100, next: "a:0099", more: true });
+    // More trailing history does not change first-page reads or bytes/continuation.
+    for (let n = 0; n < 100; n++) {
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json) VALUES (${`z:${n}`},'other','sync','completed',${source.metadata_json})`;
+    }
+    assert.deepStrictEqual(yield* store.transact(store.rearmSyncHoldsTx(input)), first);
+    let next = first.next!;
+    let changed = false;
+    for (let n = 0; n < 5; n++) {
+      const page = yield* store.transact(store.rearmSyncHoldsTx({ ...input, afterId: next }));
+      assert.isAtMost(page.inspected, 100);
+      if (page.changedIds.includes(source.id)) changed = true;
+      if (!page.more) break;
+      assert.isTrue(page.next! > next);
+      next = page.next!;
+    }
+    assert.isTrue(changed);
+    assert.isNull((yield* store.readWorkHold(source.id))?.holdClass);
+    const plan = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT id,space,kind,status,next_attempt_at,hold_class FROM memory_outbox WHERE id>'' ORDER BY id LIMIT 100`;
+    yield* Effect.log("R13_SYNC_REARM_PLAN", plan);
+    assert.isTrue(
+      plan.every((r) => !r.detail.includes("SCAN") && !r.detail.includes("TEMP B-TREE")),
+    );
+  }).pipe(Effect.provide(live)),
+);

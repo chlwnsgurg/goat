@@ -249,3 +249,49 @@ it.effect(
       );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it.effect("keeps retry accounting separate from canonical snapshot dependencies", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* memory;
+    const inventory = () => sql`SELECT
+      (SELECT count(*) FROM sqlite_master WHERE type='trigger') AS triggers,
+      (SELECT count(*) FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%') AS explicit_indexes,
+      (SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%') AS tables,
+      (SELECT sum((SELECT count(*) FROM pragma_table_xinfo(m.name))) FROM sqlite_master m WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%') AS columns`;
+    const before = yield* inventory();
+    yield* hub;
+    const after = yield* inventory();
+    yield* Effect.log("R13_SCHEMA_INVENTORY", { before, after });
+    const triggers = yield* sql<{
+      name: string;
+    }>`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memory_sync_cursors' ORDER BY name`;
+    assert.deepStrictEqual(
+      triggers.map((r) => r.name),
+      [
+        "memory_sync_cursors_hub_snapshot_bytes_delete",
+        "memory_sync_cursors_hub_snapshot_bytes_insert",
+        "memory_sync_cursors_hub_snapshot_bytes_update",
+      ],
+    );
+    yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES ('space','hub',0,'ready')`;
+    yield* sql`INSERT INTO memory_hub_retention(space,handles_json,reserved_snapshot_id,snapshot_generation,published_pinned_bytes) VALUES ('space','[]','stage',7,2)`;
+    yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,metadata_json,reason,checkpoint_id,missing_parents_json) VALUES ('space','page','checkpoint','{}','hub_snapshot','hub:stage','[]')`;
+    const generation =
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space='space' AND dimension='hub_snapshot_generation'`;
+    yield* sql`UPDATE memory_sync_cursors SET pull_retry_json='{}' WHERE space='space'`;
+    yield* sql`UPDATE memory_sync_cursors SET pull_retry_json='[]' WHERE space='space'`;
+    assert.deepStrictEqual(
+      yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space='space'`,
+      [{ reserved_snapshot_id: "stage", snapshot_generation: 7 }],
+    );
+    assert.deepStrictEqual(
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space='space' AND dimension='hub_snapshot_generation'`,
+      generation,
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:stage'`).length,
+      1,
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
