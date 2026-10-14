@@ -471,14 +471,30 @@ export default Effect.gen(function* () {
   ];
   for (const entry of processingInventory) {
     const spaceColumn = entry.table === "memory_events" ? "memory_space_id" : "space";
-    for (const [dimension, originalExpression] of entry.values("seed")) {
-      const expression =
-        entry.table === "memory_compact_receipts"
-          ? "json_extract(seed.receipt_json,'$.outcome')='rejected'"
-          : originalExpression;
-      yield* sql.unsafe(
-        `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT seed.${spaceColumn},'processing_${dimension}','',coalesce(sum(coalesce((${expression}),0)),0) FROM ${entry.table} seed GROUP BY seed.${spaceColumn} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
-      );
+    if (entry.table === "memory_items") {
+      // Materialize one GROUP BY, then expand the eight scalars without rescanning items.
+      const pairs = entry
+        .values("seed")
+        .map(
+          ([dimension, expression]) =>
+            `'processing_${dimension}',coalesce(sum(coalesce((${expression}),0)),0)`,
+        )
+        .join(",");
+      yield* sql.unsafe(`WITH totals AS MATERIALIZED (
+        SELECT seed.space,json_object(${pairs}) AS counters FROM memory_items seed GROUP BY seed.space
+      ) INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+        SELECT totals.space,c.key,'',c.value FROM totals,json_each(totals.counters) c WHERE 1
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`);
+    } else {
+      for (const [dimension, originalExpression] of entry.values("seed")) {
+        const expression =
+          entry.table === "memory_compact_receipts"
+            ? "json_extract(seed.receipt_json,'$.outcome')='rejected'"
+            : originalExpression;
+        yield* sql.unsafe(
+          `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT seed.${spaceColumn},'processing_${dimension}','',coalesce(sum(coalesce((${expression}),0)),0) FROM ${entry.table} seed GROUP BY seed.${spaceColumn} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+        );
+      }
     }
     const delta = (p: string, sign: number) =>
       entry
@@ -489,13 +505,36 @@ export default Effect.gen(function* () {
             : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${p}.${spaceColumn},'processing_${dimension}','',coalesce((${expression}),0)) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`,
         )
         .join("\n");
-    // UPDATE uses subtraction before addition, so moving a row between spaces is exact.
     for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
-      yield* sql.unsafe(
-        `CREATE TRIGGER ${entry.table}_processing_${action.toLowerCase()} AFTER ${action}${action === "UPDATE" ? ` OF ${entry.columns}` : ""} ON ${entry.table} BEGIN ${action !== "INSERT" ? delta("OLD", -1) : ""} ${action !== "DELETE" ? delta("NEW", 1) : ""} END`,
-      );
+      if (entry.table === "memory_items" && action === "UPDATE") {
+        const oldValues = entry.values("OLD");
+        const updates = entry
+          .values("NEW")
+          .map(([dimension, expression], index) => {
+            const previous = oldValues[index]![1];
+            const next = `coalesce((${expression}),0)`;
+            const old = `coalesce((${previous}),0)`;
+            return `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+            SELECT NEW.space,'processing_${dimension}','',${next}-${old}
+            WHERE ${next}!=${old}
+            ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+          })
+          .join("\n");
+        yield* sql.unsafe(
+          `CREATE TRIGGER memory_items_processing_update AFTER UPDATE OF ${entry.columns} ON memory_items WHEN NEW.space=OLD.space BEGIN ${updates} END`,
+        );
+        // Space moves are rare; keep subtraction/addition out of the normal path.
+        yield* sql.unsafe(
+          `CREATE TRIGGER memory_items_processing_move AFTER UPDATE OF space ON memory_items WHEN NEW.space!=OLD.space BEGIN ${delta("OLD", -1)} ${delta("NEW", 1)} END`,
+        );
+      } else {
+        yield* sql.unsafe(
+          `CREATE TRIGGER ${entry.table}_processing_${action.toLowerCase()} AFTER ${action}${action === "UPDATE" ? ` OF ${entry.columns}` : ""} ON ${entry.table} BEGIN ${action !== "INSERT" ? delta("OLD", -1) : ""} ${action !== "DELETE" ? delta("NEW", 1) : ""} END`,
+        );
+      }
     }
   }
+
   // Six deferred kinds, one per kind. A virtual scalar and narrow partial
   // index give the exact oldest row without another writer UPDATE or body index.
   const noDeferred = "9999-12-31T23:59:59.999Z";
