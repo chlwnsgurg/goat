@@ -278,6 +278,63 @@ export class MemoryHubCommittedSettings extends Context.Service<
   { readonly read: Effect.Effect<MemoryHubSettingsView> }
 >()("goat/serverSettings/MemoryHubCommittedSettings") {}
 
+/** SQL-free committed policy. An unready producer denies even the default-on setting. */
+export interface MemoryProviderPolicy {
+  readonly policyReady: boolean;
+  readonly enableAgentMemoryAccess: boolean;
+  readonly epoch: number;
+}
+
+/** L2 subscribes before preparing credentials, and rotates on every published epoch. */
+export class MemoryProviderCommittedPolicy extends Context.Service<
+  MemoryProviderCommittedPolicy,
+  {
+    readonly read: Effect.Effect<MemoryProviderPolicy>;
+    readonly subscribeRotations: Effect.Effect<
+      Stream.Stream<MemoryProviderPolicy>,
+      never,
+      Scope.Scope
+    >;
+  }
+>()("goat/serverSettings/MemoryProviderCommittedPolicy") {}
+
+const makeMemoryProviderPolicy = Effect.gen(function* () {
+  const current = yield* Ref.make<MemoryProviderPolicy>(
+    Object.freeze({
+      policyReady: false,
+      enableAgentMemoryAccess: false,
+      epoch: 0,
+    }),
+  );
+  // Rotation needs the newest committed epoch, not a backlog of obsolete credentials.
+  const rotations = yield* PubSub.sliding<MemoryProviderPolicy>(1);
+  const publish = (enableAgentMemoryAccess: boolean) =>
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const changed = yield* Ref.modify(current, (previous) => {
+          if (previous.policyReady && previous.enableAgentMemoryAccess === enableAgentMemoryAccess)
+            return [null, previous] as const;
+          const next = Object.freeze({
+            policyReady: true,
+            enableAgentMemoryAccess,
+            epoch: previous.epoch + 1,
+          });
+          return [next, next] as const;
+        });
+        if (changed !== null) yield* PubSub.publish(rotations, changed);
+      }),
+    );
+  const service = {
+    read: Ref.get(current),
+    subscribeRotations: Effect.gen(function* () {
+      const subscription = yield* PubSub.subscribe(rotations);
+      const snapshot = yield* Ref.get(current);
+      return Stream.make(snapshot).pipe(Stream.concat(Stream.fromSubscription(subscription)));
+    }),
+  } satisfies MemoryProviderCommittedPolicy["Service"];
+  return { publish, service };
+});
+
 const HubSettingsLock = Context.Reference<boolean>("goat/serverSettings/HubSettingsLock", {
   defaultValue: () => false,
 });
@@ -421,6 +478,8 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         : {}),
     });
     const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
+    const providerPolicy = yield* makeMemoryProviderPolicy;
+    yield* providerPolicy.publish(initialSettings.enableAgentMemoryAccess);
     const writeSemaphore = yield* Semaphore.make(1);
     const hubMarkerRef = yield* Ref.make<HubTransitionMarker | null>(null);
     const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
@@ -433,7 +492,13 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       Ref.get(currentSettingsRef).pipe(
         Effect.flatMap(update),
         Effect.flatMap(normalizeServerSettings),
-        Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
+        Effect.tap((nextSettings) =>
+          Effect.uninterruptible(
+            Ref.set(currentSettingsRef, nextSettings).pipe(
+              Effect.andThen(providerPolicy.publish(nextSettings.enableAgentMemoryAccess)),
+            ),
+          ),
+        ),
         Effect.map(resolveTextGenerationProvider),
       );
     const updateTestSettings = <E, R>(
@@ -501,6 +566,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       ),
       withSettingsSnapshot: (use) =>
         writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
+      committedProviderPolicy: providerPolicy.service,
       committedHubSettings: {
         read: Ref.get(currentSettingsRef).pipe(
           Effect.map((current) => ({
@@ -515,6 +581,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       MemoryHubSettingsTransitions["Service"] & {
         adminSettings: MemoryHubAdminSettings["Service"];
         committedHubSettings: MemoryHubCommittedSettings["Service"];
+        committedProviderPolicy: MemoryProviderCommittedPolicy["Service"];
       };
   });
 
@@ -887,6 +954,7 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const writeSemaphore = yield* Semaphore.make(1);
   const hubMarkerRef = yield* Ref.make<HubTransitionMarker | null>(null);
+  const providerPolicy = yield* makeMemoryProviderPolicy;
   const committedHubRef = yield* Ref.make<MemoryHubSettingsView>({
     settings: DEFAULT_SERVER_SETTINGS.memoryHub,
     version: DEFAULT_SERVER_SETTINGS.memoryHubVersion,
@@ -953,6 +1021,7 @@ const make = Effect.gen(function* () {
         return false;
       }
       yield* publishCommittedHub(decoded.value);
+      yield* providerPolicy.publish(decoded.value.enableAgentMemoryAccess);
       return true;
     });
 
@@ -990,7 +1059,11 @@ const make = Effect.gen(function* () {
           // temp cleanup. No cancellation may split durable commit from its Ref epoch.
           rename: (from, to) =>
             fs.rename(from, to).pipe(
-              Effect.tap(() => publishCommittedHub(settings)),
+              Effect.tap(() =>
+                publishCommittedHub(settings).pipe(
+                  Effect.andThen(providerPolicy.publish(settings.enableAgentMemoryAccess)),
+                ),
+              ),
               Effect.uninterruptible,
             ),
         }),
@@ -1083,6 +1156,13 @@ const make = Effect.gen(function* () {
       }
     }
 
+    if (!settingsExists) {
+      if (!(yield* providerPolicy.service.read).policyReady)
+        yield* providerPolicy.publish(DEFAULT_SERVER_SETTINGS.enableAgentMemoryAccess);
+      else settingsFileTrusted = false;
+    }
+    const committedProviderPolicy = yield* providerPolicy.service.read;
+
     const committedHub = yield* Ref.get(committedHubRef);
     if (!settingsExists && hasCommittedHubEpoch(committedHub)) {
       settingsFileTrusted = false;
@@ -1093,6 +1173,7 @@ const make = Effect.gen(function* () {
     // Full settings and migrations must not turn a rejected projection into a new commit.
     settings = {
       ...settings,
+      enableAgentMemoryAccess: committedProviderPolicy.enableAgentMemoryAccess,
       memoryHub: committedHub.settings,
       memoryHubVersion: committedHub.version,
     };
@@ -1614,6 +1695,7 @@ const make = Effect.gen(function* () {
       Ref.get(hubMarkerRef),
       applyHubLocked,
     ),
+    committedProviderPolicy: providerPolicy.service,
     committedHubSettings: { read: Ref.get(committedHubRef) },
     withSettingsSnapshot,
     get streamChanges() {
@@ -1628,6 +1710,7 @@ const make = Effect.gen(function* () {
     MemoryHubSettingsTransitions["Service"] & {
       adminSettings: MemoryHubAdminSettings["Service"];
       committedHubSettings: MemoryHubCommittedSettings["Service"];
+      committedProviderPolicy: MemoryProviderCommittedPolicy["Service"];
     };
 });
 
@@ -1636,11 +1719,13 @@ const settingsLayers = (
     MemoryHubSettingsTransitions["Service"] & {
       adminSettings: MemoryHubAdminSettings["Service"];
       committedHubSettings: MemoryHubCommittedSettings["Service"];
+      committedProviderPolicy: MemoryProviderCommittedPolicy["Service"];
     },
 ) =>
   Layer.mergeAll(
     Layer.succeed(ServerSettingsService, service),
     Layer.succeed(MemoryHubCommittedSettings, service.committedHubSettings),
+    Layer.succeed(MemoryProviderCommittedPolicy, service.committedProviderPolicy),
     Layer.succeed(MemoryHubAdminSettings, service.adminSettings),
     Layer.succeed(MemoryHubSettingsTransitions, {
       applyMemoryHubTransition: service.applyMemoryHubTransition,

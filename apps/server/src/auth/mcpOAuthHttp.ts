@@ -126,6 +126,9 @@ export const layer = HttpApiBuilder.group(
                 ? {}
                 : {
                     csrfToken: session.csrfToken,
+                    oneClickMemoryScopes: (["memory:read", "memory:write"] as const).filter(
+                      (scope) => session.scopes.includes(scope),
+                    ),
                     oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
                       EnvironmentAuth.mcpClientScopes(access).every((scope) =>
                         session.scopes.includes(scope),

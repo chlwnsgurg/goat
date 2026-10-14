@@ -104,6 +104,8 @@ import {
   type McpThreadInvocationScope,
   requireThreadScope,
 } from "./McpInvocationContext.ts";
+import { captureRpcMemoryGrantCeiling } from "../auth/RpcAuthorization.ts";
+
 import * as Metrics from "../observability/Metrics.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
@@ -3508,3 +3510,11 @@ export const layer: Layer.Layer<
   | SshRemoteDispatch.SshRemoteDispatch
   | ServerSettings.ServerSettingsService
 > = Layer.effect(OrchestratorMcpService, make);
+
+/** OAuth and managed callers use the same live grant port, never thread modes as authority. */
+export const captureMcpTaskMemoryGrantCeiling = (scope: McpInvocationScope, readOnly: boolean) =>
+  captureRpcMemoryGrantCeiling({
+    grantedScopes: scope.grantedScopes,
+    reauthorize: scope.reauthorize,
+    readOnly: readOnly || scope.client?.access === "read-only",
+  });
