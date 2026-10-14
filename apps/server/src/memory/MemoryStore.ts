@@ -928,6 +928,37 @@ export class MemoryStore extends Context.Service<
     readonly readPendingHubAdmins: (
       limit: number,
     ) => Effect.Effect<readonly AdminRecord[], MemoryStorageError>;
+    readonly readBootstrap: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+    }) => Effect.Effect<
+      {
+        state: "unbound" | "staging" | "ready";
+        checkpointId: string | null;
+        snapshotToken: string | null;
+        checkpointSequence: number;
+        cursor: string | null;
+        pageCount: number;
+        afterSequence: number;
+        lastSuccessAt: number | null;
+      },
+      MemoryStorageError
+    >;
+    readonly discardBootstrapTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+      expectedSnapshotToken: string;
+      expectedCheckpointId: string;
+      expectedCheckpointSequence: number;
+    }) => InTx<boolean>;
+    readonly retireFrozenClaimTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      candidateId: string;
+      expectedGeneration: number;
+      attemptId: M.MemoryOperationId;
+      frozenHeads: readonly M.MemoryRevisionId[];
+      nextAttemptAt: number;
+    }) => InTx<boolean>;
     readonly advanceBootstrapTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -4339,7 +4370,7 @@ const make = Effect.gen(function* () {
           if (forgotten.length) continue;
           yield* stored(
             "checkpoint-payload",
-            sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${page.memorySpaceId},${pair.revision.payloadRef},${pair.revision.memoryId},${yield* payloadCodec.encode(pair.payload)},${yield* headsCodec.encode(pair.payload.derivedFromMemoryRevisions)}) ON CONFLICT(space,payload_ref) DO NOTHING`,
+            sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,checkpoint_stage_id) VALUES (${page.memorySpaceId},${pair.revision.payloadRef},${pair.revision.memoryId},${yield* payloadCodec.encode(pair.payload)},${yield* headsCodec.encode(pair.payload.derivedFromMemoryRevisions)},${input.checkpointId}) ON CONFLICT(space,payload_ref) DO NOTHING`,
           );
         }
         for (const pair of page.resolutions)
@@ -4351,7 +4382,7 @@ const make = Effect.gen(function* () {
             if (forgotten.length) continue;
             yield* stored(
               "checkpoint-judgment",
-              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline,purge_eligible_after) VALUES (${page.memorySpaceId},${pair.resolution.judgmentRef},${pair.resolution.memoryId},${yield* resolutionPayloadCodec.encode(pair.payload)},${yield* headsCodec.encode(pair.resolution.inputRevisionIds)},${Date.parse(pair.resolution.appliedAtUtc)},${Date.parse(pair.resolution.revertDeadlineUtc)},${Date.parse(pair.resolution.appliedAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS}) ON CONFLICT(space,payload_ref) DO NOTHING`,
+              sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json,resolved_at,revert_deadline,purge_eligible_after,checkpoint_stage_id) VALUES (${page.memorySpaceId},${pair.resolution.judgmentRef},${pair.resolution.memoryId},${yield* resolutionPayloadCodec.encode(pair.payload)},${yield* headsCodec.encode(pair.resolution.inputRevisionIds)},${Date.parse(pair.resolution.appliedAtUtc)},${Date.parse(pair.resolution.revertDeadlineUtc)},${Date.parse(pair.resolution.appliedAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS},${input.checkpointId}) ON CONFLICT(space,payload_ref) DO NOTHING`,
             );
           }
         yield* stored(
@@ -4501,7 +4532,11 @@ const make = Effect.gen(function* () {
         );
         yield* stored(
           "checkpoint-cursor",
-          sql`INSERT INTO memory_sync_cursors (space,hub_environment_id,after_sequence,bootstrap_state,checkpoint_id,checkpoint_sequence) VALUES (${input.memorySpaceId},${input.hubEnvironmentId},${last.checkpointSequence},'ready',${input.checkpointId},${last.checkpointSequence}) ON CONFLICT(space,hub_environment_id) DO UPDATE SET after_sequence=excluded.after_sequence,bootstrap_state='ready',checkpoint_id=excluded.checkpoint_id,checkpoint_sequence=excluded.checkpoint_sequence`,
+          sql`INSERT INTO memory_sync_cursors (space,hub_environment_id,after_sequence,bootstrap_state,checkpoint_id,checkpoint_sequence) VALUES (${input.memorySpaceId},${input.hubEnvironmentId},${last.checkpointSequence},'ready',${input.checkpointId},${last.checkpointSequence}) ON CONFLICT(space,hub_environment_id) DO UPDATE SET after_sequence=excluded.after_sequence,bootstrap_state='ready',checkpoint_id=excluded.checkpoint_id,checkpoint_sequence=excluded.checkpoint_sequence,snapshot_token=NULL,checkpoint_cursor=NULL,checkpoint_page_count=0`,
+        );
+        yield* stored(
+          "checkpoint-adopt-bodies",
+          sql`UPDATE memory_payloads SET checkpoint_stage_id=NULL WHERE space=${input.memorySpaceId} AND checkpoint_stage_id=${input.checkpointId}`,
         );
         yield* stored(
           "checkpoint-finish",
@@ -6010,6 +6045,85 @@ const make = Effect.gen(function* () {
       expectedStage: "prepared",
     });
     return next;
+  });
+  const readBootstrap: MemoryStore["Service"]["readBootstrap"] = Effect.fn(
+    "MemoryStore.readBootstrap",
+  )(function* (input) {
+    const rows = yield* stored(
+      "bootstrap-read",
+      sql<{
+        bootstrap_state: "unbound" | "staging" | "ready";
+        checkpoint_id: string | null;
+        snapshot_token: string | null;
+        checkpoint_sequence: number | null;
+        checkpoint_cursor: string | null;
+        checkpoint_page_count: number;
+        after_sequence: number;
+        last_success_at: number | null;
+      }>`SELECT bootstrap_state,checkpoint_id,snapshot_token,checkpoint_sequence,checkpoint_cursor,checkpoint_page_count,after_sequence,last_success_at FROM memory_sync_cursors WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId}`,
+    );
+    const row = rows[0];
+    return {
+      state: row?.bootstrap_state ?? "unbound",
+      checkpointId: row?.checkpoint_id ?? null,
+      snapshotToken: row?.snapshot_token ?? null,
+      checkpointSequence: row?.checkpoint_sequence ?? 0,
+      cursor: row?.checkpoint_cursor ?? null,
+      pageCount: row?.checkpoint_page_count ?? 0,
+      afterSequence: row?.after_sequence ?? 0,
+      lastSuccessAt: row?.last_success_at ?? null,
+    };
+  });
+  const discardBootstrapTx: MemoryStore["Service"]["discardBootstrapTx"] = Effect.fn(
+    "MemoryStore.discardBootstrapTx",
+  )(function* (input) {
+    yield* Transaction;
+    const changed = yield* stored(
+      "bootstrap-discard-cas",
+      sql`UPDATE memory_sync_cursors SET bootstrap_state='unbound',checkpoint_id=NULL,snapshot_token=NULL,checkpoint_sequence=NULL,checkpoint_cursor=NULL,checkpoint_page_count=0,after_sequence=0,last_success_at=NULL WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId} AND bootstrap_state='staging' AND snapshot_token=${input.expectedSnapshotToken} AND checkpoint_id=${input.expectedCheckpointId} AND checkpoint_sequence=${input.expectedCheckpointSequence} RETURNING space`,
+    );
+    if (!changed.length) return false;
+    yield* stored(
+      "bootstrap-discard-pages",
+      sql`DELETE FROM memory_inbox_pending WHERE space=${input.memorySpaceId} AND checkpoint_id=${input.expectedCheckpointId} AND record_kind='checkpoint'`,
+    );
+    // Only rows created by this staging attempt are reclaimable. A concurrent
+    // canonical receive may already have adopted the same payload reference.
+    yield* stored(
+      "bootstrap-discard-bodies",
+      sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND checkpoint_stage_id=${input.expectedCheckpointId} AND NOT EXISTS(SELECT 1 FROM memory_revisions r WHERE r.space=memory_payloads.space AND r.payload_ref=memory_payloads.payload_ref) AND NOT EXISTS(SELECT 1 FROM memory_resolutions r WHERE r.space=memory_payloads.space AND r.judgment_ref=memory_payloads.payload_ref) AND NOT EXISTS(SELECT 1 FROM memory_outbox o WHERE o.space=memory_payloads.space AND o.payload_ref=memory_payloads.payload_ref)`,
+    );
+    yield* stored(
+      "bootstrap-discard-adopted",
+      sql`UPDATE memory_payloads SET checkpoint_stage_id=NULL WHERE space=${input.memorySpaceId} AND checkpoint_stage_id=${input.expectedCheckpointId}`,
+    );
+    return true;
+  });
+  const retireFrozenClaimTx: MemoryStore["Service"]["retireFrozenClaimTx"] = Effect.fn(
+    "MemoryStore.retireFrozenClaimTx",
+  )(function* (input) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "frozen-claim-read",
+      sql<{
+        frozen_claim_json: string;
+      }>`SELECT frozen_claim_json FROM memory_outbox WHERE id=${input.candidateId} AND space=${input.memorySpaceId} AND kind='claim' AND sync_version=${input.expectedGeneration} AND frozen_claim_json IS NOT NULL AND status IN ('pending','retry','running')`,
+    );
+    if (!rows[0]) return false;
+    const claim = yield* stored(
+      "frozen-claim-decode",
+      claimCodec.decode(rows[0].frozen_claim_json, strict),
+    );
+    if (
+      claim.attemptId !== input.attemptId ||
+      !sameHeadSet(claim.conflictHeadSet, input.frozenHeads)
+    )
+      return false;
+    const changed = yield* stored(
+      "frozen-claim-retire",
+      sql`UPDATE memory_outbox SET frozen_claim_json=NULL,sync_version=sync_version+1,status='retry',claimed_by=NULL,claimed_until=NULL,next_attempt_at=${input.nextAttemptAt} WHERE id=${input.candidateId} AND space=${input.memorySpaceId} AND kind='claim' AND sync_version=${input.expectedGeneration} AND frozen_claim_json=${rows[0].frozen_claim_json} AND NOT EXISTS(SELECT 1 FROM memory_outbox t WHERE t.space=${input.memorySpaceId} AND t.kind='resolve' AND json_extract(t.ticket_json,'$.ticket.attemptId')=${input.attemptId}) RETURNING id`,
+    );
+    return changed.length === 1;
   });
   const advanceBootstrapTx: MemoryStore["Service"]["advanceBootstrapTx"] = Effect.fn(
     "MemoryStore.advanceBootstrapTx",
@@ -7832,6 +7946,9 @@ const make = Effect.gen(function* () {
     activateHubMemberTx: (input) => withHubBudget(activateHubMemberTx(input)),
     readPendingHubAdmins,
     readActivatedHubAdminTx,
+    readBootstrap,
+    discardBootstrapTx,
+    retireFrozenClaimTx,
     advanceBootstrapTx,
     readHubMember,
     findHubMemberByCredential,

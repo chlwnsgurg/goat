@@ -46,6 +46,15 @@ export default Effect.gen(function* () {
   ) WHERE kind IN ('sync','revert_intent')`;
   yield* sql`CREATE INDEX memory_outbox_sync_due ON memory_outbox(space,kind,status,next_attempt_at,claimed_until)`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN terminal_at INTEGER`;
+  yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN checkpoint_page_count INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_page_count>=0)`;
+  yield* sql`ALTER TABLE memory_payloads ADD COLUMN checkpoint_stage_id TEXT`;
+  yield* sql`UPDATE memory_sync_cursors SET checkpoint_page_count=(SELECT count(*) FROM memory_inbox_pending p WHERE p.space=memory_sync_cursors.space AND p.checkpoint_id=memory_sync_cursors.checkpoint_id AND p.record_kind='checkpoint')`;
+  yield* sql`CREATE TRIGGER memory_bootstrap_page_insert AFTER INSERT ON memory_inbox_pending WHEN NEW.record_kind='checkpoint' BEGIN
+    UPDATE memory_sync_cursors SET checkpoint_page_count=checkpoint_page_count+1 WHERE space=NEW.space AND checkpoint_id=NEW.checkpoint_id AND bootstrap_state='staging';
+  END`;
+  yield* sql`CREATE TRIGGER memory_bootstrap_page_delete AFTER DELETE ON memory_inbox_pending WHEN OLD.record_kind='checkpoint' BEGIN
+    UPDATE memory_sync_cursors SET checkpoint_page_count=checkpoint_page_count-1 WHERE space=OLD.space AND checkpoint_id=OLD.checkpoint_id AND bootstrap_state='staging';
+  END`;
   const counterSpace = "_hub_global";
   // Seed once from the upgrade snapshot. Every later row delta is maintained by SQLite in its writer transaction.
   const receiptBytes = 336;

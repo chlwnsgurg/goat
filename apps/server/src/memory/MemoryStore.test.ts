@@ -4430,3 +4430,178 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "bootstrap restart reads persisted progress and expired staging discard fences a newer join",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const input = { memorySpaceId: space, hubEnvironmentId: env };
+      assert.strictEqual((yield* store.readBootstrap(input)).state, "unbound");
+      yield* store.transact(
+        store.advanceBootstrapTx({
+          ...input,
+          expectedState: "unbound",
+          nextState: "staging",
+          checkpointId: "stage-old",
+          snapshotToken: "synthetic-old",
+          checkpointSequence: 1,
+          nextCursor: null,
+        }),
+      );
+      yield* store.transact(
+        Effect.gen(function* () {
+          yield* store.installCheckpointPage({ checkpointId: "stage-old", page: checkpoint() });
+          yield* store.advanceBootstrapTx({
+            ...input,
+            expectedState: "staging",
+            nextState: "staging",
+            checkpointId: "stage-old",
+            snapshotToken: "synthetic-old",
+            checkpointSequence: 1,
+            nextCursor: "next-page",
+          });
+        }),
+      );
+      const recovered = yield* store.readBootstrap(input).pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(recovered, {
+        state: "staging",
+        checkpointId: "stage-old",
+        snapshotToken: "synthetic-old",
+        checkpointSequence: 1,
+        cursor: "next-page",
+        pageCount: 1,
+        afterSequence: 0,
+        lastSuccessAt: null,
+      });
+      const discard = {
+        ...input,
+        expectedSnapshotToken: "synthetic-old",
+        expectedCheckpointId: "stage-old",
+        expectedCheckpointSequence: 1,
+      };
+      assert.isFalse(
+        yield* store.transact(
+          store.discardBootstrapTx({ ...discard, expectedSnapshotToken: "wrong" }),
+        ),
+      );
+      yield* store
+        .transact(store.discardBootstrapTx(discard).pipe(Effect.andThen(Effect.fail("rollback"))))
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* store.readBootstrap(input), recovered);
+      assert.isTrue(yield* store.transact(store.discardBootstrapTx(discard)));
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='stage-old'`).length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE checkpoint_stage_id='stage-old'`).length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${memory}`).length,
+        0,
+      );
+      yield* store.transact(
+        store.advanceBootstrapTx({
+          ...input,
+          expectedState: "unbound",
+          nextState: "staging",
+          checkpointId: "stage-new",
+          snapshotToken: "synthetic-new",
+          checkpointSequence: 2,
+          nextCursor: null,
+        }),
+      );
+      assert.isFalse(yield* store.transact(store.discardBootstrapTx(discard)));
+      assert.strictEqual((yield* store.readBootstrap(input)).snapshotToken, "synthetic-new");
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "definitive ticketless claim retirement CAS preserves changed generations heads attempts and tickets",
+  () =>
+    Effect.gen(function* () {
+      const { store, claim } = yield* seedResolutionConflict;
+      yield* store.recoverClaimCandidates(0);
+      const candidate = (yield* store.readDueClaimCandidates(1, 0))[0]!;
+      yield* store.transact(
+        store.prepareClaimAttemptTx({
+          memorySpaceId: space,
+          candidateId: candidate.id,
+          expectedGeneration: 0,
+          conflictHeads: claim.conflictHeadSet,
+          proposedClaim: claim,
+        }),
+      );
+      const retirement = {
+        memorySpaceId: space,
+        candidateId: candidate.id,
+        expectedGeneration: 0,
+        attemptId: claim.attemptId,
+        frozenHeads: claim.conflictHeadSet,
+        nextAttemptAt: 0,
+      };
+      assert.isFalse(
+        yield* store.transact(store.retireFrozenClaimTx({ ...retirement, expectedGeneration: 1 })),
+      );
+      assert.isFalse(
+        yield* store.transact(
+          store.retireFrozenClaimTx({
+            ...retirement,
+            attemptId: M.MemoryOperationId.make(id(990)),
+          }),
+        ),
+      );
+      assert.isFalse(
+        yield* store.transact(
+          store.retireFrozenClaimTx({
+            ...retirement,
+            frozenHeads: [M.MemoryRevisionId.make(id(991))],
+          }),
+        ),
+      );
+      yield* store
+        .transact(
+          store.retireFrozenClaimTx(retirement).pipe(Effect.andThen(Effect.fail("rollback"))),
+        )
+        .pipe(Effect.flip);
+      assert.isTrue(yield* store.transact(store.retireFrozenClaimTx(retirement)));
+      assert.isFalse(yield* store.transact(store.retireFrozenClaimTx(retirement)));
+      const nextClaim = {
+        ...claim,
+        attemptId: M.MemoryOperationId.make(id(992)),
+        frozenDefaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+      };
+      assert.deepStrictEqual(
+        yield* store.transact(
+          store.prepareClaimAttemptTx({
+            memorySpaceId: space,
+            candidateId: candidate.id,
+            expectedGeneration: 1,
+            conflictHeads: claim.conflictHeadSet,
+            proposedClaim: nextClaim,
+          }),
+        ),
+        { claim: nextClaim, generation: 1 },
+      );
+      const ticket = yield* store.transact(
+        store.transitionHubLeaseTx({
+          authority: leaseAuthority,
+          action: { kind: "claim", request: nextClaim },
+        }),
+      );
+      if (!ticket || "released" in ticket) throw new Error("fixture");
+      yield* store.persistResolutionTicket(ticket);
+      assert.isFalse(
+        yield* store.transact(
+          store.retireFrozenClaimTx({
+            ...retirement,
+            expectedGeneration: 1,
+            attemptId: nextClaim.attemptId,
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(live)),
+);
