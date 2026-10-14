@@ -22,6 +22,8 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as HashMap from "effect/HashMap";
+import type { EnvironmentCatalogState } from "./connections.ts";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -42,6 +44,22 @@ import {
   emptyMemoryExposure,
   memoryExposureMatches,
 } from "./memory.ts";
+
+vi.mock("./connections.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./connections.ts")>();
+  return {
+    ...actual,
+    createEnvironmentCatalogAtoms: (
+      ...args: Parameters<typeof actual.createEnvironmentCatalogAtoms>
+    ) => {
+      const override = catalogOverrides.get(args[0]);
+      return override
+        ? { catalogValueAtom: override }
+        : actual.createEnvironmentCatalogAtoms(...args);
+    },
+  };
+});
+const catalogOverrides = new WeakMap<object, Atom.Atom<EnvironmentCatalogState>>();
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({
@@ -275,6 +293,7 @@ const harness = Effect.fn(function* (ledger = createMemoryTombstoneLedger()) {
   );
   return {
     registry,
+    entries,
     memory,
     active,
     queue,
@@ -938,5 +957,94 @@ describe("shared memory client", () => {
         expect(h.registry.get(exposure).forgotten.has(id)).toBe(true);
       }),
     ),
+  );
+  it.effect("unready empty catalog preserves an existing ledger until registration is known", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const retained = h.ledger.space(env, space);
+        h.ledger.forget(retained, id);
+        const catalog = Atom.make<EnvironmentCatalogState>({ isReady: false, entries: new Map() });
+        catalogOverrides.set(h.runtime, catalog);
+        const recreated = h.recreate();
+        const exposure = recreated.exposureAtom(target);
+        h.registry.mount(exposure);
+        expect(h.registry.get(exposure).ready).toBe(false);
+        expect(h.ledger.space(env, space)).toBe(retained);
+        expect(retained.forgotten.has(id)).toBe(true);
+        h.registry.set(catalog, { isReady: true, entries: yield* SubscriptionRef.get(h.entries) });
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        expect(h.registry.get(exposure).forgotten.has(id)).toBe(true);
+        const body = hasBody(recreated.read(readTarget));
+        h.registry.mount(body);
+        expect(h.registry.get(body)).toBe(false);
+        h.registry.set(catalog, { isReady: true, entries: new Map() });
+        yield* waitFor(h.registry, exposure, (state) => !state.ready);
+        expect(h.ledger.space(env, space)).not.toBe(retained);
+      }),
+    ),
+  );
+
+  it.effect.each(["pending", "visible"] as const)(
+    "version 10000/10001 boundary fences %s body/draft and resumes only after reset",
+    (phase) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* harness();
+          const exposure = h.memory.exposureAtom(target);
+          h.registry.mount(exposure);
+          yield* Queue.offer(h.queue, signal("reset"));
+          yield* waitFor(h.registry, exposure, (state) => state.ready);
+          const source = h.memory.read(readTarget);
+          const body = hasBody(source);
+          h.registry.mount(body);
+          const first = yield* Queue.take(h.reads);
+          const edit = h.memory.draftAtom({ ...target, draftId: "version-limit" });
+          h.registry.mount(edit);
+          h.registry.set(edit, { text: "Derived before overflow", memoryIds: [id] });
+          if (phase === "visible") {
+            yield* Deferred.succeed(first.reply, item);
+            yield* waitFor(h.registry, body, Boolean);
+          }
+          const changes = Array.from({ length: 10_000 }, (_, index) =>
+            signal(
+              "upsert",
+              MemoryId.make(`10000000-0000-4000-8000-${index.toString().padStart(12, "0")}`),
+            ),
+          );
+          yield* Queue.offerAll(h.queue, changes);
+          yield* waitFor(h.registry, exposure, (state) => HashMap.size(state.versions) === 10_000);
+          expect(h.registry.get(exposure).ready).toBe(true);
+          expect(h.registry.get(edit)).toBe("Derived before overflow");
+          expect(h.readCount()).toBe(1);
+          expect(h.registry.get(body)).toBe(phase === "visible");
+          const before = h.registry.get(exposure);
+          yield* Queue.offer(h.queue, signal("upsert", unrelated));
+          yield* waitFor(h.registry, exposure, (state) => !state.ready);
+          expect(HashMap.size(h.registry.get(exposure).versions)).toBe(0);
+          expect(h.registry.get(exposure).epoch).not.toBe(before.epoch);
+          expect(h.registry.get(body)).toBe(false);
+          expect(h.registry.get(edit)).toBeNull();
+          yield* Deferred.await(first.finalized);
+          yield* Deferred.succeed(first.reply, item);
+          const closed = h.registry.get(exposure);
+          yield* Queue.offer(h.queue, signal("upsert", unrelated));
+          yield* waitFor(h.registry, exposure, (state) => state !== closed);
+          expect(h.registry.get(exposure).ready).toBe(false);
+          expect(h.registry.get(body)).toBe(false);
+          expect(h.readCount()).toBe(1);
+          yield* Queue.offer(h.queue, signal("reset"));
+          yield* waitFor(h.registry, exposure, (state) => state.ready);
+          const second = yield* Queue.take(h.reads);
+          expect(h.registry.get(body)).toBe(false);
+          expect(h.registry.get(edit)).toBeNull();
+          expect(HashMap.size(h.registry.get(exposure).versions)).toBe(0);
+          yield* Deferred.succeed(second.reply, item);
+          yield* waitFor(h.registry, body, Boolean);
+          expect(h.readCount()).toBe(2);
+          expect(h.registry.get(edit)).toBeNull();
+        }),
+      ),
   );
 });
