@@ -2466,6 +2466,18 @@ const make = Effect.gen(function* () {
             sql`INSERT INTO memory_conflicts (space,conflict_id,memory_id,heads_json,status,failure_code) VALUES (${op.memorySpaceId},${c.conflictId},${op.memoryId},${yield* headsCodec.encode(c.heads)},${c.status},${c.failureCode ?? null}) ON CONFLICT(space,conflict_id) DO UPDATE SET heads_json=excluded.heads_json,status=excluded.status,failure_code=excluded.failure_code`,
           );
         }
+        if (
+          accepted &&
+          !decision.pending &&
+          !tombstones.length &&
+          op.kind === "resolve" &&
+          decision.heads?.length === 1 &&
+          decision.heads[0] === op.revision.revisionId
+        )
+          yield* stored(
+            "resolution-conflict-retire",
+            sql`UPDATE memory_conflicts SET status='resolved',attempt_id=NULL,failure_code=NULL WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId} AND conflict_id=${op.conflictId} AND heads_json=${yield* headsCodec.encode(op.resolution.inputRevisionIds)}`,
+          );
         if (accepted && decision.admission.kind === "localIntent")
           yield* enqueueWork({
             id: `sync:${op.memorySpaceId}:${op.operationId}`,

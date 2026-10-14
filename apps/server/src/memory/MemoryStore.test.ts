@@ -3400,6 +3400,17 @@ it.effect(
           environmentId: env,
         },
       });
+      const resolvedConflict = yield* sql<{
+        status: string;
+      }>`SELECT status FROM memory_conflicts WHERE conflict_id=${op.conflictId}`;
+      assert.strictEqual(resolvedConflict[0]!.status, "resolved");
+      const report = (yield* store.pendingReports(100))[0]!;
+      yield* store.acknowledgeReport({
+        ...report,
+        state: "delivered",
+        reportThread: { environmentId: env, threadId: M.ThreadId.make("history-report") },
+        sequence: 1,
+      });
       yield* store.finishWork(
         `resolve:${space}:${ticket.attemptId}`,
         "completed",
@@ -3477,6 +3488,26 @@ it.effect(
         (yield* store.receipt(space, op.operationId))?.receipt.outcome,
         "accepted",
       );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_report_outbox WHERE state='delivered'`).length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
+        1,
+      );
+      const replay = yield* store.transact(store.readHubReceiptTx(space, op.operationId));
+      if (replay?.entry.kind !== "metadata" || !replay.entry.compactReceipt)
+        throw new Error("fixture");
+      assert.isFalse(
+        (yield* store.transact(
+          store.reconcileResolutionReportTx({
+            record: replay.entry.compactReceipt,
+            localEnvironmentId: env,
+          }),
+        )).deliverable,
+      );
+      assert.strictEqual((yield* store.pendingReports(100)).length, 0);
       assert.strictEqual(ticket.fencingToken, 1);
     }).pipe(Effect.provide(live)),
 );
