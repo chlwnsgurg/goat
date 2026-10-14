@@ -3392,6 +3392,13 @@ it.effect(
           0,
         ),
         receipt: ledger.entry.receipt,
+        execution: {
+          requestedModelSelection: op.resolution.requestedModelSelection,
+          effectiveProvider: op.resolution.effectiveProvider,
+          effectiveModel: op.resolution.effectiveModel,
+          providerInstanceId: op.resolution.requestedModelSelection.instanceId,
+          environmentId: env,
+        },
       });
       const publish = (name: string, at: number, floor: number) =>
         store.transact(
@@ -3458,7 +3465,7 @@ it.effect(
           .length,
         0,
       );
-      assert.strictEqual((yield* store.readItem(space, memory))?.status, "active");
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "active");
       assert.strictEqual(
         (yield* store.receipt(space, op.operationId))?.receipt.outcome,
         "accepted",

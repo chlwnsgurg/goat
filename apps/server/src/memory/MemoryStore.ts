@@ -4054,7 +4054,7 @@ const make = Effect.gen(function* () {
         yield* stored(
           "report-delivery-guard",
           sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json)
-      SELECT space,'report_delivered',report_id,memory_id,${JSON.stringify({ operationId: report.operationId, outcome: report.outcome, resolvingEnvironmentId: report.resolvingEnvironmentId })}
+      SELECT space,'report_delivered',report_id,memory_id,${yield* codec(Schema.Struct({ operationId: M.MemoryOperationId, outcome: Schema.Literals(["resolved", "reverted", "failed"]), resolvingEnvironmentId: M.EnvironmentId })).encode({ operationId: report.operationId, outcome: report.outcome, resolvingEnvironmentId: report.resolvingEnvironmentId })}
       FROM memory_report_outbox WHERE report_id=${report.reportId} ON CONFLICT(space,key_kind,key) DO NOTHING`,
         );
       }),
