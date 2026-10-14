@@ -2681,6 +2681,8 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
+      const collectEntered = yield* Deferred.make<void>();
+      const resumeCollect = yield* Deferred.make<void>();
       const pushed = yield* Deferred.make<void>();
       const pending = new Map<string, M.MemorySourceReadRequest>();
       for (const n of [9101, 9102])
@@ -2702,7 +2704,11 @@ it.effect(
         });
       const responses: M.MemoryHubSourceReadRespondInput[] = [];
       const client = peer({
-        collectSourceReads: () => Effect.sync(() => ({ requests: [...pending.values()] })),
+        collectSourceReads: () =>
+          Deferred.succeed(collectEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(resumeCollect)),
+            Effect.andThen(Effect.sync(() => ({ requests: [...pending.values()] }))),
+          ),
         respondSourceRead: (_c, response) =>
           Effect.sync(() => {
             responses.push(response);
@@ -2748,9 +2754,12 @@ it.effect(
             Effect.gen(function* () {
               const sync = yield* Sync.MemorySyncService;
               const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
+              yield* Deferred.await(collectEntered);
+              yield* TestClock.adjust("1 second");
+              yield* Deferred.succeed(resumeCollect, undefined);
               yield* Deferred.await(entered);
               yield* TestClock.adjust("5 seconds");
-              yield* TestClock.adjust("10 seconds");
+              yield* TestClock.adjust("9 seconds");
               yield* Fiber.join(run);
               assert.isTrue(Option.isSome(yield* Deferred.poll(pushed)));
               assert.deepStrictEqual(
@@ -2789,6 +2798,7 @@ it.effect(
       let claims = 0;
       const batches = yield* Effect.forEach([0, 1, 2, 3, 4], () => Deferred.make<void>());
       let appScope: Scope.Scope | undefined;
+      let currentSync: Sync.MemorySyncService["Service"] | undefined;
       const client = peer({
         claim: (_c, { protocolVersion: _p, ...input }) =>
           Effect.gen(function* () {
@@ -2850,6 +2860,7 @@ it.effect(
           for (let n = 1; n <= 20; n++) yield* conflict(n);
           const settings = yield* Settings.ServerSettingsService;
           const store = yield* Store.MemoryStore;
+          const callerScope = yield* Scope.Scope;
           const control = Layer.fresh(Sync.layer).pipe(
             Layer.provide(
               Layer.mergeAll(
@@ -2866,7 +2877,15 @@ it.effect(
                   readDueClaimCandidates: (limit, now, s) =>
                     releases >= 12
                       ? Deferred.succeed(gate, undefined).pipe(Effect.andThen(Effect.never))
-                      : store.readDueClaimCandidates(limit, now, s),
+                      : Effect.gen(function* () {
+                          // An external coalesced hint keeps this cycle open across batches.
+                          const hint = yield* currentSync!.scheduleConflictResolution.pipe(
+                            Effect.forkIn(callerScope),
+                          );
+                          yield* Effect.yieldNow;
+                          yield* Fiber.interrupt(hint);
+                          return yield* store.readDueClaimCandidates(limit, now, s);
+                        }),
                 }),
               ),
             ),
@@ -2874,12 +2893,14 @@ it.effect(
           yield* Effect.scoped(
             Effect.gen(function* () {
               const sync = yield* Sync.MemorySyncService;
+              currentSync = sync;
               assert.isDefined(appScope);
               const baseline = count();
               const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
               yield* Deferred.await(gate);
               yield* Effect.yieldNow;
               assert.isAtLeast(releases, 12);
+              assert.isAtLeast(count(), baseline + 1);
               assert.isAtMost(count(), baseline + 6);
               yield* sync.shutdown;
               yield* Fiber.await(run);
@@ -3265,7 +3286,7 @@ it.effect(
             reason: null,
             revisionId: snapshot.heads[0]!,
             generation: snapshot.generation,
-            sinceAtUtc: null,
+            sinceAtUtc: M.MemoryUtcTimestamp.make(timestamp),
             attempt: 0,
             dueAt: 0,
             lastAttemptAt: null,
@@ -3325,7 +3346,7 @@ it.effect(
             if (input.memoryId === secondMemory) {
               secondClaims.push(input);
               if (secondClaims.length === 1)
-                yield* database!`CREATE TRIGGER fixture_combined_ticket_failure BEFORE INSERT ON memory_outbox WHEN NEW.kind='resolve' AND NEW.memory_id=${secondMemory} BEGIN SELECT RAISE(ABORT,'fixture ticket failure'); END`.pipe(
+                yield* database!`CREATE TRIGGER fixture_combined_ticket_failure BEFORE INSERT ON memory_outbox WHEN NEW.kind='resolve' AND NEW.memory_id='00000000-0000-4000-8000-000000000004' BEGIN SELECT RAISE(ABORT,'fixture ticket failure'); END`.pipe(
                   Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
                 );
             }

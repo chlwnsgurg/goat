@@ -213,6 +213,7 @@ const make = Effect.gen(function* () {
       resolutionAfter: string;
       syncDone: boolean;
       resolutionDone: boolean;
+      restartRequested: boolean;
     }
   >();
   const enqueueRearm = (
@@ -230,7 +231,9 @@ const make = Effect.gen(function* () {
           resolutionAfter: "",
           syncDone: false,
           resolutionDone: false,
+          restartRequested: false,
         });
+      else pending.restartRequested = true;
     }
   };
   const ensureEpoch = (epoch: number): Permit =>
@@ -646,7 +649,11 @@ const make = Effect.gen(function* () {
                       now + 30000,
                       renewalFailed ? Date.parse(currentLease.expiresAtHubTime) : 0,
                     ),
-                reportConflictFailure: definitiveFailure && generationAttempted && !renewalFailed,
+                reportConflictFailure:
+                  definitiveFailure &&
+                  generationAttempted &&
+                  !renewalFailed &&
+                  ["invalid_output", "lease_expired"].includes(failureCode(error)),
               });
               if (!saved || !definitiveFailure) return saved;
               // Keep definitive retirement and its report in the same local owner lineage.
@@ -1343,6 +1350,14 @@ const make = Effect.gen(function* () {
           return { sync, resolution };
         }),
       );
+      if (pending.restartRequested) {
+        pending.restartRequested = false;
+        pending.syncDone = false;
+        pending.resolutionDone = false;
+        pending.syncAfter = "";
+        pending.resolutionAfter = "";
+        continue;
+      }
       pending.syncDone ||= page.sync.length < 100;
       pending.resolutionDone ||= page.resolution.length < 100;
       pending.syncAfter = page.sync.at(-1) ?? pending.syncAfter;
