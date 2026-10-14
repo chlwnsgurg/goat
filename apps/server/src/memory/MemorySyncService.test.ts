@@ -7,6 +7,11 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Context from "effect/Context";
+import * as FileSystem from "effect/FileSystem";
+import * as Statement from "effect/sql/Statement";
+import * as ServerConfig from "../config.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
@@ -81,7 +86,7 @@ const hub = Hub.layer.pipe(
   Layer.provide(Layer.succeed(Hub.MemoryHubConfiguration, { read: Effect.succeed(null) })),
 );
 // Real Store ports; the fixture Settings authority below is a SQL-free Ref.
-const runtime = Layer.effect(
+const runtimeBase = Layer.effect(
   Sync.MemorySyncRuntime,
   Effect.gen(function* () {
     const store = yield* Store.MemoryStore;
@@ -130,7 +135,8 @@ const runtime = Layer.effect(
             ),
     });
   }),
-).pipe(Layer.provide(core));
+);
+const runtime = runtimeBase.pipe(Layer.provide(core));
 const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) => {
   const issued = new Map<string, M.MemoryResolutionLease>();
   const defaultClaim: Client.MemoryHubClient["Service"]["claim"] = (
@@ -3663,7 +3669,7 @@ it.effect(
           const rows = yield* sql<{
             status: string;
             submission_digest: string | null;
-          }>`SELECT status,submission_digest FROM memory_outbox WHERE kind='resolve' AND memory_id=${memoryId}`;
+          }>`SELECT status,json_extract(ticket_json,'$.submissionDigest') AS submission_digest FROM memory_outbox WHERE kind='resolve' AND memory_id=${memoryId}`;
           assert.deepStrictEqual(rows, [{ status: "completed", submission_digest: null }]);
           assert.strictEqual(
             (yield* store.readRecoverableResolutionTickets({
@@ -3678,7 +3684,7 @@ it.effect(
     }),
 );
 
-it.effect("failed renewal SQL write and release retain retains the authoritative retry floor", () =>
+it.effect("failed renewal SQL write and release retain the authoritative retry floor", () =>
   Effect.gen(function* () {
     const released = yield* Deferred.make<void>();
     let issued: M.MemoryResolutionLease | undefined;
@@ -3730,4 +3736,145 @@ it.effect("failed renewal SQL write and release retain retains the authoritative
       }).pipe(Effect.provide(fixture(client, model))),
     );
   }),
+);
+
+it.effect.each(["pull", "ack"] as const)(
+  "commits %s while the real settings provider-history reload is pending",
+  (lane) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-l4-settings-" });
+        const configLayer = ServerConfig.layerTest(process.cwd(), baseDir);
+        const config = yield* ServerConfig.ServerConfig.pipe(Effect.provide(configLayer));
+        const defaults = yield* Settings.ServerSettingsService.use((s) => s.getSettings).pipe(
+          Effect.provide(Settings.layerTest()),
+        );
+        const encodeSettings = Schema.encodeEffect(Schema.fromJsonString(M.ServerSettings));
+        yield* fs.writeFileString(
+          config.settingsPath,
+          yield* encodeSettings({ ...defaults, memoryHub: member, memoryHubVersion: 1 }),
+        );
+        const events = yield* PubSub.bounded<FileSystem.WatchEvent>(4);
+        const watching = yield* Deferred.make<void>();
+        const eventSeen = yield* Deferred.make<void>();
+        const historyRequested = yield* Deferred.make<void>();
+        const releaseHistory = yield* Deferred.make<void>();
+        let holdHistory = false;
+        let completed = 0;
+        const controlledFs = FileSystem.FileSystem.of({
+          ...fs,
+          watch: () =>
+            Stream.unwrap(
+              PubSub.subscribe(events).pipe(
+                Effect.tap(() => Deferred.succeed(watching, undefined)),
+                Effect.map(Stream.fromSubscription),
+              ),
+            ).pipe(Stream.tap(() => Deferred.succeed(eventSeen, undefined))),
+        });
+        const transformer: Statement.Transformer = (statement) =>
+          Effect.gen(function* () {
+            if (holdHistory && statement.compile()[0].includes("FROM provider_session_runtime")) {
+              yield* Deferred.succeed(historyRequested, undefined);
+              yield* Deferred.await(releaseHistory);
+            }
+            return statement;
+          });
+        const settingsLayer = Settings.layer.pipe(
+          Layer.provideMerge(Secrets.layer),
+          Layer.provideMerge(Sqlite.layerMemory),
+          Layer.provideMerge(configLayer),
+        );
+        const realCore = Service.layer.pipe(
+          Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
+          Layer.provide(identity),
+          Layer.provide(
+            Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+              resolve: () => Effect.succeed(null),
+            }),
+          ),
+          Layer.provideMerge(settingsLayer),
+        );
+        let settings: Settings.ServerSettingsService["Service"];
+        const reload = Effect.gen(function* () {
+          holdHistory = true;
+          const before = yield* settings.getSettings;
+          yield* fs.writeFileString(config.settingsPath, yield* encodeSettings(before));
+          yield* PubSub.publish(events, { _tag: "Update" as const, path: config.settingsPath });
+          yield* Deferred.await(eventSeen);
+          yield* TestClock.adjust(100);
+          yield* Deferred.await(historyRequested);
+        });
+        const withReload = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          Effect.gen(function* () {
+            yield* reload.pipe(Effect.orDie);
+            const result = yield* effect;
+            // The real transaction returned before releasing the cache lookup's SQL barrier.
+            assert.isTrue(holdHistory);
+            completed++;
+            holdHistory = false;
+            yield* Deferred.succeed(releaseHistory, undefined);
+            yield* settings.getSettings.pipe(Effect.orDie);
+            return result;
+          });
+        const observed = Layer.effect(
+          Service.MemoryService,
+          Effect.gen(function* () {
+            const service = yield* Service.MemoryService;
+            return Service.MemoryService.of({
+              ...service,
+              receiveHubPage: (input) =>
+                lane === "pull" && completed === 0
+                  ? withReload(service.receiveHubPage(input))
+                  : service.receiveHubPage(input),
+              settleHubAcknowledgement: (input) =>
+                lane === "ack" && completed === 0
+                  ? withReload(service.settleHubAcknowledgement(input))
+                  : service.settleHubAcknowledgement(input),
+            });
+          }),
+        ).pipe(Layer.provide(realCore));
+        const realHub = Hub.layer.pipe(
+          Layer.provide(realCore),
+          Layer.provide(Hub.activityLayer),
+          Layer.provide(Layer.succeed(Hub.MemoryHubConfiguration, { read: Effect.succeed(null) })),
+        );
+        const shared = Layer.mergeAll(
+          realCore,
+          realHub,
+          runtimeBase.pipe(Layer.provide(realCore)),
+          identity,
+          realGeneration({ resolveMemoryConflict: () => Effect.never }),
+          peer(),
+        );
+        const app = Sync.layer.pipe(
+          Layer.provideMerge(observed),
+          Layer.provideMerge(shared),
+          Layer.provideMerge(
+            Layer.merge(NodeServices.layer, Layer.succeed(FileSystem.FileSystem, controlledFs)),
+          ),
+        );
+        const context = yield* Layer.build(app).pipe(
+          Effect.provideService(Statement.CurrentTransformer, transformer),
+        );
+        settings = Context.get(context, Settings.ServerSettingsService);
+        yield* settings.start.pipe(
+          Effect.provideService(Statement.CurrentTransformer, transformer),
+        );
+        yield* Deferred.await(watching);
+        yield* Effect.gen(function* () {
+          yield* ready;
+          if (lane === "ack") yield* enqueue(99001);
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          yield* sync.shutdown;
+          assert.strictEqual(completed, 1);
+          if (lane === "ack")
+            assert.strictEqual(
+              (yield* (yield* Store.MemoryStore).readWork("sync:99001"))?.status,
+              "completed",
+            );
+        }).pipe(Effect.provideContext(context));
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
 );

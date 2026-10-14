@@ -242,7 +242,7 @@ const make = Effect.gen(function* () {
   const ensureEpoch = (epoch: number): Permit =>
     committedSettings.read.pipe(
       Effect.flatMap((s) =>
-        s.version === epoch && s.settings.mode !== "disabled" && !stopped
+        s.version === epoch && !stopped
           ? Effect.void
           : Effect.fail(new Service.MemoryAccessError({ code: "fenced" })),
       ),
