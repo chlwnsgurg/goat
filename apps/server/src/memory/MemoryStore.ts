@@ -1029,6 +1029,10 @@ export class MemoryStore extends Context.Service<
     }) => InTx<M.MemoryCompactionStatus>;
     readonly readHubRetentionTx: (space: M.MemorySpaceId) => InTx<HubRetention>;
     readonly readHubUsageTx: (space: M.MemorySpaceId) => InTx<HubUsage>;
+    readonly readHubInventoryTx: (space: M.MemorySpaceId) => InTx<{
+      reserved: Partial<Record<M.MemoryCapacityDimension, number>>;
+      reclaimable: Partial<Record<M.MemoryCapacityDimension, number>>;
+    }>;
     readonly reserveHubCheckpointTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       checkpointDeltaBytes: number;
@@ -6007,6 +6011,14 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
     );
   });
+  const adminReplayJson = Effect.fnUntraced(function* (record: AdminRecord) {
+    const { action, ...replay } = record;
+    return yield* adminReplayCodec.encode({
+      ...replay,
+      stage: "acknowledged" as const,
+      actionDigest: hashText(yield* adminActionCodec.encode(action)),
+    });
+  });
   const compactTerminalAdmins = Effect.fnUntraced(function* (now: number, limit: number) {
     const rows = yield* stored(
       "hub-admin-sweep",
@@ -6017,15 +6029,9 @@ const make = Effect.gen(function* () {
     );
     for (const row of rows.slice(0, limit)) {
       const record = yield* adminCodec.decode(row.admin_json, strict);
-      const { action, ...replay } = record;
-      const guard = {
-        ...replay,
-        stage: "acknowledged" as const,
-        actionDigest: hashText(yield* adminActionCodec.encode(action)),
-      };
       yield* stored(
         "hub-admin-guard",
-        sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES ('_admin','hub_admin',${record.requestId},${record.requestId},${yield* adminReplayCodec.encode(guard)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
+        sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES ('_admin','hub_admin',${record.requestId},${record.requestId},${yield* adminReplayJson(record)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
       );
       yield* stored("hub-admin-detail-retire", sql`DELETE FROM memory_outbox WHERE id=${row.id}`);
     }
@@ -7039,6 +7045,94 @@ const make = Effect.gen(function* () {
       ...usage,
     };
   });
+  const readHubInventoryTx = Effect.fn("MemoryStore.readHubInventoryTx")(function* (
+    space: M.MemorySpaceId,
+  ) {
+    yield* Transaction;
+    const now = yield* Clock.currentTimeMillis;
+    const inventory = yield* stored(
+      "hub-reserved-reclaimable",
+      sql<{
+        forget_bytes: number;
+        forget_receipts: number;
+        forget_keys: number;
+        terminal_work_rows: number;
+        terminal_work_bytes: number;
+
+        source_bytes: number;
+        snapshot_bytes: number;
+        tail_rows: number;
+        tail_bytes: number;
+        history_bytes: number;
+      }>`SELECT
+      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_bytes,
+      (SELECT count(*) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_receipts,
+      (SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_keys,
+      (SELECT count(*) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_rows,
+      (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)),0) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_bytes,
+
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_hub_source_reads r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=${space} AND r.deadline<=${now}) AS source_bytes,
+      (SELECT coalesce(sum(length(CAST(b.metadata_json AS BLOB))),0) FROM memory_inbox_pending b WHERE b.space=${space} AND b.reason='hub_snapshot' AND b.checkpoint_id!=coalesce((SELECT 'hub:'||checkpoint_id FROM memory_hub_retention WHERE space=${space}),'') AND NOT EXISTS(SELECT 1 FROM memory_hub_retention r,json_each(r.handles_json) h WHERE r.space=b.space AND 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now})) AS snapshot_bytes,
+      (SELECT count(*) FROM memory_hub_operations o JOIN memory_hub_retention r ON r.space=o.space WHERE o.space=${space} AND o.hub_sequence<=r.retention_floor AND o.committed_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=o.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=o.operation_id) AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=o.space AND json_extract(w.metadata_json,'$.operationId')=o.operation_id AND w.status IN ('pending','running','retry'))) AS tail_rows,
+      (SELECT coalesce(sum(length(CAST(o.entry_json AS BLOB))),0) FROM memory_hub_operations o JOIN memory_hub_retention r ON r.space=o.space WHERE o.space=${space} AND o.hub_sequence<=r.retention_floor AND o.committed_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=o.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=o.operation_id) AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=o.space AND json_extract(w.metadata_json,'$.operationId')=o.operation_id AND w.status IN ('pending','running','retry'))) AS tail_bytes,
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_revisions v ON v.space=p.space AND v.payload_ref=p.payload_ref JOIN memory_compact_receipts c ON c.space=v.space AND c.operation_id=v.operation_id JOIN memory_hub_retention r ON r.space=v.space WHERE p.space=${space} AND p.purge_eligible_after<=${now} AND c.hub_sequence<=r.retention_floor
+        AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=v.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=v.operation_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_items i,json_each(i.heads_json) h WHERE i.space=v.space AND h.value=v.revision_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_conflicts f,json_each(f.heads_json) h WHERE f.space=v.space AND f.status!='resolved' AND h.value=v.revision_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_resolutions x,json_each(x.input_revision_ids_json) h WHERE x.space=v.space AND x.revert_deadline>${now} AND h.value=v.revision_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_revert_intents x WHERE x.space=v.space AND (x.restored_revision_id=v.revision_id OR x.payload_ref=v.payload_ref))
+        AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=v.space AND w.status IN ('pending','running','retry') AND (w.payload_ref=v.payload_ref OR instr(w.metadata_json,v.revision_id)>0 OR instr(coalesce(w.ticket_json,''),v.revision_id)>0 OR instr(coalesce(w.frozen_claim_json,''),v.revision_id)>0))
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b WHERE b.space=v.space AND (b.payload_ref=v.payload_ref OR b.reason='hub_snapshot' AND EXISTS(SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=v.revision_id) AND (b.checkpoint_id='hub:'||r.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now}))))) AS history_bytes`,
+    );
+    const inventoryRow = inventory[0]!;
+    const adminRows = yield* stored(
+      "hub-admin-reclaimable",
+      sql<{
+        admin_json: string;
+      }>`SELECT admin_json FROM memory_outbox WHERE kind='admin' AND status='completed' AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND json_extract(admin_json,'$.stage')='acknowledged'`,
+    );
+    let adminBytes = 0;
+    for (const row of adminRows) {
+      const originalBytes = new TextEncoder().encode(row.admin_json).length;
+      const guardBytes = new TextEncoder().encode(
+        yield* adminReplayJson(yield* adminCodec.decode(row.admin_json, strict)),
+      ).length;
+      adminBytes += Math.max(0, originalBytes - guardBytes);
+    }
+    const details = yield* stored(
+      "hub-reclaimable-details",
+      sql<{ report_bytes: number; event_bytes: number; judgment_bytes: number }>`SELECT
+      (SELECT coalesce(sum(coalesce(length(CAST(report_thread_json AS BLOB)),0)+length(CAST(operation_id AS BLOB))+32),0) FROM memory_report_outbox x WHERE space=${space} AND state='delivered' AND delivered_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=x.space AND g.key_kind='report_delivered' AND g.key=x.report_id)) AS report_bytes,
+      (SELECT coalesce(sum(length(CAST(e.metadata_json AS BLOB))+length(CAST(e.receipt_json AS BLOB))),0) FROM memory_events e JOIN memory_compact_receipts c ON c.space=e.memory_space_id AND c.operation_id=e.operation_id JOIN memory_hub_retention r ON r.space=c.space WHERE e.memory_space_id=${space} AND c.hub_sequence<=r.retention_floor AND e.created_at<=${now - M.MEMORY_LOG_RETENTION_MS}
+        AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=c.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=e.operation_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=c.space AND json_extract(w.metadata_json,'$.operationId')=e.operation_id AND w.status IN ('pending','running','retry'))
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b WHERE b.space=c.space AND b.operation_id=e.operation_id)) AS event_bytes,
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_resolutions x JOIN memory_payloads p ON p.space=x.space AND p.payload_ref=x.judgment_payload_ref JOIN memory_revisions v ON v.space=x.space AND v.revision_id=x.result_revision_id JOIN memory_compact_receipts c ON c.space=v.space AND c.operation_id=v.operation_id JOIN memory_hub_retention r ON r.space=x.space WHERE x.space=${space} AND x.revert_deadline<=${now} AND c.hub_sequence<=r.retention_floor
+        AND NOT EXISTS(SELECT 1 FROM memory_revert_intents i WHERE i.space=x.space AND i.resolution_id=x.resolution_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=x.space AND w.status IN ('pending','running','retry') AND (w.payload_ref=x.judgment_payload_ref OR instr(w.metadata_json,x.resolution_id)>0))
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.resolutions') j WHERE b.space=x.space AND b.reason='hub_snapshot' AND json_extract(j.value,'$.resolution.resolutionId')=x.resolution_id AND (b.checkpoint_id='hub:'||r.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now})))) AS judgment_bytes`,
+    );
+
+    return {
+      reserved: {
+        checkpoint_staging: (yield* readHubUsageTx(space)).requiredCheckpointBoundBytes,
+        permanent_metadata:
+          inventoryRow.forget_bytes +
+          inventoryRow.forget_receipts * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
+        receipts: inventoryRow.forget_receipts,
+        import_source_items: inventoryRow.forget_keys,
+      },
+      reclaimable: {
+        checkpoint_staging: inventoryRow.snapshot_bytes,
+        log_tail_rows: inventoryRow.tail_rows,
+        log_tail_bytes: inventoryRow.tail_bytes + details[0]!.event_bytes,
+        history: inventoryRow.history_bytes + details[0]!.judgment_bytes,
+        permanent_metadata: adminBytes + details[0]!.report_bytes,
+        work_items: inventoryRow.terminal_work_rows,
+        work_bytes: inventoryRow.terminal_work_bytes + adminBytes + inventoryRow.source_bytes,
+      },
+    };
+  });
   // Handles are counted from the bounded retention record, never by a physical page scan.
   const usageForHub = Effect.fnUntraced(function* (space: M.MemorySpaceId) {
     const rows = yield* stored(
@@ -7591,6 +7685,7 @@ const make = Effect.gen(function* () {
     transitionHubLeaseTx: (input) => withHubBudget(transitionHubLeaseTx(input)),
     readHubRetentionTx,
     readHubUsageTx,
+    readHubInventoryTx,
     reserveHubCheckpointTx: (input) => withHubBudget(reserveHubCheckpointTx(input)),
     settleMetadataEntryTx,
     reconcileResolutionReportTx,

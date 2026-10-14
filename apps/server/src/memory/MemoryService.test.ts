@@ -1173,3 +1173,93 @@ it.effect.each(["ack", "pull", "metadata"] as const)(
       assert.deepStrictEqual(yield* fresh.pendingForgetIntents(100), []);
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "hub upsert reserves the next checkpoint with old pins at equality and refuses plus one without a sequence",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      const op: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "upsert",
+        memorySpaceId: space,
+        memoryId,
+        operationId: M.MemoryOperationId.make(id(1200)),
+        originEnvironmentId: environmentId,
+        expectedHeads: [],
+        revision: {
+          memorySpaceId: space,
+          memoryId,
+          revisionId: M.MemoryRevisionId.make(id(1201)),
+          operationId: M.MemoryOperationId.make(id(1200)),
+          parents: [],
+          scope: { kind: "user" },
+          payloadRef: M.MemoryRevisionId.make(id(1201)),
+          assertionKind: "inference",
+          provenance: { environmentId },
+          createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+        },
+        payload: {
+          text: "synthetic reservation boundary",
+          evidence: [],
+          derivedFromMemoryRevisions: [],
+        },
+      };
+      const before = yield* store.transact(store.readHubUsageTx(space));
+      const measured = yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* service.admitHubOperationTx({ authority, operation: op });
+            return yield* Effect.fail(
+              (yield* store.readHubUsageTx(space)).requiredCheckpointBoundBytes,
+            );
+          }),
+        )
+        .pipe(Effect.flip);
+      if (typeof measured !== "number") throw new Error("fixture admission failed");
+      assert.isAbove(measured, before.requiredCheckpointBoundBytes);
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: 0,
+          publishedPinnedDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - measured + 1,
+        }),
+      );
+      const denied = yield* service.admitHubOperation({ authority, operation: op });
+      assert.strictEqual(denied.failureCode, "capacity_exceeded");
+      assert.strictEqual(denied.capacity?.dimension, "checkpoint_staging");
+      assert.isNull(denied.hubSequence);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 0);
+      assert.isUndefined((yield* store.loadAggregate(space, memoryId)).identity);
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: 0,
+          publishedPinnedDeltaBytes: -1,
+        }),
+      );
+      const accepted = yield* service.admitHubOperation({ authority, operation: op });
+      assert.strictEqual(accepted.outcome, "accepted");
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
+        M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+      );
+      assert.deepStrictEqual(
+        yield* service.admitHubOperation({ authority, operation: op }),
+        accepted,
+      );
+    }).pipe(Effect.provide(live)),
+);

@@ -654,6 +654,7 @@ const make = Effect.gen(function* () {
           const retention = yield* store.readHubRetentionTx(input.memorySpaceId);
           const counters = yield* store.counters(input.memorySpaceId);
           const hub = yield* store.readHubUsageTx(input.memorySpaceId);
+          const inventory = yield* store.readHubInventoryTx(input.memorySpaceId);
           const limits: Partial<Record<M.MemoryCapacityDimension, number>> = {
             space_live_items: M.MEMORY_SPACE_MAX_LIVE_ITEMS,
             live_payload_bytes: M.MEMORY_LIVE_MAX_PAYLOAD_BYTES,
@@ -688,8 +689,8 @@ const make = Effect.gen(function* () {
               dimension,
               current,
               limit,
-              reclaimable: 0,
-              reserved: dimension === "checkpoint_staging" ? hub.requiredCheckpointBoundBytes : 0,
+              reclaimable: inventory.reclaimable[dimension] ?? 0,
+              reserved: inventory.reserved[dimension] ?? 0,
               warning: current >= limit ? "full" : current >= limit * 0.9 ? "warning" : "normal",
               blockedReasons: current >= limit ? ["capacity_exceeded"] : [],
             });

@@ -73,3 +73,41 @@ it.effect("upgrades 070 without rewriting legacy resolution data or sync payload
     assert.strictEqual(triggers.length, 33);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it.effect(
+  "seeds and maintains snapshot byte and row counters across UTF-8 updates, retirement and rollback",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* memory;
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES ('space','payload','memory','한글','[]')`;
+      yield* hub;
+      const counters = () =>
+        sql<{
+          dimension: string;
+          value: number;
+        }>`SELECT dimension,value FROM memory_quota_counters WHERE space='space' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows') ORDER BY dimension`;
+      assert.deepStrictEqual(yield* counters(), [
+        { dimension: "hub_snapshot_bytes", value: 6 },
+        { dimension: "hub_snapshot_rows", value: 1 },
+      ]);
+      yield* sql`UPDATE memory_payloads SET body_json='한글abc' WHERE space='space'`;
+      assert.strictEqual((yield* counters())[0]!.value, 9);
+      yield* sql
+        .withTransaction(
+          sql`DELETE FROM memory_payloads WHERE space='space'`.pipe(
+            Effect.andThen(Effect.fail("rollback")),
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(yield* counters(), [
+        { dimension: "hub_snapshot_bytes", value: 9 },
+        { dimension: "hub_snapshot_rows", value: 1 },
+      ]);
+      yield* sql`DELETE FROM memory_payloads WHERE space='space'`;
+      assert.deepStrictEqual(yield* counters(), [
+        { dimension: "hub_snapshot_bytes", value: 0 },
+        { dimension: "hub_snapshot_rows", value: 0 },
+      ]);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

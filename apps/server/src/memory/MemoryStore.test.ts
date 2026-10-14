@@ -20,6 +20,8 @@ const now = "2026-10-14T00:00:00.000Z";
 const hash = "a".repeat(64);
 const encodeOperationJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryOperation));
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
+const encodeCheckpointPage = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage));
+const decodeCheckpointPage = Schema.decodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage));
 const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const operation = (n = 3) =>
   decodeOperation({
@@ -3315,9 +3317,9 @@ it.effect.each([0, 1])(
         )
         .pipe(Effect.flip);
       assert.isAbove(delta, 0);
-      const filler =
-        M.MEMORY_PERMANENT_METADATA_MAX_BYTES - delta - M.MEMORY_COMPACT_RECEIPT_MAX_BYTES + extra;
-      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes) VALUES ('other',${id(972)},'{}','{}',${filler})`;
+      const filler = M.MEMORY_PERMANENT_METADATA_MAX_BYTES - delta - 2 + extra;
+      // Private retention detail isolates the metadata cap from required snapshot inputs.
+      yield* sql`INSERT INTO memory_hub_retention(space,compaction_json) VALUES ('other',${"x".repeat(filler)})`;
       if (extra) {
         const failure = yield* store
           .transact(store.writeHubAdminTx({ record, expectedStage: null }))
@@ -3438,6 +3440,28 @@ it.effect(
           }),
         );
       const floor = yield* publish("revert-protected", expiresAt - 1, 0);
+      const publishedRows = yield* sql<{
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_inbox_pending WHERE space=${space} AND checkpoint_id='hub:revert-protected' ORDER BY page_ordinal`;
+      const produced = yield* Effect.forEach(publishedRows, (row) =>
+        decodeCheckpointPage(row.metadata_json),
+      );
+      assert.isTrue(M.validateMemoryCheckpointRecords(produced));
+      assert.isAtMost(
+        (yield* store.transact(store.readHubUsageTx(space))).lastSnapshotBytes,
+        (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+      );
+      const resolveGuard = produced
+        .flatMap((page) => page.compactReceipts)
+        .find((record) => record.receipt.operationId === op.operationId);
+      assert.strictEqual(resolveGuard?.reportGuard?.resolvingEnvironmentId, env);
+      assert.strictEqual(produced.flatMap((page) => page.resolutions).length, 1);
+      yield* TestClock.adjust(expiresAt - 1);
+      assert.strictEqual(
+        (yield* store.transact(store.readHubInventoryTx(space))).reclaimable.history,
+        0,
+      );
+
       yield* store.transact(
         store.compactEligibleHistoryTx({
           memorySpaceId: space,
@@ -3623,7 +3647,7 @@ it.effect("reserves snapshot growth atomically at pinned equality and rejects on
   }).pipe(Effect.provide(live)),
 );
 
-it.effect.each(["refusal", "forget", "escaped"] as const)(
+it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
   "producer round-trips %s checkpoint and its encoded pages fit the counter bound",
   (shape) =>
     Effect.gen(function* () {
@@ -3663,11 +3687,18 @@ it.effect.each(["refusal", "forget", "escaped"] as const)(
           const ledger = yield* store.appendHubEntryTx({
             operation: op,
             operationDigest: memoryOperationDigest(op),
-            outcome: shape === "refusal" ? "rejected" : shape === "forget" ? "deleted" : "accepted",
-            ...(shape === "refusal" ? { failureCode: "identity_mismatch" as const } : {}),
+            outcome:
+              shape === "refusal" || shape === "pages"
+                ? "rejected"
+                : shape === "forget"
+                  ? "deleted"
+                  : "accepted",
+            ...(shape === "refusal" || shape === "pages"
+              ? { failureCode: "identity_mismatch" as const }
+              : {}),
             now: 0,
           });
-          if (shape !== "refusal") {
+          if (shape !== "refusal" && shape !== "pages") {
             const decided = decideMemoryOperation(
               yield* store.loadAggregate(space, memory),
               op,
@@ -3681,6 +3712,20 @@ it.effect.each(["refusal", "forget", "escaped"] as const)(
           }
         }),
       );
+      if (shape === "pages") {
+        for (let n = 0; n < 105; n++) {
+          const rejected = operation(1100 + n);
+          yield* store.transact(
+            store.appendHubEntryTx({
+              operation: rejected,
+              operationDigest: memoryOperationDigest(rejected),
+              outcome: "rejected",
+              failureCode: "identity_mismatch",
+              now: 0,
+            }),
+          );
+        }
+      }
       const authority: Store.HubAuthority = {
         principal: {
           memorySpaceId: space,
@@ -3709,24 +3754,31 @@ it.effect.each(["refusal", "forget", "escaped"] as const)(
             cursor,
           }),
         );
-        const json = yield* Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage))(
-          page,
-        );
-        pages.push(
-          yield* Schema.decodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage))(json),
-        );
+        const json = yield* encodeCheckpointPage(page);
+        pages.push(yield* decodeCheckpointPage(json));
         cursor = page.nextCursor;
       }
       assert.isTrue(M.validateMemoryCheckpointRecords(pages));
       const usage = yield* store.transact(store.readHubUsageTx(space));
       assert.isAtMost(usage.lastSnapshotBytes, usage.requiredCheckpointBoundBytes);
-      assert.strictEqual(pages.flatMap((p) => p.compactReceipts).length, 1);
-      assert.strictEqual(pages.flatMap((p) => p.identities).length, shape === "refusal" ? 0 : 1);
+      assert.strictEqual(
+        pages.flatMap((p) => p.compactReceipts).length,
+        shape === "pages" ? 106 : 1,
+      );
+      if (shape === "pages") assert.isAbove(handle.pageCount, 1);
+      assert.strictEqual(
+        pages.flatMap((p) => p.identities).length,
+        shape === "refusal" || shape === "pages" ? 0 : 1,
+      );
       if (shape === "forget") assert.strictEqual(pages.flatMap((p) => p.tombstones).length, 1);
       const replay = yield* store.transact(store.readHubReceiptTx(space, op.operationId));
       assert.strictEqual(
         replay?.entry.receipt.outcome,
-        shape === "refusal" ? "rejected" : shape === "forget" ? "deleted" : "accepted",
+        shape === "refusal" || shape === "pages"
+          ? "rejected"
+          : shape === "forget"
+            ? "deleted"
+            : "accepted",
       );
     }).pipe(Effect.provide(live)),
 );
