@@ -2502,6 +2502,10 @@ it.effect.each(["rejected", "uncertain"] as const)(
             limit: 100,
           });
           if (outcome === "rejected") {
+            assert.strictEqual(generations, 1);
+            assert.strictEqual((yield* store.readDueClaimCandidates(100, 0, space)).length, 0);
+            assert.strictEqual((yield* store.readDueClaimCandidates(100, 29999, space)).length, 0);
+            assert.strictEqual((yield* store.readDueClaimCandidates(100, 30000, space)).length, 1);
             assert.strictEqual(saved.length, 0);
             assert.isNull(
               yield* store.findClaimCandidate({

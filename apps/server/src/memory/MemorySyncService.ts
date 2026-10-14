@@ -438,14 +438,33 @@ const make = Effect.gen(function* () {
       if (slot) slot.ticket = renewed;
     });
     const reconcile = Effect.fnUntraced(function* (rejection?: M.MemoryHubReceipt) {
-      const result = yield* service.reconcileResolutionSubmission({
-        ownership: ownership(row),
-        now: yield* Clock.currentTimeMillis,
-        hubEnvironmentId: r.hubId,
-        localEnvironmentId: local,
-        reauthorize: ensureEpoch(r.settings.memoryHubVersion),
-        ...(rejection ? { rejection } : {}),
-      });
+      const now = yield* Clock.currentTimeMillis;
+      const result = yield* store.transact(
+        Effect.gen(function* () {
+          const candidate = rejection
+            ? yield* store.findClaimCandidate({
+                memorySpaceId: row.ticket.memorySpaceId,
+                attemptId: row.ticket.attemptId,
+              })
+            : null;
+          const reconciled = yield* service.reconcileResolutionSubmission({
+            ownership: ownership(row),
+            now,
+            hubEnvironmentId: r.hubId,
+            localEnvironmentId: local,
+            reauthorize: ensureEpoch(r.settings.memoryHubVersion),
+            ...(rejection ? { rejection } : {}),
+          });
+          // Preserve the coordinator's retry budget in the same writer transaction as retirement.
+          if (reconciled?.outcome === "retired" && candidate)
+            yield* store.retryClaimCandidate(
+              candidate.id,
+              now + 30000,
+              rejection?.failureCode ?? "conflict_changed",
+            );
+          return reconciled;
+        }),
+      );
       if (!result) return yield* new M.MemoryHubError({ code: "fenced" });
       row = result.row;
       return result.outcome;
