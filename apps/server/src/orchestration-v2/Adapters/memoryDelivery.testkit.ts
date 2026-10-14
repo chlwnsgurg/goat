@@ -1,5 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
+import * as NodeStream from "node:stream";
+import * as Fiber from "effect/Fiber";
+import { runAcpMcpStdioBridge } from "../../mcp/AcpMcpStdioBridge.ts";
 import * as HostProcess from "@goat/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert } from "@effect/vitest";
@@ -25,6 +28,8 @@ import { GrokSettings } from "@goat/provider-grok/settings";
 import { resolveSelfInvocation } from "@goat/shared/nodeRuntime";
 import { makeAntigravityAdapterV2 } from "./AntigravityAdapterV2.ts";
 
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
 export const memoryFixture = () =>
   packMemoryContext({
     memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
@@ -45,7 +50,7 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
   Effect.gen(function* () {
     const instanceId = M.ProviderInstanceId.make(`${kind}-memory`);
     const threadId = M.ThreadId.make(`${kind}-memory-thread`);
-    const selection = { instanceId, model: "default" };
+    const selection = { instanceId, model: kind === "antigravity" ? "gemini-test-low" : "default" };
     const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
       runtimeMode: "full-access",
       interactionMode: "default",
@@ -113,7 +118,9 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const crypto = yield* Crypto.Crypto;
     const prompts: ReadonlyArray<{ type: string; text?: string }>[] = [];
-    const launchServers: unknown[] = [];
+    const launchServers: Array<
+      Parameters<Parameters<typeof makeAntigravityAdapterV2>[0]["makeRuntime"]>[0]["mcpServers"]
+    > = [];
     type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
     let connect: Parameters<Runtime["handleMcpConnect"]>[0] | undefined;
     let message: Parameters<Runtime["handleMcpMessage"]>[0] | undefined;
@@ -285,6 +292,22 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
         assert.isDefined(connect);
         assert.isDefined(message);
         const connection = yield* connect!({ serverId: "goat" }, undefined as never);
+        const stdioServer = launchServers[0]?.[0];
+        if (stdioServer === undefined || !("env" in stdioServer))
+          return yield* Effect.die("Missing native stdio MCP attachment");
+        const stdioConfig = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            env: Schema.Array(Schema.Struct({ name: Schema.String, value: Schema.String })),
+          }),
+        )(stdioServer);
+        const stdioEndpoint = stdioConfig.env.find(
+          (entry) => entry.name === "GOAT_ACP_MCP_ENDPOINT",
+        )?.value;
+        const stdioAuthorization = stdioConfig.env.find(
+          (entry) => entry.name === "GOAT_ACP_MCP_AUTHORIZATION",
+        )?.value;
+        assert.equal(stdioEndpoint, endpoint);
+        assert.equal(stdioAuthorization, "Bearer memory-fixture");
         for (const name of ["memory_search", "memory_upsert"]) {
           const result = yield* message!(
             {
@@ -296,6 +319,30 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
           ).pipe(Effect.exit);
           assert.equal(
             Exit.isSuccess(result),
+            grant.includes("memory:read") &&
+              (name !== "memory_upsert" || grant.includes("memory:write")),
+          );
+          const stdin = new NodeStream.PassThrough();
+          const written: string[] = [];
+          const bridge = yield* runAcpMcpStdioBridge({
+            endpoint: stdioEndpoint!,
+            authorization: stdioAuthorization!,
+            input: stdin,
+            output: {
+              write: (chunk) => {
+                written.push(chunk);
+              },
+            },
+          }).pipe(Effect.forkScoped);
+          stdin.end(
+            `${encodeJson({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } })}\n`,
+          );
+          yield* Fiber.join(bridge);
+          const response = yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+          )(written.join(""));
+          assert.equal(
+            Object.hasOwn(response, "result"),
             grant.includes("memory:read") &&
               (name !== "memory_upsert" || grant.includes("memory:write")),
           );
