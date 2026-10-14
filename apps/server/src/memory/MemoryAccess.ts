@@ -61,10 +61,11 @@ export function effectiveMemoryGrant(input: {
 /** Capture actual memory grants, never infer them from orchestration or runtime mode. */
 export function captureMemoryGrantCeiling(
   scopes: ReadonlyArray<M.AuthEnvironmentScope>,
+  readOnly: boolean,
 ): M.MemoryTaskGrantCeiling {
   return !scopes.includes("memory:read")
     ? "none"
-    : scopes.includes("memory:write")
+    : scopes.includes("memory:write") && !readOnly
       ? "read_write"
       : "read";
 }

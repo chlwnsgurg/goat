@@ -2415,4 +2415,6 @@ export const WsMemoryCoreRpcGroup = RpcGroup.make(
 ).middleware(RpcScopeAuthorization);
 export const WsMemoryImportRpcGroup =
   RpcGroup.make(WsMemoryImportProviderRpc).middleware(RpcScopeAuthorization);
-export const WsMemoryRpcGroup = WsMemoryCoreRpcGroup.merge(WsMemoryImportRpcGroup);
+export const WsMemoryRpcGroup = WsMemoryCoreRpcGroup.merge(WsMemoryImportRpcGroup).merge(
+  WsMemoryAdministrationRpcGroup,
+);

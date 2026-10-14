@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import * as SchemaParser from "effect/SchemaParser";
@@ -1380,9 +1381,9 @@ export const MemoryTaskGrantCeilingField = MemoryTaskGrantCeiling.pipe(
   // Keep older in-process producers assignable; every codec boundary normalizes to none.
   Schema.decodeTo(
     Schema.optionalKey(MemoryTaskGrantCeiling),
-    SchemaTransformation.transform({
+    SchemaTransformation.transformOptional({
       decode: (value) => value,
-      encode: (value) => value ?? "none",
+      encode: (value) => Option.some(Option.getOrElse(value, () => "none" as const) ?? "none"),
     }),
   ),
 );

@@ -34,9 +34,10 @@ describe("memory authority intersection", () => {
         dispatchScopes: ["memory:read"],
       }),
     ).toBe("read");
-    expect(captureMemoryGrantCeiling(["orchestration:operate"])).toBe("none");
-    expect(captureMemoryGrantCeiling(["memory:read"])).toBe("read");
-    expect(captureMemoryGrantCeiling(["memory:read", "memory:write"])).toBe("read_write");
+    expect(captureMemoryGrantCeiling(["orchestration:operate"], false)).toBe("none");
+    expect(captureMemoryGrantCeiling(["memory:read"], false)).toBe("read");
+    expect(captureMemoryGrantCeiling(["memory:read", "memory:write"], false)).toBe("read_write");
+    expect(captureMemoryGrantCeiling(["memory:read", "memory:write"], true)).toBe("read");
   });
   it.effect("requires explicit source compound scopes and a repeatable live permit", () =>
     Effect.gen(function* () {
