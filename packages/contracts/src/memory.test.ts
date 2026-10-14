@@ -487,7 +487,16 @@ describe("memory sync and views", () => {
     const resolveReceipt = {
       ...compact,
       operationKind: "resolve",
-      receipt: { ...receipt, operationId: id(12), hubSequence: 2 },
+      receipt: {
+        ...receipt,
+        operationId: id(12),
+        hubSequence: 2,
+        resolutionApproval: {
+          resolutionId: id(7),
+          appliedAtUtc: now,
+          revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+        },
+      },
       revisionId: id(3),
       resolutionId: id(7),
       attemptId: id(13),
@@ -563,6 +572,7 @@ describe("memory sync and views", () => {
       ...resolveReceipt,
       receipt: {
         ...resolveReceipt.receipt,
+        resolutionApproval: undefined,
         operationId: id(30),
         outcome: "rejected",
         failureCode: "fenced",
@@ -723,7 +733,9 @@ describe("memory sync and views", () => {
       highWatermark: 1,
       throughSequence: 1,
       hasMore: false,
-      entries: [{ kind: "metadata", hubSequence: 1, receipt, memoryId: id(2) }],
+      entries: [
+        { kind: "metadata", operationKind: "upsert", hubSequence: 1, receipt, memoryId: id(2) },
+      ],
       checkpoint,
     });
   });
@@ -1280,7 +1292,16 @@ it("preserves well-formed report guard digests after detail purge for server ver
   const resolveReceipt = {
     ...compact,
     operationKind: "resolve",
-    receipt: { ...receipt, operationId: id(12), hubSequence: 2 },
+    receipt: {
+      ...receipt,
+      operationId: id(12),
+      hubSequence: 2,
+      resolutionApproval: {
+        resolutionId: id(7),
+        appliedAtUtc: now,
+        revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+      },
+    },
     revisionId: id(3),
     resolutionId: id(7),
     attemptId: id(13),
@@ -1473,5 +1494,40 @@ describe("pending forget contracts", () => {
     round(M.MemoryItem, JSON.parse(JSON.stringify(received)));
     rejects(M.MemoryItem, { ...item, payload });
     rejects(M.MemoryItem, { ...item, revision });
+  });
+});
+
+describe("authoritative resolution approvals", () => {
+  const approval = {
+    resolutionId: id(7),
+    appliedAtUtc: now,
+    revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+  };
+  const accepted = { ...receipt, resolutionApproval: approval };
+  const metadata = {
+    kind: "metadata",
+    operationKind: "resolve",
+    resolutionId: id(7),
+    memoryId: id(2),
+    hubSequence: 1,
+    receipt: accepted,
+  };
+  it("validates purged resolve metadata independently of bodies", () => {
+    round(M.MemoryHubEntry, metadata);
+    rejects(M.MemoryHubEntry, { ...metadata, receipt });
+    rejects(M.MemoryHubEntry, { ...metadata, resolutionId: id(9) });
+    rejects(M.MemoryHubEntry, { ...metadata, operationKind: "upsert" });
+    rejects(M.MemoryHubEntry, { ...metadata, operationKind: "revert" });
+    rejects(M.MemoryHubEntry, { ...metadata, receipt: { ...accepted, outcome: "deleted" } });
+    rejects(M.MemoryHubReceipt, { ...accepted, outcome: "rejected", failureCode: "fenced" });
+  });
+  it("requires exactly thirty days only at the approval boundary", () => {
+    round(M.MemoryResolutionApproval, approval);
+    rejects(M.MemoryResolutionApproval, {
+      ...approval,
+      revertDeadlineUtc: "2026-11-13T00:00:00.001Z",
+    });
+    rejects(M.MemoryResolutionApproval, { ...approval, extra: true });
+    round(M.MemoryResolution, { ...resolution, revertDeadlineUtc: "2026-10-15T00:00:00.000Z" });
   });
 });

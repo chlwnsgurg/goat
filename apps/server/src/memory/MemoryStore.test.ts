@@ -1577,3 +1577,107 @@ describe("worker completion fencing", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+it("measures the versioned compact maximum and preserves approval and correlation fields", () => {
+  const record = M.MemoryCompactReceipt.make({
+    memorySpaceId: space,
+    originEnvironmentId: env,
+    operationKind: "resolve",
+    receipt: {
+      operationId: M.MemoryOperationId.make(id(3)),
+      memoryId: memory,
+      operationDigest: hash,
+      outcome: "accepted",
+      hubSequence: Number.MAX_SAFE_INTEGER,
+      resolutionApproval: {
+        resolutionId: M.MemoryResolutionId.make(id(7)),
+        appliedAtUtc: M.MemoryUtcTimestamp.make("+275760-08-13T00:00:00.000Z"),
+        revertDeadlineUtc: M.MemoryUtcTimestamp.make("+275760-09-12T00:00:00.000Z"),
+      },
+      forgetExpansion: {
+        requestDigest: hash,
+        operationId: M.MemoryOperationId.make(id(8)),
+        operationDigest: hash,
+        status: "pending",
+      },
+      forgetRetryOf: { operationId: M.MemoryOperationId.make(id(9)), operationDigest: hash },
+    },
+    revisionId: M.MemoryRevisionId.make(id(4)),
+    resolutionId: M.MemoryResolutionId.make(id(7)),
+    revertsResolutionId: null,
+    attemptId: M.MemoryOperationId.make(id(5)),
+    fencingToken: Number.MAX_SAFE_INTEGER,
+    reportGuard: {
+      reportId: hash,
+      resolvingEnvironmentId: env,
+      resolutionId: M.MemoryResolutionId.make(id(7)),
+      outcome: "resolved",
+    },
+  });
+  const bytes = Store.encodeCompactReceipt(record, () => Number.MAX_SAFE_INTEGER);
+  assert.strictEqual(bytes.length, M.MEMORY_COMPACT_RECEIPT_ENCODING_MAX_BYTES);
+  assert.strictEqual(
+    bytes.length + M.MEMORY_COMPACT_RECEIPT_HEADROOM_BYTES,
+    M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
+  );
+  assert.deepStrictEqual(
+    Store.decodeCompactReceipt(bytes, space, () => env),
+    record,
+  );
+  const rejected = M.MemoryCompactReceipt.make({
+    ...record,
+    revisionId: null,
+    reportGuard: null,
+    receipt: {
+      operationId: record.receipt.operationId,
+      memoryId: memory,
+      operationDigest: hash,
+      hubSequence: Number.MAX_SAFE_INTEGER,
+      outcome: "rejected",
+      failureCode: "capacity_exceeded",
+      capacity: {
+        code: "capacity_exceeded",
+        dimension: "live_bytes",
+        current: Number.MAX_SAFE_INTEGER,
+        limit: Number.MAX_SAFE_INTEGER,
+        reclaimable: Number.MAX_SAFE_INTEGER,
+      },
+      forgetExpansion: record.receipt.forgetExpansion!,
+      forgetRetryOf: record.receipt.forgetRetryOf!,
+    },
+  });
+  assert.isAtMost(
+    Store.encodeCompactReceipt(rejected, () => Number.MAX_SAFE_INTEGER).length,
+    bytes.length,
+  );
+  const op = operation();
+  const legacyRecord = M.MemoryCompactReceipt.make({
+    memorySpaceId: space,
+    originEnvironmentId: env,
+    operationKind: "upsert",
+    receipt: {
+      operationId: op.operationId,
+      memoryId: memory,
+      operationDigest: hash,
+      outcome: "accepted",
+      hubSequence: 1,
+    },
+    revisionId: M.MemoryRevisionId.make(id(13)),
+    resolutionId: null,
+    revertsResolutionId: null,
+    attemptId: null,
+    fencingToken: null,
+    reportGuard: null,
+  });
+  const v2 = Store.encodeCompactReceipt(legacyRecord, () => 1);
+  const v1 = v2.slice(0, -3);
+  v1[0] = 1;
+  assert.deepStrictEqual(
+    Store.decodeCompactReceipt(v1, space, () => env),
+    legacyRecord,
+  );
+  assert.deepStrictEqual(
+    Store.decodeCompactReceipt(v2, space, () => env),
+    legacyRecord,
+  );
+});
