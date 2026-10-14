@@ -4212,21 +4212,22 @@ it.effect("keeps the successor frontier and exposure on body-free canonical meta
     const second = childOperation();
     if (first.kind === "forget" || second.kind === "forget") throw new Error("fixture");
     for (const [index, op] of [first, second].entries()) {
-      yield* store.apply({
-        ...decideMemoryOperation(
+      const approval: M.MemoryHubReceipt = {
+        operationId: op.operationId,
+        memoryId: memory,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "accepted",
+        hubSequence: index + 1,
+      };
+      yield* store.apply(
+        decideMemoryOperation(
           yield* store.loadAggregate(space, memory),
           op,
           Store.approvedReplica,
           { kind: "allowed" },
+          approval,
         ),
-        receipt: {
-          operationId: op.operationId,
-          memoryId: memory,
-          operationDigest: memoryOperationDigest(op),
-          outcome: "accepted",
-          hubSequence: index + 1,
-        },
-      });
+      );
     }
     const before = yield* store.loadAggregate(space, memory);
     assert.deepStrictEqual(before.heads, [second.revision.revisionId]);
