@@ -853,7 +853,7 @@ it.effect(
     Effect.gen(function* () {
       const quota = yield* Quota.MemoryQuotaService;
       const sql = yield* SqlClient.SqlClient;
-      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${memory},'{}','{}',100,2)`;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${memory},'{}','{}',${M.MEMORY_IDENTITY_CORE_MAX_BYTES + 100},2)`;
       yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'relay:fixture',${memory},'한글','[]')`;
       yield* sql`INSERT INTO memory_hub_source_reads(space,request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,payload_ref) VALUES (${space},'fixture',${memory},${env},${env},1,'digest','{}','completed',0,'relay:fixture')`;
       const status = yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: env });

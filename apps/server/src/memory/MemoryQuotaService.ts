@@ -668,6 +668,9 @@ const make = Effect.gen(function* () {
             work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,
             work_bytes: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
             checkpoint_staging: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+            checkpoint_handles: M.MEMORY_CHECKPOINT_MAX_HANDLES_PER_HUB,
+            relay_hub: M.MEMORY_SOURCE_READ_MAX_PER_HUB,
+            members: M.MEMORY_HUB_MAX_MEMBERS,
           };
           const quotas: M.MemoryStorageQuota[] = [];
           for (const dimension of M.MemoryCapacityDimension.literals) {
@@ -679,13 +682,20 @@ const make = Effect.gen(function* () {
             const current =
               dimension === "checkpoint_staging"
                 ? hub.stagingBytes
-                : dimension === "log_tail_rows"
-                  ? counter + hub.tailRows
-                  : dimension === "log_tail_bytes"
-                    ? counter + hub.tailBytes
-                    : dimension === "permanent_metadata"
-                      ? counter + hub.permanentMetadataBytes
-                      : counter;
+                : dimension === "checkpoint_handles"
+                  ? hub.liveHandles
+                  : dimension === "relay_hub"
+                    ? hub.liveSourceReads
+                    : dimension === "members"
+                      ? (hub.tables.find((table) => table.table === "memory_hub_members")
+                          ?.rowCount ?? 0)
+                      : dimension === "log_tail_rows"
+                        ? counter + hub.tailRows
+                        : dimension === "log_tail_bytes"
+                          ? counter + hub.tailBytes
+                          : dimension === "permanent_metadata"
+                            ? counter + hub.permanentMetadataBytes
+                            : counter;
             quotas.push({
               dimension,
               current,

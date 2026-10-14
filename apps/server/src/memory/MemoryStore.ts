@@ -7088,14 +7088,19 @@ const make = Effect.gen(function* () {
         forget_keys: number;
         terminal_work_rows: number;
         terminal_work_bytes: number;
-
         source_bytes: number;
         snapshot_bytes: number;
         tail_rows: number;
         tail_bytes: number;
         history_bytes: number;
+        expired_relays: number;
+        expired_handles: number;
+        admin_rows: number;
       }>`SELECT
-      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_bytes,
+      (SELECT count(*) FROM memory_outbox WHERE kind='admin') AS admin_rows,
+      (SELECT count(*) FROM memory_hub_source_reads WHERE space=${space} AND state!='expired' AND deadline<=${now}) AS expired_relays,
+      (SELECT count(*) FROM memory_hub_retention r,json_each(r.handles_json) h WHERE r.space=${space} AND json_extract(h.value,'$.expiresAt')<=${now}) AS expired_handles,
+      (SELECT coalesce(sum(max(0,reserve_bytes-${M.MEMORY_IDENTITY_CORE_MAX_BYTES})),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_bytes,
       (SELECT count(*) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_receipts,
       (SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_keys,
       (SELECT count(*) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_rows,
@@ -7149,11 +7154,13 @@ const make = Effect.gen(function* () {
         permanent_metadata:
           inventoryRow.forget_bytes +
           inventoryRow.forget_receipts * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
-        receipts: inventoryRow.forget_receipts,
-        import_source_items: inventoryRow.forget_keys,
+        receipts: inventoryRow.forget_receipts + inventoryRow.admin_rows,
+        import_source_items: inventoryRow.forget_keys + inventoryRow.admin_rows,
       },
       reclaimable: {
         checkpoint_staging: inventoryRow.snapshot_bytes,
+        relay_hub: inventoryRow.expired_relays,
+        checkpoint_handles: inventoryRow.expired_handles,
         log_tail_rows: inventoryRow.tail_rows,
         log_tail_bytes: inventoryRow.tail_bytes + details[0]!.event_bytes,
         history: inventoryRow.history_bytes + details[0]!.judgment_bytes,

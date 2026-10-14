@@ -3769,7 +3769,8 @@ it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
         pages.flatMap((p) => p.compactReceipts).length,
         shape === "pages" ? 106 : 1,
       );
-      if (shape === "pages" || shape === "escaped") assert.isAbove(handle.pageCount, 1);
+      if (shape === "pages") assert.isAbove(handle.pageCount, 1);
+      if (shape === "escaped") assert.isAbove(usage.lastSnapshotBytes, 100000);
       assert.strictEqual(
         pages.flatMap((p) => p.identities).length,
         shape === "refusal" || shape === "pages" ? 0 : 1,
