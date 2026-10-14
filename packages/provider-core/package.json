@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./server/cloudTask": {
+      "types": "./src/server/cloudTask.ts",
+      "import": "./src/server/cloudTask.ts"
+    },
     "./server/memoryGenerationPrompts": {
       "types": "./src/server/memoryGenerationPrompts.ts",
       "import": "./src/server/memoryGenerationPrompts.ts"

@@ -13,6 +13,21 @@ export const GUARD_ENV = "GOAT_TEST_TMP_GUARD";
 
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 
+/**
+ * macOS's per-user temp directory is already long (/private/var/folders/xx/…/T), and one more
+ * segment pushes Unix socket paths past the 104-byte sun_path limit, so sockets fail with EINVAL.
+ * The sandbox goes under /tmp there instead.
+ */
+const sandboxParent = (): string => {
+  // oxlint-disable-next-line goat/no-global-process-runtime -- Same reason as below: HostProcess cannot load in every test config.
+  if (NodeOS.platform() !== "darwin") return NodeOS.tmpdir();
+  try {
+    return NodeFS.realpathSync.native("/tmp");
+  } catch {
+    return NodeOS.tmpdir();
+  }
+};
+
 export interface TestTempSandbox {
   readonly directory: string;
   /** Restores TMPDIR, deletes the sandbox, and returns the leaked goat-* entries it held. */
@@ -42,7 +57,7 @@ export const enterTestTempSandbox = (): TestTempSandbox | undefined => {
   if (NodeOS.platform() === "win32") return undefined;
 
   const previous = process.env.TMPDIR;
-  const parent = process.env[PARENT_ENV] ?? NodeOS.tmpdir();
+  const parent = process.env[PARENT_ENV] ?? sandboxParent();
   const directory = NodeFS.mkdtempSync(NodePath.join(parent, SANDBOX_PREFIX));
   process.env[PARENT_ENV] = parent;
   process.env.TMPDIR = directory;

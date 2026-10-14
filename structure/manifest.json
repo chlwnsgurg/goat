@@ -117,7 +117,7 @@
       "path": "server.md",
       "tier": 3,
       "title": "Server",
-      "scope": "Process entry, command commit, orchestration v2, checkpoints, providers, and source control.",
+      "scope": "Process entry, command commit, local/cloud orchestration, checkpoints, providers, and source control.",
       "documents": [
         "apps/server/src/bin.ts",
         "apps/server/src/binCli.ts",
@@ -130,6 +130,7 @@
         "apps/server/src/orchestration-v2/ThreadManagementService.ts",
         "apps/server/src/orchestration-v2/ThreadCommandExecutor.ts",
         "apps/server/src/orchestration-v2/Orchestrator.ts",
+        "apps/server/src/orchestration-v2/CloudTaskSourceService.ts",
         "apps/server/src/orchestration-v2/EventSink.ts",
         "apps/server/src/orchestration-v2/EffectWorker.ts",
         "apps/server/src/orchestration-v2/runtimeLayer.ts",

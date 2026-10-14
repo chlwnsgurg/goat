@@ -16,6 +16,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
 import * as HostThreads from "./HostThreadsMcpService.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -120,6 +121,11 @@ const runSearch = (
       }),
   });
   const hostLayer = HostThreads.layer.pipe(
+    Layer.provide(
+      Layer.mock(ThreadResultService.ThreadResultService)({
+        forRun: () => Effect.succeed(null),
+      }),
+    ),
     Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
     Layer.provide(Layer.mock(LaunchWatchService.LaunchWatchService)({})),
     Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),

@@ -110,6 +110,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as CloudTaskSource from "./orchestration-v2/CloudTaskSourceService.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
@@ -809,6 +810,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     ),
   ),
+  Layer.provide(CloudTaskSource.layer.pipe(Layer.provide(GitVcsDriver.layer))),
   Layer.provide(RemoteLaunchCatalog.layerWithoutDependencies),
   // One launch-watch store and one dispatch coordinator for the MCP tools, host
   // status, and the remote-launch catalog: they all follow runs and wake launchers.

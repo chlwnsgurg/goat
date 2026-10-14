@@ -238,7 +238,27 @@ export const OrchestrationV2ContextTransfer = Schema.Struct({
 });
 export type OrchestrationV2ContextTransfer = typeof OrchestrationV2ContextTransfer.Type;
 
+export const OrchestrationV2CloudSourceRestriction = Schema.Literals([
+  "published-ref",
+  "clean-pushed-sha",
+  "project-folder",
+]);
+export type OrchestrationV2CloudSourceRestriction =
+  typeof OrchestrationV2CloudSourceRestriction.Type;
+
 export const OrchestrationV2SessionCapabilities = Schema.Struct({
+  sourceRestriction: Schema.optional(OrchestrationV2CloudSourceRestriction).pipe(
+    Schema.withDecodingDefault(Effect.succeed("published-ref" as const)),
+  ),
+  executionLocation: Schema.optional(Schema.Literals(["local", "cloud"])).pipe(
+    Schema.withDecodingDefault(Effect.succeed("local" as const)),
+  ),
+  followUp: Schema.optional(
+    Schema.Struct({
+      supported: Schema.Boolean,
+      reason: Schema.optional(Schema.String),
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({ supported: true }))),
   supportsMultipleProviderThreadsPerSession: Schema.Boolean,
   supportsModelSwitchInSession: Schema.Boolean,
   supportsProviderSwitchingViaHandoff: Schema.Boolean,
@@ -1031,7 +1051,32 @@ export const OrchestrationV2ProviderGoal = Schema.Struct({
 });
 export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Type;
 
+export const OrchestrationV2CloudTask = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  // Providers persist the app run whose vendor submission was accepted.
+  acceptedAppRunId: Schema.optional(RunId),
+  url: Schema.optional(Schema.String),
+  title: Schema.optional(Schema.String),
+  status: Schema.Literals(["submitting", "running", "succeeded", "failed", "cancelled", "unknown"]),
+  tracking: Schema.Literals(["live", "polled", "link-only"]),
+  progress: Schema.optional(Schema.String),
+  summary: Schema.optional(Schema.String),
+  prUrl: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  source: Schema.Struct({
+    repository: TrimmedNonEmptyString,
+    branch: TrimmedNonEmptyString,
+    sha: Schema.optional(TrimmedNonEmptyString),
+  }),
+  localChangesExcluded: Schema.Boolean,
+  localChangesIncluded: Schema.optional(Schema.Boolean),
+  error: Schema.optional(Schema.String),
+  updatedAt: IsoDateTime,
+});
+export type OrchestrationV2CloudTask = typeof OrchestrationV2CloudTask.Type;
+
 export const OrchestrationV2ProviderThread = Schema.Struct({
+  cloudTask: Schema.optional(OrchestrationV2CloudTask),
   id: ProviderThreadId,
   driver: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,

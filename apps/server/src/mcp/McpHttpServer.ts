@@ -37,6 +37,7 @@ import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { RemoteReportToolkit } from "./toolkits/remoteReport/tools.ts";
 import * as RemoteReportHandlers from "./toolkits/remoteReport/handlers.ts";
 import * as RemoteReportService from "../remoteReports/RemoteReportService.ts";
+import * as ThreadLaunchMcpService from "./ThreadLaunchMcpService.ts";
 import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
 import { ChannelToolkit } from "./toolkits/channel/tools.ts";
@@ -965,6 +966,7 @@ export const layerHostStatusToolkit = toolkitRegistration(
 );
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer).pipe(
+  Layer.provide(ThreadLaunchMcpService.layer),
   Layer.provide(HostThreadsMcpService.layer),
   Layer.provide(OrchestratorMcpService.layer),
 );

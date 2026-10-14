@@ -1,5 +1,10 @@
 import {
   CommandId,
+  EventId,
+  type OrchestrationV2CloudTask,
+  OrchestrationV2ProviderThreadJson,
+  ProviderInstanceId,
+  ProviderSessionId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   OrchestrationV2StoredEvent,
@@ -32,6 +37,10 @@ import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+
+const decodeProviderThreadPayload = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(OrchestrationV2ProviderThreadJson),
+);
 
 /**
  * ERRORS
@@ -82,6 +91,19 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
+  /** Merge late cloud metadata without changing settled run or task state. */
+  readonly writeCloudTaskMetadata: (input: {
+    readonly eventId: EventId;
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly runId: RunId;
+    readonly activeAttemptId: RunAttemptId;
+    readonly expectedLastRunOrdinal: number;
+    readonly nativeId: string;
+    readonly metadata: Pick<OrchestrationV2CloudTask, "url" | "title" | "progress">;
+  }) => Effect.Effect<void, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -126,6 +148,8 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    /** Recover runtime work without changing projections; requires at least one effect. */
+    readonly allowEffectOnly?: boolean;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -308,6 +332,47 @@ const layerBase: Layer.Layer<
         });
       });
 
+    // Cloud finalization writes a message and its ordinary assistant item together.
+    // Check persisted items inside the ownership-gated transaction: exact provider
+    // text from this run is reused; other text and prior runs never suppress a result.
+    // Replayed synthetic results keep their original message, position and timing.
+    const guardCloudResultItems = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Effect.gen(function* () {
+        const skippedItems = new Set<string>();
+        const skippedMessages = new Set<string>();
+        for (const event of events) {
+          if (
+            event.type !== "turn-item.updated" ||
+            event.payload.type !== "assistant_message" ||
+            event.payload.runId === null ||
+            event.payload.id !== `turn-item:cloud-result:${event.payload.runId}`
+          )
+            continue;
+          const item = event.payload;
+          const runId = event.payload.runId;
+          const { turnItems } = yield* projectionStore.getThreadRecords(
+            item.threadId,
+            ["turnItems"],
+            { turnItemRunId: runId, turnItemTypes: ["assistant_message"] },
+          );
+          if (turnItems.some((existing) => existing.id === item.id)) {
+            skippedItems.add(item.id);
+            skippedMessages.add(item.messageId);
+          } else if (
+            turnItems.some(
+              (existing) => existing.type === "assistant_message" && existing.text === item.text,
+            )
+          ) {
+            skippedItems.add(item.id);
+          }
+        }
+        return events.filter((event) =>
+          event.type === "turn-item.updated"
+            ? !skippedItems.has(event.payload.id)
+            : event.type !== "message.updated" || !skippedMessages.has(event.payload.id),
+        );
+      });
+
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
@@ -316,18 +381,24 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return Effect.forEach(
-        events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
-        { concurrency: 1 },
+      return guardCloudResultItems(events).pipe(
+        Effect.flatMap((guarded) =>
+          Effect.forEach(
+            guarded,
+            (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
+              event.type === "turn-item.updated"
+                ? turnItemPositions
+                    .normalize(
+                      event.payload,
+                      event.payload.runId === null
+                        ? undefined
+                        : runOrdinals.get(event.payload.runId),
+                    )
+                    .pipe(Effect.map((payload) => ({ ...event, payload })))
+                : Effect.succeed(event),
+            { concurrency: 1 },
+          ),
+        ),
       );
     };
 
@@ -360,6 +431,100 @@ const layerBase: Layer.Layer<
           `;
         }
       });
+
+    const writeCloudTaskMetadataEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeCloudTaskMetadata",
+    )(function* (input: Parameters<EventSinkV2Shape["writeCloudTaskMetadata"]>[0]) {
+      yield* commitThenPublish(
+        Effect.gen(function* () {
+          const rows = yield* sql<{
+            readonly payload_json: string;
+            readonly active_attempt_id: string | null;
+            readonly run_status: string;
+          }>`
+              SELECT p.payload_json,
+                json_extract(r.payload_json, '$.activeAttemptId') AS active_attempt_id,
+                r.status AS run_status
+              FROM orchestration_v2_projection_provider_threads p
+              JOIN orchestration_v2_projection_runs r
+                ON r.thread_id = p.thread_id AND r.run_id = ${input.runId}
+                  AND r.provider_thread_id = p.provider_thread_id
+                  AND r.provider_instance_id = ${input.providerInstanceId}
+                  AND r.ordinal = ${input.expectedLastRunOrdinal}
+              WHERE p.provider_thread_id = ${input.providerThreadId}
+                AND p.thread_id = ${input.threadId}
+                AND p.last_run_ordinal = ${input.expectedLastRunOrdinal}
+                AND json_extract(r.payload_json, '$.rootNodeId') IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_runs newer
+                  WHERE newer.thread_id = p.thread_id
+                    AND newer.ordinal > r.ordinal AND newer.status <> 'rolled_back'
+                )
+              LIMIT 1
+            `;
+          const row = rows[0];
+          if (
+            !row ||
+            row.active_attempt_id !== input.activeAttemptId ||
+            !["completed", "interrupted", "failed", "cancelled"].includes(row.run_status)
+          )
+            return [];
+          const latest = yield* decodeProviderThreadPayload(row.payload_json);
+          if (
+            !latest.cloudTask ||
+            latest.ownerNodeId !== null ||
+            latest.appThreadId !== input.threadId ||
+            latest.providerSessionId !== input.providerSessionId ||
+            latest.providerInstanceId !== input.providerInstanceId ||
+            latest.nativeThreadRef?.nativeId !== input.nativeId
+          )
+            return [];
+          // Whitelist fields so a stale observer cannot replace the finalized task snapshot.
+          const patch: { url?: string; title?: string; progress?: string } = {};
+          if (typeof input.metadata.title === "string")
+            patch.title = input.metadata.title.slice(0, 512);
+          if (typeof input.metadata.progress === "string")
+            patch.progress = input.metadata.progress.slice(0, 2000);
+          if (typeof input.metadata.url === "string" && input.metadata.url.length <= 2048) {
+            try {
+              const url = new URL(input.metadata.url);
+              if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
+                patch.url = url.href;
+              }
+            } catch {
+              // Keep the saved link when late metadata has no usable URL.
+            }
+          }
+          if (
+            Object.entries(patch).every(
+              ([key, value]) => latest.cloudTask?.[key as keyof typeof patch] === value,
+            )
+          )
+            return [];
+          const now = yield* DateTime.now;
+          const stored = yield* eventStore.append({
+            events: yield* normalizeEvents([
+              {
+                id: input.eventId,
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                runId: input.runId,
+                providerInstanceId: input.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...latest,
+                  updatedAt: now,
+                  cloudTask: { ...latest.cloudTask, ...patch, updatedAt: DateTime.formatIso(now) },
+                },
+              },
+            ]),
+          });
+          yield* applyStoredEvents(stored);
+          return stored;
+        }),
+        publishStoredEvents,
+      );
+    });
 
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
@@ -550,7 +715,16 @@ const layerBase: Layer.Layer<
             commandId: input.commandId,
             events: normalized,
           });
-          const sequence = storedEvents.at(-1)?.sequence;
+          let sequence = storedEvents.at(-1)?.sequence;
+          if (
+            sequence === undefined &&
+            input.allowEffectOnly === true &&
+            input.effects.length > 0
+          ) {
+            // Effect-only recovery observes the current thread high-water mark. The receipt
+            // and outbox still commit together, and retries reuse this receipt without enqueueing.
+            sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
+          }
           if (sequence === undefined) {
             return yield* Effect.die(
               new Error(`Command ${input.commandId} produced no orchestration events.`),
@@ -784,6 +958,10 @@ const layerBase: Layer.Layer<
                 cause,
               }),
           ),
+        ),
+      writeCloudTaskMetadata: (input) =>
+        writeCloudTaskMetadataEffect(input).pipe(
+          Effect.mapError((cause) => new EventSinkWriteError({ eventCount: 1, cause })),
         ),
       writeIfRunCurrent: (input) =>
         writeIfRunCurrentEffect(input).pipe(
