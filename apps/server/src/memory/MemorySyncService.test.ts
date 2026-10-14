@@ -772,9 +772,9 @@ it.effect("real HubClient transmits bounded immutable work and settles ACK", () 
   }),
 );
 
-it.effect(
-  "uncertain resolution persists bytes and restart replays without a second generation",
-  () =>
+it.effect.each(["unavailable", "unauthorized"] as const)(
+  "%s resolution submission persists bytes and restart replays without a second generation",
+  (refusal) =>
     Effect.gen(function* () {
       const submitted = yield* Deferred.make<void>();
       const replayed = yield* Deferred.make<void>();
@@ -786,7 +786,9 @@ it.effect(
             submissions.push(input);
             yield* Deferred.succeed(submitted, undefined);
             if (submissions.length === 2) yield* Deferred.succeed(replayed, undefined);
-            return yield* new M.MemoryHubError({ code: "unavailable" });
+            return yield* refusal === "unauthorized"
+              ? new M.MemoryHubUnauthorizedError({})
+              : new M.MemoryHubError({ code: "unavailable" });
           }),
       });
       const model = realGeneration({
@@ -841,6 +843,7 @@ it.effect(
           assert.strictEqual(generated, 1);
           assert.strictEqual(submissions.length, 2);
           assert.deepStrictEqual(submissions[1], submissions[0]);
+          assert.strictEqual((yield* store.pendingReports(100)).length, 0);
         }).pipe(Effect.provide(fixture(client, model))),
       );
     }),
@@ -1801,6 +1804,10 @@ it.effect("recovered attempt uses only the remaining fixed 600s cap", () =>
         yield* Deferred.await(cancelled);
         yield* Deferred.await(released);
         assert.strictEqual(yield* Clock.currentTimeMillis, 600000);
+        const reports = yield* (yield* Store.MemoryStore).pendingReports(100);
+        assert.strictEqual(reports.length, 1);
+        assert.strictEqual(reports[0]?.outcome, "failed");
+        assert.strictEqual(reports[0]?.failureCode, "lease_expired");
         yield* sync.shutdown;
         assert.strictEqual(yield* sync.activeResolutions, 0);
       }).pipe(Effect.provide(fixture(client, model))),
@@ -4052,6 +4059,7 @@ it.effect("approval metadata without saved bytes never regenerates a resolution"
         assert.strictEqual(rows.length, 1);
         assert.deepStrictEqual(rows[0]!.approval, approval);
         assert.strictEqual(rows[0]!.submission, null);
+        assert.strictEqual((yield* store.pendingReports(100)).length, 0);
       }).pipe(Effect.provide(fixture(client, model))),
     );
   }),
@@ -4431,6 +4439,52 @@ it.effect.each([
             ),
           );
         }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);
+
+it.effect.each(["stale-candidate", "ticket-write-failure"] as const)(
+  "permanent ticket refusal preserves the pair on %s without ticket-only fallback",
+  (failure) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const refuse = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
+      const client = peer({
+        renew: () =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(refuse)),
+            Effect.andThen(Effect.fail(new M.MemoryHubUnauthorizedError({}))),
+          ),
+        release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          yield* sync.syncOnce;
+          yield* Deferred.await(entered);
+          if (failure === "stale-candidate") {
+            // Simulate a newer acquisition after the coordinator captured its lineage.
+            yield* sql`UPDATE memory_outbox SET attempt=attempt+1 WHERE kind='claim'`;
+          } else {
+            yield* sql`CREATE TEMP TRIGGER fixture_pair_hold_abort BEFORE UPDATE ON memory_outbox WHEN NEW.kind='resolve' AND NEW.hold_class='authorization' BEGIN SELECT RAISE(ABORT,'synthetic pair hold failure'); END`;
+          }
+          const before =
+            yield* sql`SELECT * FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`;
+          yield* Deferred.succeed(refuse, undefined);
+          yield* Deferred.await(released);
+          yield* sync.shutdown;
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`,
+            before,
+          );
+          assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+          if (failure === "ticket-write-failure") yield* sql`DROP TRIGGER fixture_pair_hold_abort`;
+        }).pipe(Effect.provide(fixture(client))),
       );
     }),
 );
