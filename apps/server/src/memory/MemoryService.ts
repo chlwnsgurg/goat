@@ -1299,13 +1299,20 @@ const make = Effect.gen(function* () {
     if (prepared.kind === "refusal") {
       if (prepared.failureCode === "capacity_exceeded")
         return yield* new Store.MemoryStoreConflict({ code: "capacity_exceeded" });
-      return (yield* store.appendHubEntryTx({
+      const ledger = yield* store.appendHubEntryTx({
         operation: op,
         operationDigest: digest,
         outcome: "rejected",
         failureCode: prepared.failureCode,
         now,
-      })).entry.receipt;
+      });
+      yield* settleHubEntryTx({
+        memorySpaceId: op.memorySpaceId,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        entry: ledger.entry,
+      });
+      return ledger.entry.receipt;
     }
     const { decision, approval } = prepared;
     return yield* quota.withAdmission(
@@ -1343,6 +1350,13 @@ const make = Effect.gen(function* () {
               reason: op.kind === "forget" ? "forget" : "heads",
             },
           });
+        // Hub-local work receives the same terminal settlement as an ACK or pulled entry.
+        yield* settleHubEntryTx({
+          memorySpaceId: op.memorySpaceId,
+          hubEnvironmentId: environmentId,
+          localEnvironmentId: environmentId,
+          entry: ledger.entry,
+        });
         return ledger.entry.receipt;
       }),
     );

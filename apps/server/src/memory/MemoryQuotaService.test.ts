@@ -615,6 +615,11 @@ describe("MemoryQuotaService", () => {
           operationDigest: hash,
           outcome: "accepted",
           hubSequence: 3,
+          resolutionApproval: {
+            resolutionId: op.resolution.resolutionId,
+            appliedAtUtc: op.resolution.appliedAtUtc,
+            revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+          },
         },
         revisionId: op.revision.revisionId,
         resolutionId: op.resolution.resolutionId,
