@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
@@ -14,6 +15,8 @@ import * as Deferred from "effect/Deferred";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpBody from "effect/http/HttpBody";
 import * as Settings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
@@ -179,7 +182,7 @@ const scenario = Effect.gen(function* () {
       },
       M.MemoryHubPushResult,
     );
-  return { run, post, call, configure, initialize, push, hubEnv, context };
+  return { run, post, call, configure, initialize, push, hubEnv, context, memoMap };
 });
 
 describe("Memory hub assembled HTTP scenarios", () => {
@@ -499,6 +502,54 @@ describe("Memory hub assembled HTTP scenarios", () => {
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+  it.effect("serves externally registered hub routes across the server MemoMap boundary", () =>
+    Effect.gen(function* () {
+      const s = yield* scenario;
+      yield* s.initialize;
+      // As in server.ts: route/descriptor acquisition happens in the parent map,
+      // and serve forks that map while reusing the already acquired router/core.
+      const served = yield* Layer.buildWithMemoMap(
+        HttpRouter.serve(Layer.empty, {
+          disableLogger: true,
+          disableListenLog: true,
+        }).pipe(
+          Layer.provideMerge(NodeHttpServer.layerTest),
+          Layer.provide(Layer.succeedContext(s.context)),
+        ),
+        s.memoMap,
+        yield* Scope.Scope,
+      );
+      const client = Context.get(served, HttpClient.HttpClient);
+      const request = () =>
+        client.post(M.MEMORY_HUB_PATHS.push, {
+          headers: { "content-type": "application/json", authorization: `Bearer ${hubCredential}` },
+          body: HttpBody.jsonUnsafe({
+            protocolVersion: 1,
+            memorySpaceId: space,
+            environmentId: s.hubEnv,
+            operations: [],
+          }),
+        });
+      const response = yield* request();
+      assert.strictEqual(response.status, 200);
+      assert.deepStrictEqual(yield* response.json, { receipts: [] });
+      const descriptor = s.run(
+        Environment.ServerEnvironment.use((environment) => environment.getDescriptor),
+      );
+      const enabled = yield* descriptor;
+      assert.strictEqual(enabled.capabilities.memoryHubProtocolVersion, 1);
+      assert.strictEqual(enabled.capabilities.memory, undefined);
+      yield* s.configure("disabled");
+      const disabled = yield* descriptor;
+      assert.strictEqual(disabled.environmentId, enabled.environmentId);
+      assert.strictEqual(disabled.instanceId, enabled.instanceId);
+      const { memoryHubProtocolVersion: _hubVersion, ...enabledCapabilities } =
+        enabled.capabilities;
+      assert.deepStrictEqual(disabled.capabilities, enabledCapabilities);
+      assert.strictEqual((yield* request()).status, 503);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "parks for settings readiness, starts once after enable and keeps timers in application Scope",
     () =>
