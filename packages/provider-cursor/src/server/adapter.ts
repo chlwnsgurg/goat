@@ -861,6 +861,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
   const runner = yield* CursorAgentSdk.CursorAgentSdkRunner;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  // Native history survives transport/session reopening. Unknown IDs stay silent until
+  // this adapter has advertised tools; no conversation or memory body is retained here.
+  const memoryToolClaims = new Set<string>();
   const adapterOptions = options;
   const apiKey = adapterOptions.environment.CURSOR_API_KEY?.trim() || undefined;
 
@@ -2210,10 +2213,18 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               ? config
               : undefined,
           );
+          const hasMemoryTools = availability.read || availability.write || availability.source;
+          const nativeId = agent!.nativeThreadId;
+          const announceMemoryTools = hasMemoryTools || memoryToolClaims.has(nativeId);
+          // Record admission, including attempts whose native response later fails.
+          if (hasMemoryTools) memoryToolClaims.add(nativeId);
+          else memoryToolClaims.delete(nativeId);
           const text = [
             userText,
             buildRuntimeInstructions({ harness: "Cursor", model: turnInput.modelSelection.model }),
-            `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+            announceMemoryTools
+              ? `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`
+              : undefined,
             memory,
           ]
             .filter((part) => part !== undefined)

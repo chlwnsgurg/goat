@@ -91,6 +91,10 @@ describe("CursorAdapterV2", () => {
                 close: Effect.void,
                 send: (input) =>
                   Effect.gen(function* () {
+                    assert.notInclude(
+                      typeof input.message === "string" ? input.message : input.message.text,
+                      "GOAT memory tools:",
+                    );
                     sentWithMcpOverride = Object.hasOwn(input.options ?? {}, "mcpServers");
                     // Recorded Cursor task calls (see fixtures/subagent) stream a
                     // partial-tool-call before tool-call-started with the same args.
@@ -591,6 +595,12 @@ describe("CursorAdapterV2", () => {
       assert.equal(refreshes, 2);
       assert.deepEqual(imageCounts, [0, 0, 1]);
       assert.include(sentMessages[2]!, "read=false, write=false, source=false");
+      yield* runtime.startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.notInclude(sentMessages[3]!, "GOAT memory tools:");
       memory = snapshot;
       const grants: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
         ["memory:read"],
@@ -600,16 +610,16 @@ describe("CursorAdapterV2", () => {
         yield* sessions.set(config(grant));
         yield* runtime.startTurn({
           ...ordinaryInput,
-          runOrdinal: index + 4,
-          providerTurnOrdinal: index + 4,
+          runOrdinal: index + 5,
+          providerTurnOrdinal: index + 5,
         });
         yield* runtime.events.pipe(
           Stream.filter((event) => event.type === "turn.terminal"),
           Stream.runHead,
         );
-        assert.include(sentMessages[index + 3]!, memoryContextText(snapshot));
+        assert.include(sentMessages[index + 4]!, memoryContextText(snapshot));
         assert.include(
-          sentMessages[index + 3]!,
+          sentMessages[index + 4]!,
           `read=true, write=${index === 1}, source=${index === 1}`,
         );
       }
@@ -634,8 +644,8 @@ describe("CursorAdapterV2", () => {
         else yield* sessions.set(attachment);
         yield* runtime.startTurn({
           ...ordinaryInput,
-          runOrdinal: index + 6,
-          providerTurnOrdinal: index + 6,
+          runOrdinal: index + 7,
+          providerTurnOrdinal: index + 7,
         });
         yield* runtime.events.pipe(
           Stream.filter((event) => event.type === "turn.terminal"),
@@ -648,15 +658,15 @@ describe("CursorAdapterV2", () => {
         assert.equal(opened.operation, "resume");
         assert.equal(opened.agentId, "native-cursor-error");
         assert.deepEqual(opened.options.mcpServers, cursorMcpServers(attachment));
-        assert.include(sentMessages[index + 5]!, memoryContextText(snapshot));
+        assert.include(sentMessages[index + 6]!, memoryContextText(snapshot));
         assert.include(
-          sentMessages[index + 5]!,
+          sentMessages[index + 6]!,
           attachment === undefined
             ? "read=false, write=false, source=false"
             : "read=true, write=true, source=true",
         );
       }
-      assert.equal(refreshes, 9);
+      assert.equal(refreshes, 10);
       assert.deepEqual(connections, [
         "open",
         "close",
@@ -672,8 +682,8 @@ describe("CursorAdapterV2", () => {
       yield* runtime.startTurn({
         ...ordinaryInput,
         runtimePolicy: movedPolicy,
-        runOrdinal: 11,
-        providerTurnOrdinal: 11,
+        runOrdinal: 12,
+        providerTurnOrdinal: 12,
       });
       yield* runtime.events.pipe(
         Stream.filter((event) => event.type === "turn.terminal"),
@@ -683,13 +693,13 @@ describe("CursorAdapterV2", () => {
       assert.equal(closes, 5);
       assert.equal(opens[5]!.agentId, "native-cursor-error");
       assert.equal(opens[5]!.options.local?.cwd, movedPolicy.cwd);
-      assert.include(sentMessages[10]!, "read=true, write=true, source=true");
+      assert.include(sentMessages[11]!, "read=true, write=true, source=true");
       memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
       const failed = yield* runtime
         .startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 })
         .pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(failed));
-      assert.equal(sentMessages.length, 11);
+      assert.equal(sentMessages.length, 12);
     }).pipe(
       Effect.scoped,
       Effect.provide(
