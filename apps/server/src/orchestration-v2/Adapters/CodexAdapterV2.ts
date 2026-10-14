@@ -1828,6 +1828,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         let memoryGeneration = 0;
         const restoredCompactions = new Set<string>();
         const restorePermit = yield* Semaphore.make(1);
+        // Only successful native attachments enter this cache, including effective authority.
+        const attachmentKey = (config: McpProviderSession.McpProviderSessionConfig) => {
+          const { read, write, source } = McpProviderSession.memoryToolAvailability(config);
+          return `${config.providerSessionId}:${read}:${write}:${source}`;
+        };
         const credentialsByThread = new Map<string, string>();
         const additionalContextByThread = yield* Ref.make(
           new Map<
@@ -6545,7 +6550,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* readMcpSession(turnInput.threadId);
-            if (mcpSession && credentialsByThread.get(threadId) !== mcpSession.providerSessionId) {
+            if (mcpSession && credentialsByThread.get(threadId) !== attachmentKey(mcpSession)) {
               // Reconfigure the same native conversation; stale credentials are already denied by the registry.
               yield* client.raw.request("thread/resume", {
                 threadId,
@@ -6556,7 +6561,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   runtimePolicy: turnInput.runtimePolicy,
                 }),
               });
-              credentialsByThread.set(threadId, mcpSession.providerSessionId);
+              credentialsByThread.set(threadId, attachmentKey(mcpSession));
             }
             if (!mcpSession && credentialsByThread.has(threadId)) {
               yield* client.raw.request("thread/resume", {
@@ -6882,7 +6887,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     Effect.tap((response) =>
                       Effect.sync(() => {
                         if (mcpSession)
-                          credentialsByThread.set(response.thread.id, mcpSession.providerSessionId);
+                          credentialsByThread.set(response.thread.id, attachmentKey(mcpSession));
                       }),
                     ),
                   ),
@@ -6909,14 +6914,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           resumeThread: (threadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              const resumedMcp = yield* readMcpSession(
+                threadInput.threadId ?? threadInput.providerThread.appThreadId,
+              );
               // excludeTurns is not in the generated request schema yet.
               const resume = client.raw.request("thread/resume", {
                 threadId: nativeThreadId,
                 excludeTurns: true,
                 ...codexThreadRuntimeParams({
-                  mcpSession: yield* readMcpSession(
-                    threadInput.threadId ?? threadInput.providerThread.appThreadId,
-                  ),
+                  mcpSession: resumedMcp,
                   ...(threadInput.modelSelection === undefined
                     ? {}
                     : { modelSelection: threadInput.modelSelection }),
@@ -6947,10 +6953,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
-              const resumedMcp = yield* readMcpSession(
-                threadInput.threadId ?? threadInput.providerThread.appThreadId,
-              );
-              if (resumedMcp) credentialsByThread.set(nativeThreadId, resumedMcp.providerSessionId);
+              if (resumedMcp) credentialsByThread.set(nativeThreadId, attachmentKey(resumedMcp));
+              else credentialsByThread.delete(nativeThreadId);
               // Codex follows a resume with a goal snapshot notification; the
               // run's first turn writes it if it differs from the stored goal.
               return {

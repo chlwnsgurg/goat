@@ -2961,6 +2961,189 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect.each(["availability", "resume-rotation"] as const)(
+    "replays successful native attachment authority (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `wp4-attachment-${mode}`;
+          const nativeThreadId = scenario;
+          const threadId = ThreadId.make(`thread-${scenario}`);
+          const config: McpProviderSession.McpProviderSessionConfig = {
+            environmentId: M.EnvironmentId.make("fixture"),
+            threadId,
+            providerSessionId: "credential-1",
+            providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: "Bearer fixture-1",
+            browserToolsAvailable: false,
+            grantedScopes: ["memory:read", "memory:write", "orchestration:read"],
+          };
+          const next = {
+            ...config,
+            providerSessionId: "credential-2",
+            authorizationHeader: "Bearer fixture-2",
+          };
+          const stale = { ...config, grantedScopes: [] };
+          const sessions = yield* McpProviderSessions.McpProviderSessions;
+          yield* sessions.set(config);
+          let valid = true;
+          const preamble = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "unused",
+            prompt: "unused",
+          });
+          const threadResult = preamble[4]!;
+          const entries: CodexReplay.CodexAppServerReplayEntry[] = [
+            ...preamble.slice(0, 3),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 2,
+                method: "thread/start",
+                params: CodexAdapterV2.codexThreadRuntimeParams({
+                  mcpSession: config,
+                  modelSelection: CODEX_TEST_MODEL_SELECTION,
+                  runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                }),
+              },
+            },
+            threadResult,
+          ];
+          const resume = (
+            id: number,
+            attachment: McpProviderSession.McpProviderSessionConfig,
+            label?: string,
+          ) => {
+            entries.push({
+              type: "expect_outbound",
+              frame: {
+                id,
+                method: "thread/resume",
+                params: {
+                  threadId: nativeThreadId,
+                  excludeTurns: true,
+                  ...CodexAdapterV2.codexThreadRuntimeParams({
+                    mcpSession: attachment,
+                    modelSelection: CODEX_TEST_MODEL_SELECTION,
+                    runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                  }),
+                },
+              },
+            });
+            entries.push({ ...withReplayRequestId(threadResult, id), ...(label ? { label } : {}) });
+          };
+          const turn = (id: number, ordinal: number) =>
+            Effect.gen(function* () {
+              const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+                nativeThreadId,
+                codexInput: [{ type: "text", text: `turn-${ordinal}` }],
+                runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+                hasGoatMcp: true,
+                browserToolsAvailable: false,
+              });
+              entries.push(
+                { type: "expect_outbound", frame: { id, method: "turn/start", params } },
+                {
+                  type: "emit_inbound",
+                  frame: {
+                    id,
+                    result: {
+                      turn: makeCodexReplayTurn({ id: `turn-${ordinal}`, status: "inProgress" }),
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: `turn-${ordinal}`, status: "completed" }),
+                    },
+                  },
+                },
+              );
+            });
+          if (mode === "availability") {
+            yield* turn(3, 1);
+            resume(4, stale);
+            yield* turn(5, 2);
+            resume(6, config);
+            yield* turn(7, 3);
+          } else {
+            resume(3, config, "delayed-resume");
+            resume(4, next);
+            yield* turn(5, 1);
+          }
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const terminals = yield* Queue.unbounded<void>();
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({ scenario, entries }),
+            (event) =>
+              event.type === "turn.terminal" ? Queue.offer(terminals, undefined) : Effect.void,
+            undefined,
+            undefined,
+            (entry) =>
+              entry.label === "delayed-resume"
+                ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void,
+          ).pipe(
+            Effect.provideService(McpSessionRegistry.McpSessionRegistry, {
+              issue: () => Effect.die("unused"),
+              resolve: () => Effect.succeed(undefined),
+              touch: () => Effect.void,
+              revokeProviderSession: () => Effect.void,
+              revokeThread: () => Effect.void,
+              revokeAll: Effect.void,
+              currentMemoryPolicy: () =>
+                Effect.sync(() =>
+                  valid ? { grant: "read_write" as const, policyEpoch: 1 } : undefined,
+                ),
+            }),
+          );
+          if (mode === "resume-rotation") {
+            const resumed = yield* harness.runtime
+              .resumeThread({
+                threadId,
+                providerThread: harness.providerThread,
+                runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+                modelSelection: CODEX_TEST_MODEL_SELECTION,
+              })
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(entered);
+            yield* sessions.set(next);
+            yield* Deferred.succeed(release, undefined);
+            yield* Fiber.join(resumed);
+          }
+          for (let ordinal = 1; ordinal <= (mode === "availability" ? 3 : 1); ordinal++) {
+            valid = ordinal !== 2;
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`attachment-${ordinal}`),
+                text: `turn-${ordinal}`,
+              }),
+            );
+            yield* Queue.take(terminals);
+          }
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect(
     "refreshes memory on first and second actual native sends and clears an omitted snapshot",
     () =>
