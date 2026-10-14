@@ -7032,8 +7032,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 new Map(current).set(requestedSessionId, initialNativeMetadata),
               );
             }
+            // Background bookkeeping must not retain snapshot bodies or admission closures.
+            const {
+              memoryContext: _memoryContext,
+              refreshMemoryContext: _refreshMemoryContext,
+              ...turnOwner
+            } = turnInput;
             const context: ActiveAcpTurn = {
-              input: turnInput,
+              input: turnOwner,
               providerTurnId,
               nativeThreadId: requestedSessionId,
               nativeTurnId,
