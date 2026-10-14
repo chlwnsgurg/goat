@@ -20,6 +20,8 @@ const now = "2026-10-14T00:00:00.000Z";
 const hash = "a".repeat(64);
 const encodeOperationJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryOperation));
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
+const encodeCheckpointPage = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage));
+const decodeCheckpointPage = Schema.decodeEffect(Schema.fromJsonString(M.MemoryHubCheckpointPage));
 const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const operation = (n = 3) =>
   decodeOperation({
@@ -2124,6 +2126,71 @@ describe("MemoryStore hub administration", () => {
     }).pipe(Effect.provide(live)),
   );
   it.effect(
+    "configure publishes the initial empty checkpoint and internal membership atomically",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const first: Store.AdminRecord = {
+          requestId: M.MemoryOperationId.make(id(220)),
+          requestDigest: hash,
+          expectedVersion: 0,
+          stage: "prepared",
+          action: {
+            action: "configure",
+            requestId: M.MemoryOperationId.make(id(220)),
+            expectedVersion: 0,
+            settings: { mode: "hub", memorySpaceId: space },
+          },
+          secretName: null,
+          result: null,
+          memberVersion: null,
+        };
+        yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+        const activation = {
+          requestId: first.requestId,
+          requestDigest: hash,
+          memorySpaceId: space,
+          environmentId: env,
+          expectedCredentialVersion: null,
+          next: { credentialDigest: hash, credentialVersion: 1 },
+          now: 0,
+        };
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              yield* store.activateHubMemberTx(activation);
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.isUndefined(yield* store.readHubMember(space, env));
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_compaction_state WHERE published=1`).length,
+          0,
+        );
+        const member = yield* store.transact(store.activateHubMemberTx(activation));
+        assert.strictEqual(member.status, "active");
+        const published = yield* sql<{
+          published: number;
+          checkpoint_id: string;
+        }>`SELECT published,checkpoint_id FROM memory_compaction_state WHERE space=${space}`;
+        assert.strictEqual(published[0]!.published, 1);
+        const bytes = yield* store.transact(store.readHubUsageTx(space));
+        assert.isAbove(bytes.checkpointBytes, 0);
+        assert.strictEqual(bytes.liveHandles, 0);
+        const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+        assert.deepStrictEqual(
+          yield* fresh.transact(fresh.activateHubMemberTx(activation)),
+          member,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE reason='hub_snapshot'`).length,
+          1,
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
     "bootstrap cannot become ready before the matching canonical checkpoint is published",
     () =>
       Effect.gen(function* () {
@@ -2271,7 +2338,26 @@ describe("MemoryStore transient source relay", () => {
         const nextBase = operation(305);
         if (nextBase.kind !== "upsert") throw new Error("fixture");
         const current = yield* store.loadAggregate(space, memory);
-        const next = { ...nextBase, revision: { ...nextBase.revision, parents: current.heads } };
+        const next = {
+          ...nextBase,
+          expectedHeads: current.heads,
+          revision: {
+            ...nextBase.revision,
+            parents: current.heads,
+            provenance: { environmentId: env, sourceThread: thread, sourceWatermark: watermark },
+          },
+          payload: {
+            ...nextBase.payload,
+            evidence: [
+              {
+                origin: "thread" as const,
+                sourceThread: thread,
+                watermark,
+                messageIds: [messageId],
+              },
+            ],
+          },
+        };
         const approved = decideMemoryOperation(
           current,
           next,
@@ -2449,6 +2535,257 @@ describe("MemoryStore durable hub checkpoints", () => {
       }),
     );
   });
+  it.effect(
+    "producer staging preserves the hub member token, immutable pages and TTL floor pin",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const handle = yield* store.transact(
+          store.prepareHubCheckpointTx({
+            authority,
+            checkpointId: "member-initial",
+            snapshotToken: "member-token",
+            hubEnvironmentId: env,
+          }),
+        );
+        yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: handle.checkpointId,
+            expectedFloor: 0,
+            nextFloor: 1,
+            now: 0,
+          }),
+        );
+        const initial = yield* store.transact(
+          store.readHubCheckpointPageTx({
+            authority,
+            snapshotToken: handle.snapshotToken,
+            cursor: null,
+          }),
+        );
+        const guardBefore =
+          yield* sql`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`;
+        const memberBefore = yield* sql`SELECT * FROM memory_hub_members WHERE space=${space}`;
+        const base = operation(402);
+        if (base.kind === "forget") throw new Error("fixture");
+        const op = decodeOperation({
+          ...base,
+          expectedHeads: [M.MemoryRevisionId.make(id(411))],
+          revision: { ...base.revision, parents: [M.MemoryRevisionId.make(id(411))] },
+        });
+        yield* store.transact(
+          Effect.gen(function* () {
+            const next = yield* store.appendHubEntryTx({
+              operation: op,
+              operationDigest: memoryOperationDigest(op),
+              outcome: "accepted",
+              now: 0,
+            });
+            yield* store.apply({
+              ...decideMemoryOperation(
+                yield* store.loadAggregate(space, memory),
+                op,
+                Store.hubAdmission,
+                { kind: "allowed" },
+              ),
+              receipt: next.entry.receipt,
+            });
+          }),
+        );
+        for (const name of ["producer-next", "producer-repeat"]) {
+          yield* store.transact(
+            Effect.gen(function* () {
+              const staged = yield* store.prepareHubProducerCheckpointTx({
+                authority,
+                checkpointId: name,
+                hubEnvironmentId: env,
+              });
+              assert.strictEqual(staged.checkpointSequence, 2);
+              yield* store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: staged.checkpointId,
+                expectedFloor: 1,
+                nextFloor: 1,
+                now: 0,
+              });
+            }),
+          );
+          assert.deepStrictEqual(
+            yield* store.transact(
+              store.readHubCheckpointPageTx({
+                authority,
+                snapshotToken: handle.snapshotToken,
+                cursor: null,
+              }),
+            ),
+            initial,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`,
+            guardBefore,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM memory_hub_members WHERE space=${space}`,
+            memberBefore,
+          );
+        }
+        const guard = yield* sql<{
+          record_json: string;
+        }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token'`;
+        const parsed = JSON.parse(guard[0]!.record_json);
+        assert.strictEqual(parsed.retired, false);
+        assert.strictEqual(parsed.handle.firstIssuedAt, 0);
+        assert.strictEqual(parsed.handle.expiresAt, M.MEMORY_CHECKPOINT_TOKEN_TTL_MS);
+        assert.strictEqual(parsed.handle.credentialVersion, 1);
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: "producer-repeat",
+                expectedFloor: 1,
+                nextFloor: 2,
+                now: 0,
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryStoreConflict",
+        );
+        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_TOKEN_TTL_MS);
+        const expired = yield* store
+          .transact(
+            store.readHubCheckpointPageTx({
+              authority,
+              snapshotToken: handle.snapshotToken,
+              cursor: null,
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual(expired._tag, "MemoryHubError");
+        if (expired._tag === "MemoryHubError") assert.strictEqual(expired.code, "cursor_expired");
+        const advanced = yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: "producer-repeat",
+            expectedFloor: 1,
+            nextFloor: 2,
+            now: M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          }),
+        );
+        assert.strictEqual(advanced.retentionFloor, 2);
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "producer reauthenticates the real hub and rolls back capacity and outer publication failure",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const handle = yield* store.transact(
+          store.prepareHubCheckpointTx({
+            authority,
+            checkpointId: "producer-safe",
+            snapshotToken: "producer-safe-token",
+            hubEnvironmentId: env,
+          }),
+        );
+        yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: handle.checkpointId,
+            expectedFloor: 0,
+            nextFloor: 1,
+            now: 0,
+          }),
+        );
+        const preparation = { authority, checkpointId: "producer-failed", hubEnvironmentId: env };
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.prepareHubProducerCheckpointTx({
+                ...preparation,
+                hubEnvironmentId: M.EnvironmentId.make("foreign-hub"),
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryHubForbiddenError",
+        );
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.prepareHubProducerCheckpointTx({
+                ...preparation,
+                authority: {
+                  ...authority,
+                  reauthorize: Effect.fail(new M.MemoryHubUnauthorizedError({})),
+                },
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryHubUnauthorizedError",
+        );
+        const before = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              const staged = yield* store.prepareHubProducerCheckpointTx(preparation);
+              yield* store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: staged.checkpointId,
+                expectedFloor: 1,
+                nextFloor: 1,
+                now: 0,
+              });
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`,
+          before,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:producer-failed'`)
+            .length,
+          0,
+        );
+        yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} WHERE space=${space}`;
+        const full = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
+        const guards =
+          yield* sql`SELECT * FROM memory_import_keys WHERE key_kind='hub_checkpoint_token'`;
+        const capacity = yield* store
+          .transact(store.prepareHubProducerCheckpointTx(preparation))
+          .pipe(Effect.flip);
+        assert.strictEqual(capacity._tag, "MemoryCapacityError");
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`,
+          full,
+        );
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM memory_import_keys WHERE key_kind='hub_checkpoint_token'`,
+          guards,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:producer-failed'`)
+            .length,
+          0,
+        );
+        assert.strictEqual(
+          (yield* store.transact(
+            store.readHubCheckpointPageTx({
+              authority,
+              snapshotToken: handle.snapshotToken,
+              cursor: null,
+            }),
+          )).checkpointSequence,
+          1,
+        );
+      }).pipe(Effect.provide(live)),
+  );
   it.effect(
     "pins complete pages with immutable expiry and publishes recovery independently of token lifetime",
     () =>
@@ -3003,4 +3340,998 @@ it.effect("purges submission bodies in every ticket state and fences cancelled o
       0,
     );
   }).pipe(Effect.provide(live)),
+);
+
+const seedSubmission = Effect.gen(function* () {
+  const { store, sql, claim } = yield* seedResolutionConflict;
+  const ticket = yield* store.transact(
+    store.transitionHubLeaseTx({
+      authority: leaseAuthority,
+      action: { kind: "claim", request: claim },
+    }),
+  );
+  if (!ticket || "released" in ticket) throw new Error("fixture");
+  yield* store.persistResolutionTicket(ticket);
+  const key = { memorySpaceId: space, attemptId: ticket.attemptId };
+  const owner = yield* store.transact(
+    store.acquireResolutionTicketTx({
+      key,
+      expectedVersion: 0,
+      owner: "fixture",
+      coordinatorEpoch: 1,
+      now: 0,
+      ownedUntil: 100,
+    }),
+  );
+  const base = operation(80);
+  if (base.kind !== "upsert" || !owner) throw new Error("fixture");
+  const op = decodeOperation({
+    ...base,
+    kind: "resolve",
+    expectedHeads: claim.conflictHeadSet,
+    revision: { ...base.revision, parents: claim.conflictHeadSet },
+    conflictId: claim.conflictId,
+    fencingToken: ticket.fencingToken,
+    payload: { ...base.payload, text: "synthetic submission body" },
+    resolution: {
+      resolutionId: id(81),
+      memorySpaceId: space,
+      memoryId: memory,
+      inputRevisionIds: claim.conflictHeadSet,
+      inputPayloadRefs: claim.conflictHeadSet,
+      judgmentRef: id(81),
+      requestedModelSelection: claim.frozenDefaultModelSelection,
+      effectiveProvider: "codex",
+      effectiveModel: "fixture",
+      resolvingEnvironmentId: env,
+      fencingToken: ticket.fencingToken,
+      resultRevisionId: base.revision.revisionId,
+      appliedAtUtc: now,
+      revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+    },
+    resolutionPayload: { resolutionId: id(81), judgment: "synthetic submission judgment" },
+  });
+  const submission = {
+    protocolVersion: 1 as const,
+    memorySpaceId: space,
+    holderEnvironmentId: env,
+    attemptId: ticket.attemptId,
+    operation: op,
+  };
+  const ownership = { ...key, owner: "fixture", coordinatorEpoch: 1, version: owner.version };
+  return { store, sql, ticket, key, ownership, submission };
+});
+
+it.effect("rejects mismatched ticket identities before saving a submission and on recovery", () =>
+  Effect.gen(function* () {
+    const { store, sql, key, ownership, submission } = yield* seedSubmission;
+    const base = submission.operation;
+    if (base.kind !== "resolve") throw new Error("fixture");
+    for (const op of [
+      {
+        ...base,
+        memoryId: M.MemoryId.make(id(950)),
+        revision: { ...base.revision, memoryId: M.MemoryId.make(id(950)) },
+        resolution: { ...base.resolution, memoryId: M.MemoryId.make(id(950)) },
+      },
+      { ...base, conflictId: M.MemoryConflictId.make(id(951)) },
+      {
+        ...base,
+        fencingToken: base.fencingToken + 1,
+        resolution: { ...base.resolution, fencingToken: base.fencingToken + 1 },
+      },
+    ]) {
+      const failure = yield* store
+        .transact(
+          store.persistResolutionSubmissionTx({
+            ownership,
+            submission: { ...submission, operation: op },
+            digest: memoryOperationDigest(op),
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryStoreConflict");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        0,
+      );
+    }
+    yield* store.transact(
+      store.persistResolutionSubmissionTx({
+        ownership,
+        submission,
+        digest: memoryOperationDigest(base),
+      }),
+    );
+    const workId = `resolve:${space}:${key.attemptId}`;
+    yield* sql`UPDATE memory_outbox SET ticket_json=json_set(ticket_json,'$.ticket.memoryId',${id(950)}) WHERE id=${workId}`;
+    const failure = yield* store
+      .readRecoverableResolutionTickets({ now: 101, limit: 10 })
+      .pipe(Effect.flip);
+    assert.strictEqual(failure.stage, "ticket-payload-identity");
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["completed", "failed", "cancelled", "transition"] as const)(
+  "clears terminal submission atomically while protecting uncertain recovery: %s",
+  (status) =>
+    Effect.gen(function* () {
+      const { store, sql, key, ownership, submission } = yield* seedSubmission;
+      const written = yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership,
+          submission,
+          digest: memoryOperationDigest(submission.operation),
+        }),
+      );
+      const deadline = Date.parse(
+        submission.operation.kind === "resolve"
+          ? submission.operation.resolution.revertDeadlineUtc
+          : now,
+      );
+      yield* store.prunePayloads(deadline + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS, 100);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        1,
+      );
+      assert.deepStrictEqual(
+        (yield* store.readRecoverableResolutionTickets({ now: 101, limit: 10 }))[0]?.submission,
+        submission,
+      );
+      const workId = `resolve:${space}:${key.attemptId}`;
+      const finish = Effect.gen(function* () {
+        return yield* status === "transition"
+          ? store.transact(
+              store.transitionResolutionTicketTx({
+                ownership: { ...ownership, version: written.version },
+                nextState: "terminal",
+                now: 1,
+                ownedUntil: null,
+                nextAttemptAt: 1,
+              }),
+            )
+          : store.finishWork(workId, status).pipe(Effect.as(null));
+      });
+      yield* store
+        .transact(
+          finish.pipe(
+            Effect.andThen(
+              Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" })),
+            ),
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        1,
+      );
+      yield* finish;
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        0,
+      );
+      assert.deepStrictEqual(
+        yield* store.readRecoverableResolutionTickets({ now: 101, limit: 10 }),
+        [],
+      );
+      const rows = yield* sql<{
+        ticket_json: string;
+      }>`SELECT ticket_json FROM memory_outbox WHERE id=${workId}`;
+      const terminal = JSON.parse(rows[0]!.ticket_json);
+      assert.isNull(terminal.submission);
+      assert.isNull(terminal.owner);
+      assert.isAbove(terminal.version, written.version);
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(
+        yield* fresh.readRecoverableResolutionTickets({ now: 101, limit: 10 }),
+        [],
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect.each([0, 1])(
+  "enforces global metadata equality plus %s across spaces without leaking failed writes",
+  (extra) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const record: Store.AdminRecord = {
+        requestId: M.MemoryOperationId.make(id(971)),
+        requestDigest: hash,
+        expectedVersion: 0,
+        stage: "prepared",
+        action: {
+          action: "configure",
+          requestId: M.MemoryOperationId.make(id(971)),
+          expectedVersion: 0,
+          settings: { mode: "hub", memorySpaceId: space },
+        },
+        secretName: null,
+        result: null,
+        memberVersion: null,
+      };
+      // Measure the real write's encoded delta under rollback, then reserve the rest in another space.
+      let delta = 0;
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            const before = yield* sql<{
+              value: number;
+            }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata'`;
+            yield* store.writeHubAdminTx({ record, expectedStage: null });
+            const after = yield* sql<{
+              value: number;
+            }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata'`;
+            delta = after[0]!.value - before[0]!.value;
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.isAbove(delta, 0);
+      const filler = M.MEMORY_PERMANENT_METADATA_MAX_BYTES - delta - 2 + extra;
+      // Private retention detail isolates the metadata cap from required snapshot inputs.
+      yield* sql`INSERT INTO memory_hub_retention(space,compaction_json) VALUES ('other',${"x".repeat(filler)})`;
+      if (extra) {
+        const failure = yield* store
+          .transact(store.writeHubAdminTx({ record, expectedStage: null }))
+          .pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryCapacityError");
+        assert.isUndefined(yield* store.transact(store.readHubAdminTx(record.requestId)));
+      } else {
+        yield* store.transact(store.writeHubAdminTx({ record, expectedStage: null }));
+        assert.isDefined(yield* store.transact(store.readHubAdminTx(record.requestId)));
+      }
+      const counters = yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata'`;
+      assert.strictEqual(
+        counters[0]!.value,
+        M.MEMORY_PERMANENT_METADATA_MAX_BYTES + extra - (extra ? delta : 0),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
+  "protects revert inputs and collects expired canonical judgment with %s result",
+  (mode) =>
+    Effect.gen(function* () {
+      const { store, sql, ticket, submission } = yield* seedSubmission;
+      for (const n of [3, 4, 5]) {
+        const op = yield* store.readOperation(space, M.MemoryOperationId.make(id(n)));
+        if (!op) throw new Error("fixture");
+        const ledger = yield* store.transact(
+          store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome: n === 5 ? "conflicted" : "accepted",
+            now: 0,
+          }),
+        );
+        yield* store.apply({
+          ...decideMemoryOperation(
+            yield* store.loadAggregate(space, memory),
+            op,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+          receipt: ledger.entry.receipt,
+        });
+      }
+      const op = submission.operation;
+      if (op.kind !== "resolve") throw new Error("fixture");
+      const appliedAt = Date.parse(op.resolution.appliedAtUtc);
+      const expiresAt = Date.parse(op.resolution.revertDeadlineUtc);
+      const ledger = yield* store.transact(
+        store.appendHubEntryTx({
+          operation: op,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "accepted",
+          resolutionApproval: {
+            resolutionId: op.resolution.resolutionId,
+            appliedAtUtc: op.resolution.appliedAtUtc,
+            revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+          },
+          now: appliedAt,
+        }),
+      );
+      yield* store.apply({
+        ...decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          op,
+          Store.hubAdmission,
+          { kind: "allowed" },
+          undefined,
+          undefined,
+          0,
+        ),
+        receipt: ledger.entry.receipt,
+        execution: {
+          requestedModelSelection: op.resolution.requestedModelSelection,
+          effectiveProvider: op.resolution.effectiveProvider,
+          effectiveModel: op.resolution.effectiveModel,
+          providerInstanceId: op.resolution.requestedModelSelection.instanceId,
+          environmentId: env,
+        },
+      });
+      const resolvedConflict = yield* sql<{
+        status: string;
+      }>`SELECT status FROM memory_conflicts WHERE conflict_id=${op.conflictId}`;
+      assert.strictEqual(resolvedConflict[0]!.status, "resolved");
+      const report = (yield* store.pendingReports(100))[0]!;
+      yield* store.acknowledgeReport({
+        ...report,
+        state: "delivered",
+        reportThread: { environmentId: env, threadId: M.ThreadId.make("history-report") },
+        sequence: 1,
+      });
+      yield* store.finishWork(
+        `resolve:${space}:${ticket.attemptId}`,
+        "completed",
+        ledger.entry.receipt,
+      );
+      for (const candidate of yield* store.readDueClaimCandidates(100, 0))
+        yield* store.completeClaimCandidate(candidate.id);
+      const publish = (name: string, at: number, floor: number) =>
+        store.transact(
+          Effect.gen(function* () {
+            const handle = yield* store.prepareHubCheckpointTx({
+              authority: { ...leaseAuthority, now: Effect.succeed(at) },
+              checkpointId: name,
+              snapshotToken: name,
+              hubEnvironmentId: env,
+            });
+            yield* store.publishCheckpointAndFloorTx({
+              memorySpaceId: space,
+              checkpointId: name,
+              expectedFloor: floor,
+              nextFloor: handle.checkpointSequence,
+              now: at,
+            });
+            return handle.checkpointSequence;
+          }),
+        );
+      const floor = yield* publish("revert-protected", expiresAt - 1, 0);
+      const publishedRows = yield* sql<{
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_inbox_pending WHERE space=${space} AND checkpoint_id='hub:revert-protected' ORDER BY page_ordinal`;
+      const produced = yield* Effect.forEach(publishedRows, (row) =>
+        decodeCheckpointPage(row.metadata_json),
+      );
+      assert.isTrue(M.validateMemoryCheckpointRecords(produced));
+      assert.isAtMost(
+        (yield* store.transact(store.readHubUsageTx(space))).lastSnapshotBytes,
+        (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+      );
+      const resolveGuard = produced
+        .flatMap((page) => page.compactReceipts)
+        .find((record) => record.receipt.operationId === op.operationId);
+      assert.strictEqual(resolveGuard?.reportGuard?.resolvingEnvironmentId, env);
+      assert.strictEqual(produced.flatMap((page) => page.resolutions).length, 1);
+      yield* TestClock.adjust(expiresAt - 1);
+      assert.strictEqual(
+        (yield* store.transact(store.readHubInventoryTx(space))).reclaimable.history,
+        0,
+      );
+
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: floor,
+          now: expiresAt - 1,
+          limit: 100,
+        }),
+      );
+      for (const revisionId of op.resolution.inputRevisionIds)
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_revisions r JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.revision_id=${revisionId}`)
+            .length,
+          1,
+        );
+      if (mode !== "current") {
+        const base = operation(996);
+        if (base.kind === "forget") throw new Error("fixture");
+        const successor = decodeOperation({
+          ...base,
+          expectedHeads: [op.revision.revisionId],
+          revision: { ...base.revision, parents: [op.revision.revisionId] },
+        });
+        const next = yield* store.transact(
+          store.appendHubEntryTx({
+            operation: successor,
+            operationDigest: memoryOperationDigest(successor),
+            outcome: "accepted",
+            now: expiresAt,
+          }),
+        );
+        yield* store.apply({
+          ...decideMemoryOperation(
+            yield* store.loadAggregate(space, memory),
+            successor,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+          receipt: next.entry.receipt,
+        });
+        // Work protects the judgment across one bounded sweep, without pinning the superseded result.
+        yield* store.enqueueWork({
+          ...backgroundWork("judgment:protected"),
+          payloadRef: op.resolution.judgmentRef,
+        });
+      }
+      const nextFloor = yield* publish(
+        "revert-expired",
+        expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+        floor,
+      );
+      yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: nextFloor,
+          now: expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+      if (mode !== "current") {
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${op.revision.revisionId}`)
+            .length,
+          0,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`)
+            .length,
+          1,
+        );
+        yield* store.finishWork("judgment:protected", "completed");
+        const sweepAt = expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS;
+        if (mode === "replaced-prune") {
+          yield* sql`UPDATE memory_payloads SET purge_eligible_after=${sweepAt} WHERE space=${space} AND payload_ref=${op.resolution.judgmentRef}`;
+          yield* store.prunePayloads(sweepAt, 100);
+        } else {
+          yield* store.transact(
+            store.compactEligibleHistoryTx({
+              memorySpaceId: space,
+              expectedFloor: nextFloor,
+              now: sweepAt,
+              limit: 100,
+            }),
+          );
+        }
+      }
+      for (const revisionId of op.resolution.inputRevisionIds)
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${revisionId}`)
+            .length,
+          0,
+        );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)
+          .length,
+        0,
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "active");
+      assert.strictEqual(
+        (yield* store.receipt(space, op.operationId))?.receipt.outcome,
+        "accepted",
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_report_outbox WHERE state='delivered'`).length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
+        1,
+      );
+      const replay = yield* store.transact(store.readHubReceiptTx(space, op.operationId));
+      if (replay?.entry.kind !== "metadata" || !replay.entry.compactReceipt)
+        throw new Error("fixture");
+      assert.isFalse(
+        (yield* store.transact(
+          store.reconcileResolutionReportTx({
+            record: replay.entry.compactReceipt,
+            localEnvironmentId: env,
+          }),
+        )).deliverable,
+      );
+      assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+      assert.strictEqual(ticket.fencingToken, 1);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "shares required and pinned checkpoint reservation across spaces at equality and rejects plus one",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const other = M.MemorySpaceId.make(id(979));
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 4097,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: other,
+          checkpointDeltaBytes: 0,
+          publishedPinnedDeltaBytes: 1,
+        }),
+      );
+      const failed = yield* store
+        .transact(
+          store.reserveHubCheckpointTx({
+            memorySpaceId: other,
+            checkpointDeltaBytes: 4097,
+            publishedPinnedDeltaBytes: 0,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(failed._tag, "MemoryCapacityError");
+      assert.strictEqual((yield* store.transact(store.readHubUsageTx(other))).checkpointBytes, 0);
+      const counters = yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_checkpoint'`;
+      assert.strictEqual(counters[0]!.value, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 4096);
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: -1,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: other,
+          checkpointDeltaBytes: 4097,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("reserves snapshot growth atomically at pinned equality and rejects one extra byte", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const op = operation(981);
+    const append = store.appendHubEntryTx({
+      operation: op,
+      operationDigest: memoryOperationDigest(op),
+      outcome: "rejected",
+      failureCode: "identity_mismatch",
+      now: 0,
+    });
+    const base = yield* store.transact(store.readHubUsageTx(space));
+    const growth = yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* append;
+          const after = yield* store.readHubUsageTx(space);
+          return yield* Effect.fail(
+            after.requiredCheckpointBoundBytes - base.requiredCheckpointBoundBytes,
+          );
+        }),
+      )
+      .pipe(Effect.flip);
+    if (typeof growth !== "number") throw new Error("fixture growth failed");
+    assert.isAbove(growth, 0);
+    const pins = M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - base.requiredCheckpointBoundBytes - growth;
+    yield* store.transact(
+      store.reserveHubCheckpointTx({
+        memorySpaceId: space,
+        checkpointDeltaBytes: 0,
+        publishedPinnedDeltaBytes: pins + 1,
+      }),
+    );
+    const failed = yield* store.transact(append).pipe(Effect.flip);
+    assert.strictEqual(failed._tag, "MemoryCapacityError");
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 0);
+    assert.strictEqual(
+      (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+      base.requiredCheckpointBoundBytes,
+    );
+    yield* store.transact(
+      store.reserveHubCheckpointTx({
+        memorySpaceId: space,
+        checkpointDeltaBytes: 0,
+        publishedPinnedDeltaBytes: -1,
+      }),
+    );
+    yield* store.transact(append);
+    assert.strictEqual(
+      (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
+      M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+    );
+    const replay = yield* store.transact(append);
+    assert.strictEqual(replay.entry.kind, "metadata");
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["refusal", "forget", "escaped", "pages"] as const)(
+  "producer round-trips %s checkpoint and its encoded pages fit the counter bound",
+  (shape) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${env},${hash},1,'active')`;
+      const first = operation(990);
+      const op: M.MemoryOperation =
+        shape === "forget"
+          ? {
+              protocolVersion: 1,
+              memorySpaceId: space,
+              memoryId: memory,
+              operationId: first.operationId,
+              originEnvironmentId: env,
+              expectedHeads: [],
+              kind: "forget",
+              tombstone: {
+                memorySpaceId: space,
+                memoryId: memory,
+                deleteOperationId: first.operationId,
+                deletingEnvironmentId: env,
+                deletedAtUtc: M.MemoryUtcTimestamp.make(now),
+                suppressedSourceKeys: Array.from({ length: 20 }, (_, n) => ({
+                  environmentId: env,
+                  sourceId: M.MemoryImportSourceId.make(id(1700)),
+                  sourceItemKey: `${"k".repeat(480)}${n}`,
+                })),
+                suppressedContent: [],
+                sourceExclusions: [],
+              },
+            }
+          : shape === "escaped" && first.kind === "upsert"
+            ? {
+                ...first,
+                payload: { ...first.payload, text: "\u0000".repeat(10000) },
+              }
+            : first;
+      yield* store.transact(
+        Effect.gen(function* () {
+          const ledger = yield* store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome:
+              shape === "refusal" || shape === "pages"
+                ? "rejected"
+                : shape === "forget"
+                  ? "deleted"
+                  : "accepted",
+            ...(shape === "refusal" || shape === "pages"
+              ? { failureCode: "identity_mismatch" as const }
+              : {}),
+            now: 0,
+          });
+          if (shape !== "refusal" && shape !== "pages") {
+            const decided = decideMemoryOperation(
+              yield* store.loadAggregate(space, memory),
+              op,
+              Store.hubAdmission,
+              scanMemoryValue(op),
+            );
+            yield* store.apply({ ...decided, receipt: ledger.entry.receipt });
+          } else {
+            assert.strictEqual(ledger.entry.kind, "metadata");
+            if (ledger.entry.kind === "metadata") assert.isDefined(ledger.entry.compactReceipt);
+          }
+        }),
+      );
+      if (shape === "pages") {
+        for (let n = 0; n < 105; n++) {
+          const rejected = operation(1100 + n);
+          yield* store.transact(
+            store.appendHubEntryTx({
+              operation: rejected,
+              operationDigest: memoryOperationDigest(rejected),
+              outcome: "rejected",
+              failureCode: "identity_mismatch",
+              now: 0,
+            }),
+          );
+        }
+      }
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId: env,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      const handle = yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority,
+          checkpointId: `shape-${shape}`,
+          snapshotToken: `token-${shape}`,
+          hubEnvironmentId: env,
+        }),
+      );
+      const pages: M.MemoryHubCheckpointPage[] = [];
+      let cursor: M.MemoryHubCheckpointPage["nextCursor"] = null;
+      for (let i = 0; i < handle.pageCount; i++) {
+        const page: M.MemoryHubCheckpointPage = yield* store.transact(
+          store.readHubCheckpointPageTx({
+            authority,
+            snapshotToken: handle.snapshotToken,
+            cursor,
+          }),
+        );
+        const json = yield* encodeCheckpointPage(page);
+        pages.push(yield* decodeCheckpointPage(json));
+        cursor = page.nextCursor;
+      }
+      assert.isTrue(M.validateMemoryCheckpointRecords(pages));
+      const usage = yield* store.transact(store.readHubUsageTx(space));
+      assert.isAtMost(usage.lastSnapshotBytes, usage.requiredCheckpointBoundBytes);
+      assert.strictEqual(
+        pages.flatMap((p) => p.compactReceipts).length,
+        shape === "pages" ? 106 : 1,
+      );
+      if (shape === "pages") assert.isAbove(handle.pageCount, 1);
+      if (shape === "escaped") assert.isAbove(usage.lastSnapshotBytes, 100000);
+      assert.strictEqual(
+        pages.flatMap((p) => p.identities).length,
+        shape === "refusal" || shape === "pages" ? 0 : 1,
+      );
+      if (shape === "forget") {
+        assert.strictEqual(pages.flatMap((p) => p.tombstones).length, 1);
+        assert.strictEqual(pages.flatMap((p) => p.suppressions).length, 20);
+      }
+      const replay = yield* store.transact(store.readHubReceiptTx(space, op.operationId));
+      assert.strictEqual(
+        replay?.entry.receipt.outcome,
+        shape === "refusal" || shape === "pages"
+          ? "rejected"
+          : shape === "forget"
+            ? "deleted"
+            : "accepted",
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "compacts acknowledged admin after thirty days into an immutable replay and secret-name guard",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const first: Store.AdminRecord = {
+        requestId: M.MemoryOperationId.make(id(995)),
+        requestDigest: hash,
+        expectedVersion: 0,
+        stage: "prepared",
+        action: {
+          action: "configure",
+          requestId: M.MemoryOperationId.make(id(995)),
+          expectedVersion: 0,
+          settings: { mode: "disabled" },
+        },
+        secretName: "synthetic-secret-name",
+        result: null,
+        memberVersion: null,
+      };
+      yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+      yield* store.transact(
+        store.writeHubAdminTx({
+          record: { ...first, stage: "activated" },
+          expectedStage: "prepared",
+        }),
+      );
+      const ready: Store.AdminRecord = {
+        ...first,
+        stage: "ready",
+        result: { view: { settings: { mode: "disabled" }, version: 1 } },
+      };
+      yield* store.transact(store.writeHubAdminTx({ record: ready, expectedStage: "activated" }));
+      const terminal = yield* store.transact(
+        store.writeHubAdminTx({
+          record: { ...ready, stage: "acknowledged" },
+          expectedStage: "ready",
+        }),
+      );
+      const reservedCounters = yield* sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND dimension IN ('hub_receipts','hub_keys') ORDER BY dimension`;
+      assert.deepStrictEqual(reservedCounters, [
+        { dimension: "hub_keys", value: 1 },
+        { dimension: "hub_receipts", value: 1 },
+      ]);
+      yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: M.MEMORY_LOG_RETENTION_MS - 1,
+          limit: 100,
+        }),
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 1);
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* store.purgeHubTransientTx({
+              memorySpaceId: space,
+              now: M.MEMORY_LOG_RETENTION_MS,
+              limit: 100,
+            });
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 1);
+      yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: M.MEMORY_LOG_RETENTION_MS,
+          limit: 100,
+        }),
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 0);
+      assert.deepStrictEqual(
+        yield* sql`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND dimension IN ('hub_receipts','hub_keys') ORDER BY dimension`,
+        reservedCounters,
+      );
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      const guard = yield* fresh.transact(fresh.readHubAdminTx(first.requestId));
+      assert.isDefined(guard);
+      assert.isFalse(guard !== undefined && "action" in guard);
+      assert.strictEqual(guard?.secretName, first.secretName);
+      assert.deepStrictEqual(guard?.result, terminal.result);
+      assert.deepStrictEqual(
+        yield* fresh.transact(fresh.writeHubAdminTx({ record: first, expectedStage: null })),
+        terminal,
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 0);
+      const mismatch = yield* fresh
+        .transact(
+          fresh.writeHubAdminTx({
+            record: { ...first, secretName: "different-secret" },
+            expectedStage: null,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(mismatch._tag, "MemoryStoreConflict");
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("keeps the successor frontier and exposure on body-free canonical metadata replay", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const first = operation();
+    const second = childOperation();
+    if (first.kind === "forget" || second.kind === "forget") throw new Error("fixture");
+    for (const [index, op] of [first, second].entries()) {
+      const approval: M.MemoryHubReceipt = {
+        operationId: op.operationId,
+        memoryId: memory,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "accepted",
+        hubSequence: index + 1,
+      };
+      yield* store.apply(
+        decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          op,
+          Store.approvedReplica,
+          { kind: "allowed" },
+          approval,
+        ),
+      );
+    }
+    const scanner = (yield* store.readDeferred(0, 100)).find((row) => row.kind === "scanner")!;
+    assert.isDefined(scanner);
+    const scanned = yield* store.readScannerChunk(scanner);
+    assert.isNull(scanned.nextCursor);
+    assert.strictEqual(scanMemoryValue({ payloads: scanned.payloads }).kind, "allowed");
+    assert.isTrue(yield* store.claimDeferred(scanner, "replay-scanner", 0, 1000));
+    assert.isTrue(
+      yield* store.finishOwnedDeferred(scanner, "replay-scanner", 1000, {
+        now: 0,
+        scannerPolicyVersion: 1,
+      }),
+    );
+    const before = yield* store.loadAggregate(space, memory);
+    assert.deepStrictEqual(before.heads, [second.revision.revisionId]);
+    assert.strictEqual(before.item?.localAvailability.exposure, "visible");
+    yield* sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${first.revision.payloadRef}`;
+    const receipt = (yield* store.receipt(space, first.operationId))!.receipt;
+    if (!("hubSequence" in receipt) || receipt.hubSequence === null) throw new Error("fixture");
+    yield* store.transact(
+      store.settleMetadataEntryTx({
+        memorySpaceId: space,
+        entry: {
+          kind: "metadata",
+          operationKind: "upsert",
+          memoryId: memory,
+          hubSequence: 1,
+          receipt,
+          revision: first.revision,
+        },
+      }),
+    );
+    const after = yield* store.loadAggregate(space, memory);
+    assert.deepStrictEqual(after.heads, [second.revision.revisionId]);
+    assert.deepStrictEqual(after.item, before.item);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "finds activated admin beyond a saturated ready list and excludes acknowledged records",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const make = (n: number): Store.AdminRecord => ({
+        requestId: M.MemoryOperationId.make(id(n)),
+        requestDigest: hash,
+        expectedVersion: 0,
+        stage: "prepared",
+        action: {
+          action: "configure",
+          requestId: M.MemoryOperationId.make(id(n)),
+          expectedVersion: 0,
+          settings: { mode: "disabled" },
+        },
+        secretName: null,
+        memberVersion: null,
+        result: null,
+      });
+      assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+      for (let n = 0; n <= M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS; n++) {
+        const record = make(2000 + n);
+        yield* store.transact(store.writeHubAdminTx({ record, expectedStage: null }));
+        yield* store.transact(
+          store.writeHubAdminTx({
+            record: { ...record, stage: "activated" },
+            expectedStage: "prepared",
+          }),
+        );
+        const ready: Store.AdminRecord = {
+          ...record,
+          stage: "ready",
+          result: { view: { settings: { mode: "disabled" }, version: 1 } },
+        };
+        yield* store.transact(store.writeHubAdminTx({ record: ready, expectedStage: "activated" }));
+        if (n === 0)
+          yield* store.transact(
+            store.writeHubAdminTx({
+              record: { ...ready, stage: "acknowledged" },
+              expectedStage: "ready",
+            }),
+          );
+      }
+      assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+      const prepared = make(3000);
+      yield* store.transact(store.writeHubAdminTx({ record: prepared, expectedStage: null }));
+      const target = make(4000);
+      yield* store.transact(store.writeHubAdminTx({ record: target, expectedStage: null }));
+      const activated: Store.AdminRecord = { ...target, stage: "activated" };
+      yield* store.transact(
+        store.writeHubAdminTx({ record: activated, expectedStage: "prepared" }),
+      );
+      assert.isFalse(
+        (yield* store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)).some(
+          (r) => r.requestId === activated.requestId,
+        ),
+      );
+      assert.deepStrictEqual(yield* store.transact(store.readActivatedHubAdminTx()), activated);
+      const fresh = yield* Effect.service(Store.MemoryStore).pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(yield* fresh.transact(fresh.readActivatedHubAdminTx()), activated);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin' AND json_extract(admin_json,'$.stage')='acknowledged'`)
+          .length,
+        1,
+      );
+    }).pipe(Effect.provide(live)),
 );

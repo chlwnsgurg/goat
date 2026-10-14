@@ -1,3 +1,9 @@
+import {
+  checkpointBound,
+  CHECKPOINT_BYTE_EXPANSION,
+  CHECKPOINT_RECORD_OVERHEAD,
+  CHECKPOINT_PAGE_OVERHEAD,
+} from "./MemoryCheckpointBound.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes do not depend on runtime identity.
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -665,6 +671,18 @@ const AdminRecordSchema = Schema.Struct({
   ),
 );
 export type AdminRecord = typeof AdminRecordSchema.Type;
+const AdminReplaySchema = Schema.Struct({
+  requestId: M.MemoryOperationId,
+  requestDigest: digest,
+  expectedVersion: Schema.Int,
+  stage: Schema.Literal("acknowledged"),
+  actionDigest: digest,
+  secretName: AdminRecordSchema.fields.secretName,
+  result: AdminRecordSchema.fields.result,
+  memberVersion: AdminRecordSchema.fields.memberVersion,
+});
+export type AdminReplay = typeof AdminReplaySchema.Type;
+
 const HubCheckpointHandleSchema = Schema.Struct({
   checkpointId: Schema.String,
   snapshotToken: Schema.String,
@@ -701,6 +719,9 @@ export type HubUsage = {
   liveHandles: number;
   stagingBytes: number;
   checkpointBytes: number;
+  requiredCheckpointBoundBytes: number;
+  lastSnapshotBytes: number;
+  checkpointReservationConsumedBytes: number;
   publishedPinnedBytes: number;
   liveSourceReads: number;
   sourcePayloadBytes: number;
@@ -887,7 +908,9 @@ export class MemoryStore extends Context.Service<
       | M.MemoryHubUnauthorizedError
       | M.MemoryHubForbiddenError
     >;
-    readonly readHubAdminTx: (requestId: M.MemoryOperationId) => InTx<AdminRecord | undefined>;
+    readonly readHubAdminTx: (
+      requestId: M.MemoryOperationId,
+    ) => InTx<AdminRecord | AdminReplay | undefined>;
     readonly writeHubAdminTx: (input: {
       record: AdminRecord;
       expectedStage: AdminRecord["stage"] | null;
@@ -901,6 +924,7 @@ export class MemoryStore extends Context.Service<
       next: { credentialDigest: string; credentialVersion: number } | "revoked";
       now: number;
     }) => InTx<HubMember, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
+    readonly readActivatedHubAdminTx: () => InTx<AdminRecord | undefined, MemoryStorageError>;
     readonly readPendingHubAdmins: (
       limit: number,
     ) => Effect.Effect<readonly AdminRecord[], MemoryStorageError>;
@@ -980,6 +1004,19 @@ export class MemoryStore extends Context.Service<
       | M.MemoryHubUnauthorizedError
       | M.MemoryHubForbiddenError
     >;
+    readonly prepareHubProducerCheckpointTx: (input: {
+      authority: HubAuthority;
+      checkpointId: string;
+      hubEnvironmentId: M.EnvironmentId;
+    }) => InTx<
+      { readonly checkpointId: string; readonly checkpointSequence: number },
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | MemoryCapacityError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
+    >;
     readonly readHubCheckpointPageTx: (input: {
       authority: HubAuthority;
       snapshotToken: string;
@@ -1007,6 +1044,10 @@ export class MemoryStore extends Context.Service<
     }) => InTx<M.MemoryCompactionStatus>;
     readonly readHubRetentionTx: (space: M.MemorySpaceId) => InTx<HubRetention>;
     readonly readHubUsageTx: (space: M.MemorySpaceId) => InTx<HubUsage>;
+    readonly readHubInventoryTx: (space: M.MemorySpaceId) => InTx<{
+      reserved: Partial<Record<M.MemoryCapacityDimension, number>>;
+      reclaimable: Partial<Record<M.MemoryCapacityDimension, number>>;
+    }>;
     readonly reserveHubCheckpointTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       checkpointDeltaBytes: number;
@@ -1030,7 +1071,10 @@ export class MemoryStore extends Context.Service<
     ) => Effect.Effect<MemoryAggregate, MemoryStorageError>;
     readonly apply: (
       decision: MemoryDecision,
-    ) => Effect.Effect<StoredReceipt, MemoryStorageError | MemoryStoreConflict>;
+    ) => Effect.Effect<
+      StoredReceipt,
+      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError
+    >;
     readonly readAncestry: (
       space: M.MemorySpaceId,
       memoryId: M.MemoryId,
@@ -1304,6 +1348,7 @@ export class MemoryStore extends Context.Service<
       readonly hubEnvironmentId: M.EnvironmentId;
       readonly checkpointId: string;
       readonly pageCount: number;
+      readonly localEnvironmentId?: M.EnvironmentId;
     }) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
     readonly readDueClaimCandidates: (
       limit: number,
@@ -1516,6 +1561,67 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+    });
+  const globalHubCounters = Effect.fnUntraced(function* () {
+    return yield* stored(
+      "hub-global-counters",
+      sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND scope_key=''`,
+    );
+  });
+  const globalCheckpointReservation = Effect.fnUntraced(function* () {
+    const rows = yield* stored(
+      "hub-checkpoint-bound-global",
+      sql<{ bytes: number; bound: number }>`
+      SELECT coalesce(sum(max(coalesce(r.checkpoint_bytes,0),
+        ${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+
+        coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD})+
+        coalesce(r.published_pinned_bytes,0)-CASE WHEN r.snapshot_generation=coalesce(g.value,0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END),0) AS bytes,
+      coalesce(sum(${CHECKPOINT_PAGE_OVERHEAD}+coalesce(b.value,0)*${CHECKPOINT_BYTE_EXPANSION}+coalesce(n.value,0)*${CHECKPOINT_RECORD_OVERHEAD + CHECKPOINT_PAGE_OVERHEAD}),0) AS bound
+      FROM (SELECT space FROM memory_hub_retention UNION SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows') s
+      LEFT JOIN memory_hub_retention r ON r.space=s.space
+      LEFT JOIN memory_quota_counters b ON b.space=s.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key=''
+      LEFT JOIN memory_quota_counters n ON n.space=s.space AND n.dimension='hub_snapshot_rows' AND n.scope_key=''
+      LEFT JOIN memory_quota_counters g ON g.space=s.space AND g.dimension='hub_snapshot_generation' AND g.scope_key=''`,
+    );
+    return rows[0]!;
+  });
+  const withHubBudget = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const before = new Map((yield* globalHubCounters()).map((row) => [row.dimension, row.value]));
+      const beforeCheckpoint = yield* globalCheckpointReservation();
+      before.set("hub_checkpoint", beforeCheckpoint.bytes);
+      const result = yield* effect;
+      const after = new Map((yield* globalHubCounters()).map((row) => [row.dimension, row.value]));
+      const afterCheckpoint = yield* globalCheckpointReservation();
+      // A larger explicit reservation must not hide a new request's incremental input growth.
+      const maskedGrowth = Math.max(
+        0,
+        afterCheckpoint.bound -
+          beforeCheckpoint.bound -
+          Math.max(0, afterCheckpoint.bytes - beforeCheckpoint.bytes),
+      );
+      after.set("hub_checkpoint", afterCheckpoint.bytes + maskedGrowth);
+      for (const [counter, dimension, limit] of [
+        ["hub_metadata", "permanent_metadata", M.MEMORY_PERMANENT_METADATA_MAX_BYTES],
+        ["hub_receipts", "receipts", M.MEMORY_DEDUP_MAX_RECEIPTS],
+        ["hub_ids", "lifetime_ids", M.MEMORY_MAX_LIFETIME_IDS],
+        ["hub_keys", "import_source_items", M.MEMORY_IMPORT_MAX_SOURCE_ITEMS],
+        ["hub_checkpoint", "checkpoint_staging", M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES],
+      ] as const) {
+        const current = after.get(counter);
+        if (current === undefined || before.get(counter) === undefined)
+          return yield* new MemoryStorageError({
+            stage: "hub-counters-uninitialized",
+            cause: undefined,
+          });
+        // Approved replica state may be over local limits. Cleanup/replay that does not grow it stays possible.
+        if (current > limit && current > before.get(counter)!)
+          return yield* new MemoryCapacityError({ dimension, current, limit });
+      }
+      return result;
     });
   const receipt = Effect.fn("MemoryStore.receipt")(function* (
     space: M.MemorySpaceId,
@@ -1958,12 +2064,21 @@ const make = Effect.gen(function* () {
           const entry = yield* hubEntryCodec.decode(row.entry_json, strict);
           if (entry.kind === "metadata") continue;
           const op = entry.operation;
+          const compactRows = yield* stored(
+            "hub-purge-compact",
+            sql<{
+              compact_json: string;
+            }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${space} AND operation_id=${op.operationId}`,
+          );
           const redacted: M.MemoryHubEntry = {
             kind: "metadata",
             operationKind: op.kind,
             memoryId: op.memoryId,
             hubSequence: entry.hubSequence,
             receipt: entry.receipt,
+            ...(compactRows[0]
+              ? { compactReceipt: yield* compactCodec.decode(compactRows[0].compact_json, strict) }
+              : {}),
             ...(op.kind === "resolve" ? { resolutionId: op.resolution.resolutionId } : {}),
             ...(op.kind === "forget" ? { tombstone: op.tombstone } : {}),
           };
@@ -2167,7 +2282,7 @@ const make = Effect.gen(function* () {
             if (!promote) return old;
             yield* stored(
               "receipt-promote",
-              sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(decision.receipt)} WHERE memory_space_id=${op.memorySpaceId} AND operation_id=${op.operationId}`,
+              sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode({ ...decision.receipt, ...(old.receipt.forgetExpansion ? { forgetExpansion: old.receipt.forgetExpansion } : {}), ...(old.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}) })} WHERE memory_space_id=${op.memorySpaceId} AND operation_id=${op.operationId}`,
             );
           }
         } else if (expectedGeneration !== undefined) {
@@ -2219,7 +2334,19 @@ const make = Effect.gen(function* () {
             return yield* new MemoryStoreConflict({ code: "missing_parent" });
           if (!decision.item) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
         }
-        const outcome = yield* stored("receipt-codec", decodeReceipt(decision.receipt, strict));
+        const outcome = yield* stored(
+          "receipt-codec",
+          decodeReceipt(
+            {
+              ...decision.receipt,
+              ...(old?.receipt.forgetExpansion
+                ? { forgetExpansion: old.receipt.forgetExpansion }
+                : {}),
+              ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+            },
+            strict,
+          ),
+        );
         if (
           outcome.operationId !== op.operationId ||
           outcome.memoryId !== op.memoryId ||
@@ -2408,6 +2535,18 @@ const make = Effect.gen(function* () {
             sql`INSERT INTO memory_conflicts (space,conflict_id,memory_id,heads_json,status,failure_code) VALUES (${op.memorySpaceId},${c.conflictId},${op.memoryId},${yield* headsCodec.encode(c.heads)},${c.status},${c.failureCode ?? null}) ON CONFLICT(space,conflict_id) DO UPDATE SET heads_json=excluded.heads_json,status=excluded.status,failure_code=excluded.failure_code`,
           );
         }
+        if (
+          accepted &&
+          !decision.pending &&
+          !tombstones.length &&
+          op.kind === "resolve" &&
+          decision.heads?.length === 1 &&
+          decision.heads[0] === op.revision.revisionId
+        )
+          yield* stored(
+            "resolution-conflict-retire",
+            sql`UPDATE memory_conflicts SET status='resolved',attempt_id=NULL,failure_code=NULL WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId} AND conflict_id=${op.conflictId} AND heads_json=${yield* headsCodec.encode(op.resolution.inputRevisionIds)}`,
+          );
         if (accepted && decision.admission.kind === "localIntent")
           yield* enqueueWork({
             id: `sync:${op.memorySpaceId}:${op.operationId}`,
@@ -2722,14 +2861,41 @@ const make = Effect.gen(function* () {
     );
     return rows.length === 1;
   });
+  const clearTerminalSubmission = Effect.fnUntraced(function* (id: string) {
+    const rows = yield* stored(
+      "terminal-submission",
+      sql<{
+        space: string;
+        ticket_json: string;
+      }>`SELECT space,ticket_json FROM memory_outbox WHERE id=${id} AND kind='resolve' AND ticket_json IS NOT NULL`,
+    );
+    if (!rows[0]) return;
+    const row = yield* stored(
+      "terminal-ticket",
+      storedTicketRowCodec.decode(rows[0].ticket_json, strict),
+    );
+    yield* stored(
+      "terminal-submission-purge",
+      sql`DELETE FROM memory_payloads WHERE space=${rows[0].space} AND payload_ref=${`submission:${row.ticket.attemptId}`}`,
+    );
+    yield* stored(
+      "terminal-ticket-fence",
+      sql`UPDATE memory_outbox SET ticket_json=${yield* storedTicketRowCodec.encode({ ...row, state: "terminal", version: row.version + 1, submission: null, submissionDigest: null, owner: null, ownedUntil: null })},sync_version=sync_version+1,payload_ref=NULL WHERE id=${id}`,
+    );
+  });
   const finishWork = Effect.fn("MemoryStore.finishWork")(function* (
     id: string,
     status: "completed" | "cancelled" | "failed",
     result?: M.MemoryHubReceipt,
   ) {
-    yield* stored(
-      "finish-work",
-      sql`UPDATE memory_outbox SET status=${status},claimed_by=NULL,claimed_until=NULL,completed_receipt_json=${result ? yield* receiptCodec.encode(result) : null},payload_ref=NULL WHERE id=${id}`,
+    yield* transact(
+      Effect.gen(function* () {
+        yield* clearTerminalSubmission(id);
+        yield* stored(
+          "finish-work",
+          sql`UPDATE memory_outbox SET status=${status},terminal_at=${yield* Clock.currentTimeMillis},claimed_by=NULL,claimed_until=NULL,completed_receipt_json=${result ? yield* receiptCodec.encode(result) : null},payload_ref=NULL WHERE id=${id}`,
+        );
+      }),
     );
   });
   const readEligibleOutbox = Effect.fn("MemoryStore.readEligibleOutbox")(function* (
@@ -3956,14 +4122,24 @@ const make = Effect.gen(function* () {
   const acknowledgeReport = Effect.fn("MemoryStore.acknowledgeReport")(function* (
     input: M.MemoryReportDelivery,
   ) {
-    const report = yield* stored("report-codec", decodeReport(input, strict));
-    if (report.state !== "delivered" || !report.reportThread || report.sequence === null)
-      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-    const rows = yield* stored(
-      "report-ack",
-      sql`UPDATE memory_report_outbox SET state='delivered',report_thread_json=${yield* threadCodec.encode(report.reportThread)},delivered_sequence=${report.sequence},delivered_at=${yield* Clock.currentTimeMillis},claimed_by=NULL,claimed_until=NULL WHERE report_id=${report.reportId} AND operation_id=${report.operationId} AND resolving_environment_id=${report.resolvingEnvironmentId} AND outcome=${report.outcome} RETURNING report_id`,
+    return yield* transact(
+      Effect.gen(function* () {
+        const report = yield* stored("report-codec", decodeReport(input, strict));
+        if (report.state !== "delivered" || !report.reportThread || report.sequence === null)
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const rows = yield* stored(
+          "report-ack",
+          sql`UPDATE memory_report_outbox SET state='delivered',report_thread_json=${yield* threadCodec.encode(report.reportThread)},delivered_sequence=${report.sequence},delivered_at=${yield* Clock.currentTimeMillis},claimed_by=NULL,claimed_until=NULL WHERE report_id=${report.reportId} AND operation_id=${report.operationId} AND resolving_environment_id=${report.resolvingEnvironmentId} AND outcome=${report.outcome} RETURNING report_id`,
+        );
+        if (!rows.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        yield* stored(
+          "report-delivery-guard",
+          sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json)
+      SELECT space,'report_delivered',report_id,memory_id,${yield* codec(Schema.Struct({ operationId: M.MemoryOperationId, outcome: Schema.Literals(["resolved", "reverted", "failed"]), resolvingEnvironmentId: M.EnvironmentId })).encode({ operationId: report.operationId, outcome: report.outcome, resolvingEnvironmentId: report.resolvingEnvironmentId })}
+      FROM memory_report_outbox WHERE report_id=${report.reportId} ON CONFLICT(space,key_kind,key) DO NOTHING`,
+        );
+      }),
     );
-    if (!rows.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
   });
   const failGenerationAttempt = Effect.fn("MemoryStore.failGenerationAttempt")(function* (input: {
     work: MemoryWork;
@@ -4122,6 +4298,7 @@ const make = Effect.gen(function* () {
     hubEnvironmentId: M.EnvironmentId;
     checkpointId: string;
     pageCount: number;
+    localEnvironmentId?: M.EnvironmentId;
   }) {
     yield* transact(
       Effect.gen(function* () {
@@ -4158,7 +4335,14 @@ const make = Effect.gen(function* () {
               "checkpoint-fence",
               sql`UPDATE memory_identity_ledger SET fence_json=${yield* fenceCodec.encode(fence)} WHERE space=${input.memorySpaceId} AND memory_id=${fence.memoryId}`,
             );
-          for (const compact of page.compactReceipts) yield* persistCompactReceipt(compact);
+          for (const compact of page.compactReceipts) {
+            yield* persistCompactReceipt(compact);
+            if (input.localEnvironmentId)
+              yield* reconcileResolutionReportTx({
+                record: compact,
+                localEnvironmentId: input.localEnvironmentId,
+              });
+          }
           for (const conflict of page.conflicts)
             yield* stored(
               "checkpoint-conflict",
@@ -4608,7 +4792,11 @@ const make = Effect.gen(function* () {
       environmentHistoryBytes: environment[0]!.history,
       environmentLifetimeIds: environment[0]!.ids,
       environmentReceipts: environment[0]!.receipts,
-      environmentPermanentBytes: environment[0]!.permanent + environment[0]!.receipt_bytes,
+      environmentPermanentBytes:
+        environment[0]!.permanent +
+        environment[0]!.receipt_bytes +
+        ((yield* globalHubCounters()).find((row) => row.dimension === "hub_private_metadata")
+          ?.value ?? 0),
       spaceItems: live[0]!.count,
       lifetimeIds: identities[0]!.count,
       permanentBytes:
@@ -4658,9 +4846,41 @@ const make = Effect.gen(function* () {
   ) {
     yield* transact(
       Effect.gen(function* () {
-        const json = yield* compactCodec.encode(input);
+        const old = yield* receipt(input.memorySpaceId, input.receipt.operationId);
+        const json = yield* compactCodec.encode({
+          ...input,
+          receipt: {
+            ...input.receipt,
+            ...(old?.receipt.forgetExpansion
+              ? { forgetExpansion: old.receipt.forgetExpansion }
+              : {}),
+            ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+          },
+        });
         const record = yield* compactCodec.decode(json, strict);
-        const old = yield* receipt(record.memorySpaceId, record.receipt.operationId);
+        const existing = yield* stored(
+          "compact-existing",
+          sql<{
+            compact_json: string;
+          }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${record.memorySpaceId} AND operation_id=${record.receipt.operationId}`,
+        );
+        if (existing[0]) {
+          const prior = yield* compactCodec.decode(existing[0].compact_json, strict);
+          const preserved = {
+            ...prior,
+            receipt: {
+              ...prior.receipt,
+              ...(record.receipt.forgetExpansion
+                ? { forgetExpansion: record.receipt.forgetExpansion }
+                : {}),
+              ...(record.receipt.forgetRetryOf
+                ? { forgetRetryOf: record.receipt.forgetRetryOf }
+                : {}),
+            },
+          };
+          if ((yield* compactCodec.encode(preserved)) !== json)
+            return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        }
         if (
           old &&
           (old.operationDigest !== record.receipt.operationDigest ||
@@ -4702,7 +4922,7 @@ const make = Effect.gen(function* () {
           return yield* new MemoryStoreConflict({ code: "payload_too_large" });
         yield* stored(
           "compact-receipt-write",
-          sql`INSERT INTO memory_compact_receipts (space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json,compact_blob,report_key) VALUES (${record.memorySpaceId},${record.receipt.operationId},${record.receipt.operationDigest},${record.receipt.hubSequence!},${yield* receiptCodec.encode(record.receipt)},${json},${binary},${record.reportGuard?.reportId ?? null}) ON CONFLICT(space,operation_id) DO NOTHING`,
+          sql`INSERT INTO memory_compact_receipts (space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json,compact_blob,report_key) VALUES (${record.memorySpaceId},${record.receipt.operationId},${record.receipt.operationDigest},${record.receipt.hubSequence!},${yield* receiptCodec.encode(record.receipt)},${json},${binary},${record.reportGuard?.reportId ?? null}) ON CONFLICT(space,operation_id) DO UPDATE SET receipt_json=excluded.receipt_json,compact_json=excluded.compact_json,compact_blob=excluded.compact_blob`,
         );
       }),
     );
@@ -4727,15 +4947,18 @@ const make = Effect.gen(function* () {
         AND NOT EXISTS (SELECT 1 FROM memory_revert_intents r WHERE r.space=p.space AND r.payload_ref=p.payload_ref)
         AND NOT EXISTS (SELECT 1 FROM memory_resolutions r JOIN json_each(r.input_payload_refs_json) refs WHERE r.space=p.space AND refs.value=p.payload_ref AND r.revert_deadline>${now})
         AND (EXISTS (SELECT 1 FROM memory_revisions r JOIN memory_events e ON e.memory_space_id=r.space AND e.operation_id=r.operation_id WHERE r.space=p.space AND r.payload_ref=p.payload_ref AND json_extract(e.receipt_json,'$.hubSequence') IS NOT NULL)
-        OR EXISTS (SELECT 1 FROM memory_resolutions r JOIN memory_revisions v ON v.space=r.space AND v.revision_id=r.result_revision_id
+        OR EXISTS (SELECT 1 FROM memory_resolutions r
+          JOIN memory_compact_receipts k ON k.space=r.space AND json_extract(k.compact_json,'$.operationKind')='resolve'
+            AND json_extract(k.compact_json,'$.resolutionId')=r.resolution_id AND json_extract(k.compact_json,'$.revisionId')=r.result_revision_id
+            AND json_extract(k.compact_json,'$.receipt.memoryId')=r.memory_id
           JOIN memory_compaction_state c ON c.space=r.space AND c.published=1
-          LEFT JOIN memory_events e ON e.memory_space_id=v.space AND e.operation_id=v.operation_id
-          LEFT JOIN memory_compact_receipts k ON k.space=v.space AND k.operation_id=v.operation_id
+          LEFT JOIN memory_revisions v ON v.space=r.space AND v.revision_id=r.result_revision_id
           WHERE r.space=p.space AND r.judgment_payload_ref=p.payload_ref AND r.revert_deadline<=${now}
-          AND coalesce(json_extract(e.receipt_json,'$.outcome'),json_extract(k.receipt_json,'$.outcome'))='accepted'
-          AND coalesce(json_extract(e.receipt_json,'$.hubSequence'),k.hub_sequence)<=json_extract(c.boundary_json,'$.checkpointSequence')
+          AND json_extract(k.receipt_json,'$.outcome')='accepted'
+          AND k.hub_sequence<=json_extract(c.boundary_json,'$.checkpointSequence')
           AND NOT EXISTS (SELECT 1 FROM memory_revert_intents ri WHERE ri.space=r.space AND ri.resolution_id=r.resolution_id)
-          AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=v.space AND o.payload_ref=v.payload_ref AND o.status IN ('pending','retry','running'))))
+          AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=r.space AND o.status IN ('pending','retry','running') AND (o.payload_ref=v.payload_ref OR instr(o.metadata_json,r.result_revision_id)>0 OR instr(o.metadata_json,r.resolution_id)>0 OR instr(coalesce(o.ticket_json,''),r.result_revision_id)>0 OR instr(coalesce(o.ticket_json,''),r.resolution_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.result_revision_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.resolution_id)>0))
+          AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending b JOIN memory_hub_retention h ON h.space=b.space WHERE b.space=r.space AND (b.payload_ref=p.payload_ref OR b.reason='hub_snapshot' AND (b.checkpoint_id='hub:'||h.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(h.handles_json) t WHERE 'hub:'||json_extract(t.value,'$.checkpointId')=b.checkpoint_id AND json_extract(t.value,'$.expiresAt')>${now})) AND EXISTS(SELECT 1 FROM json_each(b.metadata_json,'$.resolutions') j WHERE json_extract(j.value,'$.resolution.resolutionId')=r.resolution_id)))))
         ORDER BY p.purge_eligible_after,p.space,p.payload_ref LIMIT ${Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)}`,
         );
         for (const row of rows)
@@ -5042,6 +5265,30 @@ const make = Effect.gen(function* () {
           }
         : null,
     });
+  const submissionMatchesTicket = (
+    submission: M.MemoryHubApplyResolutionInput,
+    ticket: M.MemoryResolutionLease,
+  ) => {
+    const op = submission.operation;
+    return (
+      op.kind === "resolve" &&
+      submission.memorySpaceId === ticket.memorySpaceId &&
+      submission.attemptId === ticket.attemptId &&
+      submission.holderEnvironmentId === ticket.holderEnvironmentId &&
+      op.memorySpaceId === ticket.memorySpaceId &&
+      op.memoryId === ticket.memoryId &&
+      op.originEnvironmentId === ticket.holderEnvironmentId &&
+      op.conflictId === ticket.conflictId &&
+      op.fencingToken === ticket.fencingToken &&
+      op.resolution.fencingToken === ticket.fencingToken &&
+      op.resolution.resolvingEnvironmentId === ticket.holderEnvironmentId &&
+      sameHeadSet(op.expectedHeads, ticket.conflictHeadSet) &&
+      sameHeadSet(op.revision.parents, ticket.conflictHeadSet) &&
+      sameHeadSet(op.resolution.inputRevisionIds, ticket.conflictHeadSet) &&
+      JSON.stringify(op.resolution.requestedModelSelection) ===
+        JSON.stringify(ticket.frozenDefaultModelSelection)
+    );
+  };
   const decodeTicketRow = Effect.fnUntraced(function* (json: string) {
     const row = yield* stored("ticket-decode", storedTicketRowCodec.decode(json, strict));
     if (!row.submission) return { ...row, submission: null };
@@ -5058,6 +5305,7 @@ const make = Effect.gen(function* () {
       codec(M.MemoryHubApplyResolutionInput).decode(bodies[0].body_json, strict),
     );
     if (
+      !submissionMatchesTicket(submission, row.ticket) ||
       hashText(M.encodeMemoryOperation(submission.operation)) !== row.submissionDigest ||
       (yield* metadataCodec.encode(metadataOf(submission.operation))) !==
         (yield* metadataCodec.encode(row.submission.operation))
@@ -5219,7 +5467,24 @@ const make = Effect.gen(function* () {
         approval: input.approval ?? row.approval,
         owner: input.ownedUntil === null ? null : row.owner,
       };
-      return yield* writeTicket(input.ownership, next, row.version);
+      const updated = yield* writeTicket(input.ownership, next, row.version);
+      if (updated && input.nextState === "terminal") {
+        yield* clearTerminalSubmission(ticketId(input.ownership));
+        yield* stored(
+          "terminal-resolution-work",
+          sql`UPDATE memory_outbox SET status=${updated.approval?.outcome === "rejected" ? "failed" : "completed"},terminal_at=${input.now} WHERE id=${ticketId(input.ownership)}`,
+        );
+        return {
+          ...updated,
+          state: "terminal" as const,
+          version: updated.version + 1,
+          submission: null,
+          submissionDigest: null,
+          owner: null,
+          ownedUntil: null,
+        };
+      }
+      return updated;
     });
   const persistResolutionSubmissionTx: MemoryStore["Service"]["persistResolutionSubmissionTx"] =
     Effect.fn("MemoryStore.persistResolutionSubmissionTx")(function* (input) {
@@ -5231,9 +5496,7 @@ const make = Effect.gen(function* () {
         submissionDecode(input.submission, strict),
       );
       if (
-        submission.attemptId !== row.ticket.attemptId ||
-        submission.holderEnvironmentId !== row.ticket.holderEnvironmentId ||
-        submission.memorySpaceId !== row.ticket.memorySpaceId ||
+        !submissionMatchesTicket(submission, row.ticket) ||
         hashText(M.encodeMemoryOperation(submission.operation)) !== input.digest
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
@@ -5381,6 +5644,7 @@ const make = Effect.gen(function* () {
   const adminCodec = codec(AdminRecordSchema);
   const adminDecode = Schema.decodeUnknownEffect(AdminRecordSchema);
   const adminActionCodec = codec(PersistedAdminActionSchema);
+  const adminReplayCodec = codec(AdminReplaySchema);
   const readHubAdminTx: MemoryStore["Service"]["readHubAdminTx"] = Effect.fn(
     "MemoryStore.readHubAdminTx",
   )(function* (requestId) {
@@ -5391,9 +5655,15 @@ const make = Effect.gen(function* () {
         admin_json: string;
       }>`SELECT admin_json FROM memory_outbox WHERE id=${`admin:${requestId}`} AND kind='admin'`,
     );
-    return rows[0]
-      ? yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict))
-      : undefined;
+    if (rows[0])
+      return yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict));
+    const guards = yield* stored(
+      "hub-admin-replay",
+      sql<{
+        record_json: string;
+      }>`SELECT record_json FROM memory_import_keys WHERE space='_admin' AND key_kind='hub_admin' AND key=${requestId}`,
+    );
+    return guards[0] ? yield* adminReplayCodec.decode(guards[0].record_json, strict) : undefined;
   });
   const writeHubAdminTx: MemoryStore["Service"]["writeHubAdminTx"] = Effect.fn(
     "MemoryStore.writeHubAdminTx",
@@ -5404,6 +5674,17 @@ const make = Effect.gen(function* () {
     if (new TextEncoder().encode(json).length > M.MEMORY_PAGE_MAX_UTF8_BYTES)
       return yield* new MemoryStoreConflict({ code: "payload_too_large" });
     const old = yield* readHubAdminTx(record.requestId);
+    if (old && !("action" in old)) {
+      if (
+        old.requestDigest !== record.requestDigest ||
+        old.expectedVersion !== record.expectedVersion ||
+        old.actionDigest !== hashText(yield* adminActionCodec.encode(record.action)) ||
+        old.secretName !== record.secretName
+      )
+        return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+      // Replay returns the original terminal result, never recreates work or a credential.
+      return { ...record, stage: old.stage, result: old.result, memberVersion: old.memberVersion };
+    }
     if (old) {
       if (
         old.requestDigest !== record.requestDigest ||
@@ -5445,11 +5726,26 @@ const make = Effect.gen(function* () {
         dimension: "work_bytes",
         limit: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
       });
+    const terminalAt = record.stage === "acknowledged" ? yield* Clock.currentTimeMillis : null;
     yield* stored(
       "hub-admin-write",
-      sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,admin_json,next_attempt_at) VALUES (${`admin:${record.requestId}`},'_admin','admin','pending','{}',${json},0) ON CONFLICT(id) DO UPDATE SET admin_json=excluded.admin_json,status=${record.stage === "acknowledged" ? "completed" : "pending"}`,
+      sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,admin_json,next_attempt_at,terminal_at) VALUES (${`admin:${record.requestId}`},'_admin','admin',${record.stage === "acknowledged" ? "completed" : "pending"},'{}',${json},0,${terminalAt}) ON CONFLICT(id) DO UPDATE SET admin_json=excluded.admin_json,status=excluded.status,terminal_at=coalesce(memory_outbox.terminal_at,excluded.terminal_at)`,
     );
     return record;
+  });
+  const readActivatedHubAdminTx: MemoryStore["Service"]["readActivatedHubAdminTx"] = Effect.fn(
+    "MemoryStore.readActivatedHubAdminTx",
+  )(function* () {
+    yield* Transaction;
+    const rows = yield* stored(
+      "hub-admin-activated",
+      sql<{
+        admin_json: string;
+      }>`SELECT admin_json FROM memory_outbox WHERE kind='admin' AND admin_json IS NOT NULL AND json_extract(admin_json,'$.stage')='activated' ORDER BY id LIMIT 1`,
+    );
+    return rows[0]
+      ? yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict))
+      : undefined;
   });
   const readPendingHubAdmins: MemoryStore["Service"]["readPendingHubAdmins"] = Effect.fn(
     "MemoryStore.readPendingHubAdmins",
@@ -5469,11 +5765,16 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     yield* Transaction;
     const record = yield* readHubAdminTx(input.requestId);
+    if (!record || !("action" in record))
+      return yield* new MemoryStoreConflict({ code: "revision_changed" });
     if (
-      !record ||
       record.requestDigest !== input.requestDigest ||
-      !("environmentId" in record.action) ||
-      record.action.environmentId !== input.environmentId
+      (record.action.action === "configure"
+        ? record.action.settings.mode !== "hub" ||
+          (record.action.settings.memorySpaceId !== null &&
+            record.action.settings.memorySpaceId !== input.memorySpaceId)
+        : !("environmentId" in record.action) ||
+          record.action.environmentId !== input.environmentId)
     )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
     const expectedAction =
@@ -5482,7 +5783,14 @@ const make = Effect.gen(function* () {
         : input.expectedCredentialVersion === null
           ? "provisionMember"
           : "rotateMemberCredential";
-    if (record.action.action !== expectedAction)
+    if (
+      record.action.action !== expectedAction &&
+      !(
+        record.action.action === "configure" &&
+        input.next !== "revoked" &&
+        input.expectedCredentialVersion === null
+      )
+    )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
     const old = yield* readHubMember(input.memorySpaceId, input.environmentId);
     if (record.memberVersion !== null) {
@@ -5587,6 +5895,48 @@ const make = Effect.gen(function* () {
       "hub-member-pin-retire",
       sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode(previousHandles.filter((h) => h.memberEnvironmentId !== input.environmentId))} WHERE space=${input.memorySpaceId}`,
     );
+    if (record.action.action === "configure") {
+      // Readiness and internal authority commit together; a nonrepresentable legacy space rolls back.
+      const checkpoint = yield* prepareHubCheckpointTx({
+        authority: {
+          principal: {
+            memorySpaceId: input.memorySpaceId,
+            environmentId: input.environmentId,
+            credentialVersion: next.credentialVersion,
+            scopes: ["memory:sync"],
+          },
+          now: Effect.succeed(input.now),
+          reauthorize: Effect.void,
+        },
+        checkpointId: `initial-${input.requestId}`,
+        snapshotToken: `initial-${input.requestId}`,
+        hubEnvironmentId: input.environmentId,
+      }).pipe(
+        Effect.catchTags({
+          MemoryHubError: () =>
+            Effect.fail(new MemoryStoreConflict({ code: "bootstrap_required" })),
+          MemoryHubUnauthorizedError: () =>
+            Effect.fail(new MemoryStoreConflict({ code: "identity_mismatch" })),
+          MemoryHubForbiddenError: () =>
+            Effect.fail(new MemoryStoreConflict({ code: "identity_mismatch" })),
+        }),
+      );
+      yield* publishCheckpointAndFloorTx({
+        memorySpaceId: input.memorySpaceId,
+        checkpointId: checkpoint.checkpointId,
+        expectedFloor: 0,
+        nextFloor: checkpoint.checkpointSequence,
+        now: input.now,
+      });
+      yield* stored(
+        "hub-internal-pin-retire",
+        sql`UPDATE memory_hub_retention SET handles_json='[]' WHERE space=${input.memorySpaceId}`,
+      );
+      yield* stored(
+        "hub-internal-token-retire",
+        sql`UPDATE memory_import_keys SET record_json=json_set(record_json,'$.retired',json('true')) WHERE space=${input.memorySpaceId} AND key_kind='hub_checkpoint_token' AND key=${hashText(checkpoint.snapshotToken)}`,
+      );
+    }
     yield* writeHubAdminTx({
       record: { ...record, stage: "activated", memberVersion: next.credentialVersion },
       expectedStage: "prepared",
@@ -5704,6 +6054,32 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
     );
   });
+  const adminReplayJson = Effect.fnUntraced(function* (record: AdminRecord) {
+    const { action, ...replay } = record;
+    return yield* adminReplayCodec.encode({
+      ...replay,
+      stage: "acknowledged" as const,
+      actionDigest: hashText(yield* adminActionCodec.encode(action)),
+    });
+  });
+  const compactTerminalAdmins = Effect.fnUntraced(function* (now: number, limit: number) {
+    const rows = yield* stored(
+      "hub-admin-sweep",
+      sql<{
+        id: string;
+        admin_json: string;
+      }>`SELECT id,admin_json FROM memory_outbox WHERE kind='admin' AND status='completed' AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND json_extract(admin_json,'$.stage')='acknowledged' ORDER BY terminal_at,id LIMIT ${limit + 1}`,
+    );
+    for (const row of rows.slice(0, limit)) {
+      const record = yield* adminCodec.decode(row.admin_json, strict);
+      yield* stored(
+        "hub-admin-guard",
+        sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES ('_admin','hub_admin',${record.requestId},${record.requestId},${yield* adminReplayJson(record)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
+      );
+      yield* stored("hub-admin-detail-retire", sql`DELETE FROM memory_outbox WHERE id=${row.id}`);
+    }
+    return { removedRows: Math.min(rows.length, limit), cleanupPending: rows.length > limit };
+  });
   const purgeHubTransientTx: MemoryStore["Service"]["purgeHubTransientTx"] = Effect.fn(
     "MemoryStore.purgeHubTransientTx",
   )(function* (input) {
@@ -5748,9 +6124,14 @@ const make = Effect.gen(function* () {
       "hub-transient-pin-release",
       sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode(handles)},published_pinned_bytes=max(0,published_pinned_bytes-${released}) WHERE space=${input.memorySpaceId}`,
     );
+    const admins = yield* compactTerminalAdmins(
+      input.now,
+      Math.max(0, remaining - Math.min(pages.length, remaining)),
+    );
     return {
-      removedRows: Math.min(rows.length, limit) + Math.min(pages.length, remaining),
-      cleanupPending: rows.length > limit || pages.length > remaining,
+      removedRows:
+        Math.min(rows.length, limit) + Math.min(pages.length, remaining) + admins.removedRows,
+      cleanupPending: rows.length > limit || pages.length > remaining || admins.cleanupPending,
     };
   });
   const requestHubSourceReadTx: MemoryStore["Service"]["requestHubSourceReadTx"] = Effect.fn(
@@ -5997,6 +6378,7 @@ const make = Effect.gen(function* () {
       hubSequence: record.receipt.hubSequence!,
       memoryId: record.receipt.memoryId,
       receipt: record.receipt,
+      compactReceipt: record,
       ...(record.operationKind === "resolve" && record.resolutionId
         ? { resolutionId: record.resolutionId }
         : {}),
@@ -6125,7 +6507,20 @@ const make = Effect.gen(function* () {
     );
     for (const row of identities) {
       const current = yield* loadAggregate(space, M.MemoryId.make(row.memory_id));
-      if (!current.identity || !current.fence || !approved.has(current.identity.createOperationId))
+      if (
+        !current.identity ||
+        !current.fence ||
+        !receipts.some(
+          (r) =>
+            r.receipt.operationId === current.identity!.createOperationId &&
+            r.receipt.memoryId === current.identity!.memoryId &&
+            (r.receipt.outcome === "accepted" ||
+              r.receipt.outcome === "conflicted" ||
+              (r.operationKind === "forget" &&
+                r.receipt.outcome === "deleted" &&
+                current.tombstone?.deleteOperationId === r.receipt.operationId)),
+        )
+      )
         return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
       all.identities = [...all.identities, current.identity];
       all.fences = [...all.fences, current.fence];
@@ -6245,6 +6640,68 @@ const make = Effect.gen(function* () {
       return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
     return pages;
   });
+  // Both producers and member joins stage the same complete immutable snapshot. Only joins issue handles.
+  const stageHubSnapshotTx = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    checkpointId: string,
+    now: number,
+  ) {
+    yield* Transaction;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(checkpointId))
+      return yield* new M.MemoryHubError({ code: "invalid_cursor" });
+    const retention = yield* readHubRetentionTx(space);
+    const rows = yield* stored(
+      "hub-snapshot-sequence",
+      sql<{
+        sequence: number;
+      }>`SELECT coalesce(max(hub_sequence),0) AS sequence FROM memory_hub_operations WHERE space=${space}`,
+    );
+    const sequence = Math.max(rows[0]!.sequence, retention.checkpointSequence);
+    let pages = yield* snapshotPages(space, checkpointId);
+    const builtNewSnapshot = pages.length === 0;
+    if (builtNewSnapshot) {
+      pages = yield* buildHubSnapshot(space, sequence, retention.retentionFloor, checkpointId, now);
+      const encoded = yield* Effect.forEach(pages, (page) => checkpointCodec.encode(page));
+      const bytes = encoded.reduce((sum, json) => sum + new TextEncoder().encode(json).length, 0);
+      const usage = yield* readHubUsageTx(space);
+      if (bytes > usage.requiredCheckpointBoundBytes)
+        return yield* new MemoryStorageError({
+          stage: "checkpoint-bound-underflow",
+          cause: undefined,
+        });
+      yield* reserveHubCheckpointTx({
+        memorySpaceId: space,
+        checkpointDeltaBytes: bytes - usage.checkpointBytes,
+        publishedPinnedDeltaBytes: bytes,
+      });
+      yield* stored(
+        "hub-snapshot-size",
+        sql`UPDATE memory_hub_retention SET last_snapshot_bytes=${bytes} WHERE space=${space}`,
+      );
+      for (let ordinal = 0; ordinal < pages.length; ordinal++)
+        yield* stored(
+          "hub-snapshot-stage",
+          sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,hub_sequence,checkpoint_id,page_ordinal,metadata_json) VALUES (${space},${`${snapshotId(checkpointId)}:${ordinal}`},'checkpoint','[]','hub_snapshot',${sequence},${snapshotId(checkpointId)},${ordinal},${encoded[ordinal]!})`,
+        );
+    }
+    const first = pages[0]!;
+    // Preparing materializes the reserved slot. Any later input mutation invalidates this credit in its writer Tx.
+    if (builtNewSnapshot)
+      yield* stored(
+        "hub-snapshot-reservation-consumed",
+        sql`UPDATE memory_hub_retention SET reserved_snapshot_id=${checkpointId},last_snapshot_bytes=(SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))),0) FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' AND checkpoint_id=${snapshotId(checkpointId)}),snapshot_generation=coalesce((SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''),0) WHERE space=${space}`,
+      );
+    return { pages, first };
+  });
+  const prepareHubProducerCheckpointTx: MemoryStore["Service"]["prepareHubProducerCheckpointTx"] =
+    Effect.fn("MemoryStore.prepareHubProducerCheckpointTx")(function* (input) {
+      const space = input.authority.principal.memorySpaceId;
+      const { member, now } = yield* authorizeSource(input.authority, space);
+      if (member.environmentId !== input.hubEnvironmentId)
+        return yield* new M.MemoryHubForbiddenError({});
+      const { first } = yield* stageHubSnapshotTx(space, input.checkpointId, now);
+      return { checkpointId: input.checkpointId, checkpointSequence: first.checkpointSequence };
+    });
   const prepareHubCheckpointTx: MemoryStore["Service"]["prepareHubCheckpointTx"] = Effect.fn(
     "MemoryStore.prepareHubCheckpointTx",
   )(function* (input) {
@@ -6296,38 +6753,7 @@ const make = Effect.gen(function* () {
         dimension: "checkpoint_handles",
         limit: M.MEMORY_CHECKPOINT_MAX_HANDLES_PER_HUB,
       });
-    const retention = yield* readHubRetentionTx(space);
-    const rows = yield* stored(
-      "hub-snapshot-sequence",
-      sql<{
-        sequence: number;
-      }>`SELECT coalesce(max(hub_sequence),0) AS sequence FROM memory_hub_operations WHERE space=${space}`,
-    );
-    const sequence = Math.max(rows[0]!.sequence, retention.checkpointSequence);
-    let pages = yield* snapshotPages(space, input.checkpointId);
-    if (pages.length === 0) {
-      pages = yield* buildHubSnapshot(
-        space,
-        sequence,
-        retention.retentionFloor,
-        input.checkpointId,
-        now,
-      );
-      const encoded = yield* Effect.forEach(pages, (page) => checkpointCodec.encode(page));
-      const bytes = encoded.reduce((sum, json) => sum + new TextEncoder().encode(json).length, 0);
-      const usage = yield* readHubUsageTx(space);
-      yield* reserveHubCheckpointTx({
-        memorySpaceId: space,
-        checkpointDeltaBytes: bytes - usage.checkpointBytes,
-        publishedPinnedDeltaBytes: bytes,
-      });
-      for (let ordinal = 0; ordinal < pages.length; ordinal++)
-        yield* stored(
-          "hub-snapshot-stage",
-          sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,hub_sequence,checkpoint_id,page_ordinal,metadata_json) VALUES (${space},${`${snapshotId(input.checkpointId)}:${ordinal}`},'checkpoint','[]','hub_snapshot',${sequence},${snapshotId(input.checkpointId)},${ordinal},${encoded[ordinal]!})`,
-        );
-    }
-    const first = pages[0]!;
+    const { pages, first } = yield* stageHubSnapshotTx(space, input.checkpointId, now);
     const handle: HubCheckpointHandle = {
       checkpointId: input.checkpointId,
       snapshotToken: input.snapshotToken,
@@ -6470,6 +6896,112 @@ const make = Effect.gen(function* () {
       removedRows++;
       reclaimedLogicalBytes += row.bytes;
     }
+    const limit = Math.max(0, Math.min(input.limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS));
+    const events = yield* stored(
+      "hub-compact-events",
+      sql<{
+        operation_id: string;
+        bytes: number;
+      }>`SELECT e.operation_id,length(CAST(e.metadata_json AS BLOB))+length(CAST(e.receipt_json AS BLOB)) AS bytes FROM memory_events e JOIN memory_compact_receipts c ON c.space=e.memory_space_id AND c.operation_id=e.operation_id WHERE e.memory_space_id=${input.memorySpaceId} AND c.hub_sequence<=${input.expectedFloor} AND e.created_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=e.memory_space_id AND json_extract(o.metadata_json,'$.operationId')=e.operation_id AND o.status IN ('pending','running','retry')) AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending p WHERE p.space=e.memory_space_id AND p.operation_id=e.operation_id) ORDER BY e.sequence LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const event of events) {
+      if (!covered.has(M.MemoryOperationId.make(event.operation_id))) continue;
+      yield* stored(
+        "hub-compact-event-delete",
+        sql`DELETE FROM memory_events WHERE memory_space_id=${input.memorySpaceId} AND operation_id=${event.operation_id}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += event.bytes;
+    }
+    // Snapshot bodies survive independently. Keep canonical references while the published or a live pinned page needs them.
+    const liveHandles = (yield* handlesFor(input.memorySpaceId)).filter(
+      (h) => h.expiresAt > input.now,
+    );
+    const keep = yield* stringArrayCodec.encode([
+      snapshotId(retention.checkpointId),
+      ...liveHandles.map((h) => snapshotId(h.checkpointId)),
+    ]);
+    const revisions = yield* stored(
+      "hub-compact-revisions",
+      sql<{
+        revision_id: string;
+        operation_id: string;
+        payload_ref: string;
+        bytes: number;
+      }>`SELECT r.revision_id,r.operation_id,r.payload_ref,coalesce(length(CAST(p.body_json AS BLOB)),0)+length(CAST(r.parents_json AS BLOB))+length(CAST(r.provenance_json AS BLOB))+length(CAST(r.scope_json AS BLOB)) AS bytes FROM memory_revisions r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${input.memorySpaceId} AND c.hub_sequence<=${input.expectedFloor} AND (p.purge_eligible_after<=${input.now} OR p.payload_ref IS NULL AND r.created_at<=${input.now - M.MEMORY_LOG_RETENTION_MS})
+      AND NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=r.space AND h.value=r.revision_id)
+      AND NOT EXISTS (SELECT 1 FROM memory_conflicts f JOIN json_each(f.heads_json) h WHERE f.space=r.space AND f.status!='resolved' AND h.value=r.revision_id)
+      AND NOT EXISTS (SELECT 1 FROM memory_resolutions v JOIN json_each(v.input_revision_ids_json) h WHERE v.space=r.space AND v.revert_deadline>${input.now} AND h.value=r.revision_id)
+      AND NOT EXISTS (SELECT 1 FROM memory_revert_intents v WHERE v.space=r.space AND (v.restored_revision_id=r.revision_id OR v.payload_ref=r.payload_ref))
+      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=r.space AND o.status IN ('pending','running','retry') AND (o.payload_ref=r.payload_ref OR instr(o.metadata_json,r.revision_id)>0 OR instr(coalesce(o.ticket_json,''),r.revision_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.revision_id)>0))
+      AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending b WHERE b.space=r.space AND (b.payload_ref=r.payload_ref OR b.reason='hub_snapshot' AND b.checkpoint_id IN (SELECT value FROM json_each(${keep})) AND EXISTS (SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=r.revision_id)))
+      ORDER BY coalesce(p.purge_eligible_after,r.created_at),r.revision_id LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const revision of revisions) {
+      if (!covered.has(M.MemoryOperationId.make(revision.operation_id))) continue;
+      yield* stored(
+        "hub-compact-payload-delete",
+        sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${revision.payload_ref}`,
+      );
+      yield* stored(
+        "hub-compact-revision-delete",
+        sql`DELETE FROM memory_revisions WHERE space=${input.memorySpaceId} AND revision_id=${revision.revision_id}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += revision.bytes;
+    }
+    const judgments = yield* stored(
+      "hub-compact-judgments",
+      sql<{
+        resolution_id: string;
+        operation_id: string;
+        judgment_payload_ref: string;
+        bytes: number;
+      }>`SELECT r.resolution_id,c.operation_id,r.judgment_payload_ref,length(CAST(p.body_json AS BLOB)) AS bytes FROM memory_resolutions r JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.judgment_payload_ref JOIN memory_compact_receipts c ON c.space=r.space AND json_extract(c.compact_json,'$.operationKind')='resolve' AND json_extract(c.compact_json,'$.resolutionId')=r.resolution_id AND json_extract(c.compact_json,'$.revisionId')=r.result_revision_id AND json_extract(c.compact_json,'$.receipt.memoryId')=r.memory_id AND json_extract(c.receipt_json,'$.outcome')='accepted' LEFT JOIN memory_revisions v ON v.space=r.space AND v.revision_id=r.result_revision_id WHERE r.space=${input.memorySpaceId} AND r.revert_deadline<=${input.now} AND c.hub_sequence<=${input.expectedFloor}
+      AND NOT EXISTS (SELECT 1 FROM memory_revert_intents i WHERE i.space=r.space AND i.resolution_id=r.resolution_id)
+      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=r.space AND o.status IN ('pending','running','retry') AND (o.payload_ref=r.judgment_payload_ref OR o.payload_ref=v.payload_ref OR instr(o.metadata_json,r.resolution_id)>0 OR instr(o.metadata_json,r.result_revision_id)>0 OR instr(coalesce(o.ticket_json,''),r.resolution_id)>0 OR instr(coalesce(o.ticket_json,''),r.result_revision_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.resolution_id)>0 OR instr(coalesce(o.frozen_claim_json,''),r.result_revision_id)>0))
+      AND NOT EXISTS (SELECT 1 FROM memory_inbox_pending b JOIN json_each(b.metadata_json,'$.resolutions') j WHERE b.space=r.space AND b.reason='hub_snapshot' AND b.checkpoint_id IN (SELECT value FROM json_each(${keep})) AND json_extract(j.value,'$.resolution.resolutionId')=r.resolution_id)
+      ORDER BY r.revert_deadline,r.resolution_id LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const judgment of judgments) {
+      if (!covered.has(M.MemoryOperationId.make(judgment.operation_id))) continue;
+      yield* stored(
+        "hub-compact-judgment-delete",
+        sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${judgment.judgment_payload_ref}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += judgment.bytes;
+    }
+    const terminalWork = yield* stored(
+      "hub-compact-terminal-work",
+      sql<{
+        id: string;
+        bytes: number;
+      }>`SELECT id,length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0) AS bytes FROM memory_outbox o WHERE space=${input.memorySpaceId} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId')) ORDER BY terminal_at,id LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const work of terminalWork) {
+      yield* stored(
+        "hub-compact-terminal-work-delete",
+        sql`DELETE FROM memory_outbox WHERE id=${work.id}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += work.bytes;
+    }
+    const deliveredReports = yield* stored(
+      "hub-compact-delivered-report",
+      sql<{
+        report_id: string;
+        bytes: number;
+      }>`SELECT report_id,coalesce(length(CAST(report_thread_json AS BLOB)),0)+length(CAST(operation_id AS BLOB))+32 AS bytes FROM memory_report_outbox r WHERE space=${input.memorySpaceId} AND state='delivered' AND delivered_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id) ORDER BY delivered_at,report_id LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const report of deliveredReports) {
+      yield* stored(
+        "hub-compact-delivered-report-delete",
+        sql`DELETE FROM memory_report_outbox WHERE report_id=${report.report_id}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += report.bytes;
+    }
     const status: M.MemoryCompactionStatus = {
       lastRunAtUtc: M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(input.now))),
       removedRows,
@@ -6496,6 +7028,8 @@ const make = Effect.gen(function* () {
         relay: number;
         source_bytes: number;
         checkpoint_bytes: number;
+        last_snapshot_bytes: number;
+        consumed_bytes: number;
         pinned_bytes: number;
         metadata_bytes: number;
       }>`SELECT
@@ -6505,11 +7039,25 @@ const make = Effect.gen(function* () {
       (SELECT count(*) FROM memory_hub_source_reads WHERE space=${space} AND state!='expired') AS relay,
       (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_hub_source_reads r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=${space}) AS source_bytes,
       (SELECT coalesce(checkpoint_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS checkpoint_bytes,
+      (SELECT coalesce(last_snapshot_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS last_snapshot_bytes,
+      (SELECT CASE WHEN r.snapshot_generation=coalesce((SELECT value FROM memory_quota_counters WHERE space=r.space AND dimension='hub_snapshot_generation' AND scope_key=''),0) AND EXISTS(SELECT 1 FROM memory_inbox_pending p WHERE p.space=r.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||r.reserved_snapshot_id) THEN min(r.last_snapshot_bytes,r.published_pinned_bytes) ELSE 0 END FROM memory_hub_retention r WHERE r.space=${space}) AS consumed_bytes,
       (SELECT coalesce(published_pinned_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS pinned_bytes,
       (SELECT coalesce(sum(length(CAST(credential_digest AS BLOB))+length(CAST(environment AS BLOB))+32),0) FROM memory_hub_members WHERE space=${space})+
       (SELECT coalesce(sum(length(CAST(lease_json AS BLOB))+32),0) FROM memory_hub_leases WHERE space=${space}) AS metadata_bytes`,
     );
     const row = rows[0]!;
+    const inputs = yield* stored(
+      "hub-snapshot-input-counters",
+      sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')`,
+    );
+    const inputCounters = new Map(inputs.map((r) => [r.dimension, r.value]));
+    const requiredCheckpointBoundBytes = checkpointBound(
+      inputCounters.get("hub_snapshot_bytes") ?? 0,
+      inputCounters.get("hub_snapshot_rows") ?? 0,
+    );
     const usage = yield* usageForHub(space);
     const specifications = [
       ["memory_hub_operations", "length(CAST(entry_json AS BLOB))"],
@@ -6561,12 +7109,114 @@ const make = Effect.gen(function* () {
         )
         .reduce((sum, table) => sum + table.logicalBytes, 0),
       activeMembers: row.members,
-      stagingBytes: (row.checkpoint_bytes ?? 0) + (row.pinned_bytes ?? 0),
+      stagingBytes:
+        Math.max(requiredCheckpointBoundBytes, row.checkpoint_bytes ?? 0) +
+        (row.pinned_bytes ?? 0) -
+        (row.consumed_bytes ?? 0),
+      requiredCheckpointBoundBytes,
+      lastSnapshotBytes: row.last_snapshot_bytes ?? 0,
+      checkpointReservationConsumedBytes: row.consumed_bytes ?? 0,
       checkpointBytes: row.checkpoint_bytes ?? 0,
       publishedPinnedBytes: row.pinned_bytes ?? 0,
       liveSourceReads: row.relay,
       sourcePayloadBytes: row.source_bytes,
       ...usage,
+    };
+  });
+  const readHubInventoryTx = Effect.fn("MemoryStore.readHubInventoryTx")(function* (
+    space: M.MemorySpaceId,
+  ) {
+    yield* Transaction;
+    const now = yield* Clock.currentTimeMillis;
+    const inventory = yield* stored(
+      "hub-reserved-reclaimable",
+      sql<{
+        forget_bytes: number;
+        forget_receipts: number;
+        forget_keys: number;
+        terminal_work_rows: number;
+        terminal_work_bytes: number;
+        source_bytes: number;
+        snapshot_bytes: number;
+        tail_rows: number;
+        tail_bytes: number;
+        history_bytes: number;
+        expired_relays: number;
+        expired_handles: number;
+        admin_rows: number;
+      }>`SELECT
+      (SELECT count(*) FROM memory_outbox WHERE kind='admin') AS admin_rows,
+      (SELECT count(*) FROM memory_hub_source_reads WHERE space=${space} AND state!='expired' AND deadline<=${now}) AS expired_relays,
+      (SELECT count(*) FROM memory_hub_retention r,json_each(r.handles_json) h WHERE r.space=${space} AND json_extract(h.value,'$.expiresAt')<=${now}) AS expired_handles,
+      (SELECT coalesce(sum(max(0,reserve_bytes-${M.MEMORY_IDENTITY_CORE_MAX_BYTES})),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_bytes,
+      (SELECT count(*) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_receipts,
+      (SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger i WHERE i.space=${space} AND NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id)) AS forget_keys,
+      (SELECT count(*) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_rows,
+      (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)),0) FROM memory_outbox o WHERE o.space=${space} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId'))) AS terminal_work_bytes,
+
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_hub_source_reads r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=${space} AND r.deadline<=${now}) AS source_bytes,
+      (SELECT coalesce(sum(length(CAST(b.metadata_json AS BLOB))),0) FROM memory_inbox_pending b WHERE b.space=${space} AND b.reason='hub_snapshot' AND b.checkpoint_id!=coalesce((SELECT 'hub:'||checkpoint_id FROM memory_hub_retention WHERE space=${space}),'') AND NOT EXISTS(SELECT 1 FROM memory_hub_retention r,json_each(r.handles_json) h WHERE r.space=b.space AND 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now})) AS snapshot_bytes,
+      (SELECT count(*) FROM memory_hub_operations o JOIN memory_hub_retention r ON r.space=o.space WHERE o.space=${space} AND o.hub_sequence<=r.retention_floor AND o.committed_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=o.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=o.operation_id) AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=o.space AND json_extract(w.metadata_json,'$.operationId')=o.operation_id AND w.status IN ('pending','running','retry'))) AS tail_rows,
+      (SELECT coalesce(sum(length(CAST(o.entry_json AS BLOB))),0) FROM memory_hub_operations o JOIN memory_hub_retention r ON r.space=o.space WHERE o.space=${space} AND o.hub_sequence<=r.retention_floor AND o.committed_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=o.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=o.operation_id) AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=o.space AND json_extract(w.metadata_json,'$.operationId')=o.operation_id AND w.status IN ('pending','running','retry'))) AS tail_bytes,
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_revisions v ON v.space=p.space AND v.payload_ref=p.payload_ref JOIN memory_compact_receipts c ON c.space=v.space AND c.operation_id=v.operation_id JOIN memory_hub_retention r ON r.space=v.space WHERE p.space=${space} AND p.purge_eligible_after<=${now} AND c.hub_sequence<=r.retention_floor
+        AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=v.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=v.operation_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_items i,json_each(i.heads_json) h WHERE i.space=v.space AND h.value=v.revision_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_conflicts f,json_each(f.heads_json) h WHERE f.space=v.space AND f.status!='resolved' AND h.value=v.revision_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_resolutions x,json_each(x.input_revision_ids_json) h WHERE x.space=v.space AND x.revert_deadline>${now} AND h.value=v.revision_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_revert_intents x WHERE x.space=v.space AND (x.restored_revision_id=v.revision_id OR x.payload_ref=v.payload_ref))
+        AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=v.space AND w.status IN ('pending','running','retry') AND (w.payload_ref=v.payload_ref OR instr(w.metadata_json,v.revision_id)>0 OR instr(coalesce(w.ticket_json,''),v.revision_id)>0 OR instr(coalesce(w.frozen_claim_json,''),v.revision_id)>0))
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b WHERE b.space=v.space AND (b.payload_ref=v.payload_ref OR b.reason='hub_snapshot' AND EXISTS(SELECT 1 FROM json_each(b.metadata_json,'$.revisions') j WHERE json_extract(j.value,'$.revision.revisionId')=v.revision_id) AND (b.checkpoint_id='hub:'||r.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now}))))) AS history_bytes`,
+    );
+    const inventoryRow = inventory[0]!;
+    const adminRows = yield* stored(
+      "hub-admin-reclaimable",
+      sql<{
+        admin_json: string;
+      }>`SELECT admin_json FROM memory_outbox WHERE kind='admin' AND status='completed' AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND json_extract(admin_json,'$.stage')='acknowledged'`,
+    );
+    let adminBytes = 0;
+    for (const row of adminRows) {
+      const originalBytes = new TextEncoder().encode(row.admin_json).length;
+      const guardBytes = new TextEncoder().encode(
+        yield* adminReplayJson(yield* adminCodec.decode(row.admin_json, strict)),
+      ).length;
+      adminBytes += Math.max(0, originalBytes - guardBytes);
+    }
+    const details = yield* stored(
+      "hub-reclaimable-details",
+      sql<{ report_bytes: number; event_bytes: number; judgment_bytes: number }>`SELECT
+      (SELECT coalesce(sum(coalesce(length(CAST(report_thread_json AS BLOB)),0)+length(CAST(operation_id AS BLOB))+32),0) FROM memory_report_outbox x WHERE space=${space} AND state='delivered' AND delivered_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=x.space AND g.key_kind='report_delivered' AND g.key=x.report_id)) AS report_bytes,
+      (SELECT coalesce(sum(length(CAST(e.metadata_json AS BLOB))+length(CAST(e.receipt_json AS BLOB))),0) FROM memory_events e JOIN memory_compact_receipts c ON c.space=e.memory_space_id AND c.operation_id=e.operation_id JOIN memory_hub_retention r ON r.space=c.space WHERE e.memory_space_id=${space} AND c.hub_sequence<=r.retention_floor AND e.created_at<=${now - M.MEMORY_LOG_RETENTION_MS}
+        AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=c.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=e.operation_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=c.space AND json_extract(w.metadata_json,'$.operationId')=e.operation_id AND w.status IN ('pending','running','retry'))
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b WHERE b.space=c.space AND b.operation_id=e.operation_id)) AS event_bytes,
+      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_resolutions x JOIN memory_payloads p ON p.space=x.space AND p.payload_ref=x.judgment_payload_ref JOIN memory_compact_receipts c ON c.space=x.space AND json_extract(c.compact_json,'$.operationKind')='resolve' AND json_extract(c.compact_json,'$.resolutionId')=x.resolution_id AND json_extract(c.compact_json,'$.revisionId')=x.result_revision_id AND json_extract(c.compact_json,'$.receipt.memoryId')=x.memory_id AND json_extract(c.receipt_json,'$.outcome')='accepted' LEFT JOIN memory_revisions v ON v.space=x.space AND v.revision_id=x.result_revision_id JOIN memory_hub_retention r ON r.space=x.space WHERE x.space=${space} AND x.revert_deadline<=${now} AND c.hub_sequence<=r.retention_floor
+        AND EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.compactReceipts') j WHERE b.space=c.space AND b.checkpoint_id='hub:'||r.checkpoint_id AND json_extract(j.value,'$.receipt.operationId')=c.operation_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_revert_intents i WHERE i.space=x.space AND i.resolution_id=x.resolution_id)
+        AND NOT EXISTS(SELECT 1 FROM memory_outbox w WHERE w.space=x.space AND w.status IN ('pending','running','retry') AND (w.payload_ref=x.judgment_payload_ref OR w.payload_ref=v.payload_ref OR instr(w.metadata_json,x.resolution_id)>0 OR instr(w.metadata_json,x.result_revision_id)>0 OR instr(coalesce(w.ticket_json,''),x.resolution_id)>0 OR instr(coalesce(w.ticket_json,''),x.result_revision_id)>0 OR instr(coalesce(w.frozen_claim_json,''),x.resolution_id)>0 OR instr(coalesce(w.frozen_claim_json,''),x.result_revision_id)>0))
+        AND NOT EXISTS(SELECT 1 FROM memory_inbox_pending b,json_each(b.metadata_json,'$.resolutions') j WHERE b.space=x.space AND b.reason='hub_snapshot' AND json_extract(j.value,'$.resolution.resolutionId')=x.resolution_id AND (b.checkpoint_id='hub:'||r.checkpoint_id OR EXISTS(SELECT 1 FROM json_each(r.handles_json) h WHERE 'hub:'||json_extract(h.value,'$.checkpointId')=b.checkpoint_id AND json_extract(h.value,'$.expiresAt')>${now})))) AS judgment_bytes`,
+    );
+
+    return {
+      reserved: {
+        checkpoint_staging: (yield* readHubUsageTx(space)).requiredCheckpointBoundBytes,
+        permanent_metadata:
+          inventoryRow.forget_bytes +
+          inventoryRow.forget_receipts * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
+        receipts: inventoryRow.forget_receipts + inventoryRow.admin_rows,
+        import_source_items: inventoryRow.forget_keys + inventoryRow.admin_rows,
+      },
+      reclaimable: {
+        checkpoint_staging: inventoryRow.snapshot_bytes,
+        relay_hub: inventoryRow.expired_relays,
+        checkpoint_handles: inventoryRow.expired_handles,
+        log_tail_rows: inventoryRow.tail_rows,
+        log_tail_bytes: inventoryRow.tail_bytes + details[0]!.event_bytes,
+        history: inventoryRow.history_bytes + details[0]!.judgment_bytes,
+        permanent_metadata: adminBytes + details[0]!.report_bytes,
+        work_items: inventoryRow.terminal_work_rows,
+        work_bytes: inventoryRow.terminal_work_bytes + adminBytes + inventoryRow.source_bytes,
+      },
     };
   });
   // Handles are counted from the bounded retention record, never by a physical page scan.
@@ -6591,7 +7241,7 @@ const make = Effect.gen(function* () {
       "hub-reserve",
       sql`UPDATE memory_hub_retention SET checkpoint_bytes=checkpoint_bytes+${input.checkpointDeltaBytes},published_pinned_bytes=published_pinned_bytes+${input.publishedPinnedDeltaBytes} WHERE space=${input.memorySpaceId}
       AND checkpoint_bytes+${input.checkpointDeltaBytes}>=0 AND published_pinned_bytes+${input.publishedPinnedDeltaBytes}>=0
-      AND checkpoint_bytes+${input.checkpointDeltaBytes}+published_pinned_bytes+${input.publishedPinnedDeltaBytes}<=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} RETURNING space`,
+      RETURNING space`,
     );
     if (!rows.length)
       return yield* new MemoryCapacityError({
@@ -6708,7 +7358,21 @@ const make = Effect.gen(function* () {
           : null,
     };
     yield* persistCompactReceipt(record);
-    return { entry, committedAt: input.now };
+    const finalEntry = entry.kind === "metadata" ? { ...entry, compactReceipt: record } : entry;
+    const finalJson = yield* hubEntryCodec.encode(finalEntry);
+    if (
+      !reservedDelete &&
+      counts.tailBytes + new TextEncoder().encode(finalJson).length > M.MEMORY_LOG_MAX_TAIL_BYTES
+    )
+      return yield* new MemoryCapacityError({
+        dimension: "log_tail_bytes",
+        limit: M.MEMORY_LOG_MAX_TAIL_BYTES,
+      });
+    yield* stored(
+      "hub-append-guard",
+      sql`UPDATE memory_hub_operations SET entry_json=${finalJson} WHERE hub_sequence=${hubSequence}`,
+    );
+    return { entry: finalEntry, committedAt: input.now };
   });
   const readHubTailTx: MemoryStore["Service"]["readHubTailTx"] = Effect.fn(
     "MemoryStore.readHubTailTx",
@@ -6926,17 +7590,78 @@ const make = Effect.gen(function* () {
     const entry = yield* stored("metadata-entry", hubEntryDecode(input.entry, strict));
     if (entry.kind !== "metadata")
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    if (entry.compactReceipt && entry.compactReceipt.memorySpaceId !== input.memorySpaceId)
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
     const old = yield* receipt(input.memorySpaceId, entry.receipt.operationId);
     if (old && old.operationDigest !== entry.receipt.operationDigest)
       return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+    const settledReceipt = {
+      ...entry.receipt,
+      ...(old?.receipt.forgetExpansion ? { forgetExpansion: old.receipt.forgetExpansion } : {}),
+      ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+    };
     if (
       old &&
       "hubSequence" in old.receipt &&
       old.receipt.hubSequence !== null &&
-      (yield* receiptCodec.encode(old.receipt)) !== (yield* receiptCodec.encode(entry.receipt))
+      (yield* receiptCodec.encode(old.receipt)) !== (yield* receiptCodec.encode(settledReceipt))
     )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-    if (entry.tombstone) {
+    // Canonical replay may enrich receipts, but its domain incorporation already happened.
+    const canonicalReplay = old && "hubSequence" in old.receipt && old.receipt.hubSequence !== null;
+    if (entry.receipt.outcome !== "rejected" && entry.revision) {
+      const revision = entry.revision;
+      if (
+        revision.memorySpaceId !== input.memorySpaceId ||
+        revision.memoryId !== entry.memoryId ||
+        revision.operationId !== entry.receipt.operationId
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const current = yield* loadAggregate(input.memorySpaceId, entry.memoryId);
+      if (
+        !canonicalReplay &&
+        !current.tombstone &&
+        !current.revisions.some(
+          (pair) => pair.revision.revisionId === revision.revisionId && pair.payload !== null,
+        )
+      ) {
+        yield* stored(
+          "metadata-revision",
+          sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) VALUES (${revision.memorySpaceId},${revision.revisionId},${revision.memoryId},${revision.operationId},${yield* headsCodec.encode(revision.parents)},${yield* scopeCodec.encode(revision.scope)},${revision.assertionKind},${yield* provenanceCodec.encode(revision.provenance)},${revision.payloadRef},${Date.parse(revision.createdAtUtc)}) ON CONFLICT(space,revision_id) DO NOTHING`,
+        );
+        // Preserve unrelated unsent heads; a missing body is a canonical availability state.
+        const parents = new Set(revision.parents);
+        const heads = [
+          ...new Set([...current.heads.filter((id) => !parents.has(id)), revision.revisionId]),
+        ];
+        const watermark = yield* nextWatermark(input.memorySpaceId);
+        yield* putItem(
+          {
+            memorySpaceId: input.memorySpaceId,
+            memoryId: entry.memoryId,
+            status: "blocked",
+            scope: revision.scope,
+            failureCode: "source_invalidated",
+            pendingSync: false,
+            localAvailability: {
+              exposure: "held",
+              reasons: ["dependency_invalidated"],
+              deferred: [],
+              cleanupPending: false,
+            },
+          },
+          heads,
+          watermark,
+        );
+        yield* emit({
+          memorySpaceId: input.memorySpaceId,
+          memoryId: entry.memoryId,
+          kind: "invalidate",
+          projectionWatermark: watermark,
+        });
+      }
+    }
+    if (entry.tombstone && !canonicalReplay) {
       if (
         entry.tombstone.memorySpaceId !== input.memorySpaceId ||
         entry.tombstone.memoryId !== entry.memoryId
@@ -6976,14 +7701,16 @@ const make = Effect.gen(function* () {
     }
     yield* stored(
       "metadata-receipt-promotion",
-      sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(entry.receipt)} WHERE memory_space_id=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId}`,
+      sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(settledReceipt)} WHERE memory_space_id=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId}`,
     );
     // A compact guard retains body-free approval even when no local operation body remains.
     const existing = yield* stored(
       "metadata-compact",
-      sql`UPDATE memory_compact_receipts SET receipt_json=${yield* receiptCodec.encode(entry.receipt)},hub_sequence=${entry.hubSequence} WHERE space=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId} RETURNING operation_id`,
+      sql`UPDATE memory_compact_receipts SET receipt_json=${yield* receiptCodec.encode(settledReceipt)},hub_sequence=${entry.hubSequence} WHERE space=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId} RETURNING operation_id`,
     );
-    if (!old && !existing.length)
+    if (entry.compactReceipt)
+      yield* persistCompactReceipt({ ...entry.compactReceipt, receipt: settledReceipt });
+    if (!entry.compactReceipt && !old && !existing.length)
       yield* stored(
         "metadata-ledger",
         sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${input.memorySpaceId},'hubReceipt',${entry.receipt.operationId},${entry.memoryId},${yield* hubEntryCodec.encode(entry)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
@@ -7007,6 +7734,11 @@ const make = Effect.gen(function* () {
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
       const deliverable = guard.resolvingEnvironmentId === input.localEnvironmentId;
       if (!deliverable) return { reportId, deliverable };
+      const delivered = yield* stored(
+        "report-delivered-guard",
+        sql`SELECT 1 FROM memory_import_keys WHERE space=${record.memorySpaceId} AND key_kind='report_delivered' AND key=${reportId}`,
+      );
+      if (delivered.length) return { reportId, deliverable: false };
       yield* stored(
         "report-reconcile",
         sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at) VALUES (${reportId},${record.memorySpaceId},${record.receipt.memoryId},${record.receipt.operationId},${guard.resolutionId},${record.attemptId},${guard.resolvingEnvironmentId},${guard.outcome},'pending',${record.receipt.resolutionApproval ? Date.parse(record.receipt.resolutionApproval.appliedAtUtc) : 0}) ON CONFLICT(report_id) DO NOTHING`,
@@ -7014,30 +7746,38 @@ const make = Effect.gen(function* () {
       return { reportId, deliverable };
     });
   return MemoryStore.of({
-    prepareHubCheckpointTx,
+    prepareHubCheckpointTx: (input) => withHubBudget(prepareHubCheckpointTx(input)),
+    prepareHubProducerCheckpointTx: (input) => withHubBudget(prepareHubProducerCheckpointTx(input)),
     readHubCheckpointPageTx,
     publishCheckpointAndFloorTx,
     compactEligibleHistoryTx,
     purgeHubTransientTx,
-    requestHubSourceReadTx,
+    requestHubSourceReadTx: (authority, input) =>
+      withHubBudget(requestHubSourceReadTx(authority, input)),
     collectHubSourceReadsTx,
-    respondHubSourceReadTx,
+    respondHubSourceReadTx: (authority, input) =>
+      withHubBudget(respondHubSourceReadTx(authority, input)),
     resultHubSourceReadTx,
     readHubAdminTx,
-    writeHubAdminTx,
-    activateHubMemberTx,
+    writeHubAdminTx: (input) => withHubBudget(writeHubAdminTx(input)),
+    activateHubMemberTx: (input) => withHubBudget(activateHubMemberTx(input)),
     readPendingHubAdmins,
+    readActivatedHubAdminTx,
     advanceBootstrapTx,
     readHubMember,
     findHubMemberByCredential,
     requireHubMemberTx,
     readHubReceiptTx,
-    appendHubEntryTx,
+    appendHubEntryTx: (input) =>
+      input.operation.kind === "forget"
+        ? appendHubEntryTx(input)
+        : withHubBudget(appendHubEntryTx(input)),
     readHubTailTx,
-    transitionHubLeaseTx,
+    transitionHubLeaseTx: (input) => withHubBudget(transitionHubLeaseTx(input)),
     readHubRetentionTx,
     readHubUsageTx,
-    reserveHubCheckpointTx,
+    readHubInventoryTx,
+    reserveHubCheckpointTx: (input) => withHubBudget(reserveHubCheckpointTx(input)),
     settleMetadataEntryTx,
     reconcileResolutionReportTx,
     acquireSyncWorkTx,
@@ -7052,7 +7792,10 @@ const make = Effect.gen(function* () {
     transact,
     receipt,
     loadAggregate: (space, id) => transact(loadAggregate(space, id)),
-    apply: (decision) => applyDecision(decision),
+    apply: (decision) =>
+      decision.admission.kind === "hubAdmission" && decision.operation.kind !== "forget"
+        ? transact(withHubBudget(applyDecision(decision)))
+        : applyDecision(decision),
     reconnectParked: (decision, generation) => applyDecision(decision, generation),
     readAncestry: (space, id, parents) => transact(readAncestry(space, id, parents)),
     withReceivedCursor,

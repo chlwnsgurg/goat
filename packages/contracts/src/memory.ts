@@ -1064,6 +1064,8 @@ export const MemoryStorageGrowth = struct({
 export type MemoryStorageGrowth = typeof MemoryStorageGrowth.Type;
 
 export const MemoryStorageStatus = struct({
+  requiredCheckpointBoundBytes: Schema.optionalKey(NonNegativeInt),
+  lastSnapshotBytes: Schema.optionalKey(NonNegativeInt),
   quotas: array(MemoryStorageQuota).check(
     Schema.makeFilter((vs) => unique(vs.map((v) => v.dimension))),
   ),

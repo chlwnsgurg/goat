@@ -654,6 +654,7 @@ const make = Effect.gen(function* () {
           const retention = yield* store.readHubRetentionTx(input.memorySpaceId);
           const counters = yield* store.counters(input.memorySpaceId);
           const hub = yield* store.readHubUsageTx(input.memorySpaceId);
+          const inventory = yield* store.readHubInventoryTx(input.memorySpaceId);
           const limits: Partial<Record<M.MemoryCapacityDimension, number>> = {
             space_live_items: M.MEMORY_SPACE_MAX_LIVE_ITEMS,
             live_payload_bytes: M.MEMORY_LIVE_MAX_PAYLOAD_BYTES,
@@ -661,11 +662,15 @@ const make = Effect.gen(function* () {
             permanent_metadata: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
             lifetime_ids: M.MEMORY_MAX_LIFETIME_IDS,
             receipts: M.MEMORY_DEDUP_MAX_RECEIPTS,
+            import_source_items: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
             log_tail_rows: M.MEMORY_LOG_MAX_TAIL_ROWS,
             log_tail_bytes: M.MEMORY_LOG_MAX_TAIL_BYTES,
             work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,
             work_bytes: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
             checkpoint_staging: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+            checkpoint_handles: M.MEMORY_CHECKPOINT_MAX_HANDLES_PER_HUB,
+            relay_hub: M.MEMORY_SOURCE_READ_MAX_PER_HUB,
+            members: M.MEMORY_HUB_MAX_MEMBERS,
           };
           const quotas: M.MemoryStorageQuota[] = [];
           for (const dimension of M.MemoryCapacityDimension.literals) {
@@ -677,19 +682,26 @@ const make = Effect.gen(function* () {
             const current =
               dimension === "checkpoint_staging"
                 ? hub.stagingBytes
-                : dimension === "log_tail_rows"
-                  ? counter + hub.tailRows
-                  : dimension === "log_tail_bytes"
-                    ? counter + hub.tailBytes
-                    : dimension === "permanent_metadata"
-                      ? counter + hub.permanentMetadataBytes
-                      : counter;
+                : dimension === "checkpoint_handles"
+                  ? hub.liveHandles
+                  : dimension === "relay_hub"
+                    ? hub.liveSourceReads
+                    : dimension === "members"
+                      ? (hub.tables.find((table) => table.table === "memory_hub_members")
+                          ?.rowCount ?? 0)
+                      : dimension === "log_tail_rows"
+                        ? counter + hub.tailRows
+                        : dimension === "log_tail_bytes"
+                          ? counter + hub.tailBytes
+                          : dimension === "permanent_metadata"
+                            ? counter + hub.permanentMetadataBytes
+                            : counter;
             quotas.push({
               dimension,
               current,
               limit,
-              reclaimable: 0,
-              reserved: dimension === "checkpoint_staging" ? hub.checkpointBytes : 0,
+              reclaimable: inventory.reclaimable[dimension] ?? 0,
+              reserved: inventory.reserved[dimension] ?? 0,
               warning: current >= limit ? "full" : current >= limit * 0.9 ? "warning" : "normal",
               blockedReasons: current >= limit ? ["capacity_exceeded"] : [],
             });
@@ -700,6 +712,8 @@ const make = Effect.gen(function* () {
           return yield* storageStatusDecode(
             {
               quotas,
+              requiredCheckpointBoundBytes: hub.requiredCheckpointBoundBytes,
+              lastSnapshotBytes: hub.lastSnapshotBytes,
               tables: [
                 ...(sample?.tables ?? []).filter(
                   (table) => !hub.tables.some((h) => h.table === table.table),

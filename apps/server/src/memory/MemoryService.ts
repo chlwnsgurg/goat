@@ -1428,7 +1428,15 @@ const make = Effect.gen(function* () {
       "hubSequence" in old.receipt &&
       old.receipt.hubSequence !== null &&
       (yield* decode(encodeHubReceipt(old.receipt))) !==
-        (yield* decode(encodeHubReceipt(entry.receipt)))
+        (yield* decode(
+          encodeHubReceipt({
+            ...entry.receipt,
+            ...(old.receipt.forgetExpansion
+              ? { forgetExpansion: old.receipt.forgetExpansion }
+              : {}),
+            ...(old.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+          }),
+        ))
     )
       return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
     const incorporated =
@@ -1437,6 +1445,11 @@ const make = Effect.gen(function* () {
     if (entry.kind === "operation")
       yield* apply(entry.operation, Store.approvedReplica, Effect.void, entry.receipt);
     else yield* store.settleMetadataEntryTx({ memorySpaceId: input.memorySpaceId, entry });
+    if (entry.kind === "metadata" && entry.compactReceipt)
+      yield* store.reconcileResolutionReportTx({
+        record: entry.compactReceipt,
+        localEnvironmentId: input.localEnvironmentId,
+      });
     const workId = input.workId ?? `sync:${input.memorySpaceId}:${entry.receipt.operationId}`;
     const work =
       (yield* store.readWork(workId)) ??
@@ -1530,7 +1543,11 @@ const make = Effect.gen(function* () {
         if (
           !M.validateMemoryResolutionApproval(
             work.metadata.kind === "resolve" ? "resolve" : (operation?.kind ?? "upsert"),
-            operation?.kind === "resolve" ? operation.resolution.resolutionId : null,
+            operation?.kind === "resolve"
+              ? operation.resolution.resolutionId
+              : work.metadata.kind === "resolve"
+                ? work.metadata.resolution?.resolutionId
+                : null,
             receipt,
           )
         )
@@ -1541,11 +1558,47 @@ const make = Effect.gen(function* () {
             entry: { kind: "operation", operation, receipt, hubSequence: receipt.hubSequence },
           });
         if (!("protocolVersion" in work.metadata)) return yield* invalid();
+        const meta = work.metadata;
+        const resolutionId =
+          meta.kind === "resolve"
+            ? meta.resolution?.resolutionId
+            : meta.kind === "revert"
+              ? meta.revertsResolutionId
+              : null;
+        const compactReceipt: M.MemoryCompactReceipt = {
+          memorySpaceId: input.memorySpaceId,
+          originEnvironmentId: meta.originEnvironmentId,
+          operationKind: meta.kind,
+          receipt,
+          revisionId:
+            receipt.outcome === "rejected" || meta.kind === "forget"
+              ? null
+              : (meta.revision?.revisionId ?? null),
+          resolutionId: resolutionId ?? null,
+          revertsResolutionId: meta.kind === "revert" ? (resolutionId ?? null) : null,
+          attemptId: meta.kind === "resolve" ? meta.operationId : null,
+          fencingToken: meta.kind === "resolve" ? (meta.fencingToken ?? null) : null,
+          reportGuard:
+            resolutionId && receipt.outcome !== "rejected"
+              ? {
+                  reportId: Store.resolutionReportId(
+                    input.memorySpaceId,
+                    meta.operationId,
+                    resolutionId,
+                  ),
+                  resolvingEnvironmentId: meta.originEnvironmentId,
+                  resolutionId,
+                  outcome: meta.kind === "resolve" ? "resolved" : "reverted",
+                }
+              : null,
+        };
         return yield* settleHubEntryTx({
           ...input,
           entry: {
             kind: "metadata",
             operationKind: work.metadata.kind,
+            compactReceipt,
+            ...(meta.revision ? { revision: meta.revision } : {}),
             memoryId: receipt.memoryId,
             receipt,
             hubSequence: receipt.hubSequence,

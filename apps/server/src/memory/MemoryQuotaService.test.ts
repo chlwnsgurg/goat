@@ -840,8 +840,30 @@ describe("MemoryQuotaService hub storage status", () => {
       assert.strictEqual(status.dbFileBytes, null);
       assert.strictEqual(status.measuredAtUtc, null);
       const staging = status.quotas.find((quota) => quota.dimension === "checkpoint_staging")!;
-      assert.strictEqual(staging.current, 120);
-      assert.strictEqual(staging.reserved, 100);
+      assert.strictEqual(staging.current, status.requiredCheckpointBoundBytes! + 20);
+      assert.strictEqual(staging.reserved, status.requiredCheckpointBoundBytes);
+      assert.strictEqual(status.lastSnapshotBytes, 0);
     }).pipe(Effect.provide(services)),
   );
 });
+
+it.effect(
+  "storage inventory reserves first forget and reports expired transient bodies without reclaiming current heads",
+  () =>
+    Effect.gen(function* () {
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${memory},'{}','{}',${M.MEMORY_IDENTITY_CORE_MAX_BYTES + 100},2)`;
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'relay:fixture',${memory},'한글','[]')`;
+      yield* sql`INSERT INTO memory_hub_source_reads(space,request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,payload_ref) VALUES (${space},'fixture',${memory},${env},${env},1,'digest','{}','completed',0,'relay:fixture')`;
+      const status = yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: env });
+      assert.strictEqual(status.quotas.find((q) => q.dimension === "receipts")?.reserved, 1);
+      assert.strictEqual(
+        status.quotas.find((q) => q.dimension === "permanent_metadata")?.reserved,
+        100 + M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
+      );
+      assert.strictEqual(status.quotas.find((q) => q.dimension === "work_bytes")?.reclaimable, 6);
+      assert.strictEqual(status.quotas.find((q) => q.dimension === "history")?.reclaimable, 0);
+      assert.isAbove(status.requiredCheckpointBoundBytes!, 0);
+    }).pipe(Effect.provide(services)),
+);
