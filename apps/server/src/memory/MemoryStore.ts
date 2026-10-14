@@ -57,6 +57,7 @@ export class MemoryCapacityError extends Schema.TaggedError<MemoryCapacityError>
     dimension: Schema.String,
     limit: Schema.Int,
     current: Schema.optionalKey(Schema.Int),
+    reclaimable: Schema.optionalKey(Schema.Int),
   },
 ) {
   override get message() {

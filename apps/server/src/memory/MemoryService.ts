@@ -1332,6 +1332,9 @@ const make = Effect.fnUntraced(function* (
       Effect.gen(function* () {
         yield* permit;
         const request = yield* decode(decodeSourceRequest(input.request.request, strict));
+        const outcome = yield* decode(decodeSourceOutcome(input.outcome, strict));
+        // Owner denial is authoritative after the live permit, even if the locator changed.
+        if (outcome.kind === "denied") return outcome;
         const { memorySpaceId, memoryId, sourceThread, messageIds, limit, cursor } = request;
         const locator = yield* sourceLocator({
           memorySpaceId,
@@ -1347,7 +1350,6 @@ const make = Effect.fnUntraced(function* (
             (yield* decode(encodeSourceWatermark(request.sourceWatermark)))
         )
           return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
-        const outcome = yield* decode(decodeSourceOutcome(input.outcome, strict));
         if (outcome.kind === "available") {
           if (
             (yield* decode(encodeSourceThread(outcome.page.sourceThread))) !==
@@ -1375,11 +1377,20 @@ const make = Effect.fnUntraced(function* (
       const outcome = yield* sourceReadAuthority(request, permit).pipe(
         Effect.catchTags({
           MemoryHubError: (error) =>
-            Effect.fail(
-              new Store.MemoryStoreConflict({
+            Effect.gen(function* () {
+              if (error.code === "capacity_exceeded" && error.capacity) {
+                const { dimension, current, limit, reclaimable } = error.capacity;
+                return yield* new Store.MemoryCapacityError({
+                  dimension,
+                  current,
+                  limit,
+                  reclaimable,
+                });
+              }
+              return yield* new Store.MemoryStoreConflict({
                 code: isFailureCode(error.code) ? error.code : "source_unavailable",
-              }),
-            ),
+              });
+            }),
         }),
       );
       yield* permit;

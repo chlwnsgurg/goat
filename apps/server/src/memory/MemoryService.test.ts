@@ -51,6 +51,8 @@ const input = (n = 3): M.MemoryUpsertInput => ({
   payload: { text: "synthetic memory", evidence: [], derivedFromMemoryRevisions: [] },
   baseBoundary: null,
 });
+const decodeRpcError = Schema.decodeUnknownEffect(M.MemoryRpcError);
+const encodeRpcError = Schema.encodeEffect(M.MemoryRpcError);
 const encodeItemJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const encodeResolution = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolution));
 const encodeSelectionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryModelSelection));
@@ -2585,3 +2587,207 @@ it.effect("public readSource discards an available body whose locator changed du
     assert.isTrue("code" in failure && failure.code === "forgotten");
   }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
 });
+
+it.effect.each([0, 7])(
+  "public readSource preserves Hub capacity with reclaimable %s",
+  (reclaimable) => {
+    const capacity: M.MemoryCapacityExceeded = {
+      code: "capacity_exceeded",
+      dimension: "relay_environment",
+      current: 32,
+      limit: 32,
+      reclaimable,
+    };
+    return Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const fixture = yield* sourceFixture;
+      const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryCapacityError");
+      if (failure._tag !== "MemoryCapacityError") return;
+      assert.deepStrictEqual(
+        {
+          dimension: failure.dimension,
+          current: failure.current,
+          limit: failure.limit,
+          reclaimable: failure.reclaimable,
+        },
+        { dimension: "relay_environment", current: 32, limit: 32, reclaimable },
+      );
+      // Planned transport projection: the service fields alone must satisfy the safe wire codec.
+      const safe = yield* decodeRpcError({
+        _tag: "MemoryRpcError",
+        code: "capacity_exceeded",
+        capacity: {
+          code: "capacity_exceeded",
+          dimension: failure.dimension,
+          current: failure.current,
+          limit: failure.limit,
+          reclaimable: failure.reclaimable,
+        },
+      });
+      const encoded = yield* encodeRpcError(safe);
+      assert.deepStrictEqual(encoded, {
+        _tag: "MemoryRpcError",
+        code: "capacity_exceeded",
+        capacity,
+      });
+      assert.isFalse("cause" in failure);
+    }).pipe(
+      Effect.provide(
+        serviceLive(
+          Service.layerWithSourceReadAuthority(() =>
+            Effect.fail(new M.MemoryHubError({ code: "capacity_exceeded", capacity })),
+          ),
+        ),
+      ),
+    );
+  },
+);
+it.effect.each([
+  "source_unavailable",
+  "forgotten",
+  "source_invalidated",
+  "secret_detected",
+  "hub_disabled",
+  "identity_mismatch",
+  "invalid_output",
+] as const)("public readSource preserves Hub error code %s without capacity or cause", (code) =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.isTrue("code" in failure && failure.code === code);
+    assert.isFalse("capacity" in failure);
+    assert.isFalse("cause" in failure);
+    const safe = yield* decodeRpcError({
+      _tag: "MemoryRpcError",
+      code,
+    });
+    assert.deepStrictEqual(yield* encodeRpcError(safe), {
+      _tag: "MemoryRpcError",
+      code,
+    });
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority(() => Effect.fail(new M.MemoryHubError({ code }))),
+      ),
+    ),
+  ),
+);
+it.effect("public readSource does not invent capacity for a code-only service conflict", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.isTrue("code" in failure && failure.code === "capacity_exceeded");
+    assert.isFalse("current" in failure);
+    assert.isFalse("capacity" in failure);
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority(() =>
+          Effect.fail(new Store.MemoryStoreConflict({ code: "capacity_exceeded" })),
+        ),
+      ),
+    ),
+  ),
+);
+
+for (const mutation of ["forget", "hold", "replace"] as const) {
+  it.effect.each(["denied", "malformed", "available"] as const)(
+    `public readSource validates %s after authority await with ${mutation}`,
+    (kind) => {
+      let invalidate: Effect.Effect<void, Service.MemoryServiceError> = Effect.void;
+      const authority: Service.MemorySourceReadAuthority["readSource"] = (validated) =>
+        Effect.gen(function* () {
+          yield* invalidate;
+          if (kind === "malformed") {
+            // Simulate a faulty authority crossing the runtime boundary with excess properties.
+            const malformed = {
+              kind: "denied" as const,
+              requiredPermission: "orchestration:read" as const,
+              unexpected: true,
+            };
+            return malformed;
+          }
+          if (kind === "denied")
+            return { kind: "denied" as const, requiredPermission: "orchestration:read" as const };
+          return {
+            kind: "available" as const,
+            page: {
+              sourceThread: validated.request.sourceThread,
+              watermark: validated.request.sourceWatermark,
+              messages: [],
+              nextCursor: null,
+            },
+          };
+        });
+      return Effect.gen(function* () {
+        const service = yield* Service.MemoryService;
+        const fixture = yield* sourceFixture;
+        const sql = yield* SqlClient.SqlClient;
+        if (mutation === "forget") {
+          invalidate = service
+            .forget(
+              {
+                memorySpaceId: space,
+                memoryId,
+                operationId: M.MemoryOperationId.make(id(9002)),
+                expectedHeads: [],
+              },
+              Effect.void,
+            )
+            .pipe(Effect.asVoid);
+        } else if (mutation === "replace") {
+          // Replace the linked head with an actual local revision without a source locator.
+          invalidate = service
+            .upsert(
+              { ...input(9003), expectedHeads: [M.MemoryRevisionId.make(id(9001))] },
+              Effect.void,
+            )
+            .pipe(Effect.asVoid);
+        } else {
+          const held: M.MemoryItem = {
+            memorySpaceId: space,
+            memoryId,
+            status: "blocked",
+            scope: { kind: "user" },
+            pendingSync: false,
+            failureCode: "scanner_pending",
+            localAvailability: {
+              exposure: "held",
+              reasons: ["scanner_pending"],
+              deferred: [],
+              cleanupPending: false,
+            },
+          };
+          const json = yield* encodeItemJson(held);
+          invalidate =
+            sql`UPDATE memory_items SET status='blocked',item_json=${json} WHERE space=${space} AND memory_id=${memoryId}`.pipe(
+              Effect.asVoid,
+              Effect.mapError((cause) => new Store.MemoryStorageError({ stage: "fixture", cause })),
+            );
+        }
+        const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+        assert.strictEqual(
+          failure._tag,
+          kind === "denied" ? "MemoryAccessError" : "MemoryStoreConflict",
+        );
+        assert.isTrue(
+          "code" in failure &&
+            failure.code ===
+              (kind === "denied"
+                ? "unavailable"
+                : kind === "malformed"
+                  ? "invalid_output"
+                  : mutation === "forget"
+                    ? "forgotten"
+                    : "source_invalidated"),
+        );
+      }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
+    },
+  );
+}
