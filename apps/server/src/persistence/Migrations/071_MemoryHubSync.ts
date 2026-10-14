@@ -216,7 +216,7 @@ export default Effect.gen(function* () {
       delta("hub_keys", `-(${keyCount("OLD")})`),
   );
   // Deliberately retain historical and private inputs too: expiry/compaction can only reduce this upper bound.
-  const snapshotInputs = [
+  const snapshotByteBounds = [
     ["memory_items", "space", "item_json,heads_json"],
     [
       "memory_revisions",
@@ -244,7 +244,7 @@ export default Effect.gen(function* () {
     ["memory_hub_leases", "space", "lease_json"],
     ["memory_hub_source_reads", "space", "locator_json,request_digest,response_digest"],
   ] as const;
-  for (const [table, spaceColumn, columns] of snapshotInputs) {
+  for (const [table, spaceColumn, columns] of snapshotByteBounds) {
     const rawBytes = (prefix: string) =>
       columns
         .split(",")
@@ -261,6 +261,58 @@ export default Effect.gen(function* () {
         : table === "memory_import_keys"
           ? `CASE WHEN ${prefix}key_kind='hub_checkpoint_token' THEN 0 ELSE 1 END`
           : "1";
+    for (const [dimension, expression] of [
+      ["hub_snapshot_bytes", bytes("")],
+      ["hub_snapshot_rows", recordRows("")],
+    ] as const) {
+      yield* sql.unsafe(
+        `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+        SELECT ${spaceColumn},?,'',sum(${expression}) FROM ${table} GROUP BY ${spaceColumn}
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+        [dimension],
+      );
+      const change = (prefix: string, sign: number) =>
+        sign < 0
+          ? `UPDATE memory_quota_counters SET value=value-(${dimension === "hub_snapshot_rows" ? recordRows(`${prefix}.`) : bytes(`${prefix}.`)}) WHERE space=${prefix}.${spaceColumn} AND dimension='${dimension}' AND scope_key='';`
+          : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+        VALUES (${prefix}.${spaceColumn},'${dimension}','',${dimension === "hub_snapshot_rows" ? recordRows(`${prefix}.`) : bytes(`${prefix}.`)})
+        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+      for (const [action, body] of [
+        ["INSERT", change("NEW", 1)],
+        ["UPDATE", change("OLD", -1) + change("NEW", 1)],
+        ["DELETE", change("OLD", -1)],
+      ] as const)
+        yield* sql.unsafe(
+          `CREATE TRIGGER ${table}_${dimension}_${action.toLowerCase()} AFTER ${action} ON ${table} ${action === "UPDATE" ? `WHEN OLD.${spaceColumn} IS NOT NEW.${spaceColumn} OR (${dimension === "hub_snapshot_rows" ? recordRows("OLD.") : bytes("OLD.")}) IS NOT (${dimension === "hub_snapshot_rows" ? recordRows("NEW.") : bytes("NEW.")})` : ""} BEGIN ${body} END`,
+        );
+    }
+  }
+  // buildHubSnapshot/loadAggregate also read selectors and scalar fields that are not
+  // byte-bound payloads. Keep those dependencies separate from the reservation formula.
+  const snapshotSelectors: Readonly<Record<string, string>> = {
+    memory_items: "memory_id,payload_ref",
+    memory_revisions: "created_at",
+    memory_payloads: "payload_ref,memory_id",
+    memory_tombstones: "deleted_at",
+    memory_conflicts: "memory_id",
+    memory_resolutions: "memory_id",
+    memory_identity_ledger: "memory_id",
+    memory_compact_receipts: "operation_id,hub_sequence",
+    memory_import_keys: "key_kind,key,memory_id",
+    memory_outbox: "kind,status,memory_id",
+  };
+  const snapshotDependencies = [
+    ...snapshotByteBounds.map(
+      ([table, spaceColumn, columns]) =>
+        [
+          table,
+          spaceColumn,
+          [columns, snapshotSelectors[table]].filter(Boolean).join(","),
+        ] as const,
+    ),
+    ["memory_hub_operations", "space", "hub_sequence"] as const,
+  ];
+  for (const [table, spaceColumn, columns] of snapshotDependencies) {
     const inputChanged = [
       ...new Set([
         spaceColumn,
@@ -308,31 +360,6 @@ export default Effect.gen(function* () {
         INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${prefix}.${spaceColumn},'hub_snapshot_generation','',1)
         ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+1;
       END`);
-    }
-    for (const [dimension, expression] of [
-      ["hub_snapshot_bytes", bytes("")],
-      ["hub_snapshot_rows", recordRows("")],
-    ] as const) {
-      yield* sql.unsafe(
-        `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
-        SELECT ${spaceColumn},?,'',sum(${expression}) FROM ${table} GROUP BY ${spaceColumn}
-        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
-        [dimension],
-      );
-      const change = (prefix: string, sign: number) =>
-        sign < 0
-          ? `UPDATE memory_quota_counters SET value=value-(${dimension === "hub_snapshot_rows" ? recordRows(`${prefix}.`) : bytes(`${prefix}.`)}) WHERE space=${prefix}.${spaceColumn} AND dimension='${dimension}' AND scope_key='';`
-          : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
-        VALUES (${prefix}.${spaceColumn},'${dimension}','',${dimension === "hub_snapshot_rows" ? recordRows(`${prefix}.`) : bytes(`${prefix}.`)})
-        ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
-      for (const [action, body] of [
-        ["INSERT", change("NEW", 1)],
-        ["UPDATE", change("OLD", -1) + change("NEW", 1)],
-        ["DELETE", change("OLD", -1)],
-      ] as const)
-        yield* sql.unsafe(
-          `CREATE TRIGGER ${table}_${dimension}_${action.toLowerCase()} AFTER ${action} ON ${table} ${action === "UPDATE" ? `WHEN OLD.${spaceColumn} IS NOT NEW.${spaceColumn} OR (${dimension === "hub_snapshot_rows" ? recordRows("OLD.") : bytes("OLD.")}) IS NOT (${dimension === "hub_snapshot_rows" ? recordRows("NEW.") : bytes("NEW.")})` : ""} BEGIN ${body} END`,
-        );
     }
   }
   for (const [action, prefix, sign] of [

@@ -1328,6 +1328,101 @@ it.effect("index-only updates preserve materialized checkpoint credit and stagin
   }).pipe(Effect.provide(live)),
 );
 
+it.effect.each(["status", "kind", "memory_id"] as const)(
+  "outbox %s changes reclaim producer staging atomically",
+  (changedInput) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+      yield* service.upsert(input(1291), Effect.void);
+      const workId = `sync:${space}:${id(1291)}`;
+      const operation = yield* store.readWorkOperation(workId);
+      if (!operation) throw new Error("fixture");
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      yield* service.admitHubOperation({ authority, operation });
+      yield* sql`UPDATE memory_outbox SET status='running' WHERE id=${workId}`;
+      yield* store.transact(
+        store.prepareHubProducerCheckpointTx({
+          authority,
+          checkpointId: "outbox-staging",
+          hubEnvironmentId: environmentId,
+        }),
+      );
+      const before = yield* store.transact(store.readHubUsageTx(space));
+      assert.isAbove(before.checkpointReservationConsumedBytes, 0);
+      assert.isTrue((yield* store.loadAggregate(space, operation.memoryId)).item!.pendingSync);
+      const generation = () =>
+        sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation'`.pipe(
+          Effect.map((rows) => rows[0]!.value),
+        );
+      const pages = () =>
+        sql`SELECT metadata_json FROM memory_inbox_pending WHERE space=${space} AND checkpoint_id='hub:outbox-staging'`;
+      const baselineGeneration = yield* generation();
+      const baselinePages = yield* pages();
+      assert.isAbove(baselinePages.length, 0);
+      const snapshotPending = (checkpoint: string) =>
+        sql<{
+          pending: number;
+        }>`SELECT json_extract(i.value,'$.pendingSync') AS pending FROM memory_inbox_pending p,json_each(p.metadata_json,'$.items') i WHERE p.space=${space} AND p.checkpoint_id=${checkpoint} AND json_extract(i.value,'$.memoryId')=${operation.memoryId}`;
+      assert.deepStrictEqual(yield* snapshotPending("hub:outbox-staging"), [{ pending: 1 }]);
+      yield* sql`UPDATE memory_outbox SET next_attempt_at=next_attempt_at+1 WHERE id=${workId}`;
+      assert.strictEqual(yield* generation(), baselineGeneration);
+      assert.deepStrictEqual(yield* pages(), baselinePages);
+      assert.deepStrictEqual(yield* store.transact(store.readHubUsageTx(space)), before);
+      const change =
+        changedInput === "status"
+          ? sql`UPDATE memory_outbox SET status='completed' WHERE id=${workId}`
+          : changedInput === "kind"
+            ? sql`UPDATE memory_outbox SET kind='claim' WHERE id=${workId}`
+            : sql`UPDATE memory_outbox SET memory_id='other-memory' WHERE id=${workId}`;
+      const verify = Effect.gen(function* () {
+        yield* change;
+        assert.isFalse((yield* store.loadAggregate(space, operation.memoryId)).item!.pendingSync);
+        assert.strictEqual(yield* generation(), baselineGeneration + 1);
+        assert.deepStrictEqual(yield* pages(), []);
+        assert.deepStrictEqual(
+          yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`,
+          [{ reserved_snapshot_id: null, snapshot_generation: -1 }],
+        );
+        const after = yield* store.readHubUsageTx(space);
+        assert.strictEqual(after.checkpointReservationConsumedBytes, 0);
+        assert.strictEqual(after.requiredCheckpointBoundBytes, before.requiredCheckpointBoundBytes);
+        assert.isAtMost(after.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
+      });
+      assert.strictEqual(
+        yield* store
+          .transact(verify.pipe(Effect.andThen(Effect.fail("rollback"))))
+          .pipe(Effect.flip),
+        "rollback",
+      );
+      assert.strictEqual(yield* generation(), baselineGeneration);
+      assert.deepStrictEqual(yield* pages(), baselinePages);
+      assert.deepStrictEqual(yield* store.transact(store.readHubUsageTx(space)), before);
+      yield* store.transact(verify);
+      yield* store.transact(
+        store.prepareHubProducerCheckpointTx({
+          authority,
+          checkpointId: "outbox-restaged",
+          hubEnvironmentId: environmentId,
+        }),
+      );
+      assert.deepStrictEqual(yield* snapshotPending("hub:outbox-restaged"), [{ pending: 0 }]);
+    }).pipe(Effect.provide(live)),
+);
+
 it.effect(
   "first forget reclaims large current staging at equality while retaining an older pin",
   () =>
