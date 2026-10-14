@@ -56,6 +56,8 @@ import * as Stream from "effect/Stream";
 
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@goat/provider-core/server/mcpToolPresentation";
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as ProviderEventLoggers from "@goat/provider-core/server/ProviderEventLoggers";
 import {
@@ -3253,8 +3255,39 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 );
                 return;
               }
+              const memory = yield* Effect.gen(function* () {
+                const snapshot = turnInput.refreshMemoryContext
+                  ? yield* turnInput.refreshMemoryContext()
+                  : turnInput.memoryContext;
+                return snapshot === undefined
+                  ? undefined
+                  : yield* Effect.try({
+                      try: () => MemoryContext.memoryContextText(snapshot),
+                      catch: () =>
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: OPENCODE_PROVIDER,
+                          detail: "Invalid memory context frame",
+                        }),
+                    });
+              }).pipe(
+                Effect.tapError((cause) =>
+                  finalizeTurn(state, turn, "failed", {
+                    failure: makeProviderFailure({ cause, class: "validation_error" }),
+                  }).pipe(Effect.andThen(Deferred.succeed(admissionSettled, undefined))),
+                ),
+              );
+              const currentMcp = yield* mcpSessions.read(turnInput.threadId);
+              const availability = McpProviderSession.memoryToolAvailability(
+                !connection.external &&
+                  currentMcp?.authorizationHeader === mcpSession?.authorizationHeader
+                  ? currentMcp
+                  : undefined,
+              );
               const systemPrompt = [
                 orchestrationSystemPrompt,
+                MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER,
+                `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+                memory,
                 buildRuntimeInstructions({
                   harness: "OpenCode",
                   model: turnInput.modelSelection.model,

@@ -1,3 +1,5 @@
+import { MemoryId, MemoryRevisionId, MemorySpaceId } from "@goat/contracts";
+import { packMemoryContext, memoryContextText } from "@goat/provider-core/server/memoryContext";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { OpencodeClient, ToolPart } from "@opencode-ai/sdk/v2";
@@ -149,7 +151,13 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   suffix: string,
   nativeSessionId: string,
   client: object,
-  options: { readonly external?: boolean } = {},
+  options: {
+    readonly external?: boolean;
+    readonly memory?: Pick<
+      ProviderAdapter.ProviderAdapterV2TurnInput,
+      "memoryContext" | "refreshMemoryContext"
+    >;
+  } = {},
 ) {
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
@@ -195,6 +203,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     startProviderThread: OrchestrationV2ProviderThread = providerThread,
   ) =>
     runtime.startTurn({
+      ...options.memory,
       appThread: {
         id: threadId,
         projectId: ProjectId.make(`project-opencode-${suffix}`),
@@ -248,6 +257,93 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect.each([false, true])(
+    "WP4 OpenCode v1 memory framed delivery and clear external=%s",
+    (external) =>
+      Effect.gen(function* () {
+        const snapshot = wp4Snapshot();
+        let memory: typeof snapshot | undefined = snapshot;
+        const payloads: Array<{ system?: string }> = [];
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const suffix = `memory-${external}`;
+        yield* sessions.set({
+          environmentId: EnvironmentId.make("fixture"),
+          threadId: ThreadId.make(`thread-opencode-${suffix}`),
+          providerSessionId: `session-opencode-${suffix}`,
+          providerInstanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+          endpoint: "http://fixture.invalid/mcp",
+          authorizationHeader: "Bearer memory-fixture",
+          browserToolsAvailable: false,
+          grantedScopes: ["memory:read", "memory:write"],
+        });
+        const registrations: unknown[] = [];
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          suffix,
+          "memory-root",
+          {
+            event: { subscribe: async () => ({ stream: asyncEventStream().stream }) },
+            mcp: {
+              add: async (input: unknown) => {
+                registrations.push(input);
+                return { data: true };
+              },
+            },
+            session: {
+              create: async () => ({
+                data: { id: "memory-root", time: { created: 1, updated: 1 } },
+              }),
+              get: async () => ({ data: { id: "memory-root", time: { created: 1, updated: 1 } } }),
+              promptAsync: async (input: { system?: string }) => {
+                payloads.push(input);
+                return { data: true };
+              },
+              abort: async () => ({ data: true }),
+            },
+          },
+          {
+            external,
+            memory: { memoryContext: snapshot, refreshMemoryContext: () => Effect.succeed(memory) },
+          },
+        );
+        yield* harness.startTurn();
+        assert.include(payloads[0]?.system ?? "", memoryContextText(snapshot));
+        assert.equal(registrations.length, external ? 0 : 1);
+        assert.include(payloads[0]?.system ?? "", `read=${!external}`);
+        // Resume re-registers state without retaining the prior memory body.
+        const resumed = yield* harness.runtime.resumeThread({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+            model: "anthropic/claude-sonnet",
+            options: [],
+          },
+          runtimePolicy: harness.policy,
+        });
+        memory = undefined;
+        yield* harness.startTurn("second", resumed);
+        assert.notInclude(payloads[1]?.system ?? "", "external_goat_memory");
+        const resumedAgain = yield* harness.runtime.resumeThread({
+          threadId: harness.threadId,
+          providerThread: resumed,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+            model: "anthropic/claude-sonnet",
+            options: [],
+          },
+          runtimePolicy: harness.policy,
+        });
+        memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
+        assert.isTrue(
+          Exit.isFailure(yield* harness.startTurn("invalid", resumedAgain).pipe(Effect.exit)),
+        );
+        assert.equal(payloads.length, 2);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      ),
+  );
+
   it.effect.each([
     { external: false, withCredential: true },
     { external: true, withCredential: true },
@@ -2866,3 +2962,19 @@ it.effect.each([false, true])(
       Effect.scoped,
     ),
 );
+
+const wp4Snapshot = () =>
+  packMemoryContext({
+    memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <instruction> 'data'",
+      },
+    ],
+  })!;
