@@ -176,6 +176,30 @@ describe("ConnectAgentSurface memory consent", () => {
       memoryScopes: [],
     });
   });
+  it("requires pairing when thread access is outside the full union even if memory scopes are held", async () => {
+    calls.details = {
+      ...calls.details,
+      csrfToken: "synthetic-csrf",
+      oneClickAccess: ["read-only"],
+      oneClickMemoryScopes: ["memory:read", "memory:write"],
+    };
+    await mount();
+    await select(0, true);
+    await act(() =>
+      renderer.root
+        .findByProps({ "aria-labelledby": "connect-agent-access-label" })
+        .props.onValueChange("full-access"),
+    );
+    await approve();
+    expect(calls.requests).toHaveLength(0);
+    await pair();
+    await approve();
+    expect(calls.requests[0]?.decision).toMatchObject({
+      _tag: "pairing-code",
+      access: "full-access",
+      memoryScopes: ["memory:read"],
+    });
+  });
   it("denies without granting selected scopes", async () => {
     await mount();
     await select(0, true);

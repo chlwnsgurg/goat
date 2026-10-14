@@ -3,6 +3,12 @@ import {
   MemorySpaceId,
   MemoryId,
   MemoryItem,
+  MemoryPage,
+  MemoryHistoryPage,
+  MemorySourcePage,
+  MemoryRpcError,
+  ThreadId,
+  MessageId,
   MemoryChangeSignal,
   MemoryImportProviderResult,
   WS_METHODS,
@@ -12,6 +18,7 @@ import {
 } from "@goat/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -105,6 +112,33 @@ const item = Schema.decodeUnknownSync(MemoryItem)({
     derivedFromMemoryRevisions: [],
   },
 });
+const page = Schema.decodeUnknownSync(MemoryPage)({
+  items: [item],
+  projectionWatermark: 1,
+  nextCursor: null,
+});
+const history = Schema.decodeUnknownSync(MemoryHistoryPage)({
+  memoryId: id,
+  revisions: item.status === "active" ? [{ revision: item.revision, payload: item.payload }] : [],
+  resolutions: [],
+  tombstone: null,
+  reports: [],
+  revertResults: [],
+  localAvailability: { exposure: "visible", reasons: [], deferred: [], cleanupPending: false },
+  nextCursor: null,
+});
+const sourcePage = Schema.decodeUnknownSync(MemorySourcePage)({
+  sourceThread: { environmentId: env, threadId: "synthetic-thread" },
+  watermark: { fromEventId: "e1", toEventId: "e2", throughSequence: 2 },
+  messages: [{ messageId: "m1", text: "Synthetic source" }],
+  nextCursor: null,
+});
+function hasBody<A, E>(atom: Atom.Atom<AsyncResult.AsyncResult<Option.Option<A>, E>>) {
+  return Atom.make((get) => {
+    const result = get(atom);
+    return result._tag === "Success" && Option.isSome(result.value);
+  });
+}
 function waitFor<A>(
   registry: AtomRegistry.AtomRegistry,
   atom: Atom.Atom<A>,
@@ -119,21 +153,34 @@ function waitFor<A>(
 const harness = Effect.fn(function* () {
   const registry = AtomRegistry.make();
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
-  const queue = yield* Queue.unbounded<MemoryChangeSignal>();
+  const queue = yield* Queue.unbounded<MemoryChangeSignal | MemoryRpcError>();
   const readStarted = yield* Deferred.make<void>();
   const reply = yield* Deferred.make<MemoryItem>();
   let subscriptions = 0;
   const destinations: EnvironmentId[] = [];
   let readCount = 0;
+  const responded = new Set<string>();
+  const respondOnce = <A>(method: string, value: A) =>
+    Effect.suspend(() => {
+      if (responded.has(method)) return Effect.never;
+      responded.add(method);
+      return Deferred.await(reply).pipe(Effect.as(value));
+    });
   const rpc = {
     [WS_METHODS.memoryChanges]: () => {
       subscriptions++;
-      return Stream.fromQueue(queue);
+      return Stream.fromQueue(queue).pipe(
+        Stream.mapEffect((event) => ("kind" in event ? Effect.succeed(event) : Effect.fail(event))),
+      );
     },
     [WS_METHODS.memoryRead]: () =>
       ++readCount === 1
         ? Deferred.succeed(readStarted, undefined).pipe(Effect.andThen(Deferred.await(reply)))
         : Effect.never,
+    [WS_METHODS.memoryList]: () => respondOnce("list", page),
+    [WS_METHODS.memorySearch]: () => respondOnce("search", page),
+    [WS_METHODS.memoryHistory]: () => respondOnce("history", history),
+    [WS_METHODS.memoryReadSource]: () => respondOnce("source", sourcePage),
     [WS_METHODS.memoryImportProvider]: () =>
       Effect.succeed(decodeImport({ action: "discover", sources: [] })),
   };
@@ -161,17 +208,29 @@ const harness = Effect.fn(function* () {
       [other, { enabled: true } as ConnectionCatalogEntry],
     ]),
   );
+  const clock = yield* Clock.Clock;
   const runtime = Atom.runtime(
-    Layer.succeed(EnvironmentRegistry, {
-      run,
-      followStream,
-      entries,
-    } as unknown as EnvironmentRegistry["Service"]),
+    Layer.merge(
+      Layer.succeed(EnvironmentRegistry, {
+        run,
+        followStream,
+        entries,
+      } as unknown as EnvironmentRegistry["Service"]),
+      Layer.succeed(Clock.Clock, clock),
+    ),
   );
   const memory = createMemoryEnvironmentAtoms(runtime);
+  registry.mount(grants(env));
+  registry.mount(grants(other));
+  registry.mount(configs(env));
+  registry.mount(configs(other));
+  registry.mount(prepared(env));
+  registry.mount(prepared(other));
   registry.set(
     grants(env),
-    AsyncResult.success(sessionScopes(["memory:read", "memory:write", "filesystem:read"])),
+    AsyncResult.success(
+      sessionScopes(["memory:read", "memory:write", "filesystem:read", "orchestration:read"]),
+    ),
   );
   registry.set(grants(other), AsyncResult.success(sessionScopes([])));
   registry.set(configs(env), config);
@@ -320,6 +379,103 @@ describe("shared memory client", () => {
           expect(Option.isNone(h.registry.get(body))).toBe(true);
         }),
       ),
+  );
+  it.effect.each(["reset", "forget", "invalidate"] as const)(
+    "evicts list/search/history/source and visible reads on %s",
+    (kind) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* harness();
+          const exposure = h.memory.exposureAtom(target);
+          h.registry.mount(exposure);
+          yield* Queue.offer(h.queue, signal("reset"));
+          yield* waitFor(h.registry, exposure, (state) => state.ready);
+          const bodies = [
+            hasBody(h.memory.read(readTarget)),
+            hasBody(
+              h.memory.list({
+                ...target,
+                input: { ...target.input, includeQuarantined: false, limit: 10 },
+              }),
+            ),
+            hasBody(
+              h.memory.search({
+                ...target,
+                input: { ...target.input, query: "Synthetic", mode: "fts", limit: 10 },
+              }),
+            ),
+            hasBody(h.memory.history({ ...readTarget, input: { ...readTarget.input, limit: 10 } })),
+            hasBody(
+              h.memory.readSource({
+                ...readTarget,
+                input: {
+                  ...readTarget.input,
+                  limit: 10,
+                  sourceThread: { environmentId: env, threadId: ThreadId.make("synthetic-thread") },
+                  messageIds: [MessageId.make("m1")],
+                },
+              }),
+            ),
+          ];
+          for (const body of bodies) h.registry.mount(body);
+          yield* Deferred.succeed(h.reply, item);
+          for (const body of bodies) yield* waitFor(h.registry, body, Boolean);
+          const before = h.registry.get(exposure);
+          yield* Queue.offer(h.queue, signal(kind));
+          yield* waitFor(h.registry, exposure, (state) => state !== before);
+          expect(bodies.map((body) => h.registry.get(body))).toEqual([
+            false,
+            false,
+            false,
+            false,
+            false,
+          ]);
+        }),
+      ),
+  );
+  it.effect.each(["downgrade", "remove", "prepared", "failure"] as const)(
+    "clears exposure and edits on %s",
+    (reason) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* harness();
+          const exposure = h.memory.exposureAtom(target);
+          h.registry.mount(exposure);
+          yield* Queue.offer(h.queue, signal("reset"));
+          yield* waitFor(h.registry, exposure, (state) => state.ready);
+          const edit = h.memory.draftAtom({ ...target, draftId: "edit" });
+          h.registry.mount(edit);
+          h.registry.set(edit, { text: "Derived", memoryIds: [id] });
+          if (reason === "downgrade")
+            h.registry.set(grants(env), AsyncResult.success(sessionScopes([])));
+          if (reason === "remove") yield* h.remove();
+          if (reason === "prepared") h.registry.set(prepared(env), Option.none());
+          if (reason === "failure")
+            yield* Queue.offer(h.queue, new MemoryRpcError({ code: "bootstrap_required" }));
+          yield* waitFor(h.registry, exposure, (state) => !state.ready);
+          expect(h.registry.get(edit)).toBeNull();
+        }),
+      ),
+  );
+  it.effect("expires visible bodies without refetching or persisting them", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const source = h.memory.read(readTarget);
+        const body = Atom.make((get) => Option.flatten(AsyncResult.value(get(source))));
+        h.registry.mount(body);
+        yield* Deferred.await(h.readStarted);
+        yield* Deferred.succeed(h.reply, item);
+        yield* waitFor(h.registry, body, Option.isSome);
+        yield* TestClock.adjust("1 minute");
+        yield* waitFor(h.registry, body, Option.isNone);
+        expect(Option.isNone(h.registry.get(body))).toBe(true);
+      }),
+    ),
   );
   it.effect("does not open a read stream for a write-only grant", () =>
     Effect.scoped(

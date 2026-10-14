@@ -203,9 +203,11 @@ export function createMemoryEnvironmentAtoms<R, E>(
             return Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() });
           }
           return Stream.fromEffect(
-            requestMemoryQuery(runtime, get.registry, environmentId, tag, input),
+            requestMemoryQuery(runtime, get.registry, environmentId, tag, input).pipe(
+              Effect.timeoutOption(BODY_TTL),
+            ),
           ).pipe(
-            Stream.map((value) => ({ before, value: Option.some(value) })),
+            Stream.map((value) => ({ before, value })),
             (stream) =>
               Stream.concat(
                 Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() }),
