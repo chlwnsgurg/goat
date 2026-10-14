@@ -121,14 +121,21 @@ describe("Cursor memory recovery admission", () => {
           ),
           Effect.provide(hostContext),
         );
-        const runtime = yield* adapter.openSession({
+        const bootstrap = yield* adapter.openSession({
           threadId,
           providerSessionId: ProviderSessionId.make("cursor-error-session"),
           modelSelection,
           runtimePolicy,
         });
-        const providerThread = yield* runtime.ensureThread({
+        const providerThread = yield* bootstrap.ensureThread({
           threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        // A fresh app session must resume the existing native agent, enabling abandoned-run recovery.
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("cursor-resumed-session"),
           modelSelection,
           runtimePolicy,
         });
