@@ -780,4 +780,70 @@ describe("staged memory RPC", () => {
         expect(invoked).toBe(false);
       }),
   );
+  it.effect.each(["capability", "method"] as const)(
+    "rejects a missing memory stream %s before opening it",
+    (missing) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        let opened = false;
+        const client =
+          missing === "method"
+            ? {}
+            : {
+                [WS_METHODS.memoryChanges]: () => {
+                  opened = true;
+                  return Stream.never;
+                },
+              };
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client as unknown as WsRpcProtocolClient),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: missing === "capability" ? {} : { memory: { protocolVersion: 1 } },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const failure = yield* subscribe(WS_METHODS.memoryChanges, { memorySpaceId }).pipe(
+          Stream.runDrain,
+          Effect.flip,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        );
+        expect(failure._tag).toBe("MemoryRpcError");
+        expect(opened).toBe(false);
+      }),
+  );
+  it.effect("rejects a body query when memory capability is absent", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      let invoked = false;
+      const client = {
+        [WS_METHODS.memoryList]: () => {
+          invoked = true;
+          return Effect.never;
+        },
+      };
+      yield* SubscriptionRef.set(
+        h.activeSession,
+        Option.some({
+          ...session(client as unknown as WsRpcProtocolClient),
+          initialConfig: Effect.succeed({ environment: { capabilities: {} } } as ServerConfig),
+        }),
+      );
+      const failure = yield* requestGuarded(WS_METHODS.memoryList, {
+        memorySpaceId,
+        includeQuarantined: false,
+        limit: 10,
+      }).pipe(
+        Effect.flip,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+        Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+      );
+      expect(failure._tag).toBe("EnvironmentRpcUnavailableError");
+      expect(invoked).toBe(false);
+    }),
+  );
 });

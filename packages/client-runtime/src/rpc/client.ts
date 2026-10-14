@@ -546,16 +546,37 @@ export function requestMemoryQuery<R, E, T extends MemoryBodyRpcTag>(
   );
 }
 
-/** Shares the destination grant checks with memory commands and body queries. */
+/** One-session memory stream. Its owner closes exposure and handles session replacement. */
 export function subscribeMemoryChanges<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
   atoms: AtomRegistry.AtomRegistry,
+  session: RpcSession,
   input: EnvironmentRpcInput<typeof WS_METHODS.memoryChanges>,
 ) {
-  return subscribe(WS_METHODS.memoryChanges, input).pipe(
-    Stream.provideService(RpcPermissionGuard, {
-      authorize: (id, method, payload) =>
-        createCommandPermissions(runtime, method).authorize(atoms, id, payload),
+  return Stream.unwrap(
+    Effect.gen(function* () {
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const config = yield* session.initialConfig.pipe(
+        Effect.mapError(() => new MemoryRpcError({ code: "unsupported_operation" })),
+      );
+      const method = (session.client as Partial<EnvironmentProtocolClient>)[
+        WS_METHODS.memoryChanges
+      ];
+      if (!supportsMemoryProtocol(config.environment.capabilities) || method === undefined) {
+        return Stream.fail(new MemoryRpcError({ code: "unsupported_operation" }));
+      }
+      yield* createCommandPermissions(runtime, WS_METHODS.memoryChanges).authorize(
+        atoms,
+        supervisor.target.environmentId,
+        input,
+      );
+      const observer = yield* EnvironmentRpcSubscriptionObserver;
+      const complete = yield* observer.observe({
+        environmentId: supervisor.target.environmentId,
+        method: WS_METHODS.memoryChanges,
+        input,
+      });
+      return method(input).pipe(Stream.ensuring(complete));
     }),
   );
 }

@@ -7,10 +7,11 @@ import {
   supportsMemoryProtocol,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as HashMap from "effect/HashMap";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import {
@@ -34,13 +35,19 @@ export interface MemoryExposure {
   readonly ready: boolean;
   readonly connection: object | null;
   readonly epoch: object;
-  readonly versions: ReadonlyMap<MemoryId, object>;
+  readonly versions: HashMap.HashMap<MemoryId, object>;
   readonly forgotten: ReadonlySet<MemoryId>;
 }
 
 /** Body-free state. Epoch identity also fences replies from a prior subscription. */
 export function emptyMemoryExposure(): MemoryExposure {
-  return { ready: false, connection: null, epoch: {}, versions: new Map(), forgotten: new Set() };
+  return {
+    ready: false,
+    connection: null,
+    epoch: {},
+    versions: HashMap.empty(),
+    forgotten: new Set(),
+  };
 }
 
 export function applyMemoryChange(
@@ -48,12 +55,15 @@ export function applyMemoryChange(
   signal: MemoryChangeSignal,
 ): MemoryExposure {
   if (signal.kind === "reset") {
-    return { ...state, ready: true, epoch: {}, versions: new Map() };
+    return { ...state, ready: true, epoch: {}, versions: HashMap.empty() };
   }
-  const versions = new Map(state.versions);
-  versions.set(signal.memoryId, {});
-  const forgotten = new Set(state.forgotten);
-  if (signal.kind === "forget") forgotten.add(signal.memoryId);
+  const versions = HashMap.set(state.versions, signal.memoryId, {});
+  // The factory ledger already contains forget IDs. Standalone reducer callers
+  // get an immutable snapshot without copying on ordinary upserts/invalidation.
+  const forgotten =
+    signal.kind === "forget" && !state.forgotten.has(signal.memoryId)
+      ? new Set([...state.forgotten, signal.memoryId])
+      : state.forgotten;
   return { ...state, versions, forgotten };
 }
 
@@ -68,7 +78,10 @@ export function memoryExposureMatches(
     after.ready &&
     before.epoch === after.epoch &&
     memoryIds.every(
-      (id) => !after.forgotten.has(id) && before.versions.get(id) === after.versions.get(id),
+      (id) =>
+        !after.forgotten.has(id) &&
+        Option.getOrUndefined(HashMap.get(before.versions, id)) ===
+          Option.getOrUndefined(HashMap.get(after.versions, id)),
     )
   );
 }
@@ -93,27 +106,73 @@ interface MemoryTarget {
 // displayed value; a consumer must explicitly refresh to request it again.
 const BODY_TTL = "1 minute";
 
+/** Body-free ledger owned by the factory, independent of weak atom-family lifetimes.
+ * Removal forgets an environment's metadata. Disposal is permanent. Capacity never
+ * evicts a tombstone: overflow stays closed, even on reset (reset carries no tombstones).
+ * A new runtime must acquire a fresh reset before it can expose bodies again.
+ */
+export function createMemoryTombstoneLedger(maxSpaces = 256, maxIdsPerSpace = 10_000) {
+  const spaces = new Map<
+    string,
+    { environmentId: EnvironmentId; forgotten: Set<MemoryId>; blocked: boolean }
+  >();
+  const overflow = { forgotten: new Set<MemoryId>(), blocked: true };
+  let disposed = false;
+  return {
+    space(environmentId: EnvironmentId, memorySpaceId: MemorySpaceId) {
+      if (disposed) return overflow;
+      const key = JSON.stringify([environmentId, memorySpaceId]);
+      const retained = spaces.get(key);
+      if (retained) return retained;
+      if (spaces.size >= maxSpaces) return overflow;
+      const ledger = { environmentId, forgotten: new Set<MemoryId>(), blocked: false };
+      spaces.set(key, ledger);
+      return ledger;
+    },
+    forget(ledger: { forgotten: Set<MemoryId>; blocked: boolean }, id: MemoryId) {
+      if (ledger.forgotten.has(id)) return;
+      if (ledger.forgotten.size >= maxIdsPerSpace) ledger.blocked = true;
+      else ledger.forgotten.add(id);
+    },
+    retainEnvironments(entries: ReadonlyMap<EnvironmentId, unknown>) {
+      for (const [key, ledger] of spaces) {
+        if (!entries.has(ledger.environmentId)) spaces.delete(key);
+      }
+    },
+    dispose() {
+      disposed = true;
+      spaces.clear();
+    },
+  };
+}
+
 export function createMemoryEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+  ledger = createMemoryTombstoneLedger(),
 ) {
+  const disposedAtom = Atom.make(false);
   const sessions = createEnvironmentSessionAtoms(runtime);
   const { catalogValueAtom } = createEnvironmentCatalogAtoms(runtime);
   const readPermissions = createCommandPermissions(runtime, WS_METHODS.memoryRead);
   const exposureFamily = Atom.family((key: string) => {
     const [environmentId, input] = JSON.parse(key) as [EnvironmentId, MemoryTarget["input"]];
-    const tombstones = new Set<MemoryId>();
+    const retained = () => ledger.space(environmentId, input.memorySpaceId);
     const closedState = (): MemoryExposure => ({
       ...emptyMemoryExposure(),
-      forgotten: new Set(tombstones),
+      forgotten: retained().forgotten,
     });
-    const unavailable = closedState();
+    const unavailable = emptyMemoryExposure();
     const streamAtom = runtime
       .atom((get) => {
         const allowed = get(readPermissions.permissionAtom(environmentId));
         const prepared = get(sessions.preparedConnectionValueAtom(environmentId));
         const config = get(sessions.initialConfigValueAtom(environmentId));
+        const entries = get(catalogValueAtom).entries;
+        ledger.retainEnvironments(entries);
+        if (get(disposedAtom) || !entries.get(environmentId)?.enabled) {
+          return Stream.succeed(emptyMemoryExposure());
+        }
         if (
-          !get(catalogValueAtom).entries.get(environmentId)?.enabled ||
           !allowed ||
           Option.isNone(prepared) ||
           !config ||
@@ -129,19 +188,38 @@ export function createMemoryEnvironmentAtoms<R, E>(
                 SubscriptionRef.changes(supervisor.session).pipe(
                   Stream.switchMap((session) => {
                     const closed = closedState();
-                    if (Option.isNone(session)) return Stream.succeed(closed);
-                    return subscribeMemoryChanges(runtime, get.registry, input).pipe(
+                    const stamp = (state: MemoryExposure) => ({ state, producer: session });
+                    if (Option.isNone(session)) return Stream.succeed(stamp(closed));
+                    return subscribeMemoryChanges(runtime, get.registry, session.value, input).pipe(
+                      Stream.filterEffect(() =>
+                        SubscriptionRef.get(supervisor.session).pipe(
+                          Effect.map((active) => active === session),
+                        ),
+                      ),
                       Stream.scan(
                         () => closed,
                         (state, signal) => {
-                          if (signal.kind === "forget") tombstones.add(signal.memoryId);
-                          return applyMemoryChange(state, signal);
+                          const current = retained();
+                          if (signal.kind === "forget") ledger.forget(current, signal.memoryId);
+                          if (current.blocked) return closedState();
+                          const next = applyMemoryChange(state, signal);
+                          // Version metadata also has a bound. A reset clears it safely
+                          // because epoch identity invalidates every pending body/draft.
+                          return HashMap.size(next.versions) > 10_000 ? closedState() : next;
                         },
                       ),
                       Stream.catchCause(() => Stream.succeed(closedState())),
                       (stream) => Stream.concat(Stream.succeed(closed), stream),
+                      Stream.map(stamp),
                     );
                   }),
+                  // switchMap may leave an already buffered old value downstream.
+                  Stream.filterEffect(({ producer }) =>
+                    SubscriptionRef.get(supervisor.session).pipe(
+                      Effect.map((active) => active === producer),
+                    ),
+                  ),
+                  Stream.map(({ state }) => state),
                 ),
               ),
             ),
@@ -156,7 +234,8 @@ export function createMemoryEnvironmentAtoms<R, E>(
       const result = get(streamAtom);
       // Stream atoms remain waiting while live. Match the connection identity
       // instead of treating that flag as a pending unary request.
-      return allowed &&
+      return !get(disposedAtom) &&
+        allowed &&
         registered &&
         Option.isSome(connection) &&
         result._tag === "Success" &&
@@ -172,6 +251,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
     const availability = Atom.family((environmentId: EnvironmentId | null) =>
       Atom.make((get) => {
         if (
+          get(disposedAtom) ||
           environmentId === null ||
           !get(catalogValueAtom).entries.get(environmentId)?.enabled ||
           !get(result.permissionAtom(environmentId))
@@ -205,11 +285,19 @@ export function createMemoryEnvironmentAtoms<R, E>(
         },
       ];
       const state = exposureAtom({ environmentId, input: { memorySpaceId: input.memorySpaceId } });
+      const ids = input.memoryId === undefined ? [] : [input.memoryId];
+      // Direct ID queries subscribe to a stable projection, not every space signal.
+      let selected = emptyMemoryExposure();
+      const relevantState = Atom.make((get) => {
+        const current = get(state);
+        if (ids.length > 0 && memoryExposureMatches(selected, current, ids)) return selected;
+        selected = current;
+        return current;
+      }).pipe(Atom.setIdleTTL(0));
       const raw = runtime
         .atom((get) => {
-          const before = get(state);
+          const before = get(relevantState);
           const permitted = get(read.permissionAtom(environmentId, input));
-          const ids = input.memoryId === undefined ? [] : [input.memoryId];
           if (!permitted || !memoryExposureMatches(before, before, ids)) {
             return Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() });
           }
@@ -232,26 +320,29 @@ export function createMemoryEnvironmentAtoms<R, E>(
           );
         })
         .pipe(Atom.setIdleTTL(0));
-      return Atom.make((get) => {
-        const current = get(state);
-        const allowed = get(read.permissionAtom(environmentId, input));
-        const result = get(raw);
-        if (allowed && current.ready && result._tag === "Failure")
-          return AsyncResult.map(result, () => Option.none<EnvironmentRpcSuccess<T>>());
-        if (
-          !allowed ||
-          result._tag !== "Success" ||
-          // Page/search output is invalidated by any body-free signal.
-          result.value.before !== current
-        )
-          return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
-        if (
-          Option.isSome(result.value.value) &&
-          containsForgottenMemory(result.value.value.value, current.forgotten)
-        )
-          return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
-        return AsyncResult.success(result.value.value);
-      }).pipe(Atom.setIdleTTL(0));
+      return Atom.readable(
+        (get) => {
+          const current = get(relevantState);
+          const allowed = get(read.permissionAtom(environmentId, input));
+          const result = get(raw);
+          if (allowed && current.ready && result._tag === "Failure")
+            return AsyncResult.map(result, () => Option.none<EnvironmentRpcSuccess<T>>());
+          if (
+            !allowed ||
+            result._tag !== "Success" ||
+            // Page/search output is invalidated by any body-free signal.
+            result.value.before !== current
+          )
+            return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
+          if (
+            Option.isSome(result.value.value) &&
+            containsForgottenMemory(result.value.value.value, current.forgotten)
+          )
+            return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
+          return AsyncResult.success(result.value.value);
+        },
+        (refresh) => refresh(raw),
+      ).pipe(Atom.setIdleTTL(0));
     });
     return (target: {
       readonly environmentId: EnvironmentId;
@@ -292,6 +383,11 @@ export function createMemoryEnvironmentAtoms<R, E>(
   });
 
   return {
+    /** Release body-free metadata when the owning runtime is disposed. */
+    dispose: (registry: AtomRegistry.AtomRegistry) => {
+      registry.set(disposedAtom, true);
+      ledger.dispose();
+    },
     exposureAtom,
     list: bodyQuery(WS_METHODS.memoryList),
     search: bodyQuery(WS_METHODS.memorySearch),
