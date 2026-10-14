@@ -1137,5 +1137,39 @@ it.effect.each(["ack", "pull", "metadata"] as const)(
       assert.strictEqual((yield* store.readWork(`sync:${space}:${retryId}`))?.status, "completed");
       const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
       assert.deepStrictEqual(yield* fresh.pendingForgetIntents(100), []);
+      yield* fresh.persistCompactReceipt({
+        memorySpaceId: space,
+        originEnvironmentId: environmentId,
+        operationKind: "forget",
+        receipt: canonical,
+        revisionId: null,
+        resolutionId: null,
+        revertsResolutionId: null,
+        attemptId: null,
+        fencingToken: null,
+        reportGuard: null,
+      });
+      yield* fresh.persistCompactReceipt({
+        memorySpaceId: space,
+        originEnvironmentId: environmentId,
+        operationKind: "forget",
+        receipt: canonical,
+        revisionId: null,
+        resolutionId: null,
+        revertsResolutionId: null,
+        attemptId: null,
+        fencingToken: null,
+        reportGuard: null,
+      });
+      yield* sql`DELETE FROM memory_events WHERE operation_id=${retryId}`;
+      assert.deepStrictEqual(
+        (yield* fresh.receipt(space, retryId))?.receipt.forgetRetryOf,
+        links.forgetRetryOf,
+      );
+      assert.deepStrictEqual(
+        (yield* fresh.receipt(space, retryId))?.receipt.forgetExpansion,
+        links.forgetExpansion,
+      );
+      assert.deepStrictEqual(yield* fresh.pendingForgetIntents(100), []);
     }).pipe(Effect.provide(live)),
 );

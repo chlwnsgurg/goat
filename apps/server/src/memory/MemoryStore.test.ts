@@ -3400,6 +3400,13 @@ it.effect(
           environmentId: env,
         },
       });
+      yield* store.finishWork(
+        `resolve:${space}:${ticket.attemptId}`,
+        "completed",
+        ledger.entry.receipt,
+      );
+      for (const candidate of yield* store.readDueClaimCandidates(100, 0))
+        yield* store.completeClaimCandidate(candidate.id);
       const publish = (name: string, at: number, floor: number) =>
         store.transact(
           Effect.gen(function* () {

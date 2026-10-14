@@ -4765,9 +4765,41 @@ const make = Effect.gen(function* () {
   ) {
     yield* transact(
       Effect.gen(function* () {
-        const json = yield* compactCodec.encode(input);
+        const old = yield* receipt(input.memorySpaceId, input.receipt.operationId);
+        const json = yield* compactCodec.encode({
+          ...input,
+          receipt: {
+            ...input.receipt,
+            ...(old?.receipt.forgetExpansion
+              ? { forgetExpansion: old.receipt.forgetExpansion }
+              : {}),
+            ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+          },
+        });
         const record = yield* compactCodec.decode(json, strict);
-        const old = yield* receipt(record.memorySpaceId, record.receipt.operationId);
+        const existing = yield* stored(
+          "compact-existing",
+          sql<{
+            compact_json: string;
+          }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${record.memorySpaceId} AND operation_id=${record.receipt.operationId}`,
+        );
+        if (existing[0]) {
+          const prior = yield* compactCodec.decode(existing[0].compact_json, strict);
+          const preserved = {
+            ...prior,
+            receipt: {
+              ...prior.receipt,
+              ...(record.receipt.forgetExpansion
+                ? { forgetExpansion: record.receipt.forgetExpansion }
+                : {}),
+              ...(record.receipt.forgetRetryOf
+                ? { forgetRetryOf: record.receipt.forgetRetryOf }
+                : {}),
+            },
+          };
+          if ((yield* compactCodec.encode(preserved)) !== json)
+            return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        }
         if (
           old &&
           (old.operationDigest !== record.receipt.operationDigest ||
@@ -4809,7 +4841,7 @@ const make = Effect.gen(function* () {
           return yield* new MemoryStoreConflict({ code: "payload_too_large" });
         yield* stored(
           "compact-receipt-write",
-          sql`INSERT INTO memory_compact_receipts (space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json,compact_blob,report_key) VALUES (${record.memorySpaceId},${record.receipt.operationId},${record.receipt.operationDigest},${record.receipt.hubSequence!},${yield* receiptCodec.encode(record.receipt)},${json},${binary},${record.reportGuard?.reportId ?? null}) ON CONFLICT(space,operation_id) DO NOTHING`,
+          sql`INSERT INTO memory_compact_receipts (space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json,compact_blob,report_key) VALUES (${record.memorySpaceId},${record.receipt.operationId},${record.receipt.operationDigest},${record.receipt.hubSequence!},${yield* receiptCodec.encode(record.receipt)},${json},${binary},${record.reportGuard?.reportId ?? null}) ON CONFLICT(space,operation_id) DO UPDATE SET receipt_json=excluded.receipt_json,compact_json=excluded.compact_json,compact_blob=excluded.compact_blob`,
         );
       }),
     );
