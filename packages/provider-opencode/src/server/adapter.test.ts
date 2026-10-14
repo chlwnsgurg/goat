@@ -1,3 +1,4 @@
+import type { AuthEnvironmentScope } from "@goat/contracts";
 import { MemoryId, MemoryRevisionId, MemorySpaceId } from "@goat/contracts";
 import { packMemoryContext, memoryContextText } from "@goat/provider-core/server/memoryContext";
 import { assert, describe, it } from "@effect/vitest";
@@ -267,7 +268,7 @@ describe("OpenCodeAdapterV2", () => {
         const nativeEvents = asyncEventStream();
         const sessions = yield* McpProviderSessions.McpProviderSessions;
         const suffix = `memory-${external}`;
-        yield* sessions.set({
+        const config = {
           environmentId: EnvironmentId.make("fixture"),
           threadId: ThreadId.make(`thread-opencode-${suffix}`),
           providerSessionId: `session-opencode-${suffix}`,
@@ -275,8 +276,9 @@ describe("OpenCodeAdapterV2", () => {
           endpoint: "http://fixture.invalid/mcp",
           authorizationHeader: "Bearer memory-fixture",
           browserToolsAvailable: false,
-          grantedScopes: ["memory:read", "memory:write"],
-        });
+          grantedScopes: ["memory:read", "memory:write", "orchestration:read"] as const,
+        };
+        yield* sessions.set(config);
         const registrations: unknown[] = [];
         const harness = yield* makeOpenCodeRuntimeHarness(
           suffix,
@@ -354,9 +356,26 @@ describe("OpenCodeAdapterV2", () => {
           runtimePolicy: harness.policy,
         });
         memory = undefined;
+        yield* sessions.set({ ...config, grantedScopes: [] });
         yield* harness.startTurn("second", resumed);
         yield* finish();
         assert.notInclude(payloads[1]?.system ?? "", "external_goat_memory");
+        assert.include(payloads[1]?.system ?? "", "read=false, write=false, source=false");
+        const restoredGrants: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
+          ["memory:read"],
+          ["memory:read", "memory:write", "orchestration:read"],
+        ];
+        memory = snapshot;
+        for (const [index, grant] of restoredGrants.entries()) {
+          yield* sessions.set({ ...config, grantedScopes: grant });
+          yield* harness.startTurn(`restored-${index}`, resumed);
+          yield* finish();
+          assert.include(payloads[index + 2]?.system ?? "", memoryContextText(snapshot));
+          assert.include(
+            payloads[index + 2]?.system ?? "",
+            `read=${!external}, write=${!external && index === 1}, source=${!external && index === 1}`,
+          );
+        }
         const resumedAgain = yield* harness.runtime.resumeThread({
           threadId: harness.threadId,
           providerThread: resumed,
@@ -371,7 +390,7 @@ describe("OpenCodeAdapterV2", () => {
         assert.isTrue(
           Exit.isFailure(yield* harness.startTurn("invalid", resumedAgain).pipe(Effect.exit)),
         );
-        assert.equal(payloads.length, 2);
+        assert.equal(payloads.length, 4);
       }).pipe(
         Effect.scoped,
         Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),

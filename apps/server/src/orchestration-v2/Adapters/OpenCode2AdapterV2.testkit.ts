@@ -143,6 +143,7 @@ const replayHttpClient = (
   controller: OpenCodeReplayController,
   replayGate: ProviderReplayGate | undefined,
   memoryInstructions: ((value: string) => Response) | undefined,
+  onInstructions: ((key: string, value: string) => void) | undefined,
 ) =>
   HttpClient.make((request, url) =>
     Effect.tryPromise({
@@ -161,6 +162,16 @@ const replayHttpClient = (
           query,
           raw === undefined ? undefined : decodeJson(raw),
         );
+        if (
+          operation.type === "session.instructions.entry.put" &&
+          "input" in operation &&
+          typeof operation.input === "object" &&
+          operation.input !== null
+        ) {
+          const key = Reflect.get(operation.input, "key");
+          const value = Reflect.get(operation.input, "value");
+          if (typeof key === "string" && typeof value === "string") onInstructions?.(key, value);
+        }
         if (
           operation.type === "session.instructions.entry.put" &&
           "input" in operation &&
@@ -222,6 +233,7 @@ export const replayServer = (
   transcript: ProviderReplayTranscript,
   options?: {
     readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly external?: boolean;
     readonly replayGate?: ProviderReplayGate;
     /** Counts the connections currently lent out, as the server owner's borrowers. */
@@ -239,7 +251,12 @@ export const replayServer = (
     const opencode = yield* OpenCode2Client.make.pipe(
       Effect.provideService(
         HttpClient.HttpClient,
-        replayHttpClient(controller, options?.replayGate, options?.memoryInstructions),
+        replayHttpClient(
+          controller,
+          options?.replayGate,
+          options?.memoryInstructions,
+          options?.onInstructions,
+        ),
       ),
     );
     const connection = {
@@ -271,6 +288,7 @@ const makeReplayAdapter = (
   transcript: ProviderReplayTranscript,
   options?: {
     readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly external?: boolean;
     readonly replayGate?: ProviderReplayGate;
     /** Counts the connections currently lent out, as the server owner's borrowers. */
@@ -305,6 +323,7 @@ export const openCode2ReplayRuntime = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {
     readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly external?: boolean;
     readonly borrowers?: { current: number };
     readonly replayGate?: ProviderReplayGate;

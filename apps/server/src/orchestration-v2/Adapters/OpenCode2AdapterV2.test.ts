@@ -347,6 +347,7 @@ const resumed = (
     readonly external?: boolean;
     readonly supervised?: boolean;
     readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly replayGate?: ProviderReplayGate;
   },
 ) =>
@@ -368,6 +369,9 @@ const resumed = (
         ...entries,
       ]),
       {
+        ...(options?.onInstructions === undefined
+          ? {}
+          : { onInstructions: options.onInstructions }),
         ...(options?.memoryInstructions === undefined
           ? {}
           : { memoryInstructions: options.memoryInstructions }),
@@ -486,6 +490,98 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       }).pipe(Effect.scoped),
   );
 
+  it.effect.each([false, true])("WP4 OpenCode v2 grant transitions external=%s", (external) =>
+    Effect.gen(function* () {
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      const grants: ReadonlyArray<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>> = [
+        ["memory:read", "memory:write", "orchestration:read"],
+        [],
+        ["memory:read"],
+        ["memory:read", "memory:write", "orchestration:read"],
+      ];
+      const config = {
+        environmentId: EnvironmentId.make("fixture"),
+        threadId,
+        providerSessionId: "provider-session:opencode2-adapter",
+        providerInstanceId: instanceId,
+        endpoint: "http://fixture.invalid/mcp",
+        authorizationHeader: "Bearer memory-fixture",
+        browserToolsAvailable: false,
+      };
+      yield* sessions.set({ ...config, grantedScopes: grants[0]! });
+      const values: string[] = [];
+      const systems: string[] = [];
+      const entries: ProviderReplayEntry[] = [];
+      if (!external)
+        entries.push(
+          out("mcp.add", {
+            server: goatMcpServerName(threadId),
+            config: {
+              type: "remote",
+              url: config.endpoint,
+              headers: { Authorization: config.authorizationHeader },
+              oauth: false,
+            },
+          }),
+          reply("mcp.add", null),
+        );
+      for (let index = 0; index < 4; index++) {
+        if (!external || index === 0)
+          entries.push(
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "goat",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+          );
+        entries.push(
+          out("session.prompt", { sessionID: SESSION, text: "hi" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        );
+      }
+      if (!external)
+        entries.push(
+          out("mcp.remove", { server: goatMcpServerName(threadId), "location[directory]": WORK }),
+          reply("mcp.remove", null),
+        );
+      const { runtime, thread } = yield* resumed(entries, {
+        external,
+        memoryInstructions: (value) => {
+          values.push(value);
+          return new Response(null, { status: 204 });
+        },
+        onInstructions: (key, value) => {
+          if (key === "goat") systems.push(value);
+        },
+      });
+      const snapshot = memoryFixture();
+      for (const [index, grant] of grants.entries()) {
+        yield* sessions.set({ ...config, grantedScopes: grant });
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(thread),
+          runOrdinal: index + 1,
+          providerTurnOrdinal: index + 1,
+          refreshMemoryContext: () =>
+            Effect.succeed(grant.includes("memory:read") ? snapshot : undefined),
+        });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+        assert.include(
+          systems.at(-1) ?? "",
+          `read=${!external && grant.includes("memory:read")}, write=${!external && grant.includes("memory:write")}, source=${!external && grant.includes("orchestration:read")}`,
+        );
+      }
+      assert.deepEqual(values, [
+        memoryContextText(snapshot),
+        "",
+        memoryContextText(snapshot),
+        memoryContextText(snapshot),
+      ]);
+      yield* runtime.unloadThread!({ providerThread: thread });
+    }).pipe(Effect.scoped),
+  );
   it.effect.each(["tampered", "put-failure"] as const)(
     "WP4 OpenCode v2 blocks a prompt on %s and permits retry",
     (reason) =>
