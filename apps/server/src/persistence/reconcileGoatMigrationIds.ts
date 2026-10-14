@@ -18,6 +18,7 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "Memory",
   "MemoryHubSync",
   "MemorySearchCounters",
+  "MemoryTaskGrantCeiling",
 ]);
 
 type MigrationEntry<E> = readonly [
