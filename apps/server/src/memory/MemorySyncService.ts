@@ -45,7 +45,10 @@ export class MemorySyncRuntime extends Context.Service<
     /** Application observations, never inferred from a timer: credential, descriptor or reconnect. */
     readonly rearmEvents?: Stream.Stream<
       {
+        /** Committed authority at observation, never retagged at delivery. */
+        epoch: number;
         memorySpaceId: M.MemorySpaceId;
+        hubEnvironmentId: M.EnvironmentId;
         holdClass: Store.MemoryHoldClass;
       },
       Service.MemoryAccessError
@@ -1650,8 +1653,17 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const view = yield* committedSettings.read;
             const space = view.settings.mode === "disabled" ? null : view.settings.memorySpaceId;
-            if (!space || space !== event.memorySpaceId || stopped) return;
-            enqueueRearm(view.version, space, [event.holdClass]);
+            const hubId = view.settings.mode === "member" ? view.settings.hubEnvironmentId : local;
+            if (
+              !space ||
+              space !== event.memorySpaceId ||
+              stopped ||
+              view.version !== event.epoch ||
+              hubId !== event.hubEnvironmentId
+            )
+              return;
+            // Keep the observed epoch through the existing in-transaction authority check.
+            enqueueRearm(event.epoch, space, [event.holdClass]);
             yield* requestCycle(syncCycle, false, false);
           }),
         ).pipe(Effect.ignore, Effect.forkIn(scope)),

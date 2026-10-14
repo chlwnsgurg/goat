@@ -3163,11 +3163,102 @@ it.effect.each(["bootstrap", "tail"] as const)(
     }),
 );
 
+it.effect.each(["epoch", "hub"] as const)(
+  "rearm observation crossing an adapter handoff cannot release current holds: %s",
+  (mismatch) =>
+    Effect.gen(function* () {
+      const observed = yield* Deferred.make<void>();
+      const deliver = yield* Deferred.make<void>();
+      const consumed = yield* Deferred.make<void>();
+      let pushes = 0;
+      const client = peer({
+        push: () =>
+          Effect.sync(() => {
+            pushes++;
+          }).pipe(Effect.andThen(Effect.fail(new M.MemoryHubUnauthorizedError({})))),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const store = yield* Store.MemoryStore;
+          const base = yield* Sync.MemorySyncRuntime;
+          // Observe under epoch 1, then pause strictly between adapter observation and Sync delivery.
+          const rearmEvents = Stream.fromEffect(
+            Effect.gen(function* () {
+              const event = {
+                epoch: 1,
+                memorySpaceId: space,
+                hubEnvironmentId: remote,
+                holdClass: "authorization" as const,
+              };
+              yield* Deferred.succeed(observed, undefined);
+              yield* Deferred.await(deliver);
+              return mismatch === "hub"
+                ? { ...event, hubEnvironmentId: M.EnvironmentId.make("foreign-hub") }
+                : event;
+            }),
+          ).pipe(Stream.ensuring(Deferred.succeed(consumed, undefined)));
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              yield* sync.start;
+              yield* Deferred.await(observed);
+              if (mismatch === "epoch")
+                yield* changeHub(1, { ...member, secretName: "new-binding" });
+              yield* enqueue(95001);
+              yield* sync.syncOnce;
+              assert.strictEqual(pushes, 1);
+              assert.strictEqual(
+                (yield* store.readWorkHold("sync:95001"))?.holdClass,
+                "authorization",
+              );
+              yield* store.transact(
+                store.writePullRetryTx({
+                  memorySpaceId: space,
+                  hubEnvironmentId: remote,
+                  expectedVersion: 0,
+                  retry: {
+                    attempts: 1,
+                    nextAttemptAt: Number.MAX_SAFE_INTEGER,
+                    failureCode: "route_unavailable",
+                    holdClass: "authorization",
+                  },
+                }),
+              );
+              yield* Deferred.succeed(deliver, undefined);
+              yield* Deferred.await(consumed);
+              yield* sync.syncOnce;
+              assert.strictEqual(pushes, 1, "stale observation cannot retry the new hold");
+              assert.strictEqual(
+                (yield* store.readWorkHold("sync:95001"))?.holdClass,
+                "authorization",
+              );
+              assert.strictEqual(
+                (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+                  .holdClass,
+                "authorization",
+              );
+              yield* sync.shutdown;
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, { ...base, rearmEvents })),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
 it.effect(
   "authorization observation rearms 101 held pushes with continuation and preserves other classes and spaces",
   () =>
     Effect.gen(function* () {
       const events = yield* PubSub.bounded<{
+        epoch: number;
+        hubEnvironmentId: M.EnvironmentId;
         memorySpaceId: M.MemorySpaceId;
         holdClass: Store.MemoryHoldClass;
       }>(4);
@@ -3226,12 +3317,16 @@ it.effect(
                 );
               rejected = false;
               yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
                 memorySpaceId: otherSpace,
                 holdClass: "authorization" as const,
               });
               yield* sync.syncOnce;
               assert.strictEqual(accepted, 0);
               yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
                 memorySpaceId: space,
                 holdClass: "authorization" as const,
               });
@@ -3278,6 +3373,8 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const events = yield* PubSub.bounded<{
+        epoch: number;
+        hubEnvironmentId: M.EnvironmentId;
         memorySpaceId: M.MemorySpaceId;
         holdClass: Store.MemoryHoldClass;
       }>(4);
@@ -3310,12 +3407,16 @@ it.effect(
               yield* sync.syncOnce;
               assert.strictEqual(claims.length, 1);
               yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
                 memorySpaceId: space,
                 holdClass: "protocol" as const,
               });
               yield* sync.syncOnce;
               assert.strictEqual(claims.length, 1);
               yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
                 memorySpaceId: space,
                 holdClass: "authorization" as const,
               });
@@ -4029,6 +4130,8 @@ it.effect.each(["pull", "ack"] as const)(
 it.effect("resolution rearm passes 100 protected tickets to reach the next held ticket", () =>
   Effect.gen(function* () {
     const events = yield* PubSub.bounded<{
+      epoch: number;
+      hubEnvironmentId: M.EnvironmentId;
       memorySpaceId: M.MemorySpaceId;
       holdClass: Store.MemoryHoldClass;
     }>(4);
@@ -4091,6 +4194,8 @@ it.effect("resolution rearm passes 100 protected tickets to reach the next held 
             const sync = yield* Sync.MemorySyncService;
             yield* sync.start;
             yield* PubSub.publish(events, {
+              epoch: 1,
+              hubEnvironmentId: remote,
               memorySpaceId: space,
               holdClass: "authorization" as const,
             });
@@ -4312,6 +4417,8 @@ it.effect.each([
   ([holdClass, change]) =>
     Effect.gen(function* () {
       const events = yield* PubSub.bounded<{
+        epoch: number;
+        hubEnvironmentId: M.EnvironmentId;
         memorySpaceId: M.MemorySpaceId;
         holdClass: Store.MemoryHoldClass;
       }>(4);
@@ -4352,7 +4459,12 @@ it.effect.each([
               const sync = yield* Sync.MemorySyncService;
               yield* sync.start;
               observing = true;
-              yield* PubSub.publish(events, { memorySpaceId: space, holdClass });
+              yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
+                memorySpaceId: space,
+                holdClass,
+              });
               yield* Deferred.await(firstPage);
               assert.strictEqual(
                 (yield* sql`SELECT id FROM memory_outbox WHERE kind='sync' AND hold_class=${holdClass} AND id<='sync:9300'`)
@@ -4424,6 +4536,8 @@ it.effect.each([
   ([holdClass, released, parallel, splitPage]) =>
     Effect.gen(function* () {
       const events = yield* PubSub.bounded<{
+        epoch: number;
+        hubEnvironmentId: M.EnvironmentId;
         memorySpaceId: M.MemorySpaceId;
         holdClass: Store.MemoryHoldClass;
       }>(4);
@@ -4522,6 +4636,8 @@ it.effect.each([
                 pair,
               );
               yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
                 memorySpaceId: space,
                 holdClass:
                   holdClass === "authorization"
@@ -4548,7 +4664,12 @@ it.effect.each([
                 assert.isTrue(firstPage.some((row) => row.id === frozen.id));
                 assert.isFalse(firstPage.some((row) => row.id === ticketId));
               }
-              yield* PubSub.publish(events, { memorySpaceId: space, holdClass });
+              yield* PubSub.publish(events, {
+                epoch: 1,
+                hubEnvironmentId: remote,
+                memorySpaceId: space,
+                holdClass,
+              });
               const input = yield* Deferred.await(resumed);
               yield* restarted.syncOnce;
               assert.deepStrictEqual(input.modelSelection, selection);
