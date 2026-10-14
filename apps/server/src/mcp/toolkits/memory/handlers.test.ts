@@ -12,8 +12,10 @@ import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 import * as MemoryService from "../../../memory/MemoryService.ts";
+import { decideMemoryOperation } from "../../../memory/MemoryDecider.ts";
+import { scanMemoryValue } from "../../../memory/MemorySecretScanner.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
-import { MemoryToolkit, MemoryReadSourceToolkit } from "./tools.ts";
+import { MemoryToolkit } from "./tools.ts";
 import { memoryError } from "./handlers.ts";
 import * as Fixture from "./handlers.testkit.ts";
 
@@ -22,11 +24,8 @@ const decodePage = Schema.decodeUnknownEffect(M.MemoryPage);
 const decodeHistory = Schema.decodeUnknownEffect(M.MemoryHistoryPage);
 const encodeError = Schema.encodeSync(M.MemoryRpcError);
 
-it("stages exactly eight core tools and defines source separately", () => {
-  expect(Object.keys(MemoryToolkit.tools)).toEqual(
-    M.MEMORY_MCP_TOOLS.filter((name) => name !== "memory_read_source"),
-  );
-  expect(Object.keys(MemoryReadSourceToolkit.tools)).toEqual(["memory_read_source"]);
+it("registers all nine core tools", () => {
+  expect(Object.keys(MemoryToolkit.tools).sort()).toEqual([...M.MEMORY_MCP_TOOLS].sort());
   for (const tool of Object.values(MemoryToolkit.tools))
     expect(Tool.getJsonSchema(tool).type).toBe("object");
 });
@@ -37,6 +36,10 @@ it.effect(
       const created = yield* Fixture.call("memory_upsert", Fixture.upsert());
       expect((yield* decodeReceipt(created.body)).outcome).toBe("accepted");
       const service = yield* MemoryService.MemoryService;
+      yield* service.upsert(
+        { ...Fixture.upsert(21), memoryId: M.MemoryId.make(Fixture.id(20)) },
+        Effect.void,
+      );
       const query = {
         memorySpaceId: Fixture.space,
         query: "synthetic",
@@ -44,7 +47,12 @@ it.effect(
         limit: 1,
       };
       const direct = yield* service.search(query, Effect.void);
+      expect(direct.nextCursor).not.toBeNull();
       expect((yield* Fixture.call("memory_search", query)).body).toEqual(direct);
+      const continuation = { ...query, cursor: direct.nextCursor! };
+      expect((yield* Fixture.call("memory_search", continuation)).body).toEqual(
+        yield* service.search(continuation, Effect.void),
+      );
       expect(
         (yield* decodePage(
           (yield* Fixture.call("memory_list", {
@@ -255,4 +263,193 @@ it.effect(
         ).toHaveLength(0);
       }).pipe(Effect.provide(toolkit));
     }).pipe(Effect.scoped),
+);
+
+const sourceFixture = Effect.gen(function* () {
+  const store = yield* Store.MemoryStore;
+  const environmentId = M.EnvironmentId.make("fixture-memory-mcp");
+  const sourceThread = {
+    environmentId: M.EnvironmentId.make("synthetic-owner"),
+    threadId: M.ThreadId.make("synthetic-source"),
+  };
+  const watermark = {
+    fromEventId: M.EventId.make("synthetic-from"),
+    toEventId: M.EventId.make("synthetic-to"),
+    throughSequence: 8,
+  };
+  const messageId = M.MessageId.make("synthetic-message");
+  const operationId = M.MemoryOperationId.make(Fixture.id(9000));
+  const revisionId = M.MemoryRevisionId.make(Fixture.id(9001));
+  const op: M.MemoryOperation = {
+    protocolVersion: 1,
+    kind: "upsert",
+    memorySpaceId: Fixture.space,
+    memoryId: Fixture.memoryId,
+    operationId,
+    originEnvironmentId: environmentId,
+    expectedHeads: [],
+    revision: {
+      memorySpaceId: Fixture.space,
+      memoryId: Fixture.memoryId,
+      operationId,
+      revisionId,
+      payloadRef: revisionId,
+      parents: [],
+      scope: { kind: "user" },
+      assertionKind: "inference",
+      createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+      provenance: { environmentId, sourceThread, sourceWatermark: watermark },
+    },
+    payload: {
+      text: "synthetic linked summary",
+      evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
+      derivedFromMemoryRevisions: [],
+    },
+  };
+  const aggregate = yield* store.loadAggregate(Fixture.space, Fixture.memoryId);
+  yield* store.apply(decideMemoryOperation(aggregate, op, Store.localIntent, scanMemoryValue(op)));
+  const input: M.MemoryReadSourceInput = {
+    memorySpaceId: Fixture.space,
+    memoryId: Fixture.memoryId,
+    sourceThread,
+    messageIds: [messageId],
+    limit: 10,
+  };
+  const page: M.MemorySourcePage = {
+    sourceThread,
+    watermark,
+    messages: [{ messageId, text: "synthetic original" }],
+    nextCursor: null,
+  };
+  return { input, page };
+});
+
+it.effect(
+  "source tool uses public service and fake owner authority, preserves page and independent scopes",
+  () => {
+    let calls = 0;
+    return Effect.gen(function* () {
+      const { input, page } = yield* sourceFixture;
+      for (const scopes of [["memory:read"], ["orchestration:read"], []] as const) {
+        const result = yield* Fixture.call("memory_read_source", input, Fixture.scope(scopes));
+        expect(result.body).toMatchObject({ code: "unavailable" });
+      }
+      expect(calls).toBe(0);
+      const full = { ...Fixture.scope(["memory:read", "orchestration:read"]), readOnly: true };
+      const result = yield* Fixture.call("memory_read_source", input, full);
+      expect(result.result.isError).not.toBe(true);
+      expect(result.body).toEqual(page);
+      expect(calls).toBe(1);
+      expect(
+        (yield* Fixture.call("memory_read_source", { ...input, sshHost: "synthetic" }, full)).body,
+      ).toMatchObject({ code: "invalid_request" });
+      expect(calls).toBe(1);
+    }).pipe(
+      Effect.provide(
+        Fixture.layerWithSourceReadAuthority((validated, permit) =>
+          permit.pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                calls++;
+                return {
+                  kind: "available" as const,
+                  page: {
+                    sourceThread: validated.request.sourceThread,
+                    watermark: validated.request.sourceWatermark,
+                    messages: validated.request.messageIds.map((messageId) => ({
+                      messageId,
+                      text: "synthetic original",
+                    })),
+                    nextCursor: null,
+                  },
+                };
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect.each([
+  "source_unavailable",
+  "forgotten",
+  "source_invalidated",
+  "secret_detected",
+  "denied",
+  "capacity",
+] as const)("source tool retains safe authority outcome %s", (kind) =>
+  Effect.gen(function* () {
+    const { input } = yield* sourceFixture;
+    const result = yield* Fixture.call(
+      "memory_read_source",
+      input,
+      Fixture.scope(["memory:read", "orchestration:read"]),
+    );
+    expect(result.result.isError).toBe(true);
+    expect(result.body).toMatchObject({
+      code: kind === "denied" ? "unavailable" : kind === "capacity" ? "capacity_exceeded" : kind,
+    });
+    if (kind === "capacity")
+      expect(result.body).toMatchObject({
+        capacity: { dimension: "body", current: 3, limit: 2, reclaimable: 7 },
+      });
+    expect(JSON.stringify(result.body)).not.toContain("cause");
+  }).pipe(
+    Effect.provide(
+      Fixture.layerWithSourceReadAuthority(() =>
+        kind === "capacity"
+          ? Effect.fail(
+              new M.MemoryHubError({
+                code: "capacity_exceeded",
+                capacity: {
+                  code: "capacity_exceeded",
+                  dimension: "body",
+                  current: 3,
+                  limit: 2,
+                  reclaimable: 7,
+                },
+              }),
+            )
+          : Effect.succeed(
+              kind === "denied"
+                ? { kind: "denied" as const, requiredPermission: "orchestration:read" as const }
+                : { kind: "unavailable" as const, code: kind },
+            ),
+      ),
+    ),
+  ),
+);
+
+it.effect("source tool stays closed without owner authority despite explicit scopes", () =>
+  Effect.gen(function* () {
+    const { input } = yield* sourceFixture;
+    expect(
+      (yield* Fixture.call(
+        "memory_read_source",
+        input,
+        Fixture.scope(["memory:read", "orchestration:read"]),
+      )).body,
+    ).toMatchObject({ code: "unavailable" });
+  }).pipe(Effect.provide(Fixture.layer)),
+);
+
+it.effect.each(["grantedScopes", "reauthorize", "both"] as const)(
+  "missing optional invocation authority %s never means default memory permission",
+  (missing) =>
+    Effect.gen(function* () {
+      const scope = { ...Fixture.scope(["memory:read", "memory:write", "orchestration:read"]) };
+      if (missing !== "reauthorize") delete scope.grantedScopes;
+      if (missing !== "grantedScopes") delete scope.reauthorize;
+      const { input } = yield* sourceFixture;
+      for (const [name, request] of [
+        ["memory_list", { memorySpaceId: Fixture.space, includeQuarantined: false }],
+        ["memory_upsert", Fixture.upsert()],
+        ["memory_read_source", input],
+      ] as const)
+        expect((yield* Fixture.call(name, request, scope)).body).toMatchObject({
+          code: "unavailable",
+        });
+    }).pipe(Effect.provide(Fixture.layer)),
 );

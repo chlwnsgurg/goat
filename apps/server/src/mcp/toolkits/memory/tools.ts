@@ -212,6 +212,5 @@ export const MemoryToolkit = Toolkit.make(
   UpsertTool,
   ForgetTool,
   RevertResolutionTool,
+  ReadSourceTool,
 );
-// Prepared definition only. L1 supplies the public service method before registration.
-export const MemoryReadSourceToolkit = Toolkit.make(ReadSourceTool);

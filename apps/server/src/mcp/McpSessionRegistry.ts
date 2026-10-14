@@ -167,6 +167,13 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
             const resolved = yield* resolveHash(tokenHash);
             if (
               !resolved ||
+              (required.some((scope) => scope === "memory:read" || scope === "memory:write") &&
+                (!request.memoryPolicy ||
+                  !request.readCurrentPolicy ||
+                  !request.isLiveCaller ||
+                  request.memoryPolicy.grant === "none" ||
+                  (required.includes("memory:write") &&
+                    request.memoryPolicy.grant !== "read_write"))) ||
               (request.isLiveCaller && !(yield* request.isLiveCaller)) ||
               required.some((scope) => !resolved.grantedScopes?.includes(scope)) ||
               (request.readOnly && required.includes("memory:write"))
@@ -227,7 +234,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   ): Effect.fn.Return<McpInvocationContext.McpThreadInvocationScope | undefined> {
     const timestamp = yield* currentTimeMillis;
     const record = (yield* SynchronizedRef.get(state)).records.get(tokenHash);
-    if (record?.readCurrentPolicy) {
+    if (record?.readCurrentPolicy && record.memoryPolicy) {
       const current = yield* record.readCurrentPolicy();
       if (
         !current ||
@@ -281,7 +288,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         const record = Array.from(records.values()).find(
           (record) => record.scope.thread.providerSessionId === providerSessionId,
         );
-        if (!record?.readCurrentPolicy || !record.memoryPolicy) return undefined;
+        if (!record?.readCurrentPolicy || !record.memoryPolicy || !record.isLiveCaller)
+          return undefined;
         if ((yield* currentTimeMillis) - record.lastAliveAt > livenessWindowMs) return undefined;
         const current = yield* record.readCurrentPolicy();
         const latest = (yield* SynchronizedRef.get(state)).records.get(record.tokenHash);

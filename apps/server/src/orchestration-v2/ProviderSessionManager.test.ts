@@ -5027,3 +5027,148 @@ it.effect(
       );
     }).pipe(Effect.scoped),
 );
+
+it.effect.each(["new", "existing"] as const)(
+  "prepare admission survives %s open, replacement restores grants, provider mismatch denies",
+  (branch) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+
+        if (branch === "existing")
+          yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: "read_write",
+          dispatchScopes: ["memory:read"],
+          readOnly: true,
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: "read_write",
+        });
+        const readScope = () =>
+          Effect.gen(function* () {
+            const config = yield* configs.read(threadId);
+            const scope = yield* registry.resolve(
+              config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+            );
+            assert.isDefined(scope);
+            return scope!;
+          });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "synthetic memory turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+
+        const restricted = yield* readScope();
+        assert.equal(restricted.readOnly, true);
+        assert.equal(restricted.memoryPolicy?.grant, "read");
+        assert.equal(
+          (yield* MemoryToolkitFixture.call(
+            "memory_upsert",
+            MemoryToolkitFixture.upsert(),
+            restricted,
+          )).result.isError,
+          true,
+        );
+        for (const restriction of [
+          { dispatchScopes: ["memory:read"] as const, readOnly: false },
+          { dispatchScopes: ["memory:read", "memory:write"] as const, readOnly: true },
+        ]) {
+          yield* manager.prepareMcpSession!({
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            memoryGrantCeiling: "read_write",
+            ...restriction,
+          });
+          yield* manager.open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+            memoryGrantCeiling: "read_write",
+          });
+          assert.equal((yield* readScope()).memoryPolicy?.grant, "read");
+          assert.equal(
+            (yield* MemoryToolkitFixture.call(
+              "memory_upsert",
+              MemoryToolkitFixture.upsert(),
+              yield* readScope(),
+            )).result.isError,
+            true,
+          );
+        }
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "read_write");
+        assert.notEqual(
+          (yield* MemoryToolkitFixture.call(
+            "memory_upsert",
+            MemoryToolkitFixture.upsert(),
+            yield* readScope(),
+          )).result.isError,
+          true,
+        );
+        // A subsequent open without a fresh prepare cannot reuse the old admission.
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("different-provider"),
+          memoryGrantCeiling: null,
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            MemoryToolkitFixture.layer,
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);

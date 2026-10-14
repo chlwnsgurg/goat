@@ -890,3 +890,32 @@ it.effect("reads live scopes without a token and fences replacement, revocation 
     );
   }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
 );
+
+it.effect("next issuance prunes all expired live authority entries without reading them", () =>
+  Effect.gen(function* () {
+    const store = yield* SessionStore.SessionStore;
+    const expired = yield* Effect.forEach(
+      Array.from({ length: 40 }, (_, n) => n),
+      (n) =>
+        store.issue({
+          subject: `synthetic-expiry-${n}`,
+          scopes: ["memory:read"],
+          ttl: Duration.seconds(1),
+        }),
+    );
+    const retained = yield* store.issue({ scopes: ["memory:write"], ttl: Duration.minutes(1) });
+    yield* TestClock.adjust(Duration.seconds(1));
+    const next = yield* store.issue({ scopes: ["memory:read"] });
+    for (const session of expired)
+      expect((yield* store.readActiveScopes(session.sessionId).pipe(Effect.flip))._tag).toBe(
+        "UnknownSessionTokenError",
+      );
+    expect(yield* store.readActiveScopes(retained.sessionId)).toEqual(["memory:write"]);
+    expect(yield* store.readActiveScopes(next.sessionId)).toEqual(["memory:read"]);
+    yield* store.revokeAllExcept(next.sessionId);
+    expect((yield* store.readActiveScopes(retained.sessionId).pipe(Effect.flip))._tag).toBe(
+      "UnknownSessionTokenError",
+    );
+    expect(yield* store.readActiveScopes(next.sessionId)).toEqual(["memory:read"]);
+  }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
+);

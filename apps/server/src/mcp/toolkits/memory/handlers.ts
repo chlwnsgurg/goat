@@ -42,7 +42,7 @@ export const memoryError = (error: unknown): M.MemoryRpcError => {
       dimension: error.dimension,
       current: error.current,
       limit: error.limit,
-      reclaimable: 0,
+      reclaimable: "reclaimable" in error ? error.reclaimable : 0,
     };
     return isCapacity(capacity)
       ? new M.MemoryRpcError({ code: "capacity_exceeded", capacity })
@@ -85,6 +85,7 @@ export const invocationPermit = (requirement: MemoryAccess.MemoryAccessRequireme
 
 const decodeSearch = Schema.decodeUnknownEffect(M.MemorySearchInput);
 const decodeList = Schema.decodeUnknownEffect(M.MemoryListInput);
+const decodeReadSource = Schema.decodeUnknownEffect(M.MemoryReadSourceInput);
 const decodeRead = Schema.decodeUnknownEffect(M.MemoryReadInput);
 const decodeHistory = Schema.decodeUnknownEffect(M.MemoryHistoryInput);
 const decodeSyncStatus = Schema.decodeUnknownEffect(M.MemorySyncStatusInput);
@@ -109,6 +110,15 @@ const handlers = {
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
       return yield* service.read(yield* decodeRead(input), yield* invocationPermit("read"));
+    }).pipe(Effect.mapError(memoryError)),
+  ),
+  memory_read_source: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const service = yield* MemoryService.MemoryService;
+      return yield* service.readSource(
+        yield* decodeReadSource(input),
+        yield* invocationPermit("source"),
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_history: McpToolAccess.reads((input) =>

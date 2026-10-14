@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 // eslint-disable-next-line goat/no-raw-mcp-registration -- Test harness calls only toolkits registered through McpHttpServer.toolkitRegistration.
 import { McpSchema, McpServer } from "effect/ai";
 import migration from "../../../persistence/Migrations/070_Memory.ts";
+import searchMigration from "../../../persistence/Migrations/072_MemorySearchCounters.ts";
 import hubMigration from "../../../persistence/Migrations/071_MemoryHubSync.ts";
 import * as RepositoryResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
@@ -27,19 +28,21 @@ export const memoryId = M.MemoryId.make(id(2));
 const identity = Layer.succeed(Environment.ServerEnvironmentIdentity, {
   getEnvironmentId: Effect.succeed(M.EnvironmentId.make("fixture-memory-mcp")),
 });
-const database = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-);
+const database = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
-export const core = Service.layer.pipe(
-  Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(storage))),
-  Layer.provide(identity),
-  Layer.provide(
-    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
-      resolve: () => Effect.succeed(null),
-    }),
-  ),
-);
+const makeCore = (serviceLayer: typeof Service.layer) =>
+  serviceLayer.pipe(
+    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(storage))),
+    Layer.provide(identity),
+    Layer.provide(
+      Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+        resolve: () => Effect.succeed(null),
+      }),
+    ),
+  );
+export const core = makeCore(Service.layer);
 const settings = Settings.layerTest({}, "memoryHub");
 const admin = Layer.effect(Hub.MemoryHubAdministrator, Hub.makeAdministrator).pipe(
   Layer.provideMerge(storage),
@@ -67,16 +70,21 @@ const sync = Layer.unwrap(
   }),
 ).pipe(Layer.provide(admin));
 
-export const layer = Layer.mergeAll(
-  McpHttpServer.layerMemoryToolkit,
-  McpHttpServer.layerMemoryAdministrationToolkit,
-).pipe(
-  Layer.provideMerge(core),
-  Layer.provideMerge(sync),
-  Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
-  Layer.provide(NodeServices.layer),
-);
+const makeLayer = (serviceCore: typeof core) =>
+  Layer.mergeAll(
+    McpHttpServer.layerMemoryToolkit,
+    McpHttpServer.layerMemoryAdministrationToolkit,
+  ).pipe(
+    Layer.provideMerge(serviceCore),
+    Layer.provideMerge(sync),
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+    Layer.provide(NodeServices.layer),
+  );
+export const layer = makeLayer(core);
+export const layerWithSourceReadAuthority = (
+  authority: Service.MemorySourceReadAuthority["readSource"],
+) => makeLayer(makeCore(Service.layerWithSourceReadAuthority(authority)));
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
   clientCapabilities: {},

@@ -799,7 +799,11 @@ export const make = Effect.gen(function* () {
         });
       }
       yield* Ref.update(activeScopes, (current) =>
-        new Map(current).set(sessionId, { scopes: claims.scopes, expiresAt }),
+        new Map(
+          Array.from(current).filter(
+            ([, record]) => record.expiresAt.epochMilliseconds > issuedAt.epochMilliseconds,
+          ),
+        ).set(sessionId, { scopes: claims.scopes, expiresAt }),
       );
       yield* emitUpsert(
         toAuthClientSession({

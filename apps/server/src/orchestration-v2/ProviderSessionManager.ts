@@ -181,6 +181,8 @@ export interface ProviderSessionManagerV2Shape {
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | null;
+    readonly readOnly?: boolean;
+    readonly dispatchScopes?: ReadonlyArray<AuthEnvironmentScope>;
     readonly resumeFromSession?: OrchestrationV2ProviderSession;
     readonly initialNativeThreadId?: string;
     readonly initialProviderItemIdentityVersion?: 2;
@@ -389,6 +391,9 @@ export const layerWithOptions = (
         : undefined;
       const credentialRotations = yield* PubSub.unbounded<McpCredentialRotation>();
       const memoryPrepareInputs = new Map<ThreadId, ProviderMemoryPrepareInput>();
+      // Only an explicit admission may seed the following open. Rotation/reuse
+      // metadata alone must not authorize a different admission or provider.
+      const pendingMemoryAdmissions = new Map<ThreadId, ProviderMemoryPrepareInput>();
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
       const eventSink = yield* EventSink.EventSinkV2;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -508,7 +513,7 @@ export const layerWithOptions = (
        */
       const prepareMcpSession = (
         input: ProviderMemoryPrepareInput,
-        reusePreparedInput = false,
+        reusePreparedInput: boolean | "open" = false,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
@@ -518,9 +523,16 @@ export const layerWithOptions = (
               input.threadId,
               Effect.gen(function* () {
                 const previousInput = memoryPrepareInputs.get(input.threadId);
-                const preparedInput = reusePreparedInput
-                  ? (previousInput ?? input)
-                  : { ...input, readOnly: input.readOnly ?? previousInput?.readOnly ?? false };
+                const pending = pendingMemoryAdmissions.get(input.threadId);
+                const admitted = reusePreparedInput === "open" ? pending : previousInput;
+                const preparedInput =
+                  reusePreparedInput && admitted?.providerInstanceId === input.providerInstanceId
+                    ? {
+                        ...admitted,
+                        readOnly: admitted.readOnly === true || input.readOnly === true,
+                      }
+                    : { ...input, readOnly: input.readOnly === true };
+                if (reusePreparedInput === "open") pendingMemoryAdmissions.delete(input.threadId);
                 const { threadId, providerInstanceId } = preparedInput;
                 memoryPrepareInputs.set(threadId, preparedInput);
                 const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
@@ -681,7 +693,12 @@ export const layerWithOptions = (
         mcpCredentialId === undefined
           ? mcpSessionRegistry.revokeThread(threadId).pipe(
               Effect.tap(() => mcpSessions.clear(threadId)),
-              Effect.tap(() => Effect.sync(() => memoryPrepareInputs.delete(threadId))),
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  memoryPrepareInputs.delete(threadId);
+                  pendingMemoryAdmissions.delete(threadId);
+                }),
+              ),
             )
           : mcpSessionRegistry.revokeProviderSession(mcpCredentialId).pipe(
               Effect.tap(() =>
@@ -689,6 +706,7 @@ export const layerWithOptions = (
                   if ((yield* mcpSessions.read(threadId))?.providerSessionId === mcpCredentialId) {
                     yield* mcpSessions.clear(threadId);
                     memoryPrepareInputs.delete(threadId);
+                    pendingMemoryAdmissions.delete(threadId);
                   }
                 }),
               ),
@@ -2229,6 +2247,7 @@ export const layerWithOptions = (
         prepareMcpSession: (input) =>
           Effect.gen(function* () {
             const prepared = yield* prepareMcpSession(input);
+            pendingMemoryAdmissions.set(input.threadId, { ...input });
             if (prepared.mcpCredentialId)
               dropMcpCredentialReservation(input.threadId, prepared.mcpCredentialId);
           }),
@@ -2263,19 +2282,26 @@ export const layerWithOptions = (
                 }
                 // Joining a shared session is a new session for this thread.
                 if (!attached) yield* agentScope.clear(input.threadId);
-                const prepared = yield* prepareMcpSession({
-                  threadId: input.threadId,
-                  providerInstanceId: existing.runtime.instanceId,
-                  ...(input.memoryGrantCeiling === undefined
-                    ? {}
-                    : { memoryGrantCeiling: input.memoryGrantCeiling }),
-                  readOnly:
-                    input.runtimePolicy.sandboxPolicy === "read-only" ||
-                    (typeof input.runtimePolicy.sandboxPolicy === "object" &&
-                      input.runtimePolicy.sandboxPolicy !== null &&
-                      "type" in input.runtimePolicy.sandboxPolicy &&
-                      input.runtimePolicy.sandboxPolicy.type === "readOnly"),
-                });
+                const prepared = yield* prepareMcpSession(
+                  {
+                    threadId: input.threadId,
+                    providerInstanceId: existing.runtime.instanceId,
+                    ...(input.memoryGrantCeiling === undefined
+                      ? {}
+                      : { memoryGrantCeiling: input.memoryGrantCeiling }),
+                    ...(input.dispatchScopes === undefined
+                      ? {}
+                      : { dispatchScopes: input.dispatchScopes }),
+                    readOnly:
+                      input.readOnly === true ||
+                      input.runtimePolicy.sandboxPolicy === "read-only" ||
+                      (typeof input.runtimePolicy.sandboxPolicy === "object" &&
+                        input.runtimePolicy.sandboxPolicy !== null &&
+                        "type" in input.runtimePolicy.sandboxPolicy &&
+                        input.runtimePolicy.sandboxPolicy.type === "readOnly"),
+                  },
+                  "open",
+                );
                 if (prepared.mcpCredentialId)
                   dropMcpCredentialReservation(input.threadId, prepared.mcpCredentialId);
                 yield* ensureThreadAttached({
@@ -2297,19 +2323,26 @@ export const layerWithOptions = (
                     }),
                 ),
               );
-              const prepared = yield* prepareMcpSession({
-                threadId: input.threadId,
-                providerInstanceId: input.modelSelection.instanceId,
-                ...(input.memoryGrantCeiling === undefined
-                  ? {}
-                  : { memoryGrantCeiling: input.memoryGrantCeiling }),
-                readOnly:
-                  input.runtimePolicy.sandboxPolicy === "read-only" ||
-                  (typeof input.runtimePolicy.sandboxPolicy === "object" &&
-                    input.runtimePolicy.sandboxPolicy !== null &&
-                    "type" in input.runtimePolicy.sandboxPolicy &&
-                    input.runtimePolicy.sandboxPolicy.type === "readOnly"),
-              });
+              const prepared = yield* prepareMcpSession(
+                {
+                  threadId: input.threadId,
+                  providerInstanceId: input.modelSelection.instanceId,
+                  ...(input.memoryGrantCeiling === undefined
+                    ? {}
+                    : { memoryGrantCeiling: input.memoryGrantCeiling }),
+                  ...(input.dispatchScopes === undefined
+                    ? {}
+                    : { dispatchScopes: input.dispatchScopes }),
+                  readOnly:
+                    input.readOnly === true ||
+                    input.runtimePolicy.sandboxPolicy === "read-only" ||
+                    (typeof input.runtimePolicy.sandboxPolicy === "object" &&
+                      input.runtimePolicy.sandboxPolicy !== null &&
+                      "type" in input.runtimePolicy.sandboxPolicy &&
+                      input.runtimePolicy.sandboxPolicy.type === "readOnly"),
+                },
+                "open",
+              );
               const mcpCredentialId = prepared.mcpCredentialId;
               // The reservation from prepare protects the credential (which
               // eager adapters bake into the provider process during
