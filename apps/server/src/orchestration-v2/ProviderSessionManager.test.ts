@@ -1,3 +1,4 @@
+import * as MemoryToolkitFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
 import * as NetAddress from "effect/net/NetAddress";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -4836,4 +4837,193 @@ it.effect.each([false, true])(
         ),
       );
     }),
+);
+
+it.effect(
+  "managed settings produce grants, task ceilings bound reuse, live runs and epoch rotations fence toolkit calls",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const changes = yield* Queue.unbounded<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.runForEach((change) => Queue.offer(changes, change)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        const threadId = ThreadId.make("thread-memory-policy");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: null,
+        });
+        yield* Queue.take(changes);
+        const readScope = () =>
+          Effect.gen(function* () {
+            const config = yield* configs.read(threadId);
+            assert.isDefined(config);
+            const scope = yield* registry.resolve(
+              config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+            );
+            assert.isDefined(scope);
+            return scope!;
+          });
+        const initial = yield* readScope();
+        assert.deepEqual(initial.grantedScopes, [
+          "memory:read",
+          "memory:write",
+          "orchestration:read",
+        ]);
+        assert.equal(
+          (yield* initial.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag,
+          "EnvironmentAuthorizationError",
+        );
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "synthetic memory turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.notEqual(
+          (yield* MemoryToolkitFixture.call(
+            "memory_upsert",
+            MemoryToolkitFixture.upsert(),
+            yield* readScope(),
+          )).result.isError,
+          true,
+        );
+        assert.notEqual(
+          (yield* MemoryToolkitFixture.call(
+            "memory_list",
+            { memorySpaceId: MemoryToolkitFixture.space, includeQuarantined: false },
+            yield* readScope(),
+          )).result.isError,
+          true,
+        );
+        for (const [ceiling, grant] of [
+          ["none", "none"],
+          ["read", "read"],
+          ["read_write", "read_write"],
+          [undefined, "none"],
+          [null, "read_write"],
+        ] as const) {
+          const oldConfig = yield* configs.read(threadId);
+          yield* manager.prepareMcpSession!({
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            ...(ceiling === undefined ? {} : { memoryGrantCeiling: ceiling }),
+          });
+          const admitted = yield* readScope();
+          assert.equal(admitted.memoryPolicy?.grant, grant);
+          assert.equal(admitted.grantedScopes?.includes("orchestration:read"), true);
+          if (grant !== "read_write")
+            assert.equal(
+              (yield* admitted.reauthorize!(["memory:write"]).pipe(Effect.flip))._tag,
+              "EnvironmentAuthorizationError",
+            );
+          if ((yield* configs.read(threadId))?.providerSessionId !== oldConfig?.providerSessionId)
+            assert.isUndefined(
+              yield* registry.resolve(oldConfig!.authorizationHeader.replace(/^Bearer\s+/, "")),
+            );
+        }
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+          readOnly: true,
+        });
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "read");
+        assert.equal(
+          (yield* MemoryToolkitFixture.call(
+            "memory_upsert",
+            MemoryToolkitFixture.upsert(40),
+            yield* readScope(),
+          )).result.isError,
+          true,
+        );
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+          readOnly: false,
+        });
+        yield* Queue.clear(changes);
+        const old = yield* configs.read(threadId);
+        const offReady = yield* Deferred.make<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.filter((event) => event.memoryPolicy.grant === "none"),
+          Stream.take(1),
+          Stream.runForEach((event) => Deferred.succeed(offReady, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* settings.updateSettings({ enableAgentMemoryAccess: false });
+        assert.isUndefined(
+          yield* registry.resolve(old!.authorizationHeader.replace(/^Bearer\s+/, "")),
+        );
+        const off = yield* Deferred.await(offReady);
+        assert.deepEqual(off.grantedScopes, ["orchestration:read"]);
+        assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
+        const offConfig = yield* configs.read(threadId);
+        const onReady = yield* Deferred.make<ProviderSessionManager.McpCredentialRotation>();
+        yield* manager.mcpCredentialRotations!.pipe(
+          Stream.filter((event) => event.memoryPolicy.grant === "read_write"),
+          Stream.take(1),
+          Stream.runForEach((event) => Deferred.succeed(onReady, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* settings.updateSettings({ enableAgentMemoryAccess: true });
+        assert.isUndefined(
+          yield* registry.resolve(offConfig!.authorizationHeader.replace(/^Bearer\s+/, "")),
+        );
+        const on = yield* Deferred.await(onReady);
+        assert.deepEqual(on.grantedScopes, ["memory:read", "memory:write", "orchestration:read"]);
+        const admitted = yield* readScope();
+        assert.isDefined(yield* registry.currentMemoryPolicy!(admitted.thread.providerSessionId));
+        yield* admitted.reauthorize!(["memory:read"]);
+        yield* manager.close(providerSessionId);
+        assert.equal(
+          (yield* admitted.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag,
+          "EnvironmentAuthorizationError",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            MemoryToolkitFixture.layer,
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
 );

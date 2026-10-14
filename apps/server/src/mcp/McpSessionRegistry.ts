@@ -1,4 +1,10 @@
-import { ProviderInstanceId, ThreadId } from "@goat/contracts";
+import {
+  EnvironmentAuthorizationError,
+  type AuthEnvironmentScope,
+  type MemoryTaskGrantCeiling,
+  ProviderInstanceId,
+  ThreadId,
+} from "@goat/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -12,7 +18,19 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
 
+export interface McpMemoryPolicy {
+  readonly grant: MemoryTaskGrantCeiling;
+  readonly policyEpoch: number;
+}
+
 export interface McpCredentialRequest {
+  readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
+  readonly memoryPolicy?: McpMemoryPolicy;
+  /** Reads only committed authority; never SQL or a settings lock. */
+  readonly readCurrentPolicy?: () => Effect.Effect<McpMemoryPolicy | undefined>;
+  readonly isLiveCaller?: Effect.Effect<boolean>;
+  readonly readOnly?: boolean;
+
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
   /**
@@ -25,7 +43,9 @@ export interface McpCredentialRequest {
 }
 
 export interface McpIssuedCredential {
-  readonly config: McpProviderSession.McpProviderSessionConfig;
+  readonly config: McpProviderSession.McpProviderSessionConfig & {
+    readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
+  };
 }
 
 export interface McpSessionRegistryShape {
@@ -33,6 +53,10 @@ export interface McpSessionRegistryShape {
   readonly resolve: (
     rawToken: string,
   ) => Effect.Effect<McpInvocationContext.McpThreadInvocationScope | undefined>;
+  /** SQL-free snapshot policy for an issued credential; stale handles deny. */
+  readonly currentMemoryPolicy?: (
+    providerSessionId: string,
+  ) => Effect.Effect<McpMemoryPolicy | undefined>;
   /**
    * Records a sign of life for every credential bound to `threadId`. Provider
    * turns call this so that a session which is plainly alive keeps its
@@ -54,6 +78,9 @@ interface CredentialRecord {
   readonly tokenHash: string;
   readonly scope: McpInvocationContext.McpThreadInvocationScope;
   readonly lastAliveAt: number;
+  readonly memoryPolicy: McpMemoryPolicy | undefined;
+  readonly readCurrentPolicy: (() => Effect.Effect<McpMemoryPolicy | undefined>) | undefined;
+  readonly isLiveCaller: Effect.Effect<boolean> | undefined;
 }
 
 interface RegistryState {
@@ -130,6 +157,28 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
+        ...(request.grantedScopes === undefined
+          ? {}
+          : { grantedScopes: [...request.grantedScopes] }),
+        ...(request.readOnly === undefined ? {} : { readOnly: request.readOnly }),
+        ...(request.memoryPolicy === undefined ? {} : { memoryPolicy: request.memoryPolicy }),
+        reauthorize: (required) =>
+          Effect.gen(function* () {
+            const resolved = yield* resolveHash(tokenHash);
+            if (
+              !resolved ||
+              (request.isLiveCaller && !(yield* request.isLiveCaller)) ||
+              required.some((scope) => !resolved.grantedScopes?.includes(scope)) ||
+              (request.readOnly && required.includes("memory:write"))
+            )
+              return yield* new EnvironmentAuthorizationError({
+                message: "The provider credential no longer grants this operation.",
+                requiredScope:
+                  required.find((scope) => !resolved?.grantedScopes?.includes(scope)) ??
+                  required[0] ??
+                  "memory:read",
+              });
+          }),
         requestNamespace: providerSessionId,
         thread: {
           threadId: ThreadId.make(request.threadId),
@@ -147,12 +196,20 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
         const next = new Map(pruneDead(records, issuedAt));
-        next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt });
+        next.set(tokenHash, {
+          tokenHash,
+          scope,
+          lastAliveAt: issuedAt,
+          memoryPolicy: request.memoryPolicy,
+          readCurrentPolicy: request.readCurrentPolicy,
+          isLiveCaller: request.isLiveCaller,
+        });
         return { records: next };
       });
       return {
         config: {
           environmentId,
+          grantedScopes: [...(request.grantedScopes ?? [])],
           threadId: scope.thread.threadId,
           providerSessionId,
           providerInstanceId: scope.thread.providerInstanceId,
@@ -165,21 +222,34 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     },
   );
 
-  const resolve: McpSessionRegistryShape["resolve"] = Effect.fn("McpSessionRegistry.resolve")(
-    function* (rawToken) {
-      if (rawToken.length === 0) return undefined;
-      const tokenHash = yield* hashToken(rawToken);
-      const timestamp = yield* currentTimeMillis;
-      return yield* SynchronizedRef.modify(state, ({ records }) => {
-        const current = pruneDead(records, timestamp);
-        const record = current.get(tokenHash);
-        if (!record) return [undefined, { records: current }] as const;
-        const next = new Map(current);
-        next.set(tokenHash, { ...record, lastAliveAt: timestamp });
-        return [record.scope, { records: next }] as const;
-      });
-    },
-  );
+  const resolveHash = Effect.fn("McpSessionRegistry.resolveHash")(function* (
+    tokenHash: string,
+  ): Effect.fn.Return<McpInvocationContext.McpThreadInvocationScope | undefined> {
+    const timestamp = yield* currentTimeMillis;
+    const record = (yield* SynchronizedRef.get(state)).records.get(tokenHash);
+    if (record?.readCurrentPolicy) {
+      const current = yield* record.readCurrentPolicy();
+      if (
+        !current ||
+        current.policyEpoch !== record.memoryPolicy?.policyEpoch ||
+        current.grant !== record.memoryPolicy.grant
+      )
+        return undefined;
+    }
+    return yield* SynchronizedRef.modify(state, ({ records }) => {
+      const current = pruneDead(records, timestamp);
+      const record = current.get(tokenHash);
+      if (!record) return [undefined, { records: current }] as const;
+      const next = new Map(current);
+      next.set(tokenHash, { ...record, lastAliveAt: timestamp });
+      return [record.scope, { records: next }] as const;
+    });
+  });
+
+  const resolve: McpSessionRegistryShape["resolve"] = (rawToken) =>
+    rawToken.length === 0
+      ? Effect.undefined
+      : hashToken(rawToken).pipe(Effect.flatMap(resolveHash));
 
   const touch: McpSessionRegistryShape["touch"] = Effect.fn("McpSessionRegistry.touch")(
     function* (threadId) {
@@ -205,6 +275,22 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   return McpSessionRegistry.of({
     issue,
     resolve,
+    currentMemoryPolicy: (providerSessionId) =>
+      Effect.gen(function* () {
+        const records = (yield* SynchronizedRef.get(state)).records;
+        const record = Array.from(records.values()).find(
+          (record) => record.scope.thread.providerSessionId === providerSessionId,
+        );
+        if (!record?.readCurrentPolicy || !record.memoryPolicy) return undefined;
+        if ((yield* currentTimeMillis) - record.lastAliveAt > livenessWindowMs) return undefined;
+        const current = yield* record.readCurrentPolicy();
+        const latest = (yield* SynchronizedRef.get(state)).records.get(record.tokenHash);
+        return latest === record &&
+          current?.policyEpoch === record.memoryPolicy.policyEpoch &&
+          current.grant === record.memoryPolicy.grant
+          ? current
+          : undefined;
+      }),
     touch,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
       function* (providerSessionId) {

@@ -180,3 +180,47 @@ it.effect("does not keep credentials of other threads alive", () =>
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
 );
+
+it.effect(
+  "live authority denies epoch drift, unready policy, ended caller and revoked snapshot handles",
+  () =>
+    Effect.gen(function* () {
+      const registry = yield* makeRegistry(() => 1000);
+      let current: McpSessionRegistry.McpMemoryPolicy | undefined = {
+        grant: "read_write",
+        policyEpoch: 1,
+      };
+      let live = false;
+      const issue = () =>
+        registry.issue({
+          threadId: ThreadId.make("thread-memory-epochs"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          grantedScopes: ["memory:read", "memory:write"],
+          memoryPolicy: current!,
+          readCurrentPolicy: () => Effect.sync(() => current),
+          isLiveCaller: Effect.sync(() => live),
+        });
+      const first = yield* issue();
+      const token = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      const scope = yield* registry.resolve(token);
+      expect(scope).toBeDefined();
+      expect((yield* scope!.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag).toBe(
+        "EnvironmentAuthorizationError",
+      );
+      live = true;
+      yield* scope!.reauthorize!(["memory:read"]);
+      current = undefined;
+      expect(yield* registry.resolve(token)).toBeUndefined();
+      expect(yield* registry.currentMemoryPolicy!(first.config.providerSessionId)).toBeUndefined();
+      current = { grant: "read_write", policyEpoch: 4 };
+      // The intermediate stream epochs need not be observed: the latest Ref is authoritative.
+      expect(yield* registry.resolve(token)).toBeUndefined();
+      expect((yield* scope!.reauthorize!(["memory:write"]).pipe(Effect.flip))._tag).toBe(
+        "EnvironmentAuthorizationError",
+      );
+      const last = yield* issue();
+      expect(yield* registry.currentMemoryPolicy!(last.config.providerSessionId)).toEqual(current);
+      yield* registry.revokeProviderSession(last.config.providerSessionId);
+      expect(yield* registry.currentMemoryPolicy!(last.config.providerSessionId)).toBeUndefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

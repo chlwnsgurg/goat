@@ -3,6 +3,8 @@ import * as KeyedLock from "@goat/shared/KeyedLock";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import {
   ModelSelection,
+  type AuthEnvironmentScope,
+  type MemoryTaskGrantCeiling,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -25,6 +27,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -43,6 +46,7 @@ import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
+import * as MemoryAccess from "../memory/MemoryAccess.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
@@ -149,13 +153,34 @@ export const ProviderSessionManagerV2Error = Schema.Union([
 ]);
 export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error.Type;
 
+export interface ProviderMemoryPrepareInput {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  /** Explicit null is ordinary; missing legacy task authority is none. */
+  readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | null;
+  readonly readOnly?: boolean;
+  readonly dispatchScopes?: ReadonlyArray<AuthEnvironmentScope>;
+}
+
+export interface McpCredentialRotation {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerSessionId: string;
+  readonly grantedScopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly memoryPolicy: McpSessionRegistry.McpMemoryPolicy;
+}
+
 export interface ProviderSessionManagerV2Shape {
+  readonly prepareMcpSession?: (input: ProviderMemoryPrepareInput) => Effect.Effect<void>;
+  readonly mcpCredentialRotations?: Stream.Stream<McpCredentialRotation>;
+
   readonly shutdown: Effect.Effect<void>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+    readonly memoryGrantCeiling?: MemoryTaskGrantCeiling | null;
     readonly resumeFromSession?: OrchestrationV2ProviderSession;
     readonly initialNativeThreadId?: string;
     readonly initialProviderItemIdentityVersion?: 2;
@@ -225,6 +250,7 @@ interface LiveSessionEntry {
    * only clear itself and the session is idle when the set is empty.
    */
   readonly busyTurns: ReadonlySet<string>;
+  readonly busyTurnByThread: ReadonlyMap<ThreadId, string>;
   readonly lastActivityAtMs: number;
   readonly idleFiber: Fiber.Fiber<void, never> | null;
   /** Set when idle release is deferred for pending background work; bounds total deferral. */
@@ -354,6 +380,15 @@ export const layerWithOptions = (
        * reverse costs an agent one toolset and is visible immediately (#7083).
        */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+      const memoryPolicy = yield* Effect.serviceOption(
+        ServerSettings.MemoryProviderCommittedPolicy,
+      );
+      // Acquire the subscription before any credential can be prepared.
+      const memoryRotations = Option.isSome(memoryPolicy)
+        ? yield* memoryPolicy.value.subscribeRotations
+        : undefined;
+      const credentialRotations = yield* PubSub.unbounded<McpCredentialRotation>();
+      const memoryPrepareInputs = new Map<ThreadId, ProviderMemoryPrepareInput>();
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
       const eventSink = yield* EventSink.EventSinkV2;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -472,16 +507,79 @@ export const layerWithOptions = (
        * their rotate steps and revoke each other's freshly minted credential.
        */
       const prepareMcpSession = (
-        threadId: ThreadId,
-        providerInstanceId: ProviderInstanceId,
+        input: ProviderMemoryPrepareInput,
+        reusePreparedInput = false,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
-              .clear(threadId)
+              .clear(input.threadId)
               .pipe(Effect.as<PreparedMcpCredential>({ mcpCredentialId: undefined, issued: false }))
           : mcpPrepareLock.withLock(
-              threadId,
+              input.threadId,
               Effect.gen(function* () {
+                const previousInput = memoryPrepareInputs.get(input.threadId);
+                const preparedInput = reusePreparedInput
+                  ? (previousInput ?? input)
+                  : { ...input, readOnly: input.readOnly ?? previousInput?.readOnly ?? false };
+                const { threadId, providerInstanceId } = preparedInput;
+                memoryPrepareInputs.set(threadId, preparedInput);
+                const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
+                const usableThread =
+                  Option.isSome(thread) &&
+                  thread.value.deletedAt === null &&
+                  thread.value.archivedAt === null &&
+                  thread.value.providerInstanceId === providerInstanceId;
+                const readOnly = preparedInput.readOnly === true;
+                const threadReadAllowed = usableThread;
+                const committed = Option.isSome(memoryPolicy)
+                  ? yield* memoryPolicy.value.read
+                  : { policyReady: false, enableAgentMemoryAccess: false, epoch: 0 };
+                const grant = MemoryAccess.effectiveMemoryGrant({
+                  ...committed,
+                  readOnly,
+                  memoryGrantCeiling: usableThread ? preparedInput.memoryGrantCeiling : "none",
+                  ...(preparedInput.dispatchScopes === undefined
+                    ? {}
+                    : { dispatchScopes: preparedInput.dispatchScopes }),
+                });
+                const issuedPolicy = { grant, policyEpoch: committed.epoch };
+                const grantedScopes: ReadonlyArray<AuthEnvironmentScope> = [
+                  ...(grant === "none" ? [] : ["memory:read" as const]),
+                  ...(grant === "read_write" ? ["memory:write" as const] : []),
+                  ...(threadReadAllowed ? ["orchestration:read" as const] : []),
+                ];
+                const readCurrentPolicy = () =>
+                  Effect.gen(function* () {
+                    if (Option.isNone(memoryPolicy)) return undefined;
+                    const current = yield* memoryPolicy.value.read;
+                    if (!current.policyReady) return undefined;
+                    return {
+                      policyEpoch: current.epoch,
+                      grant: MemoryAccess.effectiveMemoryGrant({
+                        ...current,
+                        readOnly,
+                        memoryGrantCeiling: usableThread
+                          ? preparedInput.memoryGrantCeiling
+                          : "none",
+                        ...(preparedInput.dispatchScopes === undefined
+                          ? {}
+                          : { dispatchScopes: preparedInput.dispatchScopes }),
+                      }),
+                    };
+                  });
+                let issuedCredentialId: string | undefined;
+                const isLiveCaller = Ref.get(sessions).pipe(
+                  Effect.map((current) =>
+                    Array.from(current.values()).some(
+                      (entry) =>
+                        entry.runtime.instanceId === providerInstanceId &&
+                        entry.attachedThreadIds.has(threadId) &&
+                        entry.mcpCredentialIdByThread.get(threadId) === issuedCredentialId &&
+                        entry.busyTurnByThread.has(threadId) &&
+                        entry.busyTurns.has(entry.busyTurnByThread.get(threadId)!),
+                    ),
+                  ),
+                );
                 // Reuse a still-valid credential for this thread instead of
                 // rotating: long-lived provider processes (codex app-server)
                 // build their MCP client once per conversation and keep using
@@ -495,6 +593,7 @@ export const layerWithOptions = (
                 >(["orchestration", "worktree", "pull-requests"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
+                if (grant !== "none") capabilities.add("memory");
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before the async resolve so a release cannot
@@ -519,7 +618,11 @@ export const layerWithOptions = (
                     // A flipped browser-access setting must not survive through
                     // credential reuse: rotate so the new scope reflects it.
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
-                    resolved.capabilities.has("device") === deviceToolsAvailable
+                    resolved.capabilities.has("device") === deviceToolsAvailable &&
+                    resolved.readOnly === readOnly &&
+                    resolved.grantedScopes?.join(",") === grantedScopes.join(",") &&
+                    resolved.memoryPolicy?.grant === grant &&
+                    resolved.memoryPolicy.policyEpoch === committed.epoch
                   ) {
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
@@ -531,8 +634,39 @@ export const layerWithOptions = (
                   providerInstanceId,
                   browserToolsAvailable,
                   capabilities,
+                  grantedScopes,
+                  memoryPolicy: issuedPolicy,
+                  ...(Option.isNone(memoryPolicy) ? {} : { readCurrentPolicy }),
+                  isLiveCaller,
+                  readOnly,
                 });
+                issuedCredentialId = credential.config.providerSessionId;
                 yield* mcpSessions.set(credential.config);
+                yield* Ref.update(
+                  sessions,
+                  (current) =>
+                    new Map(
+                      Array.from(current, ([key, entry]) => [
+                        key,
+                        entry.attachedThreadIds.has(threadId)
+                          ? {
+                              ...entry,
+                              mcpCredentialIdByThread: new Map(entry.mcpCredentialIdByThread).set(
+                                threadId,
+                                credential.config.providerSessionId,
+                              ),
+                            }
+                          : entry,
+                      ]),
+                    ),
+                );
+                yield* PubSub.publish(credentialRotations, {
+                  threadId,
+                  providerInstanceId,
+                  providerSessionId: credential.config.providerSessionId,
+                  grantedScopes,
+                  memoryPolicy: issuedPolicy,
+                });
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
                 return { mcpCredentialId: credential.config.providerSessionId, issued: true };
               }),
@@ -1330,7 +1464,10 @@ export const layerWithOptions = (
               Effect.uninterruptible,
             );
             if (attached !== undefined) {
-              const prepared = yield* prepareMcpSession(input.threadId, input.providerInstanceId);
+              const prepared = yield* prepareMcpSession(
+                { threadId: input.threadId, providerInstanceId: input.providerInstanceId },
+                true,
+              );
               preparedForCleanup = prepared;
               if (prepared.mcpCredentialId !== undefined) {
                 const mcpCredentialId = prepared.mcpCredentialId;
@@ -1406,7 +1543,11 @@ export const layerWithOptions = (
           );
         });
 
-      const markBusy = (providerSessionId: ProviderSessionId, turnKey: string) =>
+      const markBusy = (
+        providerSessionId: ProviderSessionId,
+        turnKey: string,
+        threadId: ThreadId,
+      ) =>
         withActivityError(
           providerSessionId,
           Effect.gen(function* () {
@@ -1421,6 +1562,7 @@ export const layerWithOptions = (
               updated.set(key, {
                 ...entry,
                 busyTurns: new Set(entry.busyTurns).add(turnKey),
+                busyTurnByThread: new Map(entry.busyTurnByThread).set(threadId, turnKey),
                 idleFiber: null,
                 lastActivityAtMs: now,
                 pinnedSinceMs: null,
@@ -1455,6 +1597,11 @@ export const layerWithOptions = (
               updated.set(key, {
                 ...entry,
                 busyTurns,
+                busyTurnByThread: new Map(
+                  Array.from(entry.busyTurnByThread).filter(
+                    ([, key]) => key !== busyTurnKey(providerThreadId, runOrdinal),
+                  ),
+                ),
                 lastActivityAtMs: now,
               });
               return updated;
@@ -1740,6 +1887,7 @@ export const layerWithOptions = (
                   markBusy(
                     providerSessionId,
                     busyTurnKey(input.providerThread.id, input.runOrdinal),
+                    input.threadId,
                   ),
                 ),
                 () => operation,
@@ -2054,7 +2202,34 @@ export const layerWithOptions = (
         ),
       );
 
+      if (memoryRotations !== undefined) {
+        yield* memoryRotations.pipe(
+          Stream.runForEach(() =>
+            Effect.forEach(
+              Array.from(memoryPrepareInputs.keys()),
+              (threadId) =>
+                Effect.gen(function* () {
+                  const input = memoryPrepareInputs.get(threadId);
+                  if (!input || (yield* mcpSessions.read(threadId)) === undefined) return;
+                  const prepared = yield* prepareMcpSession(input, true);
+                  if (prepared.mcpCredentialId)
+                    dropMcpCredentialReservation(threadId, prepared.mcpCredentialId);
+                }),
+              { discard: true },
+            ),
+          ),
+          Effect.forkScoped,
+        );
+      }
+
       return ProviderSessionManagerV2.of({
+        mcpCredentialRotations: Stream.fromPubSub(credentialRotations),
+        prepareMcpSession: (input) =>
+          Effect.gen(function* () {
+            const prepared = yield* prepareMcpSession(input);
+            if (prepared.mcpCredentialId)
+              dropMcpCredentialReservation(input.threadId, prepared.mcpCredentialId);
+          }),
         shutdown,
         open: (input) =>
           sessionOpen.withLock(
@@ -2086,6 +2261,21 @@ export const layerWithOptions = (
                 }
                 // Joining a shared session is a new session for this thread.
                 if (!attached) yield* agentScope.clear(input.threadId);
+                const prepared = yield* prepareMcpSession({
+                  threadId: input.threadId,
+                  providerInstanceId: existing.runtime.instanceId,
+                  ...(input.memoryGrantCeiling === undefined
+                    ? {}
+                    : { memoryGrantCeiling: input.memoryGrantCeiling }),
+                  readOnly:
+                    input.runtimePolicy.sandboxPolicy === "read-only" ||
+                    (typeof input.runtimePolicy.sandboxPolicy === "object" &&
+                      input.runtimePolicy.sandboxPolicy !== null &&
+                      "type" in input.runtimePolicy.sandboxPolicy &&
+                      input.runtimePolicy.sandboxPolicy.type === "readOnly"),
+                });
+                if (prepared.mcpCredentialId)
+                  dropMcpCredentialReservation(input.threadId, prepared.mcpCredentialId);
                 yield* ensureThreadAttached({
                   providerSessionId: input.providerSessionId,
                   threadId: input.threadId,
@@ -2105,10 +2295,19 @@ export const layerWithOptions = (
                     }),
                 ),
               );
-              const prepared = yield* prepareMcpSession(
-                input.threadId,
-                input.modelSelection.instanceId,
-              );
+              const prepared = yield* prepareMcpSession({
+                threadId: input.threadId,
+                providerInstanceId: input.modelSelection.instanceId,
+                ...(input.memoryGrantCeiling === undefined
+                  ? {}
+                  : { memoryGrantCeiling: input.memoryGrantCeiling }),
+                readOnly:
+                  input.runtimePolicy.sandboxPolicy === "read-only" ||
+                  (typeof input.runtimePolicy.sandboxPolicy === "object" &&
+                    input.runtimePolicy.sandboxPolicy !== null &&
+                    "type" in input.runtimePolicy.sandboxPolicy &&
+                    input.runtimePolicy.sandboxPolicy.type === "readOnly"),
+              });
               const mcpCredentialId = prepared.mcpCredentialId;
               // The reservation from prepare protects the credential (which
               // eager adapters bake into the provider process during
@@ -2205,6 +2404,7 @@ export const layerWithOptions = (
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),
+                busyTurnByThread: new Map(),
                 lastActivityAtMs: now,
                 idleFiber: null,
                 pinnedSinceMs: null,
