@@ -144,6 +144,7 @@ const make = Effect.gen(function* () {
   const coordinator = yield* Semaphore.make(1);
   let cycle: Fiber.Fiber<void, Error> | null = null;
   let pendingSweep = false;
+  let pendingSync = false;
   let cancelling = false;
   let statusEpoch: number | null = null;
   const registryMutex = yield* Semaphore.make(1);
@@ -1103,7 +1104,7 @@ const make = Effect.gen(function* () {
     }),
   );
   // A single tracked cycle includes manual sync and registry sweeps. Waiters coalesce;
-  // completion hints request one additional sweep, never an accumulating work queue.
+  // A pending full sync outranks a completion sweep; both are single coalesced hints.
   const requestCycle = (effect: Effect.Effect<void, Error>, sweepOnly = false, wait = true) =>
     Effect.gen(function* () {
       const active = yield* coordinator.withPermit(
@@ -1111,17 +1112,24 @@ const make = Effect.gen(function* () {
           if (stopped || cancelling) return null;
           if (cycle) {
             if (sweepOnly) pendingSweep = true;
+            else pendingSync = true;
             return cycle;
           }
           const epoch = (yield* readSettings).memoryHubVersion;
           resetStatus(epoch);
           cycle = yield* Effect.gen(function* () {
             yield* effect;
-            while (pendingSweep) {
+            while (pendingSync || pendingSweep) {
               if (stopped || cancelling) break;
-              pendingSweep = false;
               yield* ensureEpoch(epoch);
-              yield* sweep;
+              if (pendingSync) {
+                pendingSync = false;
+                pendingSweep = false;
+                yield* syncCycle;
+              } else {
+                pendingSweep = false;
+                yield* sweep;
+              }
             }
           }).pipe(
             Effect.tapError((e) => noteFailure(epoch, e)),
@@ -1146,6 +1154,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       cancelling = true;
       pendingSweep = false;
+      pendingSync = false;
       const active = cycle;
       // No sync/registry mutex is held while cancellation is requested. Cycle interruption
       // finishes any registration reservation first; matching release has a 15s bound.
