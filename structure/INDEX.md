@@ -33,14 +33,14 @@ Wire schemas and the libraries web, desktop, and mobile share.
 
 The process that commits orchestration, runs providers, and reaches other machines.
 
-| Doc                                                              | Scope                                                                                        |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| [`server.md`](server.md)                                         | Process entry, command commit, orchestration v2, checkpoints, providers, and source control. |
-| [`mcp-toolkits.md`](mcp-toolkits.md)                             | The GOAT MCP server, toolkit layout, and which tool names use which prefix.                  |
-| [`channels.md`](channels.md)                                     | The channel ledger, Slack and MCP ingress, and the GOAT Bot thread clients render.           |
-| [`scheduled-tasks.md`](scheduled-tasks.md)                       | Clock and webhook tasks that launch or send through orchestration services.                  |
-| [`ssh.md`](ssh.md)                                               | OpenSSH host discovery, the remote ~/.goat server, and agent browse and launch.              |
-| [`launch-and-remote-dispatch.md`](launch-and-remote-dispatch.md) | Wakes for a launched thread, and durable SSH dispatches that report back.                    |
+| Doc                                                              | Scope                                                                                                 |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| [`server.md`](server.md)                                         | Process entry, command commit, local/cloud orchestration, checkpoints, providers, and source control. |
+| [`mcp-toolkits.md`](mcp-toolkits.md)                             | The GOAT MCP server, toolkit layout, and which tool names use which prefix.                           |
+| [`channels.md`](channels.md)                                     | The channel ledger, Slack and MCP ingress, and the GOAT Bot thread clients render.                    |
+| [`scheduled-tasks.md`](scheduled-tasks.md)                       | Clock and webhook tasks that launch or send through orchestration services.                           |
+| [`ssh.md`](ssh.md)                                               | OpenSSH host discovery, the remote ~/.goat server, and agent browse and launch.                       |
+| [`launch-and-remote-dispatch.md`](launch-and-remote-dispatch.md) | Wakes for a launched thread, and durable SSH dispatches that report back.                             |
 
 ### Tier 4 — Clients
 

@@ -26,6 +26,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as EventSink from "./EventSink.ts";
+import { makeCloudResultEvents } from "./CloudResultEvents.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
@@ -41,6 +42,9 @@ import { sideChatNoteFor } from "./SideChatNote.ts";
 import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@goat/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderAdapters from "./ProviderAdapterRegistry.ts";
+import * as CloudSource from "./CloudTaskSourceService.ts";
+import { cloudTaskResultText, isCloudExecution } from "@goat/provider-core/server/cloudTask";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@goat/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -61,6 +65,7 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
 ) {}
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
+const isCloudTaskSourceError = Schema.is(CloudSource.CloudTaskSourceError);
 
 /** Claude refuses to replace a process running background work before it reads the prompt. */
 const refusedBeforePrompt = (error: unknown): boolean =>
@@ -77,6 +82,7 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
+    readonly reattach?: boolean;
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
@@ -113,6 +119,8 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const adapterRegistry = yield* Effect.serviceOption(ProviderAdapters.ProviderAdapterRegistryV2);
+    const cloudSources = yield* Effect.serviceOption(CloudSource.CloudTaskSourceService);
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -221,6 +229,7 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      readonly reattach?: boolean;
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
@@ -228,7 +237,8 @@ export const layer: Layer.Layer<
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
       }
-      if (run.status !== "starting") {
+      const expectedStartStatus = input.reattach === true ? "running" : "starting";
+      if (run.status !== expectedStartStatus) {
         // The effect is idempotent once the run has advanced or terminalized.
         return;
       }
@@ -241,6 +251,27 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
+      const persistedSession = projection.providerSessions.find(
+        (candidate) => candidate.id === providerThread?.providerSessionId,
+      );
+      const capabilities = Option.isSome(adapterRegistry)
+        ? yield* (yield* adapterRegistry.value.get(run.providerInstanceId)).getCapabilities()
+        : persistedSession?.capabilities;
+      const cloud = capabilities !== undefined && isCloudExecution(capabilities);
+      if (input.reattach === true && (!cloud || providerThread?.cloudTask === undefined)) {
+        return yield* new ProviderTurnStartError({
+          runId,
+          cause: "No persisted cloud task to attach.",
+        });
+      }
+      let cloudSource:
+        | {
+            source: import("@goat/contracts").OrchestrationV2CloudTask["source"];
+            localChangesExcluded: boolean;
+            localChangesIncluded?: boolean;
+            launchSource?: ProviderAdapter.ProviderAdapterV2CloudLaunchSource;
+          }
+        | undefined;
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
           handoff.status === "ready" &&
@@ -275,7 +306,7 @@ export const layer: Layer.Layer<
         providerThread === undefined ||
         providerThread.providerSessionId === null ||
         message === undefined ||
-        checkpointScope === undefined
+        (!cloud && checkpointScope === undefined)
       ) {
         return yield* new ProviderTurnStartError({
           runId,
@@ -367,7 +398,7 @@ export const layer: Layer.Layer<
             threadId: projection.thread.id,
             runId,
             activeAttemptId: attempt.id,
-            expectedStatus: "starting",
+            expectedStatus: expectedStartStatus,
             events,
           });
         },
@@ -458,8 +489,68 @@ export const layer: Layer.Layer<
           return;
         }
       }
+      const sourceResult = yield* Effect.result(
+        Effect.gen(function* () {
+          return cloud &&
+            input.reattach !== true &&
+            (providerThread.cloudTask === undefined || providerThread.nativeThreadRef === null)
+            ? yield* Effect.gen(function* () {
+                if (Option.isNone(cloudSources))
+                  return yield* new ProviderTurnStartError({
+                    runId,
+                    cause: "Cloud source preflight is unavailable.",
+                  });
+                const project = Option.getOrUndefined(
+                  yield* projects.getById(projection.thread.projectId),
+                );
+                if (!project)
+                  return yield* new ProviderTurnStartError({ runId, cause: "Project not found." });
+                return yield* cloudSources.value.resolve({
+                  cwd:
+                    capabilities?.sessions.sourceRestriction === "project-folder"
+                      ? project.workspaceRoot
+                      : (projection.thread.worktreePath ?? project.workspaceRoot),
+                  restriction: capabilities?.sessions.sourceRestriction ?? "published-ref",
+                  ...(projection.thread.branch === null
+                    ? {}
+                    : { branch: projection.thread.branch }),
+                });
+              })
+            : providerThread?.cloudTask === undefined
+              ? undefined
+              : {
+                  source: providerThread.cloudTask.source,
+                  localChangesExcluded: providerThread.cloudTask.localChangesExcluded,
+                  ...(providerThread.cloudTask.localChangesIncluded === undefined
+                    ? {}
+                    : { localChangesIncluded: providerThread.cloudTask.localChangesIncluded }),
+                };
+        }),
+      );
+      if (sourceResult._tag === "Failure") {
+        yield* settleRunBeforeStart({
+          signal: "cloud-source-preflight",
+          status: "failed",
+          now: yield* DateTime.now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Cloud source could not be verified",
+            failure: makeProviderFailure({
+              cause: sourceResult.failure,
+              message: isCloudTaskSourceError(sourceResult.failure)
+                ? sourceResult.failure.message
+                : "Cloud source preflight failed.",
+              class: "validation_error",
+            }),
+          },
+        });
+        return;
+      }
+      cloudSource = sourceResult.success;
       const { worktreePath, branch } = projection.thread;
-      if (worktreePath !== null && branch !== null) {
+      if (!cloud && worktreePath !== null && branch !== null) {
         // Worktree removal holds this lease while it checks and deletes the
         // checkout, so a turn that starts meanwhile waits and then recreates it.
         yield* withWorkspaceLease(
@@ -587,6 +678,7 @@ export const layer: Layer.Layer<
           });
         });
       if (sessionResult._tag === "Failure") {
+        if (input.reattach === true) return yield* sessionResult.failure;
         if (input.willRetry === true) return yield* sessionResult.failure;
         yield* settleStartFailure({
           signal: "provider-session-open-failure",
@@ -604,6 +696,7 @@ export const layer: Layer.Layer<
         Effect.gen(function* () {
           const loaded = yield* Effect.result(load);
           if (loaded._tag === "Success") return loaded.success;
+          if (input.reattach === true) return yield* loaded.failure;
           if (input.willRetry === true) return yield* loaded.failure;
           yield* settleStartFailure({
             signal: "provider-thread-load-failure",
@@ -612,8 +705,9 @@ export const layer: Layer.Layer<
           });
           return undefined;
         });
-      let effectiveHandoffs = handoffs;
+      let effectiveHandoffs = cloud ? [] : handoffs;
       const loadedProviderThread = yield* Effect.gen(function* () {
+        if (input.reattach === true) return providerThread;
         if (nativeForkTransfer !== undefined) {
           const sourceProjection = yield* projectionStore.getThreadRecords(
             nativeForkTransfer.sourceThreadId,
@@ -653,6 +747,8 @@ export const layer: Layer.Layer<
           );
         }
         if (providerThread.nativeThreadRef === null) {
+          // Remote cloud creation starts only after the durable intent commit.
+          if (cloud) return providerThread;
           // Hand the run's provider thread to the adapter so it adopts this
           // row's identity when attaching native state. An adapter that mints
           // its own row instead leaves two live rows per app thread, and
@@ -696,6 +792,7 @@ export const layer: Layer.Layer<
           return resumed.success;
         }
 
+        if (cloud) return yield* loadFromProvider(Effect.fail(resumed.failure));
         yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {
           driver: session.driver,
           providerThreadId: providerThread.id,
@@ -787,7 +884,7 @@ export const layer: Layer.Layer<
       });
       // The last attempt already failed the run.
       if (loadedProviderThread === undefined) return;
-      if (!(yield* isCurrentAttemptInStatus("starting"))) {
+      if (!(yield* isCurrentAttemptInStatus(expectedStartStatus))) {
         return;
       }
       const now = yield* DateTime.now;
@@ -829,8 +926,32 @@ export const layer: Layer.Layer<
         previousUsage,
         knownModelWindow,
       });
+      // Retain accepted ownership evidence until the provider commits its next acceptance.
+      const acceptedCloudTask = providerThread.nativeThreadRef?.nativeId
+        ? providerThread.cloudTask
+        : undefined;
       const runningProviderThread: OrchestrationV2ProviderThread = {
         ...loadedProviderThread,
+        ...(cloudSource === undefined
+          ? {}
+          : {
+              cloudTask:
+                input.reattach === true
+                  ? providerThread.cloudTask
+                  : {
+                      ...(acceptedCloudTask ?? {
+                        taskId: run.id,
+                        tracking: "live" as const,
+                        source: cloudSource.source,
+                        localChangesExcluded: cloudSource.localChangesExcluded,
+                        ...(cloudSource.localChangesIncluded === undefined
+                          ? {}
+                          : { localChangesIncluded: cloudSource.localChangesIncluded }),
+                      }),
+                      status: "submitting" as const,
+                      updatedAt: DateTime.formatIso(now),
+                    },
+            }),
         contextUsage: handoffUsage,
         id: providerThread.id,
         driver: session.driver,
@@ -849,7 +970,7 @@ export const layer: Layer.Layer<
       const runningRun: OrchestrationV2Run = {
         ...run,
         status: "running",
-        startedAt: now,
+        startedAt: input.reattach === true ? run.startedAt : now,
       };
       const runningAttempt: OrchestrationV2RunAttempt = {
         ...attempt,
@@ -857,12 +978,12 @@ export const layer: Layer.Layer<
           ? {}
           : { nativeThreadId: runningProviderThread.nativeThreadRef.nativeId }),
         status: "running",
-        startedAt: now,
+        startedAt: input.reattach === true ? attempt.startedAt : now,
       };
       const runningRootNode: OrchestrationV2ExecutionNode = {
         ...rootNode,
         status: "running",
-        startedAt: now,
+        startedAt: input.reattach === true ? rootNode.startedAt : now,
       };
       const events: Array<OrchestrationV2DomainEvent> = [
         {
@@ -947,7 +1068,7 @@ export const layer: Layer.Layer<
         threadId: projection.thread.id,
         runId: run.id,
         activeAttemptId: attempt.id,
-        expectedStatus: "starting",
+        expectedStatus: expectedStartStatus,
         events,
       });
       if (!runningWrite.committed) {
@@ -1237,14 +1358,26 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
+      const recoveredProviderTurn =
+        input.reattach === true
+          ? projection.providerTurns.find(
+              (turn) =>
+                turn.providerThreadId === providerThread.id && turn.runAttemptId === attempt.id,
+            )
+          : undefined;
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,
         providerSessionId,
-        session: deliverySession,
+        session: cloud ? session : deliverySession,
         run: runningRun,
         rootNode: runningRootNode,
-        checkpointScope,
+        checkpointScope: cloud ? null : checkpointScope!,
+        ...(cloudSource === undefined ? {} : { cloudSource: cloudSource.source }),
+        ...(cloudSource?.launchSource === undefined
+          ? {}
+          : { cloudLaunchSource: cloudSource.launchSource }),
+        reattach: input.reattach === true,
         providerThread: runningProviderThread,
         attempt: runningAttempt,
         attemptId: attempt.id,
@@ -1256,6 +1389,7 @@ export const layer: Layer.Layer<
           subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
         ),
         providerTurnOrdinal:
+          recoveredProviderTurn?.ordinal ??
           Math.max(
             0,
             ...projection.providerTurns
@@ -1292,7 +1426,107 @@ export const layer: Layer.Layer<
 
     return ProviderTurnStartServiceV2.of({
       start: (input) =>
-        start(input).pipe(
+        Effect.gen(function* () {
+          const originalAttemptId =
+            input.reattach === true
+              ? (yield* projectionStore.getTurnStartContext(input.threadId, input.runId)).runs.find(
+                  (run) => run.id === input.runId,
+                )?.activeAttemptId
+              : undefined;
+          return yield* start(input).pipe(
+            Effect.catch((cause) =>
+              Effect.gen(function* () {
+                if (input.reattach !== true || input.willRetry === true)
+                  return yield* Effect.fail(cause);
+                const current = yield* projectionStore.getTurnStartContext(
+                  input.threadId,
+                  input.runId,
+                );
+                const run = current.runs.find((candidate) => candidate.id === input.runId);
+                const thread = current.providerThreads.find(
+                  (candidate) => candidate.id === run?.providerThreadId,
+                );
+                const attempt = current.attempts.find(
+                  (candidate) => candidate.id === run?.activeAttemptId,
+                );
+                const root = current.nodes.find((candidate) => candidate.id === run?.rootNodeId);
+                if (
+                  run?.status !== "running" ||
+                  run.activeAttemptId !== originalAttemptId ||
+                  !thread?.cloudTask ||
+                  !attempt ||
+                  !root
+                ) {
+                  return yield* Effect.fail(cause);
+                }
+                const now = yield* DateTime.now;
+                const reason =
+                  "Cloud tracking could not be reattached. Open the task link; remote work may continue.";
+                const updated = {
+                  ...thread,
+                  status: "idle" as const,
+                  updatedAt: now,
+                  cloudTask: {
+                    ...thread.cloudTask,
+                    status: "unknown" as const,
+                    error: reason,
+                    updatedAt: DateTime.formatIso(now),
+                  },
+                };
+                const allocateEventId = () =>
+                  idAllocator.allocate.event({ threadId: input.threadId });
+                const cloudResultEvents = yield* makeCloudResultEvents({
+                  run,
+                  nodeId: root.id,
+                  providerThreadId: thread.id,
+                  providerTurnId:
+                    latestProviderTurnForAttempt(current.providerTurns, attempt.id)?.id ?? null,
+                  text: cloudTaskResultText({ ...updated.cloudTask, summary: reason }),
+                  completedAt: now,
+                  allocateEventId,
+                });
+                yield* eventSink.writeIfRunCurrent({
+                  threadId: input.threadId,
+                  runId: run.id,
+                  activeAttemptId: attempt.id,
+                  expectedStatus: "running",
+                  events: [
+                    ...(yield* Effect.forEach(
+                      [
+                        { type: "provider-thread.updated" as const, payload: updated },
+                        {
+                          type: "run.updated" as const,
+                          payload: { ...run, status: "failed" as const, completedAt: now },
+                        },
+                        {
+                          type: "run-attempt.updated" as const,
+                          payload: { ...attempt, status: "failed" as const, completedAt: now },
+                        },
+                        {
+                          type: "node.updated" as const,
+                          payload: { ...root, status: "failed" as const, completedAt: now },
+                        },
+                      ],
+                      (event) =>
+                        allocateEventId().pipe(
+                          Effect.map((id) => ({
+                            ...event,
+                            id,
+                            threadId: input.threadId,
+                            runId: run.id,
+                            providerInstanceId: run.providerInstanceId,
+                            occurredAt: now,
+                          })),
+                        ),
+                    )),
+                    ...cloudResultEvents,
+                  ],
+                });
+                return yield* Effect.fail(cause);
+              }),
+            ),
+          );
+        }).pipe(
           Effect.mapError((cause) =>
             isProviderTurnStartError(cause)
               ? cause

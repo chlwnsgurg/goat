@@ -8,6 +8,7 @@ import type {
   OrchestratorMcpThreadStatusResult,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
+import { cloudTaskView } from "./cloudTaskView.ts";
 
 /**
  * The phase goat_thread_status reports, from facts the thread already records:
@@ -78,10 +79,13 @@ export function excerpt(text: string, max = LAST_MESSAGE_EXCERPT_CHARS): string 
  * including one from a GOAT that predates the bounds.
  */
 export function boundedStatus<
-  S extends Pick<OrchestratorMcpThreadStatusResult, "lastMessage" | "lastError">,
->(status: S): S {
+  S extends Pick<OrchestratorMcpThreadStatusResult, "lastMessage" | "lastError" | "cloudTask">,
+>(status: S) {
+  const { cloudTask: rawCloudTask, ...fields } = status;
+  const cloudTask = cloudTaskView(rawCloudTask);
   return {
-    ...status,
+    ...fields,
+    ...(cloudTask === undefined ? {} : { cloudTask }),
     lastMessage:
       status.lastMessage === null
         ? null
@@ -179,6 +183,7 @@ export function statusFromRead(
   const pending = thread.pendingRequestCount > 0 && (status === "running" || status === "waiting");
   const phase = pending ? "waiting" : threadPhase(status, null);
   return {
+    ...(read.cloudTask === undefined ? {} : { cloudTask: read.cloudTask }),
     ...(read.host === undefined ? {} : { host: read.host }),
     threadId: thread.threadId,
     title: thread.title,

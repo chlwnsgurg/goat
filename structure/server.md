@@ -78,7 +78,8 @@ above.
 
 ## Checkpoints
 
-A finished run enqueues `checkpoint.capture`. `CheckpointCaptureService` in
+A finished local run enqueues `checkpoint.capture`.
+Cloud runs settle directly without a local checkpoint or workspace refresh. `CheckpointCaptureService` in
 `apps/server/src/orchestration-v2/CheckpointCaptureService.ts` calls `CheckpointService.capture`,
 then commits a `checkpoint.captured` event through the same sink.
 
@@ -119,6 +120,16 @@ adapters on the driver: `makeAntigravityAdapterV2` inside `AntigravityDriver.ts`
 `packages/provider-core` holds the driver and adapter-driver interfaces those packages implement.
 `packages/provider-acp` is the ACP client stack the ACP drivers sit on. Shared provider behavior
 that must not branch through the orchestrator belongs at this boundary.
+
+Cloud execution belongs to the provider adapter, while GOAT owns durable launch
+intent, source preflight and observation. The session's execution location bypasses
+local worktree/setup/checkpoint paths. Task identity and source remain in the existing
+provider-thread projection; the ordinary assistant message retains the result links.
+On restart an active cloud task reattaches to its original run and attempt. Shutdown
+releases observation without cancelling remote work. Unknown submission outcomes
+must never retry a create operation. See the optional `resumeTurn` contract in
+`packages/provider-core/src/server/ProviderAdapter.ts` and the read-only source service
+in `apps/server/src/orchestration-v2/CloudTaskSourceService.ts`.
 `docs/internals/providers.md` and `docs/internals/adding-a-provider.md` are the contributor
 procedures. This page is the inventory.
 

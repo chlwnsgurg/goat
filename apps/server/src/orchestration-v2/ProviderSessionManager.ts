@@ -650,6 +650,12 @@ export const layerWithOptions = (
         readonly detail?: string;
       }) =>
         Effect.gen(function* () {
+          if (
+            input.entry.runtime.providerSession.capabilities.sessions.executionLocation ===
+              "cloud" &&
+            input.reason === "server_shutdown"
+          )
+            return;
           const now = yield* DateTime.now;
           const payload: OrchestrationV2ProviderSession = {
             ...input.entry.runtime.providerSession,
@@ -971,8 +977,14 @@ export const layerWithOptions = (
                     ...(input.detail === undefined ? {} : { detail: input.detail }),
                     releasedAt,
                   };
+                  const observationOnlyShutdown =
+                    input.reason === "server_shutdown" &&
+                    entry.runtime.providerSession.capabilities.sessions.executionLocation ===
+                      "cloud";
                   const recorded = yield* Effect.exit(
-                    writeReleaseRecords({ ...records, replaced: false }),
+                    observationOnlyShutdown
+                      ? Effect.void
+                      : writeReleaseRecords({ ...records, replaced: false }),
                   );
                   if (Exit.isFailure(recorded)) {
                     yield* retryReleaseRecords(records);
@@ -1694,6 +1706,53 @@ export const layerWithOptions = (
               modelFamily: normalizeModelMetricLabel(model),
             },
           });
+        const trackTurn = (
+          input: Pick<
+            ProviderAdapter.ProviderAdapterV2TurnInput,
+            "threadId" | "providerThread" | "runOrdinal"
+          >,
+          operation: Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>,
+        ) =>
+          observeActivity(
+            providerSessionId,
+            ensureThreadAttached({
+              providerSessionId,
+              threadId: input.threadId,
+              providerInstanceId: runtime.instanceId,
+            }),
+          ).pipe(
+            // A start that fails or is stopped may never emit turn.terminal,
+            // so it clears its own turn or the session never goes idle. If
+            // the adapter emits the terminal anyway, clearing the same turn
+            // again changes nothing, so another thread's turn on a shared
+            // session stays busy either way.
+            Effect.andThen(
+              holdThreadLoaded({
+                providerSessionId,
+                threadId: input.threadId,
+                providerThread: input.providerThread,
+              }),
+            ),
+            Effect.andThen(
+              Effect.acquireUseRelease(
+                observeActivity(
+                  providerSessionId,
+                  markBusy(
+                    providerSessionId,
+                    busyTurnKey(input.providerThread.id, input.runOrdinal),
+                  ),
+                ),
+                () => operation,
+                (_, exit) =>
+                  Exit.isFailure(exit)
+                    ? observeActivity(
+                        providerSessionId,
+                        markIdle(providerSessionId, input.providerThread.id, input.runOrdinal),
+                      )
+                    : Effect.void,
+              ),
+            ),
+          );
         return {
           ...runtime,
           subscribeEvents,
@@ -1799,47 +1858,15 @@ export const layerWithOptions = (
               ),
             ),
           startTurn: (input) =>
-            observeActivity(
-              providerSessionId,
-              ensureThreadAttached({
-                providerSessionId,
-                threadId: input.threadId,
-                providerInstanceId: runtime.instanceId,
-              }),
-            ).pipe(
-              // A start that fails or is stopped may never emit turn.terminal,
-              // so it clears its own turn or the session never goes idle. If
-              // the adapter emits the terminal anyway, clearing the same turn
-              // again changes nothing, so another thread's turn on a shared
-              // session stays busy either way.
-              Effect.andThen(
-                holdThreadLoaded({
-                  providerSessionId,
-                  threadId: input.threadId,
-                  providerThread: input.providerThread,
-                }),
-              ),
-              Effect.andThen(
-                Effect.acquireUseRelease(
-                  observeActivity(
-                    providerSessionId,
-                    markBusy(
-                      providerSessionId,
-                      busyTurnKey(input.providerThread.id, input.runOrdinal),
-                    ),
-                  ),
-                  () =>
-                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
-                  (_, exit) =>
-                    Exit.isFailure(exit)
-                      ? observeActivity(
-                          providerSessionId,
-                          markIdle(providerSessionId, input.providerThread.id, input.runOrdinal),
-                        )
-                      : Effect.void,
-                ),
-              ),
+            trackTurn(
+              input,
+              runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
             ),
+          ...(runtime.resumeTurn === undefined
+            ? {}
+            : {
+                resumeTurn: (input) => trackTurn(input, runtime.resumeTurn!(input)),
+              }),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer"))),

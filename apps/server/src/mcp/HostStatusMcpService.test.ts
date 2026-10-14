@@ -18,6 +18,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
@@ -108,6 +109,11 @@ const run = <A, E>(
   const providers = { current: options.providers ?? [] };
   const layer = HostStatusMcpService.layer.pipe(
     Layer.provide(HostThreadsMcpService.layer),
+    Layer.provide(
+      Layer.mock(ThreadResultService.ThreadResultService)({
+        forRun: () => Effect.succeed(null),
+      }),
+    ),
     Layer.provide(Layer.mock(HostResources.HostResources)({ read: Effect.succeed(capacity) })),
     Layer.provide(
       Layer.mock(ProviderRegistry.ProviderRegistry)({

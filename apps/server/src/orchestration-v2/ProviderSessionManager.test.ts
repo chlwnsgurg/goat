@@ -320,6 +320,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
     readonly startTurn?: Effect.Effect<void>;
+    readonly resumeTurn?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
     /** Registers the process's closeCount finalizer before `beforeOpen` runs. */
     readonly spawnBeforeOpen?: boolean;
@@ -415,6 +416,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
           startTurn: () => options.startTurn ?? Effect.void,
+          ...(options.resumeTurn === undefined ? {} : { resumeTurn: () => options.resumeTurn! }),
           steerTurn: () => Effect.void,
           interruptTurn: () =>
             Ref.update(state, (current) => ({
@@ -467,6 +469,7 @@ function layerTest(input: {
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
   readonly startTurn?: Effect.Effect<void>;
+  readonly resumeTurn?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -497,6 +500,7 @@ function layerTest(input: {
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
+      ...(input.resumeTurn === undefined ? {} : { resumeTurn: input.resumeTurn }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
       ...(input.spawnBeforeOpen === undefined ? {} : { spawnBeforeOpen: input.spawnBeforeOpen }),
       ...(input.scopeCloseReached === undefined
@@ -4721,5 +4725,115 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+it.effect.each([false, true])(
+  "cloud attach remains busy until terminal or shutdown=%s",
+  (shutdown) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const attached = yield* Deferred.make<void>();
+      const capabilities = {
+        ...CodexCapabilities,
+        sessions: {
+          ...CodexCapabilities.sessions,
+          executionLocation: "cloud" as const,
+        },
+      };
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`thread:cloud-attach-${shutdown}`);
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const runId = ids.derive.run({ threadId, ordinal: 1 });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const cloudTask = {
+          taskId: "accepted-cloud-session",
+          status: "running" as const,
+          tracking: "live" as const,
+          source: { repository: "https://github.com/acme/repo", branch: "dev" },
+          localChangesExcluded: false,
+          updatedAt: DateTime.formatIso(now),
+        };
+        yield* runtime.resumeTurn!({
+          appThread: (yield* store.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: ids.derive.rootNode({ runId }),
+          providerThread: { ...providerThread, cloudTask },
+          cloudTask,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* Deferred.await(attached);
+        yield* TestClock.adjust("2 seconds");
+        assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        if (shutdown) {
+          yield* manager.shutdown;
+        } else {
+          const subscription = yield* runtime.subscribeEvents!;
+          const terminal = yield* subscription.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkChild,
+          );
+          const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+          yield* Queue.offer(queue, {
+            type: "turn.terminal",
+            driver: CODEX_DRIVER,
+            providerThreadId: providerThread.id,
+            providerTurnId: ids.derive.providerTurn({
+              driver: CODEX_DRIVER,
+              nativeTurnId: "cloud-attach-turn",
+            }),
+            runOrdinal: 1,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          yield* Fiber.join(terminal);
+          yield* subscription.close;
+          yield* TestClock.adjust("2 seconds");
+          yield* Effect.yieldNow;
+          assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        }
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        assert.equal((yield* Ref.get(state)).interruptCount, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities,
+            idleTimeoutMs: 1000,
+            resumeTurn: Deferred.succeed(attached, undefined).pipe(Effect.asVoid),
+          }),
+        ),
+      );
     }),
 );

@@ -1,3 +1,8 @@
+import {
+  fakeCloudCapabilities,
+  fakeCloudDriver,
+  fakeCloudInstanceId,
+} from "./testkit/FakeCloudAdapter.ts";
 import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -87,6 +92,7 @@ it.effect("reads recovery projections only for threads that need runtime recover
           getRuntimeRecoveryProjection: (threadId) => {
             projectionReads(threadId);
             return Effect.succeed({
+              ...idleThreadProjection(liveThreadShell(threadId)),
               thread: { id: threadId },
               runtimeRequests: [],
               providerSessions: [],
@@ -135,6 +141,7 @@ it.effect("expires orphaned runtime requests before command readiness", () => {
     },
   );
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId },
     runtimeRequests: [
       {
@@ -185,6 +192,7 @@ it.effect("preserves async questions across startup and shutdown", () => {
   const threadId = ThreadId.make("async-recovery-thread");
   const nodeId = NodeId.make("async-recovery-node");
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId },
     runtimeRequests: [
       {
@@ -235,6 +243,7 @@ it.effect("uses the same reconciliation path to cancel runtime requests during s
   let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
     null;
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId },
     runtimeRequests: [
       {
@@ -302,6 +311,7 @@ it.effect(
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
+      ...idleThreadProjection(liveThreadShell(threadId)),
       thread: { id: threadId },
       runtimeRequests: [],
       providerSessions: [],
@@ -424,6 +434,7 @@ it.effect(
       null;
     // Claude launched a background subagent, then the thread switched to Codex.
     const projection = {
+      ...idleThreadProjection(liveThreadShell(threadId)),
       thread: { id: threadId },
       runtimeRequests: [],
       providerSessions: [],
@@ -526,6 +537,7 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
   let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
     null;
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId },
     runtimeRequests: [],
     providerSessions: [],
@@ -585,6 +597,7 @@ it.effect("closes a secret request card's form when its run is recovered", () =>
   let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
     null;
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId },
     runtimeRequests: [],
     providerSessions: [],
@@ -652,6 +665,7 @@ it.effect("holds accepted queued work without cancelling its execution state aft
   let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
     null;
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId },
     runtimeRequests: [],
     providerSessions: [],
@@ -740,6 +754,7 @@ it.effect(
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
+      ...idleThreadProjection(liveThreadShell(threadId)),
       thread: { id: threadId },
       runtimeRequests: [],
       providerSessions: [
@@ -872,6 +887,7 @@ it.effect("cancels workflow members and child roots without run ids after restar
     providerInstanceId,
   };
   const parentProjection = {
+    ...idleThreadProjection(liveThreadShell(parentThreadId)),
     thread: { id: parentThreadId, providerInstanceId },
     runs: [],
     attempts: [],
@@ -888,6 +904,7 @@ it.effect("cancels workflow members and child roots without run ids after restar
   } as unknown as OrchestrationV2ThreadProjection;
   const childProjection = {
     ...parentProjection,
+    ...idleThreadProjection(liveThreadShell(childThreadId)),
     thread: { id: childThreadId, providerInstanceId },
     nodes: [
       {
@@ -972,6 +989,7 @@ it.effect(
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
+      ...idleThreadProjection(liveThreadShell(threadId)),
       thread: { id: threadId },
       runtimeRequests: [],
       providerSessions: [
@@ -1174,6 +1192,7 @@ it.effect(
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
+      ...idleThreadProjection(liveThreadShell(threadId)),
       thread: { id: threadId, providerInstanceId: codexInstanceId },
       runtimeRequests: [],
       providerSessions: [],
@@ -1295,6 +1314,7 @@ it.effect(
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
+      ...idleThreadProjection(liveThreadShell(threadId)),
       thread: { id: threadId },
       runtimeRequests: [],
       providerSessions: [],
@@ -1468,6 +1488,7 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
   let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
     null;
   const projection = {
+    ...idleThreadProjection(liveThreadShell(threadId)),
     thread: { id: threadId, providerInstanceId: claudeInstanceId },
     runtimeRequests: [],
     providerSessions: [],
@@ -1674,5 +1695,178 @@ it.effect.each(["startup", "shutdown"] as const)(
             event.payload.subagentId === remoteId,
         ),
       );
+    }),
+);
+
+const cloudRecoveryCases = (["startup", "shutdown"] as const).flatMap((trigger) =>
+  (["submitting", "running", "unknown", "failed", "succeeded", "cancelled"] as const).flatMap(
+    (taskStatus) =>
+      (taskStatus === "running" ? [false, true] : [false]).map((mixed) => ({
+        trigger,
+        taskStatus,
+        mixed,
+      })),
+  ),
+);
+it.effect.each(cloudRecoveryCases)(
+  "preserves $taskStatus during $trigger mixed=$mixed",
+  ({ trigger, taskStatus, mixed }) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:cloud-recovery");
+      const runId = RunId.make("run:cloud-recovery");
+      const providerThreadId = ProviderThreadId.make("pt:cloud-recovery");
+      const sessionId = ProviderSessionId.make("ps:cloud-recovery");
+      const projection = idleThreadProjection(liveThreadShell(threadId));
+      const cloud = {
+        ...projection,
+        runs: [
+          {
+            id: runId,
+            providerThreadId,
+            providerInstanceId: fakeCloudInstanceId,
+            status: "running",
+          },
+        ],
+        providerThreads: [
+          {
+            id: providerThreadId,
+            providerSessionId: sessionId,
+            providerInstanceId: fakeCloudInstanceId,
+            driver: fakeCloudDriver,
+            ownerNodeId: null,
+            status: "active",
+            pendingBackgroundTasks: [],
+            cloudTask: {
+              taskId: "remote-1",
+              status: taskStatus,
+              tracking: "live",
+              source: { repository: "https://github.com/acme/repo", branch: "dev" },
+              localChangesExcluded: false,
+              updatedAt: "2026-10-13T00:00:00.000Z",
+            },
+          },
+        ],
+        providerSessions: [
+          {
+            id: sessionId,
+            providerInstanceId: fakeCloudInstanceId,
+            status: "running",
+            capabilities: fakeCloudCapabilities(),
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const localRunId = RunId.make("run:local-recovery");
+      const localThreadId = ProviderThreadId.make("pt:local-recovery");
+      const localSessionId = ProviderSessionId.make("ps:local-recovery");
+      const localInstanceId = ProviderInstanceId.make("codex");
+      const recoveryProjection = mixed
+        ? ({
+            ...cloud,
+            runs: [
+              ...cloud.runs,
+              {
+                id: localRunId,
+                ordinal: 2,
+                providerThreadId: localThreadId,
+                providerInstanceId: localInstanceId,
+                status: "running",
+              },
+            ],
+            providerThreads: [
+              ...cloud.providerThreads,
+              {
+                id: localThreadId,
+                providerSessionId: localSessionId,
+                providerInstanceId: localInstanceId,
+                status: "active",
+                pendingBackgroundTasks: [],
+              },
+            ],
+            providerSessions: [
+              ...cloud.providerSessions,
+              { id: localSessionId, providerInstanceId: localInstanceId, status: "running" },
+            ],
+            attempts: [
+              { id: "cloud-attempt", runId, status: "running" },
+              { id: "local-attempt", runId: localRunId, status: "running" },
+            ],
+            nodes: [
+              { id: "cloud-node", runId, status: "running" },
+              { id: "local-node", runId: localRunId, status: "running" },
+            ],
+            messages: [
+              { id: "cloud-message", runId, streaming: true },
+              { id: "local-message", runId: localRunId, streaming: true },
+            ],
+            turnItems: [
+              {
+                id: "cloud-item",
+                runId,
+                providerThreadId,
+                type: "command_execution",
+                status: "running",
+              },
+            ],
+          } as unknown as OrchestrationV2ThreadProjection)
+        : cloud;
+      const committed = vi.fn(
+        (_input: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]) =>
+          Effect.succeed({ cancelledEffectCount: 0 } as never),
+      );
+      const layer = ProviderRuntimeRecovery.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest(),
+            IdAllocator.layer,
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([threadId]),
+              getRuntimeRecoveryProjection: () => Effect.succeed(recoveryProjection),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({ commitCommand: committed }),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              cancelUnsettled: () => Effect.succeed([]),
+              signalCancellations: () => Effect.void,
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            }),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const result =
+          yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile(trigger);
+        assert.equal(result.terminalizedRuns, mixed ? 1 : 0);
+        assert.equal(result.stoppedSessions, mixed ? 1 : 0);
+      }).pipe(Effect.provide(layer));
+      if (trigger === "startup") {
+        assert.equal(committed.mock.calls.length, 1);
+        const input = committed.mock.calls[0]![0] as Parameters<
+          EventSink.EventSinkV2["Service"]["commitCommand"]
+        >[0];
+        if (!mixed) assert.deepEqual(input.events, []);
+        assert.equal(input.effects?.length, 1);
+        assert.deepEqual(input.effects?.[0]?.request, { type: "provider-turn.reattach", runId });
+      } else assert.equal(committed.mock.calls.length, mixed ? 1 : 0);
+      if (mixed) {
+        const input = committed.mock.calls[0]![0];
+        assert.isTrue(
+          input.events.some(
+            (event) => event.type === "run.updated" && event.payload.id === localRunId,
+          ),
+        );
+        const cloudRowIds = new Set([
+          String(runId),
+          String(providerThreadId),
+          String(sessionId),
+          "cloud-attempt",
+          "cloud-node",
+          "cloud-message",
+          "cloud-item",
+        ]);
+        assert.isFalse(
+          input.events.some(
+            (event) => "id" in event.payload && cloudRowIds.has(String(event.payload.id)),
+          ),
+        );
+      }
     }),
 );

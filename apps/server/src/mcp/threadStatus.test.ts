@@ -5,8 +5,10 @@ import type {
   OrchestrationV2TurnItem,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 
 import {
+  boundedStatus,
   excerpt,
   LAST_ERROR_CHARS,
   LAST_MESSAGE_EXCERPT_CHARS,
@@ -15,6 +17,7 @@ import {
 } from "./threadStatus.ts";
 
 const at = (iso: string) => DateTime.makeUnsafe(iso);
+const isJson = Schema.is(Schema.Json);
 
 const run = (id: string, status: OrchestrationV2Run["status"]) =>
   ({
@@ -147,7 +150,10 @@ describe("statusFromShell", () => {
   });
 
   it("is idle before the first run", () => {
-    expect(statusFromShell(shell({}), [], [])).toMatchObject({ phase: "idle", run: null });
+    const status = statusFromShell(shell({}), [], []);
+    expect(status).toMatchObject({ phase: "idle", run: null });
+    expect(isJson(status)).toBe(true);
+    expect(isJson(boundedStatus({ ...status, cloudTask: undefined }))).toBe(true);
   });
 
   it("keeps a short message whole", () => {

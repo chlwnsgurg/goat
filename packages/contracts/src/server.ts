@@ -244,6 +244,7 @@ export const ServerProviderUpdateState = Schema.Struct({
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
 export const ServerProvider = Schema.Struct({
+  executionLocation: Schema.optional(Schema.Literals(["local", "cloud"])),
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
   instanceId: ProviderInstanceId,
