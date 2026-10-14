@@ -18,6 +18,7 @@ import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as DateTime from "effect/DateTime";
 import * as Owner from "./MemoryOwnerSourceReader.ts";
+import { memoryOperationDigest } from "./MemoryDecider.ts";
 import type { ProviderDriver, ProviderInstance } from "@goat/provider-core/server/driver";
 import * as Registry from "../provider/ProviderInstanceRegistry.ts";
 import * as Generation from "../textGeneration/TextGeneration.ts";
@@ -151,6 +152,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const sourceSendEntered = yield* Deferred.make<void>();
     let pullFault: "failure" | "budget" | null = null;
     let pullCalls = 0;
+    let budgetOperation: Extract<M.MemoryOperation, { kind: "upsert" }> | null = null;
     const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
     let sourceAfterResultGate: Deferred.Deferred<void> | null = null;
     let sourceResultGate: Deferred.Deferred<void> | null = null;
@@ -246,19 +248,46 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               pullCalls++;
               if (pullFault === "failure")
                 return Effect.fail(new M.MemoryHubError({ code: "storage_failed" }));
-              return client.pull(connection, input).pipe(
-                Effect.map((page) =>
-                  pullFault === "budget"
-                    ? {
-                        ...page,
-                        hasMore: true,
-                        throughSequence: input.afterSequence + 1,
-                        highWatermark: input.highWatermark ?? 10000,
-                        entries: [],
-                      }
-                    : page,
-                ),
-              );
+              if (pullFault === "budget" && budgetOperation) {
+                const sequence = input.afterSequence + 1;
+                const operationId = id(20000 + sequence);
+                const memoryId = M.MemoryId.make(id(30000 + sequence));
+                const revisionId = M.MemoryRevisionId.make(id(40000 + sequence));
+                const operation = {
+                  ...budgetOperation,
+                  operationId,
+                  memoryId,
+                  expectedHeads: [],
+                  revision: {
+                    ...budgetOperation.revision,
+                    operationId,
+                    memoryId,
+                    revisionId,
+                    payloadRef: revisionId,
+                    parents: [],
+                  },
+                };
+                return Effect.succeed({
+                  hasMore: true,
+                  throughSequence: sequence,
+                  highWatermark: input.highWatermark ?? 10000,
+                  entries: [
+                    {
+                      kind: "operation" as const,
+                      operation,
+                      hubSequence: sequence,
+                      receipt: {
+                        operationId,
+                        memoryId,
+                        hubSequence: sequence,
+                        operationDigest: memoryOperationDigest(operation),
+                        outcome: "accepted" as const,
+                      },
+                    },
+                  ],
+                });
+              }
+              return client.pull(connection, input);
             }).pipe(
               Effect.tap(() => (observePull ? Deferred.succeed(pulled, undefined) : Effect.void)),
             ),
@@ -431,8 +460,12 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       blockSourceSend: (gate: Deferred.Deferred<void>) => {
         sourceSendGate = gate;
       },
-      setPullFault: (fault: "failure" | "budget") => {
+      setPullFault: (
+        fault: "failure" | "budget",
+        operation: Extract<M.MemoryOperation, { kind: "upsert" }>,
+      ) => {
         pullFault = fault;
+        budgetOperation = operation;
       },
       pullCalls: () => pullCalls,
       commitSourcePolicy: (policy: M.MemoryOwnerSourceReadPolicy) =>
@@ -1286,7 +1319,18 @@ const sourceFixture = (ownerIsHub = false) =>
             ]
           : [],
       });
-    return { ...c, owner, target, thread, messageId, assistantId, watermark, validated, remove };
+    return {
+      ...c,
+      owner,
+      target,
+      thread,
+      messageId,
+      assistantId,
+      watermark,
+      validated,
+      remove,
+      sourceOperation: op,
+    };
   });
 
 it.effect.each([false, true])(
@@ -1528,7 +1572,7 @@ it.effect.each(["failure", "budget"] as const)(
     Effect.gen(function* () {
       const c = yield* sourceFixture();
       yield* c.remove(true);
-      c.owner.setPullFault(fault);
+      c.owner.setPullFault(fault, c.sourceOperation);
       const before = c.owner.pullCalls();
       const cycle = yield* Effect.result(c.owner.sync.syncOnce);
       if (fault === "failure") assert.strictEqual(cycle._tag, "Failure");
