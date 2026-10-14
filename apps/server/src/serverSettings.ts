@@ -518,10 +518,24 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       };
   });
 
-export const layerTest = (
-  overrides: DeepPartial<ServerSettings> = {},
-): Layer.Layer<ServerSettingsService, ServerSettingsError> =>
-  Layer.unwrap(makeTest(overrides).pipe(Effect.map(settingsLayers)));
+// Keep fixtures accepting a settings-only replacement compatible. Memory
+// composition opts into the complete context already built by settingsLayers.
+export function layerTest(
+  overrides: DeepPartial<ServerSettings>,
+  services: "memoryHub",
+): Layer.Layer<
+  | ServerSettingsService
+  | MemoryHubCommittedSettings
+  | MemoryHubAdminSettings
+  | MemoryHubSettingsTransitions,
+  ServerSettingsError
+>;
+export function layerTest(
+  overrides?: DeepPartial<ServerSettings>,
+): Layer.Layer<ServerSettingsService, ServerSettingsError>;
+export function layerTest(overrides: DeepPartial<ServerSettings> = {}, _services?: "memoryHub") {
+  return Layer.unwrap(makeTest(overrides).pipe(Effect.map(settingsLayers)));
+}
 
 // Migrate saved token delivery without accepting it in settings writes or
 // letting one retired value reset the rest of the environment's settings.

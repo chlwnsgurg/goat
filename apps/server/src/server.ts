@@ -2,6 +2,8 @@ import * as MemoryStore from "./memory/MemoryStore.ts";
 import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
+import * as MemorySync from "./memory/MemorySyncService.ts";
+import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
 import * as MemoryWorker from "./memory/MemoryWorker.ts";
 import * as MemoryHub from "./memory/MemoryHubService.ts";
 import * as MemoryCompactor from "./memory/MemoryCompactor.ts";
@@ -614,8 +616,19 @@ const layerRegisteredMemoryHub = layerMemoryHubRoutes.pipe(
   HttpRouter.provideRequest(layerMemoryHub),
   Layer.provideMerge(layerMemoryHub),
 );
-// L4 r2 adds SyncService/Client and the committed owner reader to this shared
-// application context; it must reuse layerMemoryService and the settings owner.
+export const layerMemorySyncStarted = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const sync = yield* MemorySync.MemorySyncService;
+    yield* sync.start;
+  }),
+).pipe(Layer.provideMerge(MemorySync.layer));
+
+const layerMemorySync = layerMemorySyncStarted.pipe(
+  Layer.provideMerge(MemorySyncRuntimeLive.layer),
+  Layer.provide(layerMemoryHub),
+  Layer.provide(layerTextGeneration),
+  Layer.provide(ServerEnvironment.layerIdentity),
+);
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(
   Layer.provide(layerRegisteredMemoryHub),
@@ -738,6 +751,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerMemoryStarted,
+  layerMemorySync,
   AgentAwarenessRelay.layer,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,
