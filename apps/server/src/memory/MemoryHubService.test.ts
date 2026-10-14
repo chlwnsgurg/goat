@@ -1717,6 +1717,20 @@ it.effect.each(
         requestId: M.MemoryOperationId.make(id(9202)),
         expectedVersion: (yield* settings.read).version,
       };
+      if (stop === "after prepared commit") {
+        const denied = yield* admin
+          .update(next, Effect.fail(new M.MemoryHubForbiddenError({})))
+          .pipe(Effect.flip);
+        assert.strictEqual(denied._tag, "MemoryHubForbiddenError");
+        const stale = yield* admin
+          .update({ ...next, expectedVersion: 0 }, Effect.void)
+          .pipe(Effect.flip);
+        assert.strictEqual(stale._tag, "MemoryStoreConflict");
+        assert.deepStrictEqual(
+          yield* restartedStore.transact(restartedStore.readHubAdminTx(successor.requestId)),
+          saved,
+        );
+      }
       // An activated operation can still own the current revision. Reconcile its
       // successful CAS first, then retry C against the newly observed revision.
       if (stop === "after activation before settings apply") {
@@ -1730,8 +1744,6 @@ it.effect.each(
         { ...next, expectedVersion: (yield* settings.read).version },
         Effect.void,
       );
-      assert.strictEqual(readySpace(result), allocated);
-      yield* assertPublished(allocated);
       const sql = yield* SqlClient.SqlClient;
       assert.strictEqual(
         (yield* sql<{
@@ -1742,6 +1754,49 @@ it.effect.each(
       assert.strictEqual(
         (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_members`)[0]?.count,
         1,
+      );
+      assert.strictEqual(readySpace(result), allocated);
+      yield* assertPublished(allocated);
+      const disabled = yield* admin.update(
+        {
+          requestId: M.MemoryOperationId.make(id(9203)),
+          expectedVersion: result.view.version,
+          action: "configure",
+          settings: { mode: "disabled" },
+        },
+        Effect.void,
+      );
+      yield* Effect.gen(function* () {
+        const reenabled = yield* (yield* Hub.makeAdministrator).update(
+          {
+            ...firstHub,
+            requestId: M.MemoryOperationId.make(id(9204)),
+            expectedVersion: disabled.view.version,
+          },
+          Effect.void,
+        );
+        assert.strictEqual(readySpace(reenabled), allocated);
+        yield* assertPublished(allocated);
+        const freshSql = yield* SqlClient.SqlClient;
+        assert.strictEqual(
+          (yield* freshSql<{
+            count: number;
+          }>`SELECT count(*) AS count FROM memory_compaction_state WHERE published=1`)[0]?.count,
+          1,
+        );
+        assert.strictEqual(
+          (yield* freshSql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_members`)[0]
+            ?.count,
+          1,
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(
+            Layer.mergeAll(Store.layer, Settings.layer).pipe(
+              Layer.provideMerge(Persistence.layerConfig),
+            ),
+          ),
+        ),
       );
       if (saved && "action" in saved) {
         const terminal = yield* restartedStore.transact(
@@ -1777,6 +1832,58 @@ it.effect.each(
       ),
     );
   }).pipe(Effect.provide(bootstrapDependencies)),
+);
+
+it.effect(
+  "a full pending sweep refuses unproven null-space allocation without retiring pointers",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      yield* store.transact(
+        Effect.gen(function* () {
+          for (let index = 0; index < M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS; index++) {
+            const action: M.MemoryHubSettingsUpdateInput = {
+              ...firstHub,
+              requestId: M.MemoryOperationId.make(id(10000 + index)),
+            };
+            const requestDigest = NodeCrypto.createHash("sha256")
+              .update(yield* encodeHubAdminRequest(action))
+              .digest("hex");
+            yield* store.writeHubAdminTx({
+              record: {
+                requestId: action.requestId,
+                requestDigest,
+                expectedVersion: 0,
+                action,
+                stage: "prepared",
+                memberVersion: null,
+                result: null,
+                secretName: null,
+              },
+              expectedStage: null,
+            });
+          }
+        }),
+      );
+      const admin = yield* Hub.makeAdministrator;
+      const error = yield* admin.update(firstHub, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryStoreConflict");
+      if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "revision_changed");
+      assert.isUndefined(yield* store.transact(store.readHubAdminTx(firstHub.requestId)));
+      const pending = yield* admin.pending(Effect.void);
+      assert.strictEqual(pending.length, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS);
+      assert.isTrue(pending.every((item) => item.stage === "prepared"));
+      const sql = yield* SqlClient.SqlClient;
+      assert.strictEqual(
+        (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_members`)[0]?.count,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_compaction_state`)[0]
+          ?.count,
+        0,
+      );
+    }).pipe(Effect.provide(bootstrapDependencies)),
 );
 
 it.effect.each(["prepared", "activated"] as const)(
