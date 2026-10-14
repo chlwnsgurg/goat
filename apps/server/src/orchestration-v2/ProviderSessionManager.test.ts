@@ -1,3 +1,10 @@
+import * as MemorySnapshot from "../memory/MemorySnapshot.ts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
+import * as MemoryContracts from "@goat/contracts";
+import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
+import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
+import * as CheckpointService from "./CheckpointService.ts";
+import * as AdapterInfrastructure from "../provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as ChannelDispatcher from "../channels/ChannelDispatcher.ts";
@@ -348,6 +355,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
+    readonly onTurnInput?: (
+      input: ProviderAdapter.ProviderAdapterV2TurnInput,
+    ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>;
     readonly startTurn?: Effect.Effect<void>;
     readonly resumeTurn?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
@@ -444,7 +454,8 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
               ...current,
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
-          startTurn: () => options.startTurn ?? Effect.void,
+          startTurn: (turnInput) =>
+            options.onTurnInput?.(turnInput) ?? options.startTurn ?? Effect.void,
           ...(options.resumeTurn === undefined ? {} : { resumeTurn: () => options.resumeTurn! }),
           steerTurn: () => Effect.void,
           interruptTurn: () =>
@@ -497,6 +508,9 @@ function layerTest(input: {
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
+  readonly onTurnInput?: (
+    input: ProviderAdapter.ProviderAdapterV2TurnInput,
+  ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>;
   readonly startTurn?: Effect.Effect<void>;
   readonly resumeTurn?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
@@ -504,8 +518,32 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly projectionReads?: { getThread: number; getThreadShell: number };
   readonly fileSystem?: FileSystem.FileSystem;
 }) {
+  const reads = input.projectionReads;
+  const layerConfiguredStores = reads
+    ? Layer.merge(
+        layerTestStores,
+        Layer.effect(
+          ProjectionStore.ProjectionStoreV2,
+          Effect.gen(function* () {
+            const delegate = yield* ProjectionStore.ProjectionStoreV2;
+            return ProjectionStore.ProjectionStoreV2.of({
+              ...delegate,
+              getThread: (threadId) =>
+                Effect.sync(() => reads.getThread++).pipe(
+                  Effect.andThen(delegate.getThread(threadId)),
+                ),
+              getThreadShell: (threadId) =>
+                Effect.sync(() => reads.getThreadShell++).pipe(
+                  Effect.andThen(delegate.getThreadShell(threadId)),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(layerTestStores)),
+      )
+    : layerTestStores;
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -529,6 +567,7 @@ function layerTest(input: {
       ...(input.hangSessionScopeClose === undefined
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
+      ...(input.onTurnInput === undefined ? {} : { onTurnInput: input.onTurnInput }),
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
       ...(input.resumeTurn === undefined ? {} : { resumeTurn: input.resumeTurn }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
@@ -547,13 +586,14 @@ function layerTest(input: {
       Layer.mergeAll(
         layerConfiguredEventSink,
         IdAllocator.layer,
-        layerTestStores,
+        layerConfiguredStores,
         ThreadCommandExecutor.layer,
       ),
     ),
   );
   return Layer.mergeAll(
-    layerTestStores,
+    AdapterInfrastructure.layerMemoryAdmission,
+    layerConfiguredStores,
     layerConfiguredEventSink,
     IdAllocator.layer,
     layerConfiguredMcpRegistry,
@@ -565,11 +605,12 @@ function layerTest(input: {
       Layer.provide(
         Layer.mergeAll(
           layerRegistry.pipe(Layer.provideMerge(McpProviderSessions.layer)),
+          AdapterInfrastructure.layerMemoryAdmission,
           layerConfiguredEventSink,
           IdAllocator.layer,
           layerProviderEventIngestorTest,
           layerConfiguredMcpRegistry,
-          layerTestStores,
+          layerConfiguredStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
         ),
@@ -4888,6 +4929,15 @@ it.effect(
         const configs = yield* McpProviderSessions.McpProviderSessions;
         const settings = yield* ServerSettings.ServerSettingsService;
         const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const admission = yield* AdapterInfrastructure.ProviderMemoryAdmission;
+        const adapterChanges = yield* Queue.unbounded<{
+          threadId: ThreadId;
+          providerInstanceId: ProviderInstanceId;
+        }>();
+        yield* admission.rotations.pipe(
+          Stream.runForEach((event) => Queue.offer(adapterChanges, event)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
         const changes = yield* Queue.unbounded<ProviderSessionManager.McpCredentialRotation>();
         yield* manager.mcpCredentialRotations!.pipe(
           Stream.runForEach((change) => Queue.offer(changes, change)),
@@ -4909,7 +4959,16 @@ it.effect(
           runtimePolicy,
           memoryGrantCeiling: null,
         });
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "read_write");
         yield* Queue.take(changes);
+        const initialAdapterRotation = yield* Queue.take(adapterChanges);
+        assert.equal(initialAdapterRotation.threadId, threadId);
+        assert.equal(initialAdapterRotation.providerInstanceId, modelSelection.instanceId);
+        assert.deepEqual(
+          yield* admission.currentPolicy(threadId),
+          yield* manager.currentMemoryPolicy!(threadId),
+        );
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "read_write");
         const readScope = () =>
           Effect.gen(function* () {
             const config = yield* configs.read(threadId);
@@ -5014,6 +5073,7 @@ it.effect(
           readOnly: false,
         });
         yield* Queue.clear(changes);
+        yield* Queue.clear(adapterChanges);
         const old = yield* configs.read(threadId);
         const offReady = yield* Deferred.make<ProviderSessionManager.McpCredentialRotation>();
         yield* manager.mcpCredentialRotations!.pipe(
@@ -5028,6 +5088,13 @@ it.effect(
         );
         const off = yield* Deferred.await(offReady);
         assert.deepEqual(off.grantedScopes, ["orchestration:read"]);
+        const offAdapterRotation = yield* Queue.take(adapterChanges);
+        assert.equal(offAdapterRotation.threadId, off.threadId);
+        assert.equal(offAdapterRotation.providerInstanceId, off.providerInstanceId);
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "none");
+        assert.deepEqual((yield* admission.fence(yield* configs.read(threadId)))?.grantedScopes, [
+          "orchestration:read",
+        ]);
         assert.equal((yield* readScope()).memoryPolicy?.grant, "none");
         const offConfig = yield* configs.read(threadId);
         const onReady = yield* Deferred.make<ProviderSessionManager.McpCredentialRotation>();
@@ -5046,7 +5113,10 @@ it.effect(
         const admitted = yield* readScope();
         assert.isDefined(yield* registry.currentMemoryPolicy!(admitted.thread.providerSessionId));
         yield* admitted.reauthorize!(["memory:read"]);
+        const attachedConfig = yield* configs.read(threadId);
         yield* manager.close(providerSessionId);
+        assert.isUndefined(yield* admission.fence(attachedConfig));
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "none");
         assert.equal(
           (yield* admitted.reauthorize!(["memory:read"]).pipe(Effect.flip))._tag,
           "EnvironmentAuthorizationError",
@@ -5544,7 +5614,50 @@ it.effect.each(turnStartMemoryCases)(
   (testCase: TurnStartMemoryCase) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
-      const settingsLayer = ServerSettings.layerTest();
+      const settingsLayer = ServerSettings.layerTest({ enableAgentMemoryAccess: true });
+      const delivered = yield* Deferred.make<void>();
+      let selections = 0;
+      const projectionReads = { getThread: 0, getThreadShell: 0 };
+      const refreshReads: Array<{ getThread: number; getThreadShell: number; selections: number }> =
+        [];
+      const frame = MemoryContext.packMemoryContext({
+        memorySpaceId: MemoryContracts.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+        projectionWatermark: 1,
+        items: [
+          {
+            memoryId: MemoryContracts.MemoryId.make("00000000-0000-4000-8000-000000000001"),
+            revisionId: MemoryContracts.MemoryRevisionId.make(
+              "00000000-0000-4000-8000-000000000002",
+            ),
+            scope: { kind: "user" },
+            provenance: { environmentId: EnvironmentId.make("fixture") },
+            assertionKind: "fact",
+            text: "memory & fixture",
+          },
+        ],
+      });
+      const onTurnInput = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+        Effect.gen(function* () {
+          assert.isDefined(turnInput.refreshMemoryContext);
+          // Admission is complete at the provider send boundary. Count only refresh work,
+          // including a second send with the same callback (native retry).
+          for (let send = 0; send < 2; send++) {
+            projectionReads.getThread = 0;
+            projectionReads.getThreadShell = 0;
+            const beforeSelections = selections;
+            const snapshot = yield* turnInput.refreshMemoryContext!();
+            if (testCase.expected === "none") {
+              assert.isUndefined(snapshot);
+            } else {
+              assert.equal(
+                MemoryContext.memoryContextText(snapshot),
+                MemoryContext.memoryContextText(frame),
+              );
+            }
+            refreshReads.push({ ...projectionReads, selections: selections - beforeSelections });
+          }
+          yield* Deferred.succeed(delivered, undefined);
+        });
       yield* Effect.gen(function* () {
         const sink = yield* EventSink.EventSinkV2;
         const ids = yield* IdAllocator.IdAllocatorV2;
@@ -5913,7 +6026,6 @@ it.effect.each(turnStartMemoryCases)(
             ...("readOnly" in testCase ? {} : { dispatchScopes: ["memory:read"] as const }),
           });
         }
-        const delivered = yield* Deferred.make<void>();
         const policy = {
           ...runtimePolicy,
           ...("readOnly" in testCase ? { sandboxPolicy: "read-only" as const } : {}),
@@ -5926,7 +6038,9 @@ it.effect.each(turnStartMemoryCases)(
               Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
               Layer.succeed(IdAllocator.IdAllocatorV2, ids),
               Layer.succeed(ProviderSessionManager.ProviderSessionManagerV2, manager),
-              Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
+              ContextHandoffService.layer.pipe(
+                Layer.provide(Layer.succeed(IdAllocator.IdAllocatorV2, ids)),
+              ),
               FileSystem.layerNoop({}),
               Layer.mock(GitWorkflow.GitWorkflowService)({}),
               Layer.mock(ProjectService.ProjectService)({}),
@@ -5934,9 +6048,31 @@ it.effect.each(turnStartMemoryCases)(
                 tryHandlePromptCommand: () => Effect.succeed(false),
               }),
               Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed(policy) }),
-              Layer.mock(RunExecutionService.RunExecutionServiceV2)({
-                startRootRun: () => Deferred.succeed(delivered, undefined).pipe(Effect.asVoid),
+              Layer.mock(MemorySnapshot.MemorySnapshot)({
+                forThread: (_threadId, issued, current) =>
+                  Effect.gen(function* () {
+                    selections++;
+                    assert.deepEqual(issued, yield* current);
+                    return frame;
+                  }),
               }),
+              RunExecutionService.layer.pipe(
+                Layer.provide(
+                  Layer.mergeAll(
+                    McpAppModelContext.layerEmpty,
+                    RemoteReportInbox.layerEmpty,
+                    settingsLayer,
+                    Layer.succeed(EventSink.EventSinkV2, sink),
+                    Layer.succeed(IdAllocator.IdAllocatorV2, ids),
+                    Layer.mock(CheckpointService.CheckpointServiceV2)({
+                      captureBaseline: () => Effect.void,
+                    }),
+                    Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+                      ingestNormalized: () => Effect.succeed([]),
+                    }),
+                  ),
+                ),
+              ),
             ),
           ),
         );
@@ -5949,7 +6085,20 @@ it.effect.each(turnStartMemoryCases)(
           assert.isUndefined(yield* configs.read(threadId));
         } else {
           yield* start;
+          assert.isTrue(
+            yield* Deferred.isDone(delivered),
+            "actual send must reach fixture before start returns",
+          );
           yield* Deferred.await(delivered);
+          // Check counters outside the provider: a regression must report the actual reads,
+          // rather than being translated into a failed send by the manager.
+          const expectedReads =
+            testCase.expected === "none"
+              ? { getThread: 0, getThreadShell: 0, selections: 0 }
+              : { getThread: 2, getThreadShell: 2, selections: 1 };
+          // Allowed refreshes check initial authority and the snapshot's live checkpoint.
+          assert.deepEqual(refreshReads, [expectedReads, expectedReads]);
+          assert.equal(selections, testCase.expected === "none" ? 0 : 2);
           const config = yield* configs.read(threadId);
           assert.isDefined(config);
           const expectedScopes =
@@ -5958,6 +6107,17 @@ it.effect.each(turnStartMemoryCases)(
               : testCase.expected === "read"
                 ? ["memory:read"]
                 : ["memory:read", "memory:write"];
+          const admission = yield* AdapterInfrastructure.ProviderMemoryAdmission;
+          assert.deepEqual(
+            yield* admission.currentPolicy(threadId),
+            yield* manager.currentMemoryPolicy!(threadId),
+          );
+          assert.equal((yield* admission.currentPolicy(threadId)).grant, testCase.expected);
+          const fenced = yield* admission.fence(config);
+          assert.deepEqual(
+            fenced?.grantedScopes?.filter((scope) => scope.startsWith("memory:")),
+            expectedScopes,
+          );
           const publication = (yield* Queue.takeAll(issued)).at(-1);
           assert.isDefined(publication);
           assert.deepEqual(
@@ -5975,7 +6135,13 @@ it.effect.each(turnStartMemoryCases)(
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
-            layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
+            layerTest({
+              state,
+              idleTimeoutMs: 1000,
+              serverSettingsLayer: settingsLayer,
+              projectionReads,
+              onTurnInput,
+            }),
             settingsLayer,
             Layer.effect(
               Orchestrator.OrchestratorV2,
