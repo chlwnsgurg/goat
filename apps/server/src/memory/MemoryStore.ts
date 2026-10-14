@@ -2874,7 +2874,8 @@ const make = Effect.gen(function* () {
         if (
           accepted &&
           decision.admission.kind !== "localIntent" &&
-          (decision.admission.kind === "approvedReplica" || (!decision.pending && !tombstones.length)) &&
+          (decision.admission.kind === "approvedReplica" ||
+            (!decision.pending && !tombstones.length)) &&
           op.kind !== "forget"
         ) {
           yield* unionImportLineageTx(lineageForRevision(op.revision), decision.admission);
@@ -8757,6 +8758,7 @@ const make = Effect.gen(function* () {
       permanentMetadataBytes: tables
         .filter(
           (table) =>
+            table.table === "memory_import_lineage" ||
             table.table === "memory_hub_members" ||
             table.table === "memory_hub_leases" ||
             table.table === "memory_hub_retention",

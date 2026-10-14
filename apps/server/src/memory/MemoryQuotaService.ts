@@ -657,6 +657,7 @@ const make = Effect.gen(function* () {
           const retention = yield* store.readHubRetentionTx(input.memorySpaceId);
           const counters = yield* store.counters(input.memorySpaceId);
           const hub = yield* store.readHubUsageTx(input.memorySpaceId);
+          const lineageCounters = yield* store.counters("_hub_global");
           const inventory = yield* store.readHubInventoryTx(input.memorySpaceId);
           const limits: Partial<Record<M.MemoryCapacityDimension, number>> = {
             space_live_items: M.MEMORY_SPACE_MAX_LIVE_ITEMS,
@@ -666,6 +667,7 @@ const make = Effect.gen(function* () {
             lifetime_ids: M.MEMORY_MAX_LIFETIME_IDS,
             receipts: M.MEMORY_DEDUP_MAX_RECEIPTS,
             import_source_items: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+            import_lineage_bytes: M.MEMORY_IMPORT_LINEAGE_MAX_BYTES,
             log_tail_rows: M.MEMORY_LOG_MAX_TAIL_ROWS,
             log_tail_bytes: M.MEMORY_LOG_MAX_TAIL_BYTES,
             work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,
@@ -683,22 +685,25 @@ const make = Effect.gen(function* () {
               .filter((c) => c.dimension === dimension)
               .reduce((sum, c) => sum + c.value, 0);
             const current =
-              dimension === "checkpoint_staging"
-                ? hub.stagingBytes
-                : dimension === "checkpoint_handles"
-                  ? hub.liveHandles
-                  : dimension === "relay_hub"
-                    ? hub.liveSourceReads
-                    : dimension === "members"
-                      ? (hub.tables.find((table) => table.table === "memory_hub_members")
-                          ?.rowCount ?? 0)
-                      : dimension === "log_tail_rows"
-                        ? counter + hub.tailRows
-                        : dimension === "log_tail_bytes"
-                          ? counter + hub.tailBytes
-                          : dimension === "permanent_metadata"
-                            ? counter + hub.permanentMetadataBytes
-                            : counter;
+              dimension === "import_lineage_bytes"
+                ? (lineageCounters.find((counter) => counter.dimension === "import_lineage_bytes")
+                    ?.value ?? 0)
+                : dimension === "checkpoint_staging"
+                  ? hub.stagingBytes
+                  : dimension === "checkpoint_handles"
+                    ? hub.liveHandles
+                    : dimension === "relay_hub"
+                      ? hub.liveSourceReads
+                      : dimension === "members"
+                        ? (hub.tables.find((table) => table.table === "memory_hub_members")
+                            ?.rowCount ?? 0)
+                        : dimension === "log_tail_rows"
+                          ? counter + hub.tailRows
+                          : dimension === "log_tail_bytes"
+                            ? counter + hub.tailBytes
+                            : dimension === "permanent_metadata"
+                              ? counter + hub.permanentMetadataBytes
+                              : counter;
             quotas.push({
               dimension,
               current,

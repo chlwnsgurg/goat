@@ -224,7 +224,7 @@ describe("MemoryCompactor", () => {
           );
           assert.strictEqual(match.kind, "source_suppressed");
           assert.strictEqual((yield* replica.readImportLineage(space, memoryId)).length, 202);
-        }).pipe(Effect.provide(core));
+        }).pipe(Effect.provide(Layer.fresh(core)));
       }).pipe(Effect.provide(live)),
   );
 

@@ -965,6 +965,7 @@ export const MemoryStorageTable = Schema.Literals([
   "memory_hub_leases",
   "memory_hub_source_reads",
   "memory_hub_retention",
+  "memory_import_lineage",
 ]);
 export type MemoryStorageTable = typeof MemoryStorageTable.Type;
 
