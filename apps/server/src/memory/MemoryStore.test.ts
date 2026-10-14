@@ -5154,3 +5154,138 @@ it.effect("pull bootstrap retry survives restart with version CAS and untouched 
     assert.strictEqual((yield* fresh.readPullRetry(key)).version, 3);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("resolution failure reports and permanent holds are owner fenced and targeted", () =>
+  Effect.gen(function* () {
+    const { store, sql, ownership, ticket, key, submission } = yield* seedSubmission;
+    const failure = {
+      ownership,
+      now: 1,
+      failureCode: "generation_failed" as const,
+      nextAttemptAt: Number.MAX_SAFE_INTEGER,
+      holdClass: "availability" as const,
+      reportConflictFailure: true,
+    };
+    assert.isNull(
+      yield* store.transact(
+        store.failResolutionTicketTx({ ...failure, ownership: { ...ownership, version: 0 } }),
+      ),
+    );
+    yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* store.failResolutionTicketTx(failure);
+          return yield* Effect.fail("rollback");
+        }),
+      )
+      .pipe(Effect.exit);
+    assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+    const failed = yield* store.transact(store.failResolutionTicketTx(failure));
+    assert.strictEqual(failed?.nextAttemptAt, Number.MAX_SAFE_INTEGER);
+    assert.strictEqual((yield* store.pendingReports(100))[0]?.operationId, ticket.attemptId);
+    assert.strictEqual(
+      (yield* store.readWorkHold(`resolve:${space}:${ticket.attemptId}`))?.holdClass,
+      "availability",
+    );
+    assert.isNull(yield* store.transact(store.failResolutionTicketTx(failure)));
+    const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+      Effect.provide(Layer.fresh(Store.layer)),
+    );
+    assert.deepStrictEqual(
+      yield* fresh.transact(
+        fresh.rearmResolutionHoldsTx({
+          memorySpaceId: space,
+          holdClass: "identity",
+          now: 2,
+          afterId: "",
+          limit: 100,
+        }),
+      ),
+      [],
+    );
+    assert.deepStrictEqual(
+      yield* fresh.transact(
+        fresh.rearmResolutionHoldsTx({
+          memorySpaceId: space,
+          holdClass: "availability",
+          now: 2,
+          afterId: "",
+          limit: 100,
+        }),
+      ),
+      [`resolve:${space}:${ticket.attemptId}`],
+    );
+    const recovered = (yield* fresh.readRecoverableResolutionTickets({
+      memorySpaceId: space,
+      now: 2,
+      limit: 100,
+    }))[0]!;
+    const owner = yield* fresh.transact(
+      fresh.acquireResolutionTicketTx({
+        key,
+        expectedVersion: recovered.version,
+        owner: "fresh",
+        coordinatorEpoch: 2,
+        now: 2,
+        ownedUntil: 100,
+      }),
+    );
+    if (!owner) throw new Error("fixture");
+    const newOwnership = { ...key, owner: "fresh", coordinatorEpoch: 2, version: owner.version };
+    const submitted = yield* fresh.transact(
+      fresh.persistResolutionSubmissionTx({
+        ownership: newOwnership,
+        submission,
+        digest: memoryOperationDigest(submission.operation),
+      }),
+    );
+    const submitOwner = { ...newOwnership, version: submitted.version };
+    assert.strictEqual(
+      (yield* fresh
+        .transact(fresh.failResolutionTicketTx({ ...failure, ownership: submitOwner, now: 3 }))
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    const held = yield* fresh.transact(
+      fresh.failResolutionTicketTx({
+        ...failure,
+        ownership: submitOwner,
+        now: 3,
+        reportConflictFailure: false,
+      }),
+    );
+    assert.deepStrictEqual(held?.submission, submission);
+    assert.strictEqual((yield* fresh.pendingReports(100)).length, 1);
+    // Claim-stage hold also needs its generation, frozen attempt and live coordinator ownership.
+    yield* fresh.recoverClaimCandidates(0);
+    const candidate = (yield* fresh.readDueClaimCandidates(1, 0, space))[0]!;
+    yield* sql`UPDATE memory_outbox SET status='running',claimed_by='2',claimed_until=100,frozen_claim_json=${JSON.stringify({ protocolVersion: 1, ...ticket, conflictHeadSet: ticket.conflictHeadSet })} WHERE id=${candidate.id}`;
+    const hold = {
+      memorySpaceId: space,
+      candidateId: candidate.id,
+      expectedGeneration: 0,
+      attemptId: ticket.attemptId,
+      coordinatorEpoch: 2,
+      now: 4,
+      failureCode: "unavailable" as const,
+      holdClass: "authorization" as const,
+    };
+    assert.isFalse(
+      yield* fresh.transact(fresh.holdClaimCandidateTx({ ...hold, coordinatorEpoch: 1 })),
+    );
+    assert.isTrue(yield* fresh.transact(fresh.holdClaimCandidateTx(hold)));
+    assert.deepStrictEqual(yield* fresh.readDueClaimCandidates(100, 5, space), []);
+    assert.deepStrictEqual(
+      yield* fresh.transact(
+        fresh.rearmResolutionHoldsTx({
+          memorySpaceId: space,
+          holdClass: "authorization",
+          now: 5,
+          afterId: "",
+          limit: 100,
+        }),
+      ),
+      [candidate.id],
+    );
+  }).pipe(Effect.provide(live)),
+);

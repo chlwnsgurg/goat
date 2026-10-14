@@ -903,6 +903,31 @@ export class MemoryStore extends Context.Service<
       approval?: M.MemoryHubReceipt;
       retireClaim?: { expectedGeneration: number; attemptId: string };
     }) => InTx<TicketRow | null>;
+    readonly failResolutionTicketTx: (input: {
+      ownership: TicketOwner;
+      now: number;
+      failureCode: M.MemoryFailureCode;
+      nextAttemptAt: number;
+      holdClass?: MemoryHoldClass;
+      reportConflictFailure: boolean;
+    }) => InTx<TicketRow | null>;
+    readonly holdClaimCandidateTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      candidateId: string;
+      expectedGeneration: number;
+      attemptId: M.MemoryOperationId;
+      coordinatorEpoch: number;
+      now: number;
+      failureCode: M.MemoryFailureCode;
+      holdClass: MemoryHoldClass;
+    }) => InTx<boolean>;
+    readonly rearmResolutionHoldsTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      holdClass: MemoryHoldClass;
+      now: number;
+      afterId: string;
+      limit: number;
+    }) => InTx<readonly string[]>;
     readonly persistResolutionSubmissionTx: (input: {
       ownership: TicketOwner;
       submission: M.MemoryHubApplyResolutionInput;
@@ -5903,6 +5928,105 @@ const make = Effect.gen(function* () {
       }
       return updated;
     });
+  const failResolutionTicketTx: MemoryStore["Service"]["failResolutionTicketTx"] = Effect.fn(
+    "MemoryStore.failResolutionTicketTx",
+  )(function* (input) {
+    yield* Transaction;
+    const row = yield* ownedTicket(input.ownership, input.now);
+    if (!row || row.state === "terminal" || row.approval) return null;
+    if (
+      input.nextAttemptAt < input.now ||
+      (input.nextAttemptAt === Number.MAX_SAFE_INTEGER) !== (input.holdClass !== undefined)
+    )
+      return yield* new MemoryStoreConflict({ code: "invalid_output" });
+    // An uncertain submission is preserved and is never announced as a failed conflict.
+    if (input.reportConflictFailure && row.submission)
+      return yield* new MemoryStoreConflict({ code: "revision_changed" });
+    const next = yield* writeTicket(
+      input.ownership,
+      {
+        ...row,
+        version: row.version + 1,
+        state: row.submission ? "submitting" : "recoverable",
+        owner: null,
+        ownedUntil: null,
+        nextAttemptAt: input.nextAttemptAt,
+      },
+      row.version,
+    );
+    if (!next) return null;
+    yield* stored(
+      "ticket-failure",
+      sql`UPDATE memory_outbox SET hold_class=${input.holdClass ?? null},failure_code=${input.failureCode} WHERE id=${ticketId(input.ownership)} AND sync_version=${next.version}`,
+    );
+    if (input.reportConflictFailure) {
+      const reportId = hashText(
+        `${row.ticket.memorySpaceId}:${row.ticket.attemptId}:conflict-failed`,
+      );
+      yield* stored(
+        "conflict-failure-report",
+        sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at)
+        VALUES (${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now}) ON CONFLICT(report_id) DO NOTHING`,
+      );
+    }
+    return next;
+  });
+  const holdClaimCandidateTx: MemoryStore["Service"]["holdClaimCandidateTx"] = Effect.fn(
+    "MemoryStore.holdClaimCandidateTx",
+  )(function* (input) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "claim-hold",
+      sql`UPDATE memory_outbox SET status='retry',hold_class=${input.holdClass},failure_code=${input.failureCode},next_attempt_at=${Number.MAX_SAFE_INTEGER},claimed_by=NULL,claimed_until=NULL
+      WHERE id=${input.candidateId} AND space=${input.memorySpaceId} AND kind='claim' AND status='running' AND sync_version=${input.expectedGeneration}
+      AND json_extract(frozen_claim_json,'$.attemptId')=${input.attemptId} AND claimed_by=${String(input.coordinatorEpoch)} AND claimed_until>${input.now} RETURNING id`,
+    );
+    return rows.length === 1;
+  });
+  const rearmResolutionHoldsTx: MemoryStore["Service"]["rearmResolutionHoldsTx"] = Effect.fn(
+    "MemoryStore.rearmResolutionHoldsTx",
+  )(function* (input) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "resolution-hold-list",
+      sql<{
+        id: string;
+        kind: string;
+        ticket_json: string | null;
+      }>`SELECT id,kind,ticket_json FROM memory_outbox WHERE space=${input.memorySpaceId} AND kind IN ('claim','resolve') AND status NOT IN ('cancelled','completed','failed') AND next_attempt_at=${Number.MAX_SAFE_INTEGER} AND hold_class=${input.holdClass} AND id>${input.afterId} ORDER BY id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
+    );
+    const changed: string[] = [];
+    for (const row of rows) {
+      if (row.kind === "resolve") {
+        if (!row.ticket_json) continue;
+        const ticket = yield* decodeTicketRow(row.ticket_json);
+        if (
+          ticket.state === "terminal" ||
+          ticket.approval ||
+          (ticket.ownedUntil !== null && ticket.ownedUntil > input.now)
+        )
+          continue;
+        const next = yield* writeTicket(
+          { memorySpaceId: input.memorySpaceId, attemptId: ticket.ticket.attemptId },
+          {
+            ...ticket,
+            version: ticket.version + 1,
+            owner: null,
+            ownedUntil: null,
+            nextAttemptAt: input.now,
+          },
+          ticket.version,
+        );
+        if (!next) continue;
+      }
+      const updated = yield* stored(
+        "resolution-hold-rearm",
+        sql`UPDATE memory_outbox SET hold_class=NULL,failure_code=NULL,next_attempt_at=${input.now},claimed_by=NULL,claimed_until=NULL WHERE id=${row.id} AND hold_class=${input.holdClass} RETURNING id`,
+      );
+      if (updated.length) changed.push(row.id);
+    }
+    return changed;
+  });
   const persistResolutionSubmissionTx: MemoryStore["Service"]["persistResolutionSubmissionTx"] =
     Effect.fn("MemoryStore.persistResolutionSubmissionTx")(function* (input) {
       yield* Transaction;
@@ -8360,6 +8484,9 @@ const make = Effect.gen(function* () {
     acquireResolutionTicketTx,
     transitionResolutionTicketTx,
     persistResolutionSubmissionTx,
+    failResolutionTicketTx,
+    holdClaimCandidateTx,
+    rearmResolutionHoldsTx,
     listMaterializableIntents,
     assignIntentIdentityTx,
     transact,
