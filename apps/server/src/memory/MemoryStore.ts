@@ -4076,8 +4076,15 @@ const make = Effect.gen(function* () {
           }
           if (!eligible || item.status !== "quarantined") continue;
           const headSetDigest = hashText(yield* headsCodec.encode(item.conflict.heads));
+          const candidateId = `claim:${row.space}:${row.memory_id}:${headSetDigest}`;
+          // An exposure hold can clear without changing heads. Its cancelled
+          // attempt stays fenced, but the eligible frontier may start a new one.
+          yield* stored(
+            "claim-rearm",
+            sql`UPDATE memory_outbox SET status='pending',frozen_claim_json=NULL,sync_version=sync_version+1,terminal_at=NULL,next_attempt_at=${now},claimed_by=NULL,claimed_until=NULL WHERE id=${candidateId} AND kind='claim' AND status='cancelled'`,
+          );
           yield* enqueueWork({
-            id: `claim:${row.space}:${row.memory_id}:${headSetDigest}`,
+            id: candidateId,
             space: row.space,
             memoryId: item.memoryId,
             kind: "claim",

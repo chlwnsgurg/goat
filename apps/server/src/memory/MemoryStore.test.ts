@@ -4688,3 +4688,77 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "exposure cancellation fences ticket ownership and resumes the same frontier after the hold clears",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ticket } = yield* seedSubmission;
+      yield* store.recoverClaimCandidates(0);
+      const aggregate = yield* store.loadAggregate(space, memory);
+      if (!aggregate.item) throw new Error("fixture");
+      const held = {
+        ...aggregate.item,
+        localAvailability: { ...aggregate.item.localAvailability, reasons: ["scanner_pending"] },
+      };
+      yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(held)} WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.recoverClaimCandidates(1);
+      const cancelled = yield* sql<{
+        status: string;
+        ticket_json: string;
+      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.strictEqual(cancelled[0]!.status, "cancelled");
+      assert.strictEqual(JSON.parse(cancelled[0]!.ticket_json).state, "terminal");
+      assert.strictEqual((yield* store.readDueClaimCandidates(100, 1)).length, 0);
+      yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(aggregate.item)} WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.recoverClaimCandidates(2);
+      const candidate = (yield* store.readDueClaimCandidates(100, 2))[0]!;
+      assert.strictEqual(candidate.status, "pending");
+      if (candidate.metadata.kind !== "claim") throw new Error("fixture");
+      assert.isTrue(candidate.metadata.generation! > 0);
+      assert.strictEqual(
+        (yield* sql<{
+          status: string;
+        }>`SELECT status FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`)[0]!
+          .status,
+        "cancelled",
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("discarding expired bootstrap preserves staged bodies adopted by canonical receive", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const input = { memorySpaceId: space, hubEnvironmentId: env };
+    yield* store.transact(
+      store.advanceBootstrapTx({
+        ...input,
+        expectedState: "unbound",
+        nextState: "staging",
+        checkpointId: "adopted",
+        snapshotToken: "synthetic-adopted",
+        checkpointSequence: 1,
+        nextCursor: null,
+      }),
+    );
+    yield* store.installCheckpointPage({ checkpointId: "adopted", page: checkpoint() });
+    yield* store.apply(approved());
+    assert.isTrue(
+      yield* store.transact(
+        store.discardBootstrapTx({
+          ...input,
+          expectedSnapshotToken: "synthetic-adopted",
+          expectedCheckpointId: "adopted",
+          expectedCheckpointSequence: 1,
+        }),
+      ),
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${id(13)}`)
+        .length,
+      1,
+    );
+    assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "active");
+  }).pipe(Effect.provide(live)),
+);
