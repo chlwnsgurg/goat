@@ -1761,6 +1761,7 @@ it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] 
       });
       yield* Effect.scoped(
         Effect.gen(function* () {
+          yield* ready;
           const validated = yield* sourceFixture;
           const base = yield* Sync.MemorySyncRuntime;
           const owner = Sync.MemorySyncRuntime.of({
