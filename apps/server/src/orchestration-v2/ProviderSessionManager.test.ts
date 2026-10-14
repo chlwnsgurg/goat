@@ -6000,7 +6000,9 @@ it.effect.each(turnStartMemoryCases)(
               Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
               Layer.succeed(IdAllocator.IdAllocatorV2, ids),
               Layer.succeed(ProviderSessionManager.ProviderSessionManagerV2, manager),
-              Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
+              ContextHandoffService.layer.pipe(
+                Layer.provide(Layer.succeed(IdAllocator.IdAllocatorV2, ids)),
+              ),
               FileSystem.layerNoop({}),
               Layer.mock(GitWorkflow.GitWorkflowService)({}),
               Layer.mock(ProjectService.ProjectService)({}),
