@@ -11,6 +11,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
@@ -2583,4 +2584,288 @@ it.effect("a missing selected head body never exposes a partial frontier to gene
       ),
     );
   }),
+);
+
+it.effect(
+  "discard and new join fence a late final bootstrap page without replacing the new token",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const client = peer({
+        join: () =>
+          Effect.succeed({
+            protocolVersion: 1,
+            memorySpaceId: space,
+            hubEnvironmentId: remote,
+            checkpointSequence: 0,
+            retentionFloor: 0,
+            snapshotToken: "old-stage",
+            causalBoundary: { checkpointSequence: 0, boundaryId: "old-boundary" },
+          }),
+        pull: () =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(resume)),
+            Effect.as({
+              highWatermark: 0,
+              throughSequence: 0,
+              hasMore: false,
+              entries: [],
+              checkpoint: {
+                memorySpaceId: space,
+                checkpointSequence: 0,
+                retentionFloor: 0,
+                causalBoundary: { checkpointSequence: 0, boundaryId: "old-boundary" },
+                pageOrdinal: 0,
+                items: [],
+                revisions: [],
+                tombstones: [],
+                conflicts: [],
+                resolutions: [],
+                compactReceipts: [],
+                identities: [],
+                fences: [],
+                suppressions: [],
+                nextCursor: null,
+                bootstrapComplete: true,
+              },
+            }),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
+          yield* Deferred.await(entered);
+          yield* store.transact(
+            Effect.gen(function* () {
+              yield* store.discardBootstrapTx({
+                memorySpaceId: space,
+                hubEnvironmentId: remote,
+                expectedSnapshotToken: "old-stage",
+                expectedCheckpointId: "hub:old-stage",
+                expectedCheckpointSequence: 0,
+              });
+              yield* store.advanceBootstrapTx({
+                memorySpaceId: space,
+                hubEnvironmentId: remote,
+                expectedState: "unbound",
+                nextState: "staging",
+                checkpointId: "hub:new-stage",
+                snapshotToken: "new-stage",
+                checkpointSequence: 1,
+                nextCursor: null,
+              });
+            }),
+          );
+          yield* Deferred.succeed(resume, undefined);
+          yield* Fiber.join(run);
+          const progress = yield* store.readBootstrap({
+            memorySpaceId: space,
+            hubEnvironmentId: remote,
+          });
+          assert.strictEqual(progress.snapshotToken, "new-stage");
+          assert.strictEqual(progress.checkpointId, "hub:new-stage");
+          assert.strictEqual(progress.checkpointSequence, 1);
+          assert.strictEqual(progress.state, "staging");
+          assert.strictEqual(progress.pageCount, 0);
+          assert.strictEqual(yield* store.readCursor(space, remote), 0);
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect(
+  "hung first relay read sends its failure and the healthy pending successor before push",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const pushed = yield* Deferred.make<void>();
+      const pending = new Map<string, M.MemorySourceReadRequest>();
+      for (const n of [9101, 9102])
+        pending.set(id(n), {
+          requestId: M.MemorySourceReadRequestId.make(id(n)),
+          memorySpaceId: space,
+          memoryId: M.MemoryId.make(id(2)),
+          requesterEnvironmentId: remote,
+          sourceThread: { environmentId: local, threadId: M.ThreadId.make("healthy-source") },
+          sourceWatermark: {
+            fromEventId: M.EventId.make("e1"),
+            toEventId: M.EventId.make("e2"),
+            throughSequence: 2,
+          },
+          messageIds: [],
+          limit: 10,
+          authorizedScopes: ["memory:read", "orchestration:read"],
+          expiresAtHubTime: "1970-01-01T00:01:15.000Z",
+        });
+      const responses: M.MemoryHubSourceReadRespondInput[] = [];
+      const client = peer({
+        collectSourceReads: () => Effect.sync(() => ({ requests: [...pending.values()] })),
+        respondSourceRead: (_c, response) =>
+          Effect.sync(() => {
+            responses.push(response);
+            pending.delete(response.requestId);
+            return { accepted: true };
+          }),
+        push: (_c, input) =>
+          Deferred.succeed(pushed, undefined).pipe(
+            Effect.as({
+              receipts: input.operations.map((op) => ({
+                operationId: op.operationId,
+                memoryId: op.memoryId,
+                operationDigest: memoryOperationDigest(op),
+                hubSequence: 1,
+                outcome: "accepted" as const,
+              })),
+            }),
+          ),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* enqueue(910);
+          const base = yield* Sync.MemorySyncRuntime;
+          const owner = {
+            ...base,
+            ownerReader: {
+              readCommitted: (request: M.MemorySourceReadRequest) =>
+                request.requestId === id(9101)
+                  ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+                  : Effect.succeed({
+                      kind: "available" as const,
+                      page: {
+                        sourceThread: request.sourceThread,
+                        watermark: request.sourceWatermark,
+                        messages: [],
+                        nextCursor: null,
+                      },
+                    }),
+            },
+          };
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
+              yield* Deferred.await(entered);
+              yield* TestClock.adjust("5 seconds");
+              yield* Deferred.await(pushed);
+              yield* Fiber.join(run);
+              assert.deepStrictEqual(
+                responses.map((r) => r.requestId),
+                [id(9101), id(9102)],
+              );
+              assert.deepStrictEqual(responses[0]?.outcome, {
+                kind: "unavailable",
+                code: "source_unavailable",
+              });
+              assert.strictEqual(responses[1]?.outcome.kind, "available");
+              assert.strictEqual(pending.size, 0);
+              yield* sync.syncOnce;
+              assert.strictEqual(responses.length, 2);
+              const store = yield* Store.MemoryStore;
+              assert.strictEqual((yield* store.readEligibleOutbox(space, 5000, 100)).length, 0);
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, owner)),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect(
+  "completion batches keep the active cycle scope bounded without accumulating waiters",
+  () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>();
+      let releases = 0;
+      let appScope: Scope.Scope | undefined;
+      const client = peer({
+        applyResolution: (_c, input) =>
+          Effect.succeed({
+            operationId: input.operation.operationId,
+            memoryId: input.operation.memoryId,
+            operationDigest: memoryOperationDigest(input.operation),
+            hubSequence: null,
+            outcome: "rejected",
+            failureCode: "conflict_changed",
+          }),
+        release: () =>
+          Effect.sync(() => {
+            releases++;
+            return { released: true };
+          }),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.succeed({
+            result: {
+              text: "synthetic resolution",
+              evidence: [],
+              assertionKind: "inference",
+              judgment: "synthetic judgment",
+            },
+            execution: {
+              requestedModelSelection: input.modelSelection,
+              effectiveProvider: M.ProviderDriverKind.make("codex"),
+              effectiveModel: input.modelSelection.model,
+              providerInstanceId: input.modelSelection.instanceId,
+              environmentId: local,
+            },
+          }),
+      });
+      const count = () =>
+        appScope?.state._tag === "Open"
+          ? (appScope.state.finalizer ? 1 : 0) + (appScope.state.finalizers?.size ?? 0)
+          : 0;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          for (let n = 1; n <= 20; n++) yield* conflict(n);
+          const settings = yield* Settings.ServerSettingsService;
+          const store = yield* Store.MemoryStore;
+          const control = Layer.fresh(Sync.layer).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(Settings.ServerSettingsService, {
+                  ...settings,
+                  getSettings: Effect.gen(function* () {
+                    if (!appScope)
+                      appScope = Option.getOrUndefined(yield* Effect.serviceOption(Scope.Scope));
+                    return yield* settings.getSettings;
+                  }),
+                }),
+                Layer.succeed(Store.MemoryStore, {
+                  ...store,
+                  readDueClaimCandidates: (limit, now, s) =>
+                    releases >= 12
+                      ? Deferred.succeed(gate, undefined).pipe(Effect.andThen(Effect.never))
+                      : store.readDueClaimCandidates(limit, now, s),
+                }),
+              ),
+            ),
+          );
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              const baseline = count();
+              const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
+              yield* Deferred.await(gate);
+              yield* Effect.yieldNow;
+              assert.isAtLeast(releases, 12);
+              assert.isAtMost(count(), baseline + 6);
+              yield* sync.shutdown;
+              yield* Fiber.await(run);
+              assert.isAtMost(count(), baseline);
+            }).pipe(Effect.provide(control)),
+          );
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
 );

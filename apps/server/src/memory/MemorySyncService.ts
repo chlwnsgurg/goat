@@ -673,7 +673,7 @@ const make = Effect.gen(function* () {
           ),
           Effect.ensuring(store.wake),
           Effect.ensuring(
-            Effect.suspend(() => requestCycle(sweep, true)).pipe(
+            Effect.suspend(() => requestCycle(sweep, true, false)).pipe(
               Effect.ignore,
               Effect.forkIn(scope),
               Effect.asVoid,
@@ -941,30 +941,45 @@ const make = Effect.gen(function* () {
       )
         return yield* new M.MemoryHubError({ code: "invalid_output" });
       yield* ensureEpoch(r.settings.memoryHubVersion);
-      yield* store.transact(
-        Effect.gen(function* () {
-          yield* store.installCheckpointPage({ checkpointId: state.checkpointId!, page });
-          if (page.bootstrapComplete)
-            yield* store.completeCheckpoint({
+      const installed = yield* store
+        .transact(
+          Effect.gen(function* () {
+            const stage = {
               memorySpaceId: r.space!,
               hubEnvironmentId: r.hubId,
-              localEnvironmentId: local,
               checkpointId: state.checkpointId!,
-              pageCount: state.pageCount + 1,
-            });
-          else
-            yield* store.advanceBootstrapTx({
-              memorySpaceId: r.space!,
-              hubEnvironmentId: r.hubId,
-              expectedState: "staging",
-              nextState: "staging",
-              checkpointId: state.checkpointId!,
-              snapshotToken: state.snapshotToken,
-              checkpointSequence: state.checkpointSequence,
-              nextCursor: page.nextCursor,
-            });
-        }),
-      );
+              expectedSnapshotToken: state.snapshotToken!,
+              expectedCheckpointSequence: state.checkpointSequence,
+            };
+            yield* store.installCheckpointPage({ ...stage, page });
+            if (page.bootstrapComplete)
+              yield* store.completeCheckpoint({
+                ...stage,
+                localEnvironmentId: local,
+                pageCount: state.pageCount + 1,
+              });
+            else
+              yield* store.advanceBootstrapTx({
+                memorySpaceId: r.space!,
+                hubEnvironmentId: r.hubId,
+                expectedState: "staging",
+                nextState: "staging",
+                checkpointId: state.checkpointId!,
+                snapshotToken: state.snapshotToken,
+                checkpointSequence: state.checkpointSequence,
+                nextCursor: page.nextCursor,
+              });
+          }),
+        )
+        .pipe(
+          Effect.as(true),
+          // Catch outside the outer Tx: a stale final page must roll back the whole install.
+          Effect.catchTags({
+            MemoryStoreConflict: (e) =>
+              e.code === "revision_changed" ? Effect.succeed(false) : Effect.fail(e),
+          }),
+        );
+      if (!installed) return false;
       budget.pages++;
       state = { ...state, pageCount: state.pageCount + 1, cursor: page.nextCursor };
       if (page.bootstrapComplete) return true;
@@ -972,7 +987,9 @@ const make = Effect.gen(function* () {
     return false;
   });
   const relayMutex = yield* Semaphore.make(1);
-  // One relay cycle at a time, at most 32 items, 15s total including permits and transport.
+  let lastRelayRequest: M.MemorySourceReadRequestId | null = null;
+  // Rotate the bounded collected page after the last attempted request. Read time leaves
+  // room for the failure response; a stalled response cannot monopolize the next cycle.
   const relay = (r: Route) =>
     relayMutex
       .withPermit(
@@ -989,7 +1006,13 @@ const make = Effect.gen(function* () {
           const collected = yield* r.connection
             ? client.collectSourceReads(r.connection, input)
             : hub.collectSourceReads(input, r.principal!);
-          for (const request of collected.requests) {
+          const previous = collected.requests.findIndex((q) => q.requestId === lastRelayRequest);
+          const requests = [
+            ...collected.requests.slice(previous + 1),
+            ...collected.requests.slice(0, previous + 1),
+          ];
+          for (const request of requests) {
+            lastRelayRequest = request.requestId;
             yield* Effect.gen(function* () {
               if (
                 request.sourceThread.environmentId !== local ||
@@ -999,15 +1022,15 @@ const make = Effect.gen(function* () {
               const permit = runtime
                 .ownerPermit(request)
                 .pipe(Effect.andThen(ensureEpoch(r.settings.memoryHubVersion)));
-              yield* permit;
-              const outcome = yield* runtime.ownerReader.readCommitted(request, permit).pipe(
-                Effect.timeout("15 seconds"),
+              const outcome = yield* permit.pipe(
+                Effect.andThen(runtime.ownerReader.readCommitted(request, permit)),
+                Effect.timeout("5 seconds"),
                 Effect.catchTags({
                   TimeoutError: () =>
                     Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
                 }),
               );
-              yield* permit;
+              yield* permit.pipe(Effect.timeout("1 second"));
               if (Date.parse(request.expiresAtHubTime) <= (yield* Clock.currentTimeMillis)) return;
               const checked = yield* decodeSource(outcome).pipe(
                 Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
@@ -1036,10 +1059,18 @@ const make = Effect.gen(function* () {
                 requestId: request.requestId,
                 outcome: safe,
               };
-              yield* r.connection
-                ? client.respondSourceRead(r.connection, response)
-                : hub.respondSourceRead(response, r.principal!);
-            }).pipe(Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)));
+              yield* (
+                r.connection
+                  ? client.respondSourceRead(r.connection, response)
+                  : hub.respondSourceRead(response, r.principal!)
+              ).pipe(Effect.timeout("1 second"));
+            }).pipe(
+              Effect.catchTags({
+                TimeoutError: () =>
+                  Effect.fail(new M.MemoryHubError({ code: "source_unavailable" })),
+              }),
+              Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)),
+            );
           }
         }),
       )
