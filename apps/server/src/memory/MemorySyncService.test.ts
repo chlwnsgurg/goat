@@ -79,63 +79,54 @@ const hub = Hub.layer.pipe(
   Layer.provide(Hub.activityLayer),
   Layer.provide(Layer.succeed(Hub.MemoryHubConfiguration, { read: Effect.succeed(null) })),
 );
-// Pending L1 read/discard ports are supplied by committed SQL only in this fixture.
+// Real Store ports; the fixture Settings authority below is a SQL-free Ref.
 const runtime = Layer.effect(
   Sync.MemorySyncRuntime,
   Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
+    const store = yield* Store.MemoryStore;
+    const settings = yield* Settings.ServerSettingsService;
     return Sync.MemorySyncRuntime.of({
       cwd: "/tmp/memory-sync-fixture",
+      readIntentBinding: settings.getSettings.pipe(
+        Effect.map((s) => ({
+          memorySpaceId: s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId,
+          coordinatorEpoch: s.memoryHubVersion,
+          enabled: s.memoryHub.mode !== "disabled",
+        })),
+        Effect.mapError(() => new Service.MemoryAccessError({ code: "fenced" })),
+      ),
       available: () => Effect.void,
       ownerPermit: () => Effect.void,
       ownerReader: {
         readCommitted: () => Effect.succeed({ kind: "unavailable", code: "source_unavailable" }),
       },
-      readBootstrap: (s, h) =>
-        Effect.gen(function* () {
-          const rows = yield* sql<{
-            bootstrap_state: "unbound" | "staging" | "ready";
-            checkpoint_id: string | null;
-            snapshot_token: string | null;
-            checkpoint_sequence: number;
-            checkpoint_cursor: string | null;
-          }>`SELECT * FROM memory_sync_cursors WHERE space=${s} AND hub_environment_id=${h}`;
-          const row = rows[0];
-          const pages = row?.checkpoint_id
-            ? yield* sql<{
-                count: number;
-              }>`SELECT count(*) AS count FROM memory_inbox_pending WHERE checkpoint_id=${row.checkpoint_id}`
-            : [];
-          return {
-            state: row?.bootstrap_state ?? "unbound",
-            checkpointId: row?.checkpoint_id ?? null,
-            snapshotToken: row?.snapshot_token ?? null,
-            checkpointSequence: row?.checkpoint_sequence ?? 0,
-            cursor: row?.checkpoint_cursor ?? null,
-            pageCount: pages[0]?.count ?? 0,
-          };
-        }).pipe(
-          Effect.mapError(
-            (cause) => new Store.MemoryStorageError({ stage: "fixture-bootstrap", cause }),
-          ),
-        ),
-      discardBootstrap: (s, h) =>
-        sql`DELETE FROM memory_sync_cursors WHERE space=${s} AND hub_environment_id=${h}`.pipe(
-          Effect.asVoid,
-          Effect.mapError(
-            (cause) => new Store.MemoryStorageError({ stage: "fixture-discard", cause }),
-          ),
-        ),
-      readUnboundStorage: Effect.fail(
-        new Store.MemoryStorageError({ stage: "fixture-status", cause: "pending L1 adapter" }),
-      ),
-      readProcessing: () =>
-        Effect.fail(
-          new Store.MemoryStorageError({
-            stage: "fixture-status",
-            cause: "status assembler is an L1 handoff",
+      readBootstrap: (s, h) => store.readBootstrap({ memorySpaceId: s, hubEnvironmentId: h }),
+      discardBootstrap: (s, h, token) =>
+        store.transact(
+          Effect.gen(function* () {
+            const progress = yield* store.readBootstrap({ memorySpaceId: s, hubEnvironmentId: h });
+            if (progress.snapshotToken !== token || !progress.checkpointId) return;
+            yield* store.discardBootstrapTx({
+              memorySpaceId: s,
+              hubEnvironmentId: h,
+              expectedSnapshotToken: token,
+              expectedCheckpointId: progress.checkpointId,
+              expectedCheckpointSequence: progress.checkpointSequence,
+            });
           }),
         ),
+      readUnboundStorage: Effect.fail(
+        new Store.MemoryStorageError({ stage: "fixture-unbound", cause: "L5 adapter pending" }),
+      ),
+      readProcessing: (s, h) =>
+        s && h
+          ? store.readProcessing({ memorySpaceId: s, hubEnvironmentId: h })
+          : Effect.fail(
+              new Store.MemoryStorageError({
+                stage: "fixture-unbound",
+                cause: "L1 nullable status port pending",
+              }),
+            ),
     });
   }),
 ).pipe(Layer.provide(core));
@@ -268,18 +259,15 @@ const fixture = (
   disabled = false,
   changing = false,
 ) => {
-  const shared = Layer.mergeAll(
-    hub,
-    runtime,
-    identity,
-    generation,
-    changing
-      ? changingSettings(disabled)
-      : Settings.layerTest({
-          memoryHub: disabled ? { mode: "disabled" } : member,
-          memoryHubVersion: 1,
-          defaultModelSelection: selection,
-        }),
+  const sharedSettings = changing
+    ? changingSettings(disabled)
+    : Settings.layerTest({
+        memoryHub: disabled ? { mode: "disabled" } : member,
+        memoryHubVersion: 1,
+        defaultModelSelection: selection,
+      });
+  const shared = Layer.mergeAll(hub, runtime, identity, generation).pipe(
+    Layer.provideMerge(sharedSettings),
   );
   return Sync.layer.pipe(Layer.provideMerge(client.pipe(Layer.provideMerge(shared))));
 };
@@ -325,9 +313,15 @@ const commit = (op: M.MemoryOperation) =>
       ),
     );
   });
-const conflict = (n = 1) =>
+const conflict = (n = 1, targetSpace = space) =>
   Effect.gen(function* () {
-    const first = operation(n * 3, M.MemoryId.make(id(n + 2)));
+    const original = operation(n * 3, M.MemoryId.make(id(n + 2)));
+    if (original.kind !== "upsert") throw new Error("fixture");
+    const first = {
+      ...original,
+      memorySpaceId: targetSpace,
+      revision: { ...original.revision, memorySpaceId: targetSpace },
+    };
     if (first.kind !== "upsert") throw new Error("fixture");
     yield* commit(first);
     for (const next of [
@@ -337,8 +331,13 @@ const conflict = (n = 1) =>
       if (next.kind !== "upsert") throw new Error("fixture");
       yield* commit({
         ...next,
+        memorySpaceId: targetSpace,
         expectedHeads: [first.revision.revisionId],
-        revision: { ...next.revision, parents: [first.revision.revisionId] },
+        revision: {
+          ...next.revision,
+          memorySpaceId: targetSpace,
+          parents: [first.revision.revisionId],
+        },
       });
     }
     return first.memoryId;
@@ -452,7 +451,7 @@ it.effect("claim_busy persists backoff and TestClock releases a due candidate", 
         const store = yield* Store.MemoryStore;
         yield* sync.syncOnce;
         assert.strictEqual(claims, 1);
-        assert.strictEqual((yield* store.readDueClaimCandidates(100, 29999)).length, 0);
+        assert.strictEqual((yield* store.readDueClaimCandidates(100, 29999, space)).length, 0);
         yield* sync.syncOnce;
         assert.strictEqual(claims, 1);
         yield* TestClock.adjust("30 seconds");
@@ -805,7 +804,11 @@ it.effect(
           // shutdown waits for registered execution and its durable finalization.
           yield* sync.shutdown;
           const store = yield* Store.MemoryStore;
-          const tickets = yield* store.readRecoverableResolutionTickets({ now: 30000, limit: 100 });
+          const tickets = yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 30000,
+            limit: 100,
+          });
           assert.strictEqual(tickets.length, 1);
           assert.deepStrictEqual(tickets[0]?.submission, submissions[0]);
           assert.strictEqual(tickets[0]?.state, "submitting");
@@ -1183,7 +1186,11 @@ it.effect(
           yield* Deferred.await(firstReleased);
           yield* sync.shutdown;
           const store = yield* Store.MemoryStore;
-          const saved = yield* store.readRecoverableResolutionTickets({ now: 30000, limit: 100 });
+          const saved = yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 30000,
+            limit: 100,
+          });
           assert.strictEqual(saved[0]?.approval?.outcome, "accepted");
           assert.strictEqual((yield* store.loadAggregate(space, memory)).heads.length, 2);
           const sql = yield* SqlClient.SqlClient;
@@ -1285,7 +1292,11 @@ it.effect(
           const store = yield* Store.MemoryStore;
           yield* sync.syncOnce;
           assert.strictEqual(
-            (yield* store.readRecoverableResolutionTickets({ now: 0, limit: 100 })).length,
+            (yield* store.readRecoverableResolutionTickets({
+              memorySpaceId: space,
+              now: 0,
+              limit: 100,
+            })).length,
             0,
           );
           assert.strictEqual(yield* sync.activeResolutions, 0);
@@ -1304,7 +1315,11 @@ it.effect(
           );
           assert.strictEqual(claims.length, 2);
           assert.deepStrictEqual(claims[1], claims[0]);
-          const tickets = yield* store.readRecoverableResolutionTickets({ now: 35000, limit: 100 });
+          const tickets = yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 35000,
+            limit: 100,
+          });
           assert.strictEqual(tickets[0]?.ticket.fencingToken, 41);
           assert.strictEqual(tickets[0]?.ticket.attemptId, claims[0]?.attemptId);
         }).pipe(Effect.provide(fixture(client, model))),
@@ -1511,6 +1526,7 @@ it.effect("periodic renewal failure preserves the renewed expiry retry floor", (
         yield* Deferred.await(released);
         yield* sync.shutdown;
         const tickets = yield* (yield* Store.MemoryStore).readRecoverableResolutionTickets({
+          memorySpaceId: space,
           now: 180000,
           limit: 100,
         });

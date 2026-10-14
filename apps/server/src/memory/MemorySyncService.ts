@@ -40,6 +40,8 @@ export class MemorySyncRuntime extends Context.Service<
   MemorySyncRuntime,
   {
     readonly cwd: string;
+    /** SQL-free committed authority; absent until the application snapshot adapter is wired. */
+    readonly readIntentBinding?: Effect.Effect<Service.IntentBinding, Service.MemoryAccessError>;
     readonly readBootstrap: (
       space: M.MemorySpaceId,
       hub: M.EnvironmentId,
@@ -241,13 +243,13 @@ const make = Effect.gen(function* () {
     );
   };
   const eligibility = Effect.fnUntraced(function* (ticket: M.MemoryResolutionLease) {
-    const aggregate = yield* store.loadAggregate(ticket.memorySpaceId, ticket.memoryId);
+    const aggregate = yield* store.readResolutionSnapshot(ticket.memorySpaceId, ticket.memoryId);
     if (
       aggregate.tombstone ||
       aggregate.pendingForget ||
       !sameHeads(aggregate.heads, ticket.conflictHeadSet) ||
-      aggregate.item?.status !== "quarantined" ||
-      aggregate.item.localAvailability.reasons.some((r) =>
+      aggregate.status !== "quarantined" ||
+      aggregate.reasons.some((r) =>
         [
           "secret_detected",
           "scanner_pending",
@@ -350,12 +352,10 @@ const make = Effect.gen(function* () {
     const settle = Effect.fnUntraced(function* (receipt: M.MemoryHubReceipt) {
       if (!row.submission) return yield* new M.MemoryHubError({ code: "invalid_output" });
       const operation = row.submission.operation;
-      const candidate = (yield* store.readDueClaimCandidates(100, Number.MAX_SAFE_INTEGER)).find(
-        (work) =>
-          work.memoryId === row.ticket.memoryId &&
-          work.metadata.kind === "claim" &&
-          sameHeads(work.metadata.sortedHeads, row.ticket.conflictHeadSet),
-      );
+      const candidate = yield* store.findClaimCandidate({
+        memorySpaceId: row.ticket.memorySpaceId,
+        attemptId: row.ticket.attemptId,
+      });
       yield* ensureEpoch(r.settings.memoryHubVersion);
       yield* store.transact(
         service.settleHubEntryTx({
@@ -377,9 +377,14 @@ const make = Effect.gen(function* () {
       if (!row.submission) {
         yield* transition("running");
         yield* refreshLease();
-        const aggregate = yield* eligibility(row.ticket);
+        yield* eligibility(row.ticket);
         yield* runtime.available(row.ticket.frozenDefaultModelSelection);
-        const heads = aggregate.revisions
+        const revisions = yield* store.readResolutionHeads({
+          memorySpaceId: row.ticket.memorySpaceId,
+          memoryId: row.ticket.memoryId,
+          heads: row.ticket.conflictHeadSet,
+        });
+        const heads = revisions
           .filter(
             (h) => row.ticket.conflictHeadSet.includes(h.revision.revisionId) && h.payload !== null,
           )
@@ -533,10 +538,10 @@ const make = Effect.gen(function* () {
           const released = yield* release(r, row.ticket);
           if (row.state !== "terminal") {
             if (definitiveFailure && released) {
-              const candidates = yield* store.readDueClaimCandidates(100, Number.MAX_SAFE_INTEGER);
-              const candidate = candidates.find(
-                (work) => work.memoryId === row.ticket.memoryId && work.metadata.kind === "claim",
-              );
+              const candidate = yield* store.findClaimCandidate({
+                memorySpaceId: row.ticket.memorySpaceId,
+                attemptId: row.ticket.attemptId,
+              });
               if (candidate?.metadata.kind === "claim") {
                 const retired = yield* Effect.result(
                   transition("terminal", undefined, {
@@ -647,16 +652,15 @@ const make = Effect.gen(function* () {
       if (!r || !r.space || stopped || cancelling) return;
       yield* ensureEpoch(r.settings.memoryHubVersion);
       const now = yield* Clock.currentTimeMillis;
-      // The current L1 recovery sweep cancels all resolve rows; do not destroy a durable ticket.
-      // L1 must make that sweep frontier-aware before concurrent new-conflict recovery is enabled.
-      const existing = yield* store.readRecoverableResolutionTickets({
-        now: Number.MAX_SAFE_INTEGER,
+      // L1 preserves matching tickets and advances a bounded durable frontier cursor.
+      yield* store.recoverClaimCandidates(now);
+      const saved = yield* store.readRecoverableResolutionTickets({
+        memorySpaceId: r.space,
+        now,
         limit: 100,
       });
-      if (existing.length === 0 && executions.size === 0) yield* store.recoverClaimCandidates(now);
-      const saved = yield* store.readRecoverableResolutionTickets({ now, limit: 100 });
       for (const ticket of saved) yield* register(r, ticket);
-      const candidates = yield* store.readDueClaimCandidates(100, now);
+      const candidates = yield* store.readDueClaimCandidates(100, now, r.space);
       for (const work of candidates) {
         if (executions.size + reservations >= 4) break;
         if (
@@ -726,6 +730,7 @@ const make = Effect.gen(function* () {
             reservations--;
             reserved = false;
             for (const row of yield* store.readRecoverableResolutionTickets({
+              memorySpaceId: r.space,
               now: yield* Clock.currentTimeMillis,
               limit: 100,
             }))
@@ -744,7 +749,7 @@ const make = Effect.gen(function* () {
           const code = failureCode(attempt.failure);
           const knownExpiry =
             code === "claim_busy"
-              ? (yield* store.loadAggregate(r.space, work.memoryId!)).fence?.activeLease
+              ? (yield* store.readResolutionSnapshot(r.space, work.memoryId!)).fence?.activeLease
                   ?.expiresAtHubTime
               : undefined;
           yield* store.retryClaimCandidate(
@@ -1078,23 +1083,19 @@ const make = Effect.gen(function* () {
       // Tail checkpoint S is incorporated before any local identity assignment or push.
       for (const intent of yield* store.listMaterializableIntents(local, 100)) {
         yield* ensureEpoch(r.settings.memoryHubVersion);
-        const assigned = yield* store.transact(
-          store.assignIntentIdentityTx({
-            environmentId: local,
+        yield* service.commitLocalIntent({
+          assignment: {
             intentId: intent.intentId,
             memorySpaceId: r.space!,
             operationId: M.MemoryOperationId.make(uuid()),
             revisionId: M.MemoryRevisionId.make(uuid()),
-          }),
-        );
-        // L1 exact admission + canonical/outbox commit + intent completion port is pending.
-        // This materialization returns an operation only; it does not complete the intent.
-        yield* store.materializeLocalIntent({
-          environmentId: local,
-          intentId: intent.intentId,
-          memorySpaceId: assigned.memorySpaceId,
-          operationId: assigned.operationId,
-          revisionId: assigned.revisionId,
+          },
+          expectedEpoch: r.settings.memoryHubVersion,
+          readBinding: runtime.readIntentBinding
+            ? runtime.readIntentBinding.pipe(
+                Effect.map((binding) => ({ ...binding, enabled: binding.enabled && !stopped })),
+              )
+            : Effect.fail(new Service.MemoryAccessError({ code: "fenced" })),
         });
       }
       yield* push(r);
