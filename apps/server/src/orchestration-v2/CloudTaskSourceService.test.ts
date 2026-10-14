@@ -18,6 +18,8 @@ function fixture(
     primary?: string | null;
     authFailure?: boolean;
     truncated?: boolean;
+    noHead?: boolean;
+    localUpstream?: boolean;
   } = {},
 ) {
   const reads: ReadonlyArray<string>[] = [];
@@ -41,7 +43,7 @@ function fixture(
               stdout = "fork\nupstream\norigin";
               break;
             case "config --get branch.feature.remote":
-              stdout = options.trackingSame ? "fork" : "upstream";
+              stdout = options.localUpstream ? "." : options.trackingSame ? "fork" : "upstream";
               exitCode = options.noTracking ? 1 : 0;
               break;
             case "config --get branch.feature.pushRemote":
@@ -73,6 +75,8 @@ function fixture(
               break;
             case "check-ref-format refs/heads/feature":
               break;
+            case "check-ref-format refs/heads/origin/feature":
+              break;
             case "check-ref-format refs/heads/dev":
               break;
             case "check-ref-format refs/heads/feature..bad":
@@ -80,6 +84,17 @@ function fixture(
               break;
             case "rev-parse HEAD":
               stdout = options.exactHead ? sha : "a".repeat(40);
+              break;
+            case "rev-parse --verify HEAD":
+              stdout = options.exactHead ? sha : "a".repeat(40);
+              exitCode = options.noHead ? 128 : 0;
+              break;
+            case "rev-parse --verify @{upstream}":
+              stdout = sha;
+              exitCode = options.noTracking || options.unpublished ? 128 : 0;
+              break;
+            case "merge-base --is-ancestor HEAD @{upstream}":
+              exitCode = options.exactHead ? 0 : (options.ancestry ?? 1);
               break;
             case `merge-base --is-ancestor HEAD ${sha}`:
               exitCode = options.ancestry ?? 1;
@@ -122,6 +137,46 @@ it.effect("uses the pushed fork branch and excludes dirty/ahead local state", ()
     );
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect.each([
+  { options: { dirty: true, exactHead: true }, included: true },
+  { options: { exactHead: true }, included: false },
+  { options: { ancestry: 0 }, included: false },
+  { options: { ancestry: 1 }, included: true },
+  { options: { exactHead: true, noTracking: true }, included: true },
+  { options: { exactHead: true, unpublished: true }, included: true },
+  { options: { noHead: true, noTracking: true }, included: true },
+  { options: { exactHead: true, localUpstream: true }, included: true },
+])(
+  "launches the project folder without requiring a pushed branch (%s)",
+  ({ options, included }) => {
+    const f = fixture(options);
+    return Effect.gen(function* () {
+      const result = yield* (yield* CloudSource.CloudTaskSourceService).resolve({
+        cwd: "/repo/project",
+        branch: "origin/dev",
+        restriction: "project-folder",
+      });
+      assert.deepEqual(result, {
+        source: {
+          repository: "https://github.com/acme-fork/repo",
+          branch: "feature",
+          ...(options.noHead ? {} : { sha: options.exactHead ? f.sha : "a".repeat(40) }),
+        },
+        launchSource: { cwd: "/repo/project", restriction: "project-folder" },
+        localChangesExcluded: false,
+        localChangesIncluded: included,
+      });
+      assert.isFalse(
+        f.reads.some((args) =>
+          ["ls-remote", "fetch", "push", "checkout", "worktree", "stash", "commit"].includes(
+            args[0]!,
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(f.layer));
+  },
+);
 
 it.effect.each(["origin/dev", "refs/remotes/origin/dev"])(
   "resolves explicit remote branch %s without replacing it with tracking metadata",
@@ -177,6 +232,18 @@ it.effect.each([
   return Effect.gen(function* () {
     const result = yield* (yield* CloudSource.CloudTaskSourceService).resolve({ cwd: "/repo" });
     assert.equal(result.source.repository, "https://github.com/acme/repo");
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("keeps a local branch named after a remote for project-folder source", () => {
+  const f = fixture({ localBranch: "origin/feature", exactHead: true });
+  return Effect.gen(function* () {
+    const result = yield* (yield* CloudSource.CloudTaskSourceService).resolve({
+      cwd: "/repo",
+      restriction: "project-folder",
+    });
+    assert.equal(result.source.branch, "origin/feature");
+    assert.equal(result.source.repository, "https://github.com/acme-fork/repo");
   }).pipe(Effect.provide(f.layer));
 });
 

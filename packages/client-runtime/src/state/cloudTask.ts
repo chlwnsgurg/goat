@@ -83,6 +83,11 @@ export function presentCloudTask(task: OrchestrationV2CloudTask) {
     label: task.status === "succeeded" && task.prUrl ? "Result PR found" : label,
     taskUrl: safeUrl(task.url),
     prUrl: safeUrl(task.prUrl),
+    localChangesNotice: task.localChangesIncluded
+      ? "local changes may be included"
+      : task.localChangesExcluded
+        ? "local changes are not included"
+        : null,
   };
 }
 

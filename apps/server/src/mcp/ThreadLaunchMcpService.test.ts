@@ -7,6 +7,7 @@ import {
   ThreadId,
   type Project,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2CloudSourceRestriction,
 } from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -53,7 +54,10 @@ const caller = {
   deletedAt: null,
 } as OrchestrationV2ThreadShell;
 
-function fixture(unpublished = false) {
+function fixture(
+  unpublished = false,
+  sourceRestriction: OrchestrationV2CloudSourceRestriction = "published-ref",
+) {
   const launched: ThreadLaunch.ThreadLaunchInput[] = [];
   const sources: Parameters<CloudSource.CloudTaskSourceService["Service"]["resolve"]>[0][] = [];
   let routes = 0;
@@ -73,7 +77,13 @@ function fixture(unpublished = false) {
           driver: ProviderDriverKind.make("fakeCloud"),
           planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
           openSession: () => Effect.die("Launch admission does not open a provider session."),
-          getCapabilities: () => Effect.succeed(fakeCloudCapabilities()),
+          getCapabilities: () => {
+            const capabilities = fakeCloudCapabilities();
+            return Effect.succeed({
+              ...capabilities,
+              sessions: { ...capabilities.sessions, sourceRestriction },
+            });
+          },
         }),
     }),
     Layer.mock(CloudSource.CloudTaskSourceService)({
@@ -103,7 +113,9 @@ function fixture(unpublished = false) {
         ),
     }),
     Layer.mock(Folders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
-    Layer.mock(Git.GitVcsDriver)({}),
+    Layer.mock(Git.GitVcsDriver)({
+      listWorktreePaths: () => Effect.succeed(["/repo", "/repo/worktree"]),
+    }),
     Layer.mock(Reports.RemoteReportService)({}),
     Layer.mock(Watches.LaunchWatchService)({
       resolveRoute: () =>
@@ -169,6 +181,37 @@ it.effect(
         { runtimeMode: "full-access", interactionMode: "default" },
       );
       expect(f.sources).toEqual([{ cwd: "/repo", branch: "dev", restriction: "published-ref" }]);
+      expect(f.launched).toHaveLength(1);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+it.effect.each(["published-ref", "project-folder"] as const)(
+  "cloud launch chooses the source folder for %s with an existing output worktree",
+  (restriction) => {
+    const f = fixture(false, restriction);
+    return Effect.gen(function* () {
+      const service = yield* ThreadLaunchMcp.ThreadLaunchMcpService;
+      yield* service.launch(
+        scope,
+        {
+          title: "Cloud",
+          message: "Inspect",
+          standingInstructions: false,
+          workspaceStrategy: {
+            type: "existing_worktree",
+            worktreePath: "/repo/worktree",
+            branch: "feature",
+          },
+        },
+        { runtimeMode: "full-access", interactionMode: "default" },
+      );
+      expect(f.sources).toEqual([
+        {
+          cwd: restriction === "project-folder" ? "/repo" : "/repo/worktree",
+          branch: "feature",
+          restriction,
+        },
+      ]);
       expect(f.launched).toHaveLength(1);
     }).pipe(Effect.provide(f.layer));
   },

@@ -1313,7 +1313,10 @@ const make = Effect.gen(function* () {
         return yield* failure("invalid_request", "The project was not found.");
       yield* cloudSources.value
         .resolve({
-          cwd: worktreePath ?? project.workspaceRoot,
+          cwd:
+            capabilities.sessions.sourceRestriction === "project-folder"
+              ? project.workspaceRoot
+              : (worktreePath ?? project.workspaceRoot),
           restriction: capabilities.sessions.sourceRestriction ?? "published-ref",
           ...(branch === null ? {} : { branch }),
         })

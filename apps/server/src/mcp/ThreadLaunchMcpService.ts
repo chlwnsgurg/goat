@@ -210,6 +210,7 @@ const make = Effect.gen(function* () {
             .resolve({
               restriction: capabilities.sessions.sourceRestriction ?? "published-ref",
               cwd:
+                capabilities.sessions.sourceRestriction !== "project-folder" &&
                 strategy?.type === "existing_worktree"
                   ? strategy.worktreePath
                   : project.workspaceRoot,

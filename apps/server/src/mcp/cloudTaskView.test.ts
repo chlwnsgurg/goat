@@ -29,8 +29,15 @@ describe("cloud MCP task output", () => {
     expect(view.prUrl).toBe(task.prUrl);
     expect(view.localChangesExcluded).toBe(true);
     expect(Object.hasOwn(view, "acceptedAppRunId")).toBe(false);
+    expect(Object.hasOwn(view, "localChangesIncluded")).toBe(false);
     expect(Object.values(view)).not.toContain(undefined);
     expect(cloudTaskView(undefined)).toBeUndefined();
+  });
+  it.each([true, false])("preserves optional local source inclusion evidence (%s)", (included) => {
+    const view = cloudTaskView({ ...task, localChangesIncluded: included })!;
+    expect(view.localChangesIncluded).toBe(included);
+    expect(decodeTask(encodeTask(view))).toEqual(view);
+    expect(Object.values(view)).not.toContain(undefined);
   });
   it("bounds output without turning an unsafe or oversized URL into a link", () => {
     const view = cloudTaskView({

@@ -51,6 +51,7 @@ export class CloudTaskSourceService extends Context.Service<
       {
         readonly source: OrchestrationV2CloudTask["source"];
         readonly localChangesExcluded: boolean;
+        readonly localChangesIncluded?: boolean;
         readonly launchSource: {
           readonly cwd: string;
           readonly restriction: OrchestrationV2CloudSourceRestriction;
@@ -103,16 +104,21 @@ const make = Effect.gen(function* () {
       .statusDetailsLocal(cwd, { includeDivergence: false })
       .pipe(Effect.mapError((cause) => new CloudTaskSourceError({ reason: "read", cause })));
     if (!local.isRepo) return yield* new CloudTaskSourceError({ reason: "repository" });
-    const rawBranch = requestedBranch ?? local.branch;
+    const rawBranch =
+      restriction === "project-folder" ? local.branch : (requestedBranch ?? local.branch);
     if (!rawBranch || /^[0-9a-f]{40,64}$/i.test(rawBranch))
       return yield* new CloudTaskSourceError({ reason: "branch" });
     const remotesResult = yield* read(cwd, ["remote"]);
     if (remotesResult.exitCode !== 0 || remotesResult.stdoutTruncated)
       return yield* new CloudTaskSourceError({ reason: "read" });
     const remotes = remotesResult.stdout.trim().split("\n").filter(Boolean);
-    const explicitRemote = remotes.find(
-      (name) => rawBranch.startsWith(`${name}/`) || rawBranch.startsWith(`refs/remotes/${name}/`),
-    );
+    const explicitRemote =
+      restriction === "project-folder"
+        ? undefined
+        : remotes.find(
+            (name) =>
+              rawBranch.startsWith(`${name}/`) || rawBranch.startsWith(`refs/remotes/${name}/`),
+          );
     if (rawBranch.startsWith("refs/remotes/") && explicitRemote === undefined)
       return yield* new CloudTaskSourceError({ reason: "branch" });
     const branch = rawBranch.replace(/^refs\/heads\//, "").replace(/^refs\/remotes\//, "");
@@ -144,6 +150,37 @@ const make = Effect.gen(function* () {
     const repository = repositoryUrl(remoteResult.stdout.trim());
     if (remoteResult.exitCode !== 0 || remoteResult.stdoutTruncated || !repository) {
       return yield* new CloudTaskSourceError({ reason: "remote" });
+    }
+    if (restriction === "project-folder") {
+      const head = yield* read(cwd, ["rev-parse", "--verify", "HEAD"]);
+      if (head.stdoutTruncated || (head.exitCode !== 0 && head.exitCode !== 128)) {
+        return yield* new CloudTaskSourceError({ reason: "read" });
+      }
+      const sha = head.exitCode === 0 ? head.stdout.trim() : undefined;
+      if (sha !== undefined && !/^[0-9a-f]{40,64}$/.test(sha)) {
+        return yield* new CloudTaskSourceError({ reason: "read" });
+      }
+      // Use local tracking metadata; unpublished branches need no network preflight.
+      const upstream = yield* read(cwd, ["rev-parse", "--verify", "@{upstream}"]);
+      if (upstream.stdoutTruncated || (upstream.exitCode !== 0 && upstream.exitCode !== 128)) {
+        return yield* new CloudTaskSourceError({ reason: "read" });
+      }
+      const ancestry =
+        sha !== undefined &&
+        trackingRemote !== null &&
+        trackingRemote !== "." &&
+        upstream.exitCode === 0
+          ? yield* read(cwd, ["merge-base", "--is-ancestor", "HEAD", "@{upstream}"])
+          : null;
+      if (ancestry !== null && ancestry.exitCode !== 0 && ancestry.exitCode !== 1) {
+        return yield* new CloudTaskSourceError({ reason: "read" });
+      }
+      return {
+        source: { repository, branch: publishedBranch, ...(sha === undefined ? {} : { sha }) },
+        launchSource: { cwd, restriction },
+        localChangesExcluded: false,
+        localChangesIncluded: local.hasWorkingTreeChanges || ancestry?.exitCode !== 0,
+      };
     }
     // Query the selected push URL, which can differ from its fetch URL.
     const published = yield* read(cwd, [

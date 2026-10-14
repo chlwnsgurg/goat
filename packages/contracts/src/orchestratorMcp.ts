@@ -257,6 +257,7 @@ export const OrchestratorMcpCloudTask = Schema.Struct({
   progress: Schema.optional(Schema.String.check(Schema.isMaxLength(1000))),
   summary: Schema.optional(Schema.String.check(Schema.isMaxLength(4000))),
   localChangesExcluded: Schema.Boolean,
+  localChangesIncluded: OrchestrationV2CloudTask.fields.localChangesIncluded,
   error: Schema.optional(Schema.String.check(Schema.isMaxLength(1000))),
   updatedAt: IsoDateTime,
 });

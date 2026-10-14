@@ -240,6 +240,7 @@ export type OrchestrationV2ContextTransfer = typeof OrchestrationV2ContextTransf
 export const OrchestrationV2CloudSourceRestriction = Schema.Literals([
   "published-ref",
   "clean-pushed-sha",
+  "project-folder",
 ]);
 export type OrchestrationV2CloudSourceRestriction =
   typeof OrchestrationV2CloudSourceRestriction.Type;
@@ -1066,6 +1067,7 @@ export const OrchestrationV2CloudTask = Schema.Struct({
     sha: Schema.optional(TrimmedNonEmptyString),
   }),
   localChangesExcluded: Schema.Boolean,
+  localChangesIncluded: Schema.optional(Schema.Boolean),
   error: Schema.optional(Schema.String),
   updatedAt: IsoDateTime,
 });

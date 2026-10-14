@@ -69,6 +69,9 @@ export const makeFakeCloudAdapter = Effect.fnUntraced(function* (
       tracking: "live",
       source: input.cloudSource!,
       localChangesExcluded: input.providerThread.cloudTask?.localChangesExcluded ?? false,
+      ...(input.providerThread.cloudTask?.localChangesIncluded === undefined
+        ? {}
+        : { localChangesIncluded: input.providerThread.cloudTask.localChangesIncluded }),
       updatedAt: DateTime.formatIso(now),
     };
     yield* input.commitCloudTask!(task, {
@@ -202,6 +205,9 @@ export const makeFakeCloudAdapter = Effect.fnUntraced(function* (
       ...(linkOnly ? {} : { prUrl: "https://github.com/acme/repo/pull/1", branch: "agent/fix" }),
       source: input.cloudSource!,
       localChangesExcluded: input.providerThread.cloudTask?.localChangesExcluded ?? false,
+      ...(input.providerThread.cloudTask?.localChangesIncluded === undefined
+        ? {}
+        : { localChangesIncluded: input.providerThread.cloudTask.localChangesIncluded }),
       updatedAt: DateTime.formatIso(now),
     });
     yield* beforeTerminal;

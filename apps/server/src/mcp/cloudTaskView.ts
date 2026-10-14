@@ -34,6 +34,9 @@ export function cloudTaskView(
     ...(task.progress === undefined ? {} : { progress: task.progress.slice(0, 1000) }),
     ...(task.summary === undefined ? {} : { summary: task.summary.slice(0, 4000) }),
     localChangesExcluded: task.localChangesExcluded,
+    ...(task.localChangesIncluded === undefined
+      ? {}
+      : { localChangesIncluded: task.localChangesIncluded }),
     ...(task.error === undefined ? {} : { error: task.error.slice(0, 1000) }),
     updatedAt: task.updatedAt,
   };

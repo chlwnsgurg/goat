@@ -18,7 +18,7 @@ export function CloudTaskStatus({ task }: { readonly task: OrchestrationV2CloudT
       <Text>
         {task.source.repository} · {task.source.branch}
       </Text>
-      {task.localChangesExcluded ? <Text>local changes are not included</Text> : null}
+      {view.localChangesNotice ? <Text>{view.localChangesNotice}</Text> : null}
       {task.progress ? <Text>{task.progress}</Text> : null}
       {task.summary ? <Text>{task.summary}</Text> : null}
       {task.error ? <Text accessibilityRole="alert">{task.error}</Text> : null}

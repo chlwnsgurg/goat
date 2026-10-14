@@ -23,6 +23,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Ref from "effect/Ref";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -107,15 +108,34 @@ function assertCloudResultItem(projection: OrchestrationV2ThreadProjection, runI
   return result;
 }
 
-it.effect.each(["same", "different"] as const)(
-  "cloud finalization reuses only $0 provider assistant text from the same run",
-  (providerText) =>
+it.effect.each([
+  { providerText: "same", projectFolder: false },
+  { providerText: "different", projectFolder: false },
+  { providerText: "same", projectFolder: true },
+  { providerText: "different", projectFolder: true },
+] as const)(
+  "cloud finalization reuses only $providerText provider assistant text (projectFolder=$projectFolder)",
+  ({ providerText, projectFolder }) =>
     Effect.gen(function* () {
       const fake = yield* makeFakeCloudAdapter();
+      const fs = yield* FileSystem.FileSystem;
+      const outputWorktree = projectFolder
+        ? yield* fs.makeTempDirectoryScoped({ prefix: "cloud-output-" })
+        : null;
+      const capabilities = yield* fake.adapter.getCapabilities();
+      const sourceRestriction = projectFolder ? "project-folder" : "published-ref";
+      const adapter = {
+        ...fake.adapter,
+        getCapabilities: () =>
+          Effect.succeed({
+            ...capabilities,
+            sessions: { ...capabilities.sessions, sourceRestriction },
+          }),
+      } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
       const projectId = ProjectId.make("project:cloud-result");
       const runtime = layerWithRegistry(
-        { name: `cloud-result-${providerText}` },
-        Registry.layerFromAdapters([fake.adapter]),
+        { name: `cloud-result-${providerText}-${projectFolder}` },
+        Registry.layerFromAdapters([adapter]),
         {
           runEffectWorker: false,
           projects: Layer.mock(Projects.ProjectService)({
@@ -123,12 +143,16 @@ it.effect.each(["same", "different"] as const)(
               Effect.succeed(Option.some({ id: projectId, workspaceRoot: "/repo" } as Project)),
           }),
           cloudSources: Layer.succeed(CloudSource.CloudTaskSourceService, {
-            resolve: (input) =>
-              Effect.succeed({
+            resolve: (input) => {
+              assert.equal(input.cwd, "/repo");
+              assert.equal(input.restriction, sourceRestriction);
+              return Effect.succeed({
                 source: { repository: "https://github.com/acme/repo", branch: "dev" },
-                launchSource: { cwd: input.cwd, restriction: "published-ref" },
-                localChangesExcluded: true,
-              }),
+                launchSource: { cwd: input.cwd, restriction: sourceRestriction },
+                localChangesExcluded: !projectFolder,
+                ...(projectFolder ? { localChangesIncluded: true } : {}),
+              });
+            },
           }),
         },
       );
@@ -147,7 +171,7 @@ it.effect.each(["same", "different"] as const)(
           runtimeMode: "full-access",
           interactionMode: "default",
           branch: "dev",
-          worktreePath: null,
+          worktreePath: outputWorktree,
           createdBy: "user",
           creationSource: "web",
         });
@@ -163,7 +187,19 @@ it.effect.each(["same", "different"] as const)(
           creationSource: "web",
         });
         yield* worker.drain();
-        const input = (yield* Ref.get(fake.current))!;
+        const input = yield* Ref.get(fake.current);
+        assert.isNotNull(input);
+        if (input === null) throw new Error("Cloud adapter did not start");
+        assert.equal(
+          input.providerThread.cloudTask?.localChangesIncluded,
+          projectFolder ? true : undefined,
+        );
+        assert.deepEqual(input.cloudLaunchSource, { cwd: "/repo", restriction: sourceRestriction });
+        const accepted = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          accepted.providerThreads[0]?.cloudTask?.localChangesIncluded,
+          projectFolder ? true : undefined,
+        );
         const itemId = TurnItemId.make("turn-item:provider-result");
         const now = yield* DateTime.now;
         const finalText =
@@ -219,6 +255,10 @@ it.effect.each(["same", "different"] as const)(
         yield* Fiber.join(completed);
         yield* worker.drain();
         const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          projection.providerThreads[0]?.cloudTask?.localChangesIncluded,
+          projectFolder ? true : undefined,
+        );
         const assistants = projection.turnItems.filter((item) => item.type === "assistant_message");
         assert.equal(assistants.length, providerText === "same" ? 1 : 2);
         const results = assistants.filter(
@@ -240,7 +280,7 @@ it.effect.each(["same", "different"] as const)(
           finalText,
         );
       }).pipe(Effect.provide(runtime));
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
 it.effect("reattaches a fully running SQLite cloud crash snapshot once without resubmission", () =>

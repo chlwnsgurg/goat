@@ -72,9 +72,28 @@ describe("cloud task client state", () => {
   });
   it("omits accepted run ownership from presentation without emitting undefined", () => {
     const view = presentCloudTask({ ...task, acceptedAppRunId: RunId.make("run:accepted") });
-    expect(view).toEqual({ label: "Running in the cloud", taskUrl: task.url, prUrl: null });
+    expect(view).toEqual({
+      label: "Running in the cloud",
+      taskUrl: task.url,
+      prUrl: null,
+      localChangesNotice: "local changes are not included",
+    });
     expect(Object.hasOwn(view, "acceptedAppRunId")).toBe(false);
     expect(Object.values(view)).not.toContain(undefined);
+  });
+  it("warns that project-folder tasks may include local changes and retains legacy exclusions", () => {
+    expect(
+      presentCloudTask({ ...task, localChangesExcluded: false, localChangesIncluded: true })
+        .localChangesNotice,
+    ).toBe("local changes may be included");
+    expect(presentCloudTask(task).localChangesNotice).toBe("local changes are not included");
+    expect(
+      presentCloudTask({ ...task, localChangesExcluded: false, localChangesIncluded: false })
+        .localChangesNotice,
+    ).toBeNull();
+    expect(
+      presentCloudTask({ ...task, localChangesExcluded: false }).localChangesNotice,
+    ).toBeNull();
   });
   it("blocks unknown acceptance with its persisted recovery reason", () => {
     const current = projection();

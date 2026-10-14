@@ -268,6 +268,7 @@ export const layer: Layer.Layer<
         | {
             source: import("@goat/contracts").OrchestrationV2CloudTask["source"];
             localChangesExcluded: boolean;
+            localChangesIncluded?: boolean;
             launchSource?: ProviderAdapter.ProviderAdapterV2CloudLaunchSource;
           }
         | undefined;
@@ -505,7 +506,10 @@ export const layer: Layer.Layer<
                 if (!project)
                   return yield* new ProviderTurnStartError({ runId, cause: "Project not found." });
                 return yield* cloudSources.value.resolve({
-                  cwd: projection.thread.worktreePath ?? project.workspaceRoot,
+                  cwd:
+                    capabilities?.sessions.sourceRestriction === "project-folder"
+                      ? project.workspaceRoot
+                      : (projection.thread.worktreePath ?? project.workspaceRoot),
                   restriction: capabilities?.sessions.sourceRestriction ?? "published-ref",
                   ...(projection.thread.branch === null
                     ? {}
@@ -517,6 +521,9 @@ export const layer: Layer.Layer<
               : {
                   source: providerThread.cloudTask.source,
                   localChangesExcluded: providerThread.cloudTask.localChangesExcluded,
+                  ...(providerThread.cloudTask.localChangesIncluded === undefined
+                    ? {}
+                    : { localChangesIncluded: providerThread.cloudTask.localChangesIncluded }),
                 };
         }),
       );
@@ -937,6 +944,9 @@ export const layer: Layer.Layer<
                         tracking: "live" as const,
                         source: cloudSource.source,
                         localChangesExcluded: cloudSource.localChangesExcluded,
+                        ...(cloudSource.localChangesIncluded === undefined
+                          ? {}
+                          : { localChangesIncluded: cloudSource.localChangesIncluded }),
                       }),
                       status: "submitting" as const,
                       updatedAt: DateTime.formatIso(now),
