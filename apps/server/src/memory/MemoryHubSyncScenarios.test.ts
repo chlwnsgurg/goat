@@ -391,24 +391,12 @@ it.effect(
           },
           Effect.void,
         );
-        const connection = yield* member.connection;
-        const joined = yield* member.run(
-          Client.MemoryHubClient.use((client) =>
-            client.join(connection, {
-              protocolVersion: 1,
-              memorySpaceId: space,
-              environmentId: member.identity,
-            }),
-          ),
-        );
-        assert.strictEqual(joined.hubEnvironmentId, h.identity);
-        assert.strictEqual(joined.memorySpaceId, space);
-        assert.strictEqual(joined.checkpointSequence, 0);
         assert.strictEqual(
           (yield* member.descriptor).capabilities.memoryHubProtocolVersion,
           undefined,
         );
-        // A real join issues a token but cannot mark the replica bootstrap ready.
+        // Installation alone leaves an unbound replica; production startup owns
+        // its first HTTP join and bootstrap. No preparatory join or ready seed.
         const progress = yield* member.run(
           Store.MemoryStore.use((store) =>
             store.readBootstrap({
