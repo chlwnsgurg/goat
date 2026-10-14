@@ -46,6 +46,9 @@ export default Effect.gen(function* () {
   ) WHERE kind IN ('sync','revert_intent')`;
   yield* sql`CREATE INDEX memory_outbox_sync_due ON memory_outbox(space,kind,status,next_attempt_at,claimed_until)`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN terminal_at INTEGER`;
+  yield* sql`ALTER TABLE memory_outbox ADD COLUMN hold_class TEXT CHECK(hold_class IN ('authorization','protocol','identity','availability'))`;
+  yield* sql`ALTER TABLE memory_outbox ADD COLUMN failure_code TEXT CHECK(length(failure_code)<=64)`;
+
   yield* sql`ALTER TABLE memory_sync_cursors ADD COLUMN checkpoint_page_count INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_page_count>=0)`;
   yield* sql`ALTER TABLE memory_payloads ADD COLUMN checkpoint_stage_id TEXT`;
   yield* sql`UPDATE memory_sync_cursors SET checkpoint_page_count=(SELECT count(*) FROM memory_inbox_pending p WHERE p.space=memory_sync_cursors.space AND p.checkpoint_id=memory_sync_cursors.checkpoint_id AND p.record_kind='checkpoint')`;
@@ -77,7 +80,7 @@ export default Effect.gen(function* () {
     ],
     [
       "memory_outbox",
-      "coalesce(length(CAST(admin_json AS BLOB)),0)+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)",
+      "coalesce(length(CAST(admin_json AS BLOB)),0)+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)+coalesce(length(CAST(hold_class AS BLOB)),0)+coalesce(length(CAST(failure_code AS BLOB)),0)",
     ],
     [
       "memory_report_outbox",
@@ -128,7 +131,7 @@ export default Effect.gen(function* () {
   for (const [table, expression] of privateInventory) {
     const qualify = (prefix: string) =>
       expression.replace(
-        /\b(space|environment|credential_digest|credential_version|status|joined_at|memory_id|highest_token|lease_json|locator_json|request_digest|response_digest|boundary_json|handles_json|compaction_json|admin_json|ticket_json|frozen_claim_json|report_id|operation_id|resolving_environment_id|resolution_id|report_thread_json)\b/g,
+        /\b(space|environment|credential_digest|credential_version|status|joined_at|memory_id|highest_token|lease_json|locator_json|request_digest|response_digest|boundary_json|handles_json|compaction_json|admin_json|ticket_json|frozen_claim_json|hold_class|failure_code|report_id|operation_id|resolving_environment_id|resolution_id|report_thread_json)\b/g,
         `${prefix}.$1`,
       );
     const charge = (value: string) =>
@@ -248,7 +251,11 @@ export default Effect.gen(function* () {
     ["memory_compact_receipts", "space", "compact_json,receipt_json"],
     ["memory_import_keys", "space", "record_json"],
     ["memory_events", "memory_space_id", "metadata_json,receipt_json"],
-    ["memory_outbox", "space", "metadata_json,admin_json,ticket_json,frozen_claim_json"],
+    [
+      "memory_outbox",
+      "space",
+      "metadata_json,admin_json,ticket_json,frozen_claim_json,hold_class,failure_code",
+    ],
     ["memory_hub_members", "space", "space,environment,credential_digest,status"],
     ["memory_hub_leases", "space", "lease_json"],
     ["memory_hub_source_reads", "space", "locator_json,request_digest,response_digest"],

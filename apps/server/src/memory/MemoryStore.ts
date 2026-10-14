@@ -558,6 +558,12 @@ export type Settlement = {
   incorporated: boolean;
   intent: "none" | "completed" | "rejected" | "review";
 };
+const HoldClass = Schema.Literals(["authorization", "protocol", "identity", "availability"]);
+export type MemoryHoldClass = typeof HoldClass.Type;
+export type WorkHold = {
+  holdClass: MemoryHoldClass | null;
+  failureCode: M.MemoryFailureCode | null;
+};
 export type SyncWorkCandidate = {
   work: MemoryWork;
   operationId: M.MemoryOperationId;
@@ -831,7 +837,16 @@ export class MemoryStore extends Context.Service<
       now: number;
       nextAttemptAt: number;
       failureCode: M.MemoryFailureCode | null;
+      holdClass?: MemoryHoldClass;
     }) => InTx<boolean>;
+    readonly readWorkHold: (workId: string) => Effect.Effect<WorkHold | null, MemoryStorageError>;
+    readonly rearmSyncHoldsTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      holdClass: MemoryHoldClass;
+      now: number;
+      afterId: string;
+      limit: number;
+    }) => InTx<readonly string[]>;
     readonly prepareClaimAttemptTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       candidateId: string;
@@ -5547,15 +5562,51 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     yield* Transaction;
     const o = input.ownership;
+    if ((input.nextAttemptAt === Number.MAX_SAFE_INTEGER) !== (input.holdClass !== undefined))
+      return yield* new MemoryStoreConflict({ code: "invalid_output" });
     if (input.nextAttemptAt < input.now) return false;
     const rows = yield* stored(
       "sync-retry",
       sql`
-      UPDATE memory_outbox SET status='retry', next_attempt_at=${input.nextAttemptAt}, claimed_by=NULL, claimed_until=NULL, sync_version=sync_version+1
+      UPDATE memory_outbox SET status='retry', next_attempt_at=${input.nextAttemptAt}, failure_code=${input.failureCode},hold_class=${input.holdClass ?? null}, claimed_by=NULL, claimed_until=NULL, sync_version=sync_version+1
       WHERE id=${o.workId} AND kind IN ('sync','revert_intent') AND status='running' AND claimed_by=${o.owner}
         AND sync_version=${o.version} AND operation_digest=${o.operationDigest} AND claimed_until=${o.ownedUntil} AND claimed_until>${input.now} RETURNING id`,
     );
     return rows.length === 1;
+  });
+  const readWorkHold: MemoryStore["Service"]["readWorkHold"] = Effect.fn(
+    "MemoryStore.readWorkHold",
+  )(function* (workId) {
+    const rows = yield* stored(
+      "work-hold",
+      sql<{
+        hold_class: string | null;
+        failure_code: string | null;
+      }>`SELECT hold_class,failure_code FROM memory_outbox WHERE id=${workId}`,
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      holdClass: row.hold_class
+        ? yield* stored("hold-codec", Schema.decodeUnknownEffect(HoldClass)(row.hold_class))
+        : null,
+      failureCode: row.failure_code
+        ? yield* stored("failure-codec", decodeFailureCode(row.failure_code))
+        : null,
+    };
+  });
+  const rearmSyncHoldsTx: MemoryStore["Service"]["rearmSyncHoldsTx"] = Effect.fn(
+    "MemoryStore.rearmSyncHoldsTx",
+  )(function* (input) {
+    yield* Transaction;
+    const rows = yield* stored(
+      "sync-hold-rearm",
+      sql<{
+        id: string;
+      }>`UPDATE memory_outbox SET hold_class=NULL,failure_code=NULL,next_attempt_at=${input.now},sync_version=sync_version+1
+      WHERE id IN (SELECT id FROM memory_outbox WHERE space=${input.memorySpaceId} AND kind IN ('sync','revert_intent') AND status='retry' AND next_attempt_at=${Number.MAX_SAFE_INTEGER} AND hold_class=${input.holdClass} AND id>${input.afterId} ORDER BY id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}) RETURNING id`,
+    );
+    return rows.map((row) => row.id).toSorted();
   });
   const claimCodec = codec(M.MemoryHubClaimInput);
   const storedTicketRowCodec = codec(StoredTicketRowSchema);
@@ -8238,6 +8289,8 @@ const make = Effect.gen(function* () {
     reconcileResolutionReportTx,
     acquireSyncWorkTx,
     retrySyncWorkTx,
+    readWorkHold,
+    rearmSyncHoldsTx,
     prepareClaimAttemptTx,
     readRecoverableResolutionTickets,
     acquireResolutionTicketTx,

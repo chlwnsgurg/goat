@@ -4995,3 +4995,94 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     );
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("rearms only the persisted sync hold class and fences the old owner", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const op = operation();
+    yield* store.apply(decision(op));
+    const candidate = (yield* store.readEligibleOutbox(space, 0, 10))[0]!;
+    const ownership = yield* store.transact(
+      store.acquireSyncWorkTx({
+        workId: candidate.work.id,
+        operationId: candidate.operationId,
+        operationDigest: candidate.operationDigest,
+        owner: "old",
+        expectedVersion: candidate.version,
+        now: 0,
+        ownedUntil: 100,
+      }),
+    );
+    if (!ownership) throw new Error("fixture");
+    assert.isTrue(
+      yield* store.transact(
+        store.retrySyncWorkTx({
+          ownership,
+          now: 1,
+          nextAttemptAt: Number.MAX_SAFE_INTEGER,
+          failureCode: "identity_mismatch",
+          holdClass: "identity",
+        }),
+      ),
+    );
+    yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at,hold_class,failure_code) SELECT 'protocol-hold',space,memory_id,kind,status,metadata_json,next_attempt_at,'protocol','unsupported_protocol' FROM memory_outbox WHERE id=${candidate.work.id}`;
+    const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+      Effect.provide(Layer.fresh(Store.layer)),
+    );
+    assert.deepStrictEqual(yield* fresh.readWorkHold(candidate.work.id), {
+      holdClass: "identity",
+      failureCode: "identity_mismatch",
+    });
+    assert.deepStrictEqual(
+      yield* fresh.transact(
+        fresh.rearmSyncHoldsTx({
+          memorySpaceId: M.MemorySpaceId.make(id(7777)),
+          holdClass: "identity",
+          now: 2,
+          afterId: "",
+          limit: 100,
+        }),
+      ),
+      [],
+    );
+    yield* fresh
+      .transact(
+        Effect.gen(function* () {
+          yield* fresh.rearmSyncHoldsTx({
+            memorySpaceId: space,
+            holdClass: "identity",
+            now: 2,
+            afterId: "",
+            limit: 100,
+          });
+          return yield* Effect.fail("rollback");
+        }),
+      )
+      .pipe(Effect.exit);
+    assert.strictEqual((yield* fresh.readWorkHold(candidate.work.id))?.holdClass, "identity");
+    assert.deepStrictEqual(
+      yield* fresh.transact(
+        fresh.rearmSyncHoldsTx({
+          memorySpaceId: space,
+          holdClass: "identity",
+          now: 2,
+          afterId: "",
+          limit: 100,
+        }),
+      ),
+      [candidate.work.id],
+    );
+    assert.deepStrictEqual(yield* fresh.readWorkHold(candidate.work.id), {
+      holdClass: null,
+      failureCode: null,
+    });
+    assert.strictEqual((yield* fresh.readWorkHold("protocol-hold"))?.holdClass, "protocol");
+    assert.isFalse(
+      yield* fresh.transact(
+        fresh.retrySyncWorkTx({ ownership, now: 3, nextAttemptAt: 4, failureCode: "unavailable" }),
+      ),
+    );
+    assert.strictEqual((yield* fresh.readEligibleOutbox(space, 2, 100)).length, 1);
+  }).pipe(Effect.provide(live)),
+);
