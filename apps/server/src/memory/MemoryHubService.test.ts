@@ -9,6 +9,7 @@ import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Option from "effect/Option";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Secrets from "../auth/ServerSecretStore.ts";
@@ -55,8 +56,24 @@ const core = Service.layer.pipe(
 const configuration = Layer.succeed(Hub.MemoryHubConfiguration, {
   read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: hubEnv }),
 });
+// Legacy Store adapter exercises unrelated L2 behavior until L1 provides producer staging.
+// It does not prove same-principal bootstrap token preservation.
+const legacyProducerLayer = Layer.effect(
+  Compactor.MemoryHubCheckpointProducer,
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    return Compactor.MemoryHubCheckpointProducer.of({
+      prepareTx: (input) =>
+        store.prepareHubCheckpointTx({
+          ...input,
+          snapshotToken: `producer-${input.checkpointId}`,
+        }),
+    });
+  }),
+).pipe(Layer.provide(storeLayer));
 const live = Layer.merge(Hub.layer, Compactor.layer).pipe(
   Layer.provideMerge(core),
+  Layer.provideMerge(legacyProducerLayer),
   Layer.provideMerge(Hub.activityLayer),
   Layer.provide(configuration),
 );
@@ -527,23 +544,35 @@ const adminFixture = Effect.gen(function* () {
     version: 0,
   });
   const failApply = yield* Ref.make(false);
+  const applied = yield* Ref.make(
+    new Map<M.MemoryOperationId, { digest: string; result: { view: M.MemoryHubSettingsView } }>(),
+  );
+  const lock = yield* Semaphore.make(1);
   const backend: Hub.MemoryHubAdminSettings["Service"] = {
-    withLock: (effect) => effect,
+    withLock: (effect) => lock.withPermit(effect),
     read: Ref.get(view),
     apply: (record, permit) =>
       Effect.gen(function* () {
         yield* permit;
         if (yield* Ref.get(failApply)) return yield* new M.MemoryHubError({ code: "hub_disabled" });
+        const saved = (yield* Ref.get(applied)).get(record.requestId);
+        if (saved) {
+          if (saved.digest !== record.requestDigest)
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          return saved.result;
+        }
         const current = yield* Ref.get(view);
         // This fixture is the settings CAS owner; SQL/admin service is real.
         if (current.version === record.expectedVersion) {
           const next = { ...current, version: current.version + 1 };
           yield* Ref.set(view, next);
-          return { view: next };
+          const result = { view: next };
+          yield* Ref.update(applied, (entries) =>
+            new Map(entries).set(record.requestId, { digest: record.requestDigest, result }),
+          );
+          return result;
         }
-        if (current.version !== record.expectedVersion + 1)
-          return yield* new M.MemoryHubError({ code: "identity_mismatch" });
-        return { view: current };
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
       }),
   };
   const admin = yield* Hub.makeAdministrator.pipe(
@@ -593,6 +622,91 @@ describe("MemoryHubAdministrator", () => {
         assert.isFalse(rows[0]!.admin_json.includes(result.credential!.credential));
         assert.isFalse(rows[0]!.admin_json.includes('"credential":'));
       }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect("a prepared rotation cannot supersede a completed competing rotation", () =>
+    Effect.gen(function* () {
+      const { admin, backend } = yield* adminFixture;
+      const first = yield* admin.update(provision, Effect.void);
+      const rotation: M.MemoryHubSettingsUpdateInput = {
+        requestId: M.MemoryOperationId.make(id(410)),
+        expectedVersion: 1,
+        action: "rotateMemberCredential",
+        environmentId: first.credential!.environmentId,
+      };
+      const secrets = yield* Secrets.ServerSecretStore;
+      const failed = yield* Hub.makeAdministrator.pipe(
+        Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+        Effect.provideService(Secrets.ServerSecretStore, {
+          ...secrets,
+          getOrCreateRandom: () =>
+            Effect.fail(
+              new Secrets.SecretStorePersistError({ resource: "synthetic", cause: undefined }),
+            ),
+        }),
+      );
+      assert.strictEqual(
+        (yield* failed.update(rotation, Effect.void).pipe(Effect.flip))._tag,
+        "SecretStorePersistError",
+      );
+      assert.strictEqual(
+        (yield* admin.pending(Effect.void)).find(
+          (record) => record.requestId === rotation.requestId,
+        )!.stage,
+        "prepared",
+      );
+      const winner = yield* admin.update(
+        { ...rotation, requestId: M.MemoryOperationId.make(id(411)) },
+        Effect.void,
+      );
+      const store = yield* Store.MemoryStore;
+      const member = yield* store.readHubMember(space, rotation.environmentId);
+      const error = yield* admin.update(rotation, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryStoreConflict");
+      if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "revision_changed");
+      assert.deepStrictEqual(yield* store.readHubMember(space, rotation.environmentId), member);
+      assert.strictEqual(member!.credentialVersion, winner.credential!.credentialVersion);
+      yield* store.transact(
+        store.requireHubMemberTx({
+          ...principal(rotation.environmentId),
+          credentialVersion: winner.credential!.credentialVersion,
+        }),
+      );
+    }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect("an activated recovery blocks later transitions until its settings CAS finishes", () =>
+    Effect.gen(function* () {
+      const { admin, backend, failApply, view } = yield* adminFixture;
+      yield* Ref.set(failApply, true);
+      yield* admin.update(provision, Effect.void).pipe(Effect.flip);
+      yield* Ref.set(failApply, false);
+      const blocked = {
+        ...provision,
+        requestId: M.MemoryOperationId.make(id(412)),
+        environmentId: M.EnvironmentId.make("other-new-member"),
+      };
+      assert.strictEqual(
+        (yield* admin.update(blocked, Effect.void).pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      const store = yield* Store.MemoryStore;
+      assert.isUndefined(yield* store.transact(store.readHubAdminTx(blocked.requestId)));
+      assert.isUndefined(yield* store.readHubMember(space, blocked.environmentId));
+      const restarted = yield* Hub.makeAdministrator.pipe(
+        Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+      );
+      yield* restarted.update(provision, Effect.void);
+      assert.strictEqual((yield* Ref.get(view)).version, 1);
+      // A distinct request cannot replay another request's expectedVersion + 1.
+      const original = (yield* store.transact(store.readHubAdminTx(provision.requestId)))!;
+      assert.strictEqual(
+        (yield* backend
+          .apply({ ...original, requestId: blocked.requestId }, Effect.void)
+          .pipe(Effect.flip))._tag,
+        "MemoryHubError",
+      );
+      yield* restarted.update({ ...blocked, expectedVersion: 1 }, Effect.void);
+      assert.strictEqual((yield* Ref.get(view)).version, 2);
+    }).pipe(Effect.provide(adminDependencies)),
   );
   it.effect("acknowledgement erases outgoing bytes and replay cannot disclose them", () =>
     Effect.gen(function* () {

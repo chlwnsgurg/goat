@@ -418,6 +418,24 @@ export const makeAdministrator = Effect.gen(function* () {
           return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
         const outgoing =
           request.action === "provisionMember" || request.action === "rotateMemberCredential";
+        if (!record || record.stage === "prepared") {
+          // An activated request must finish its settings CAS before another admin
+          // can change membership. A full bounded page is conservatively blocked.
+          const pending = yield* tx(
+            permit,
+            store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS),
+          );
+          if (
+            pending.length === M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS ||
+            pending.some(
+              (other) => other.requestId !== request.requestId && other.stage === "activated",
+            )
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          const view = yield* settings.read;
+          if (view.version !== request.expectedVersion)
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+        }
         if (!record) {
           const view = yield* settings.read;
           if (view.version !== request.expectedVersion)

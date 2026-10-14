@@ -5,7 +5,6 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Store from "./MemoryStore.ts";
@@ -14,6 +13,21 @@ import {
   MemoryHubActivity,
   type MemoryHubServiceError,
 } from "./MemoryHubService.ts";
+
+/** L1 supplies staging without issuing, retiring or replacing member bootstrap handles. */
+export class MemoryHubCheckpointProducer extends Context.Service<
+  MemoryHubCheckpointProducer,
+  {
+    readonly prepareTx: (input: {
+      readonly authority: Store.HubAuthority;
+      readonly checkpointId: string;
+      readonly hubEnvironmentId: M.EnvironmentId;
+    }) => Store.InTx<
+      { readonly checkpointId: string; readonly checkpointSequence: number },
+      MemoryHubServiceError
+    >;
+  }
+>()("goat/memory/MemoryCompactor/MemoryHubCheckpointProducer") {}
 
 export class MemoryCompactor extends Context.Service<
   MemoryCompactor,
@@ -35,6 +49,7 @@ export const make = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
   const configuration = yield* MemoryHubConfiguration;
   const activity = yield* MemoryHubActivity;
+  const producer = yield* MemoryHubCheckpointProducer;
   const run = Effect.fnUntraced(function* (principal: M.MemoryHubPrincipal, force: boolean) {
     return yield* store.transact(
       Effect.gen(function* () {
@@ -69,10 +84,9 @@ export const make = Effect.gen(function* () {
           now: Clock.currentTimeMillis,
           reauthorize: Effect.asVoid(store.requireHubMemberTx(principal)),
         };
-        const handle = yield* store.prepareHubCheckpointTx({
+        const handle = yield* producer.prepareTx({
           authority,
           checkpointId: NodeCrypto.randomUUID(),
-          snapshotToken: NodeCrypto.randomBytes(32).toString("base64url"),
           hubEnvironmentId: hub.hubEnvironmentId,
         });
         // The Store owns pin details. A failed floor CAS due to another live pin keeps
@@ -130,10 +144,34 @@ export const make = Effect.gen(function* () {
       );
       yield* Stream.runForEach(changes, () => sweep).pipe(Effect.forkScoped);
       yield* Stream.runForEach(admissions, () => sweep).pipe(Effect.forkScoped);
-      yield* sweep.pipe(
-        Effect.repeat(Schedule.spaced(M.MEMORY_CHECKPOINT_INTERVAL_MS)),
-        Effect.forkScoped,
+      const scheduledSweep = Effect.gen(function* () {
+        // Signals can move lastRun while the timer is sleeping. On every wake,
+        // re-read the durable deadline rather than adding another fixed day.
+        const retained = yield* store.transact(store.readHubRetentionTx(principal.memorySpaceId));
+        const now = yield* Clock.currentTimeMillis;
+        const lastRun = retained.compaction.lastRunAtUtc;
+        const deadline =
+          lastRun === null ? now : Date.parse(lastRun) + M.MEMORY_CHECKPOINT_INTERVAL_MS;
+        yield* Effect.sleep(Math.max(0, deadline - now));
+        yield* sweep;
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Memory compaction timer deferred", { errorTag: error._tag }),
+        ),
+        // A failed due sweep must not spin on an unchanged past deadline.
+        Effect.andThen(
+          Effect.gen(function* () {
+            const retained = yield* store.transact(
+              store.readHubRetentionTx(principal.memorySpaceId),
+            );
+            const now = yield* Clock.currentTimeMillis;
+            const lastRun = retained.compaction.lastRunAtUtc;
+            if (lastRun === null || Date.parse(lastRun) + M.MEMORY_CHECKPOINT_INTERVAL_MS <= now)
+              yield* Effect.sleep(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+          }).pipe(Effect.catch(() => Effect.sleep(M.MEMORY_CHECKPOINT_INTERVAL_MS))),
+        ),
       );
+      yield* scheduledSweep.pipe(Effect.forever, Effect.forkScoped);
     },
   );
   return MemoryCompactor.of({ compact, compactIfNeeded, start });

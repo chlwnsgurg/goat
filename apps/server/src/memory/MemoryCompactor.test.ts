@@ -1,6 +1,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
+import * as Ref from "effect/Ref";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -43,8 +49,24 @@ const core = Service.layer.pipe(
     }),
   ),
 );
+// Legacy Store adapter exercises unrelated L2 behavior until L1 provides producer staging.
+// It does not prove same-principal bootstrap token preservation.
+const legacyProducerLayer = Layer.effect(
+  Compactor.MemoryHubCheckpointProducer,
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    return Compactor.MemoryHubCheckpointProducer.of({
+      prepareTx: (input) =>
+        store.prepareHubCheckpointTx({
+          ...input,
+          snapshotToken: `producer-${input.checkpointId}`,
+        }),
+    });
+  }),
+).pipe(Layer.provide(storeLayer));
 const live = Layer.merge(Hub.layer, Compactor.layer).pipe(
   Layer.provideMerge(core),
+  Layer.provideMerge(legacyProducerLayer),
   Layer.provideMerge(Hub.activityLayer),
   Layer.provide(
     Layer.succeed(Hub.MemoryHubConfiguration, {
@@ -225,6 +247,86 @@ describe("MemoryCompactor", () => {
         first.checkpointId,
       );
     }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "start follows the durable daily deadline after a signal and interrupts its scoped workers",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        yield* push();
+        const store = yield* Store.MemoryStore;
+        const activity = yield* Hub.MemoryHubActivity;
+        const scope = yield* Scope.make();
+        const mainId = yield* Effect.withFiberSucceed((fiber) => fiber.id);
+        const workers = yield* Ref.make(new Map<number, Fiber.Fiber<unknown, unknown>>());
+        const completed = yield* Ref.make(0);
+        const signaled = yield* Deferred.make<void>();
+        const daily = yield* Deferred.make<void>();
+        const observed = Store.MemoryStore.of({
+          ...store,
+          readHubRetentionTx: (spaceId) =>
+            Effect.withFiber((fiber) =>
+              Ref.update(workers, (all) =>
+                fiber.id === mainId ? all : new Map(all).set(fiber.id, fiber),
+              ).pipe(Effect.andThen(store.readHubRetentionTx(spaceId))),
+            ),
+          compactEligibleHistoryTx: (input) =>
+            store.compactEligibleHistoryTx(input).pipe(
+              Effect.tap(() =>
+                Effect.gen(function* () {
+                  const count = yield* Ref.updateAndGet(completed, (n) => n + 1);
+                  if (count === 2) yield* Deferred.succeed(signaled, undefined);
+                  if (count === 3) yield* Deferred.succeed(daily, undefined);
+                }),
+              ),
+            ),
+        });
+        const compactor = yield* Compactor.make.pipe(
+          Effect.provideService(Store.MemoryStore, observed),
+          Effect.provideService(Hub.MemoryHubConfiguration, {
+            read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: hubEnv }),
+          }),
+        );
+        yield* compactor.start(principal()).pipe(Effect.provideService(Scope.Scope, scope));
+        const startedAt = yield* Clock.currentTimeMillis;
+        yield* TestClock.adjust(3600000);
+        const sql = yield* SqlClient.SqlClient;
+        const padded = " ".repeat(M.MEMORY_CHECKPOINT_TRIGGER_TAIL_BYTES);
+        yield* sql`UPDATE memory_hub_operations SET entry_json=entry_json || ${padded} WHERE space=${space}`;
+        yield* activity.notify;
+        yield* Deferred.await(signaled);
+        const signaledRun = yield* store.transact(store.readHubRetentionTx(space));
+        assert.strictEqual(Date.parse(signaledRun.compaction.lastRunAtUtc!), startedAt + 3600000);
+        yield* sql`UPDATE memory_hub_operations SET entry_json=rtrim(entry_json) WHERE space=${space}`;
+        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS - 1);
+        assert.strictEqual(
+          (yield* store.transact(store.readHubRetentionTx(space))).checkpointId,
+          signaledRun.checkpointId,
+        );
+        yield* TestClock.adjust(1);
+        yield* Deferred.await(daily);
+        const dailyRun = yield* store.transact(store.readHubRetentionTx(space));
+        assert.strictEqual(
+          Date.parse(dailyRun.compaction.lastRunAtUtc!),
+          startedAt + 3600000 + M.MEMORY_CHECKPOINT_INTERVAL_MS,
+        );
+        assert.notStrictEqual(dailyRun.checkpointId, signaledRun.checkpointId);
+        yield* Scope.close(scope, Exit.void);
+        const captured = yield* Ref.get(workers);
+        // Timer plus admission worker have both crossed a real Store boundary.
+        assert.isAtLeast(captured.size, 2);
+        for (const fiber of captured.values()) {
+          const exit = yield* Fiber.await(fiber);
+          assert.isTrue(Exit.isFailure(exit));
+        }
+        yield* activity.notify;
+        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+        assert.strictEqual(
+          (yield* store.transact(store.readHubRetentionTx(space))).checkpointId,
+          dailyRun.checkpointId,
+        );
+        assert.strictEqual(yield* Ref.get(completed), 3);
+      }).pipe(Effect.provide(live)),
   );
   it.effect("members cannot run hub compaction or floor publication", () =>
     Effect.gen(function* () {
