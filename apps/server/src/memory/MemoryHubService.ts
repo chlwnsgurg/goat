@@ -406,8 +406,15 @@ export const makeAdministrator = Effect.gen(function* () {
   // acknowledged stage removes it from pending work and retains replay evidence.
   const retireTx = (record: Store.AdminRecord) =>
     Effect.gen(function* () {
+      const activated =
+        record.stage === "prepared"
+          ? yield* store.writeHubAdminTx({
+              record: { ...record, stage: "activated" },
+              expectedStage: "prepared",
+            })
+          : record;
       const ready = yield* store.writeHubAdminTx({
-        record: { ...record, stage: "ready", result: null },
+        record: { ...activated, stage: "ready", result: null },
         expectedStage: "activated",
       });
       return yield* store.writeHubAdminTx({
@@ -492,6 +499,8 @@ export const makeAdministrator = Effect.gen(function* () {
             return yield* new Store.MemoryStoreConflict({ code: "not_found" });
         }
         let superseded: Store.AdminRecord | undefined;
+        let preparedSuccessors: readonly Store.AdminRecord[] = [];
+        let pendingScanFull = false;
         const outgoing =
           request.action === "provisionMember" || request.action === "rotateMemberCredential";
         if (!record || record.stage === "prepared") {
@@ -500,17 +509,10 @@ export const makeAdministrator = Effect.gen(function* () {
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           const activated = yield* tx(permit, store.readActivatedHubAdminTx());
           if (activated && activated.requestId !== request.requestId) {
-            // A fresh owner configure is the explicit superseding CAS. Never retire
-            // credential operations or a configure that can still apply its revision.
-            if (
-              request.action !== "configure" ||
-              activated.action.action !== "configure" ||
-              (activated.expectedVersion === view.version &&
-                !(
-                  activated.action.settings.mode === "hub" &&
-                  activated.action.settings.memorySpaceId === null
-                ))
-            )
+            // A fresh owner configure reconciles the previous configure first.
+            // A still-applicable CAS succeeds and forces a fresh caller revision;
+            // only a refused CAS is retired. Credential operations stay protected.
+            if (request.action !== "configure" || activated.action.action !== "configure")
               return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
             const result = yield* settings.apply(activated, permit).pipe(
               Effect.catchTags({
@@ -539,29 +541,17 @@ export const makeAdministrator = Effect.gen(function* () {
               return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           }
           if (request.action === "configure") {
-            // Pre-consumer null-space intents cannot bootstrap. Preserve their
-            // immutable payload while retiring through the existing forward CAS.
+            // Prepared configure intents may be the only durable pointer left
+            // after their predecessor retired. Transfer that pointer before retiring
+            // them, including disable/member intents carrying the internal reference.
             const pending = yield* store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS);
-            for (const legacy of pending) {
-              if (
-                legacy.requestId === request.requestId ||
-                legacy.stage !== "prepared" ||
-                legacy.action.action !== "configure" ||
-                legacy.action.settings.mode !== "hub" ||
-                legacy.action.settings.memorySpaceId !== null
-              )
-                continue;
-              yield* tx(
-                permit,
-                Effect.gen(function* () {
-                  const next = yield* store.writeHubAdminTx({
-                    record: { ...legacy, stage: "activated" },
-                    expectedStage: "prepared",
-                  });
-                  yield* retireTx(next);
-                }),
-              );
-            }
+            pendingScanFull = pending.length === M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS;
+            preparedSuccessors = pending.filter(
+              (item) =>
+                item.requestId !== request.requestId &&
+                item.stage === "prepared" &&
+                item.action.action === "configure",
+            );
           }
         }
         if (!record) {
@@ -578,12 +568,31 @@ export const makeAdministrator = Effect.gen(function* () {
                 Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
               );
           }
+          // Explicit request > current/previous settings (including its receipt)
+          // > refused activated configure > prepared configure in Store id order
+          // > new derivation. Never replace an already persisted request's action.
+          for (const candidate of [...(superseded ? [superseded] : []), ...preparedSuccessors]) {
+            if (previousSpace !== null) break;
+            if (candidate.action.action !== "configure") continue;
+            const saved =
+              candidate.action.settings.mode === "hub"
+                ? candidate.action.settings.memorySpaceId
+                : (candidate.secretName?.match(/^memory-hub-internal-(.+)$/)?.[1] ?? null);
+            if (saved !== null)
+              previousSpace = yield* decodeMemorySpaceId(saved).pipe(
+                Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
+              );
+          }
+          // A truncated sweep cannot prove there is no hidden recovery binding.
+          // Refuse allocation rather than fork a previously published space.
           if (
+            request.action === "configure" &&
+            request.settings.mode === "hub" &&
+            request.settings.memorySpaceId === null &&
             previousSpace === null &&
-            superseded?.action.action === "configure" &&
-            superseded.action.settings.mode === "hub"
+            pendingScanFull
           )
-            previousSpace = superseded.action.settings.memorySpaceId;
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           let action: Store.PersistedAdminAction;
           if (request.action === "installCredential") {
             const { credential: _credential, ...safe } = request;
@@ -618,6 +627,7 @@ export const makeAdministrator = Effect.gen(function* () {
               // Keep the successor binding and retirement atomic: interruption
               // cannot leave a published space without a durable recovery pointer.
               if (superseded) yield* retireTx(superseded);
+              for (const previous of preparedSuccessors) yield* retireTx(previous);
               return yield* store.writeHubAdminTx({
                 record: {
                   requestId: request.requestId,
@@ -639,9 +649,18 @@ export const makeAdministrator = Effect.gen(function* () {
             }),
           );
           superseded = undefined;
+          preparedSuccessors = [];
         }
         if (record.stage === "prepared") {
-          if (superseded) yield* tx(permit, retireTx(superseded));
+          // The same-request retry already owns its durable recovery pointer.
+          if (superseded || preparedSuccessors.length > 0)
+            yield* tx(
+              permit,
+              Effect.gen(function* () {
+                if (superseded) yield* retireTx(superseded);
+                for (const previous of preparedSuccessors) yield* retireTx(previous);
+              }),
+            );
           yield* permit;
           if (request.action === "installCredential") {
             // Retry stages identical bytes to the same private reference.
