@@ -972,6 +972,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
 
         const mcpSession = yield* mcpSessions.read(input.threadId);
         const hasGoatMcp = mcpSession !== undefined && !connection.external;
+        let installedMcpSession = hasGoatMcp ? mcpSession : undefined;
         const orchestrationSystemPrompt = goatOrchestrationSystemPrompt(hasGoatMcp);
         if (hasGoatMcp) {
           yield* OpenCodeRuntime.runOpenCodeSdk("mcp.add", () =>
@@ -2957,6 +2958,36 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               )).find((entry) => entry.name === match[1])
             : undefined;
           if (!command) {
+            const currentMcp =
+              memoryInput === undefined ? undefined : yield* mcpSessions.read(memoryInput.threadId);
+            if (
+              memoryInput !== undefined &&
+              !connection.external &&
+              (currentMcp?.authorizationHeader !== installedMcpSession?.authorizationHeader ||
+                currentMcp?.endpoint !== installedMcpSession?.endpoint)
+            ) {
+              if (currentMcp === undefined) {
+                yield* sdkCall("mcp.disconnect", { name: "goat" }, (signal) =>
+                  client.mcp.disconnect({ name: "goat" }, { signal }),
+                );
+              } else {
+                yield* sdkCall("mcp.add", { name: "goat" }, (signal) =>
+                  client.mcp.add(
+                    {
+                      name: "goat",
+                      config: {
+                        type: "remote",
+                        url: currentMcp.endpoint,
+                        headers: { Authorization: currentMcp.authorizationHeader },
+                        oauth: false,
+                      },
+                    },
+                    { signal },
+                  ),
+                );
+              }
+              installedMcpSession = currentMcp;
+            }
             const snapshot =
               memoryInput === undefined
                 ? undefined
@@ -2974,12 +3005,10 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                         detail: "Invalid memory context frame",
                       }),
                   });
-            const currentMcp =
-              memoryInput === undefined ? undefined : yield* mcpSessions.read(memoryInput.threadId);
             const availability = McpProviderSession.memoryToolAvailability(
               !connection.external &&
-                currentMcp?.authorizationHeader === mcpSession?.authorizationHeader &&
-                currentMcp?.endpoint === mcpSession?.endpoint
+                currentMcp?.authorizationHeader === installedMcpSession?.authorizationHeader &&
+                currentMcp?.endpoint === installedMcpSession?.endpoint
                 ? currentMcp
                 : undefined,
             );
