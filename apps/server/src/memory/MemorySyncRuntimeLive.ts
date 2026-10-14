@@ -29,10 +29,9 @@ const make = Effect.gen(function* () {
   };
   const events = yield* PubSub.dropping<Observation>(16);
   yield* Effect.addFinalizer(() => PubSub.shutdown(events));
-  // One transport binding and four failure classes.
+  // One observed epoch and four failure classes.
   // Never retain credential bytes, response bodies or a per-request history.
   let epoch: number | null = null;
-  let binding: Client.HubConnection | null = null;
   const failures = new Set<Store.MemoryHoldClass>();
   const publish = (connection: Client.HubConnection, holdClass: Store.MemoryHoldClass) =>
     connection.memorySpaceId === null
@@ -57,19 +56,10 @@ const make = Effect.gen(function* () {
         current.settings.memorySpaceId === connection.memorySpaceId
       ) {
         if (epoch !== connection.epoch) {
-          const previous = binding;
           failures.clear();
           epoch = connection.epoch;
-          binding = connection;
-          if (previous !== null) {
-            yield* publish(connection, "authorization");
-            if (
-              previous.memorySpaceId !== connection.memorySpaceId ||
-              previous.hubEnvironmentId !== connection.hubEnvironmentId
-            )
-              yield* publish(connection, "identity");
-            if (previous.endpoint !== connection.endpoint) yield* publish(connection, "protocol");
-          }
+          // Committed binding changes are handled by Sync's settings consumer.
+          // This adapter publishes only recovery observed on this transport.
         }
         if (result._tag === "Failure") {
           const error = result.failure;

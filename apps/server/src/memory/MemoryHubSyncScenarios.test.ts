@@ -10,6 +10,9 @@ import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Deferred from "effect/Deferred";
 import * as Schema from "effect/Schema";
+import * as Fiber from "effect/Fiber";
+import * as Clock from "effect/Clock";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type { ProviderDriver, ProviderInstance } from "@goat/provider-core/server/driver";
 import * as Registry from "../provider/ProviderInstanceRegistry.ts";
@@ -84,6 +87,14 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
     const released = yield* Deferred.make<M.MemoryId>();
     let generated = 0;
+    let descriptorHealthy = true;
+    let probes = 0;
+    let rearmObservations = 0;
+    const probed = yield* Deferred.make<void>();
+    const pulled = yield* Deferred.make<void>();
+    let observePull = false;
+    const sourceRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
+    let sourceResultGate: Deferred.Deferred<void> | null = null;
     const driver: ProviderDriver<{}> = {
       driverKind: M.ProviderDriverKind.make("codex"),
       metadata: { displayName: "Synthetic memory provider", hasDefaultInstance: false },
@@ -154,6 +165,31 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         const client = yield* Client.MemoryHubClient;
         return Client.MemoryHubClient.of({
           ...client,
+          preflight: (connection) =>
+            client.preflight(connection).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  probes++;
+                }),
+              ),
+              Effect.tap(() => Deferred.succeed(probed, undefined)),
+            ),
+          pull: (connection, input) =>
+            client
+              .pull(connection, input)
+              .pipe(
+                Effect.tap(() => (observePull ? Deferred.succeed(pulled, undefined) : Effect.void)),
+              ),
+          requestSourceRead: (connection, input) =>
+            client
+              .requestSourceRead(connection, input)
+              .pipe(Effect.tap((result) => Deferred.succeed(sourceRequested, result.request))),
+          resultSourceRead: (connection, input) =>
+            Effect.suspend(() =>
+              (sourceResultGate ? Deferred.await(sourceResultGate) : Effect.void).pipe(
+                Effect.andThen(client.resultSourceRead(connection, input)),
+              ),
+            ),
           release: (connection, input) =>
             client
               .release(connection, input)
@@ -163,11 +199,27 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         });
       }),
     ).pipe(Layer.provideMerge(Runtime.layer));
+    const observedRuntime = Layer.effect(
+      Sync.MemorySyncRuntime,
+      Effect.gen(function* () {
+        const runtime = yield* Sync.MemorySyncRuntime;
+        return Sync.MemorySyncRuntime.of({
+          ...runtime,
+          rearmEvents: runtime.rearmEvents!.pipe(
+            Stream.tap(() =>
+              Effect.sync(() => {
+                rearmObservations++;
+              }),
+            ),
+          ),
+        });
+      }),
+    ).pipe(Layer.provideMerge(observedClient));
     const syncLayer = Layer.mergeAll(Sync.layer, Worker.layer).pipe(
       Layer.provide(Maintenance.layer),
       Layer.provide(OrchestrationRuntime.layerEventSink),
       Layer.provide(RuntimeIdentity.layer),
-      Layer.provideMerge(observedClient),
+      Layer.provideMerge(observedRuntime),
       Layer.provideMerge(Generation.layer.pipe(Layer.provide(sourceControl))),
       Layer.provideMerge(providers),
       Layer.provideMerge(Layer.succeedContext(baseContext)),
@@ -184,7 +236,15 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       const descriptorRoute = HttpRouter.add(
         "GET",
         GOAT_ENVIRONMENT_PATH,
-        descriptor.pipe(Effect.map(HttpServerResponse.jsonUnsafe)),
+        descriptor.pipe(
+          Effect.map((view) =>
+            HttpServerResponse.jsonUnsafe(
+              descriptorHealthy
+                ? view
+                : { ...view, capabilities: { ...view.capabilities, memoryHubProtocolVersion: 99 } },
+            ),
+          ),
+        ),
       );
       const served = yield* Layer.buildWithMemoMap(
         HttpRouter.serve(descriptorRoute, { disableLogger: true, disableListenLog: true }).pipe(
@@ -242,6 +302,20 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       released,
       generated: () => generated,
       startProduction,
+      setDescriptorHealthy: (healthy: boolean) => {
+        descriptorHealthy = healthy;
+      },
+      probes: () => probes,
+      rearmObservations: () => rearmObservations,
+      probed,
+      pulled,
+      observeNextPull: () => {
+        observePull = true;
+      },
+      sourceRequested,
+      blockSourceResult: (gate: Deferred.Deferred<void>) => {
+        sourceResultGate = gate;
+      },
     };
   });
 
@@ -632,6 +706,37 @@ it.effect(
       yield* c.a.tick;
       assert.strictEqual(yield* Deferred.await(c.a.released), target);
       yield* c.a.worker.drain;
+      if (c.a.generated() !== 1) {
+        const status = yield* c.a.sync.syncStatus({}, Effect.void);
+        const snapshot = yield* c.a.run(
+          Store.MemoryStore.use((store) => store.readResolutionSnapshot(c.space, target)),
+        );
+        const tickets = yield* c.a.run(
+          Store.MemoryStore.use((store) =>
+            store.readRecoverableResolutionTickets({
+              memorySpaceId: c.space,
+              now: Number.MAX_SAFE_INTEGER,
+              limit: 100,
+            }),
+          ),
+        );
+        assert.fail(
+          JSON.stringify({
+            generated: c.a.generated(),
+            now: yield* Clock.currentTimeMillis,
+            failureCode: status.failureCode,
+            status: snapshot.status,
+            reasons: snapshot.reasons,
+            lease: snapshot.fence?.activeLease,
+            tickets: tickets.map((row) => ({
+              state: row.state,
+              nextAttemptAt: row.nextAttemptAt,
+              ownedUntil: row.ownedUntil,
+              leaseExpires: row.ticket.expiresAtHubTime,
+            })),
+          }),
+        );
+      }
       assert.strictEqual(c.a.generated(), 1);
       assert.strictEqual(
         (yield* c.h.aggregate(c.space, target)).resolutions[0]?.resolvingEnvironmentId,
@@ -693,25 +798,27 @@ it.effect(
           }),
         ),
       );
-      const requested = yield* c.a.run(
-        Client.MemoryHubClient.use((client) =>
-          client.requestSourceRead(connection, {
-            protocolVersion: 1,
-            memorySpaceId: c.space,
-            memoryId: target,
-            requestId: M.MemorySourceReadRequestId.make(id(1142)),
-            sourceThread,
-            sourceWatermark: watermark,
-            messageIds: [messageId],
-            limit: 10,
-            authorizedScopes: ["memory:read", "orchestration:read"],
-          }),
+      yield* c.a.tick;
+      const validated = yield* c.a.run(
+        Service.MemoryService.use((service) =>
+          service.prepareSourceRead(
+            {
+              memorySpaceId: c.space,
+              memoryId: target,
+              sourceThread,
+              messageIds: [messageId],
+              limit: 10,
+            },
+            Effect.void,
+          ),
         ),
       );
+      const resultGate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(resultGate);
+      const requester = yield* c.a.sync.readSource(validated, Effect.void).pipe(Effect.forkScoped);
+      const request = yield* Deferred.await(c.a.sourceRequested);
       const denied = yield* c.b.run(
-        Sync.MemorySyncRuntime.use((runtime) =>
-          Effect.result(runtime.ownerPermit(requested.request)),
-        ),
+        Sync.MemorySyncRuntime.use((runtime) => Effect.result(runtime.ownerPermit(request))),
       );
       assert.strictEqual(denied._tag, "Failure");
       if (denied._tag === "Failure") {
@@ -727,12 +834,17 @@ it.effect(
       );
       const status = yield* c.b.sync.syncStatus({}, Effect.void);
       assert.strictEqual(status.failureCode, "route_unavailable");
+      yield* Deferred.succeed(resultGate, undefined);
+      assert.deepStrictEqual(yield* Fiber.join(requester), {
+        kind: "denied",
+        requiredPermission: "orchestration:read",
+      });
       const outcome = yield* c.a.run(
         Client.MemoryHubClient.use((client) =>
           client.resultSourceRead(connection, {
             protocolVersion: 1,
             memorySpaceId: c.space,
-            requestId: requested.request.requestId,
+            requestId: request.requestId,
           }),
         ),
       );
@@ -811,5 +923,41 @@ it.effect(
         assert.strictEqual(replica.generated(), 0);
       }
       assert.strictEqual((yield* c.h.sync.readLocalReadiness()).bootstrap, "ready");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "production adapter and recovery probe recover one protocol hold without duplicate rearm observations",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* cluster();
+      c.h.setDescriptorHealthy(false);
+      yield* c.a.sync.syncOnce;
+      const retry = () =>
+        c.a.run(
+          Store.MemoryStore.use((store) =>
+            store.readPullRetry({
+              memorySpaceId: c.space,
+              hubEnvironmentId: c.h.identity,
+            }),
+          ),
+        );
+      assert.strictEqual((yield* retry()).holdClass, "protocol");
+      assert.strictEqual((yield* retry()).nextAttemptAt, Number.MAX_SAFE_INTEGER);
+      c.h.setDescriptorHealthy(true);
+      c.a.observeNextPull();
+      yield* c.a.startProduction;
+      assert.strictEqual(c.a.probes(), 0);
+      yield* TestClock.adjust("30 seconds");
+      yield* Deferred.await(c.a.probed);
+      yield* Deferred.await(c.a.pulled);
+      yield* c.a.tick;
+      assert.strictEqual((yield* retry()).holdClass, null);
+      assert.strictEqual(c.a.probes(), 1);
+      assert.strictEqual(c.a.rearmObservations(), 0);
+      yield* c.a.tick;
+      assert.strictEqual(c.a.probes(), 1);
+      assert.strictEqual(c.a.rearmObservations(), 0);
+      yield* c.a.sync.shutdown;
     }).pipe(Effect.provide(NodeServices.layer)),
 );
