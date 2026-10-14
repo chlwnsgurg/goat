@@ -53,6 +53,7 @@ describe("GOAT migration ids", () => {
         "RemoteReportRelay",
         "ProjectionTurnItemRequestIndex",
         "Memory",
+        "MemoryHubSync",
       ]);
       assert.isFalse(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* runMigrations(), [[61, "PullRequestReviewGuides"]]);
@@ -73,6 +74,7 @@ describe("GOAT migration ids", () => {
         [68, "RemoteReportRelay"],
         [69, "ProjectionTurnItemRequestIndex"],
         [70, "Memory"],
+        [71, "MemoryHubSync"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -80,12 +82,13 @@ describe("GOAT migration ids", () => {
   );
   it.effect("reconciles Memory by stable name after upstream claims its old ID", () =>
     Effect.gen(function* () {
-      assert.deepStrictEqual(migrationManifest.at(-1), [70, "Memory"]);
+      assert.deepStrictEqual(migrationManifest.at(-1), [71, "MemoryHubSync"]);
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`INSERT INTO memory_quota_counters VALUES ('fixture','live','user',7)`;
       const future = migrationEntries.map(
-        ([n, name, migration]) => [name === "Memory" ? 71 : n, name, migration] as const,
+        ([n, name, migration]) =>
+          [name === "Memory" ? 71 : name === "MemoryHubSync" ? 72 : n, name, migration] as const,
       );
       const displaced = Effect.gen(function* () {
         yield* sql`CREATE TABLE IF NOT EXISTS future_fixture (id INTEGER)`;
