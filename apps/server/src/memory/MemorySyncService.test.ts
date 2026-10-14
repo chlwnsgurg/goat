@@ -366,10 +366,10 @@ const tailEntries = (from: number, to: number): M.MemoryHubEntry[] =>
       },
     };
   });
-const enqueue = (n: number) =>
+const enqueue = (n: number, memory = M.MemoryId.make(id(2))) =>
   Effect.gen(function* () {
     const store = yield* Store.MemoryStore;
-    const op = operation(n);
+    const op = operation(n, memory);
     yield* commit(op);
     yield* store.enqueueWork({
       id: `sync:${n}`,
@@ -2750,8 +2750,9 @@ it.effect(
               const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
               yield* Deferred.await(entered);
               yield* TestClock.adjust("5 seconds");
-              yield* Deferred.await(pushed);
+              yield* TestClock.adjust("10 seconds");
               yield* Fiber.join(run);
+              assert.isTrue(Option.isSome(yield* Deferred.poll(pushed)));
               assert.deepStrictEqual(
                 responses.map((r) => r.requestId),
                 [id(9101), id(9102)],
@@ -2785,8 +2786,25 @@ it.effect(
     Effect.gen(function* () {
       const gate = yield* Deferred.make<void>();
       let releases = 0;
+      let claims = 0;
+      const batches = yield* Effect.forEach([0, 1, 2, 3, 4], () => Deferred.make<void>());
       let appScope: Scope.Scope | undefined;
       const client = peer({
+        claim: (_c, { protocolVersion: _p, ...input }) =>
+          Effect.gen(function* () {
+            claims++;
+            if (claims % 4 === 0) {
+              yield* Deferred.await(batches[claims / 4 - 1]!);
+              yield* Effect.yieldNow;
+            }
+            return {
+              ...input,
+              fencingToken: 1,
+              claimedAtHubTime: timestamp,
+              expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+              attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            };
+          }),
         applyResolution: (_c, input) =>
           Effect.succeed({
             operationId: input.operation.operationId,
@@ -2797,8 +2815,10 @@ it.effect(
             failureCode: "conflict_changed",
           }),
         release: () =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
             releases++;
+            if (releases % 4 === 3)
+              yield* Deferred.succeed(batches[Math.floor(releases / 4)]!, undefined);
             return { released: true };
           }),
       });
@@ -2854,6 +2874,7 @@ it.effect(
           yield* Effect.scoped(
             Effect.gen(function* () {
               const sync = yield* Sync.MemorySyncService;
+              assert.isDefined(appScope);
               const baseline = count();
               const run = yield* sync.syncOnce.pipe(Effect.forkScoped);
               yield* Deferred.await(gate);
@@ -2964,6 +2985,442 @@ it.effect.each(["bootstrap", "tail"] as const)(
             }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
           );
         }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect(
+  "authorization observation rearms 101 held pushes with continuation and preserves other classes and spaces",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* PubSub.bounded<{
+        memorySpaceId: M.MemorySpaceId;
+        holdClass: Store.MemoryHoldClass;
+      }>(4);
+      const done = yield* Deferred.make<void>();
+      let rejected = true;
+      let accepted = 0;
+      const client = peer({
+        push: (_c, input) =>
+          Effect.gen(function* () {
+            if (rejected) return yield* new M.MemoryHubUnauthorizedError({});
+            accepted++;
+            if (accepted === 101) yield* Deferred.succeed(done, undefined);
+            return {
+              receipts: input.operations.map((op) => ({
+                operationId: op.operationId,
+                memoryId: op.memoryId,
+                operationDigest: memoryOperationDigest(op),
+                hubSequence: accepted,
+                outcome: "accepted" as const,
+              })),
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          for (let n = 9000; n < 9102; n++) yield* enqueue(n, M.MemoryId.make(id(n + 10000)));
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          const base = yield* Sync.MemorySyncRuntime;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              yield* sync.start;
+              yield* sync.syncOnce;
+              assert.strictEqual(
+                (yield* sql`SELECT id FROM memory_outbox WHERE hold_class='authorization' AND kind='sync'`)
+                  .length,
+                102,
+              );
+              yield* sql`UPDATE memory_outbox SET hold_class='protocol',failure_code='invalid_output' WHERE id='sync:9101'`;
+              const otherSpace = M.MemorySpaceId.make(id(9800));
+              for (const s of [space, otherSpace])
+                yield* store.transact(
+                  store.writePullRetryTx({
+                    memorySpaceId: s,
+                    hubEnvironmentId: remote,
+                    expectedVersion: 0,
+                    retry: {
+                      attempts: 1,
+                      nextAttemptAt: Number.MAX_SAFE_INTEGER,
+                      failureCode: "route_unavailable",
+                      holdClass: "authorization",
+                    },
+                  }),
+                );
+              rejected = false;
+              yield* PubSub.publish(events, {
+                memorySpaceId: otherSpace,
+                holdClass: "authorization" as const,
+              });
+              yield* sync.syncOnce;
+              assert.strictEqual(accepted, 0);
+              yield* PubSub.publish(events, {
+                memorySpaceId: space,
+                holdClass: "authorization" as const,
+              });
+              yield* Deferred.await(done);
+              yield* sync.syncOnce;
+              assert.strictEqual(accepted, 101);
+              assert.deepStrictEqual(yield* store.readWorkHold("sync:9101"), {
+                holdClass: "protocol",
+                failureCode: "invalid_output",
+              });
+              assert.strictEqual(
+                (yield* store.readPullRetry({
+                  memorySpaceId: otherSpace,
+                  hubEnvironmentId: remote,
+                })).holdClass,
+                "authorization",
+              );
+              assert.strictEqual(
+                (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+                  .holdClass,
+                null,
+              );
+              yield* sync.shutdown;
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(
+                    Layer.succeed(Sync.MemorySyncRuntime, {
+                      ...base,
+                      rearmEvents: Stream.fromPubSub(events),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect(
+  "permanent claim refusal holds its frozen attempt until the matching authorization observation",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* PubSub.bounded<{
+        memorySpaceId: M.MemorySpaceId;
+        holdClass: Store.MemoryHoldClass;
+      }>(4);
+      const retried = yield* Deferred.make<void>();
+      const claims: M.MemoryHubClaimInput[] = [];
+      const client = peer({
+        claim: (_c, input) =>
+          Effect.gen(function* () {
+            claims.push(input);
+            if (claims.length === 2) yield* Deferred.succeed(retried, undefined);
+            return yield* new M.MemoryHubUnauthorizedError({});
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const base = yield* Sync.MemorySyncRuntime;
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              yield* sync.start;
+              assert.strictEqual(claims.length, 1);
+              const held = (yield* sql<{
+                id: string;
+              }>`SELECT id FROM memory_outbox WHERE kind='claim' AND hold_class='authorization'`)[0];
+              assert.isDefined(held);
+              yield* sync.syncOnce;
+              assert.strictEqual(claims.length, 1);
+              yield* PubSub.publish(events, {
+                memorySpaceId: space,
+                holdClass: "protocol" as const,
+              });
+              yield* sync.syncOnce;
+              assert.strictEqual(claims.length, 1);
+              yield* PubSub.publish(events, {
+                memorySpaceId: space,
+                holdClass: "authorization" as const,
+              });
+              yield* Deferred.await(retried);
+              yield* sync.syncOnce;
+              assert.deepStrictEqual(claims[1], claims[0]);
+              assert.strictEqual((yield* store.readWorkHold(held!.id))?.holdClass, "authorization");
+              yield* sync.shutdown;
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(
+                    Layer.succeed(Sync.MemorySyncRuntime, {
+                      ...base,
+                      rearmEvents: Stream.fromPubSub(events),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect(
+  "generation failure records one conflict report, retires the attempt, and the next attempt uses Q",
+  () =>
+    Effect.gen(function* () {
+      const released = yield* Deferred.make<void>();
+      const second = yield* Deferred.make<void>();
+      const selections: M.MemoryModelSelection[] = [];
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.gen(function* () {
+            selections.push(input.modelSelection);
+            if (selections.length === 2) {
+              yield* Deferred.succeed(second, undefined);
+              return yield* Effect.never;
+            }
+            // A syntactically valid result with foreign execution identity must fail validation.
+            return {
+              result: {
+                text: "synthetic result",
+                evidence: [],
+                assertionKind: "inference",
+                judgment: "synthetic judgment",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: remote,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          const settings = yield* Settings.ServerSettingsService;
+          yield* sync.syncOnce;
+          yield* Deferred.await(released);
+          yield* sync.scheduleConflictResolution;
+          const reports = yield* store.pendingReports(100);
+          assert.strictEqual(reports.length, 1);
+          assert.strictEqual(reports[0]?.outcome, "failed");
+          assert.strictEqual(reports[0]?.failureCode, "invalid_output");
+          const next = { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" };
+          yield* settings.updateSettings({ defaultModelSelection: next });
+          yield* TestClock.adjust("30 seconds");
+          yield* sync.syncOnce;
+          yield* Deferred.await(second);
+          assert.deepStrictEqual(selections, [selection, next]);
+          assert.strictEqual((yield* store.pendingReports(100)).length, 1);
+          yield* sync.shutdown;
+        }).pipe(
+          Effect.provide(
+            fixture(
+              peer({
+                release: () =>
+                  Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+              }),
+              model,
+            ),
+          ),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "scanner policy release reaches conflict discovery only after a successful committed rescan",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      let generations = 0;
+      const model = realGeneration({
+        resolveMemoryConflict: () =>
+          Effect.gen(function* () {
+            generations++;
+            yield* Deferred.succeed(entered, undefined);
+            return yield* Effect.never;
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const memoryId = yield* conflict();
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          const snapshot = yield* store.readResolutionSnapshot(space, memoryId);
+          const row = {
+            kind: "scanner" as const,
+            state: "pending" as const,
+            reason: null,
+            revisionId: snapshot.heads[0]!,
+            generation: snapshot.generation,
+            sinceAtUtc: null,
+            attempt: 0,
+            dueAt: 0,
+            lastAttemptAt: null,
+            claimedBy: null,
+            claimedUntil: null,
+          };
+          yield* sql`UPDATE memory_items SET deferred_json=${encode([row])},scanner_policy_version=1 WHERE space=${space} AND memory_id=${memoryId}`;
+          const target = { ...row, memorySpaceId: space, memoryId, payloadBytes: 0 };
+          assert.isTrue(
+            yield* store.finishDeferred(target, {
+              now: 0,
+              failure: "secret_detected",
+              scannerPolicyVersion: 1,
+            }),
+          );
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          assert.strictEqual(generations, 0);
+          yield* store.recoverDeferred(1, 0);
+          assert.isFalse((yield* store.readDeferred(0, 100)).some((w) => w.kind === "scanner"));
+          yield* store.recoverDeferred(2, 0);
+          const rescan = (yield* store.readDeferred(0, 100)).find(
+            (w) => w.kind === "scanner" && w.memoryId === memoryId,
+          );
+          assert.isDefined(rescan);
+          yield* sync.syncOnce;
+          assert.strictEqual(generations, 0);
+          assert.isTrue(yield* store.finishDeferred(rescan!, { now: 0, scannerPolicyVersion: 2 }));
+          yield* sync.syncOnce;
+          yield* Deferred.await(entered);
+          assert.strictEqual(generations, 1);
+          assert.isFalse(
+            (yield* store.readResolutionSnapshot(space, memoryId)).reasons.includes(
+              "secret_detected",
+            ),
+          );
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(peer(), model))),
+      );
+    }),
+);
+
+it.effect(
+  "claim response before ticket failure recovers alongside an existing uncertain submission",
+  () =>
+    Effect.gen(function* () {
+      const released = yield* Deferred.make<void>();
+      const recovered = yield* Deferred.make<M.MemoryModelSelection>();
+      let database: SqlClient.SqlClient | undefined;
+      let generations = 0;
+      let submitted: M.MemoryHubApplyResolutionInput | undefined;
+      const secondClaims: M.MemoryHubClaimInput[] = [];
+      const secondMemory = M.MemoryId.make(id(4));
+      const client = peer({
+        claim: (_c, input) =>
+          Effect.gen(function* () {
+            if (input.memoryId === secondMemory) {
+              secondClaims.push(input);
+              if (secondClaims.length === 1)
+                yield* database!`CREATE TRIGGER fixture_combined_ticket_failure BEFORE INSERT ON memory_outbox WHEN NEW.kind='resolve' AND NEW.memory_id=${secondMemory} BEGIN SELECT RAISE(ABORT,'fixture ticket failure'); END`.pipe(
+                  Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
+                );
+            }
+            const { protocolVersion: _p, ...claim } = input;
+            return {
+              ...claim,
+              fencingToken: 41,
+              claimedAtHubTime: timestamp,
+              expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+              attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            };
+          }),
+        applyResolution: (_c, input) =>
+          Effect.gen(function* () {
+            submitted = input;
+            return yield* new M.MemoryHubError({ code: "unavailable" });
+          }),
+        release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.gen(function* () {
+            generations++;
+            if (input.memoryId === secondMemory) {
+              yield* Deferred.succeed(recovered, input.modelSelection);
+              return yield* Effect.never;
+            }
+            return {
+              result: {
+                text: "synthetic result",
+                evidence: [],
+                assertionKind: "inference",
+                judgment: "synthetic judgment",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: local,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          database = yield* SqlClient.SqlClient;
+          yield* conflict();
+          const store = yield* Store.MemoryStore;
+          const settings = yield* Settings.ServerSettingsService;
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          yield* Deferred.await(released);
+          yield* sync.shutdown;
+          const uncertain = (yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 30000,
+            limit: 100,
+          }))[0]!;
+          assert.deepStrictEqual(uncertain.submission, submitted);
+          assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+          yield* conflict(2);
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              assert.strictEqual(secondClaims.length, 1);
+              assert.strictEqual(generations, 1);
+              yield* restarted.shutdown;
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+          yield* database`DROP TRIGGER fixture_combined_ticket_failure`;
+          yield* settings.updateSettings({
+            defaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+          });
+          yield* TestClock.adjust("5 seconds");
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              assert.deepStrictEqual(yield* Deferred.await(recovered), selection);
+              assert.deepStrictEqual(secondClaims[1], secondClaims[0]);
+              const retained = (yield* store.readRecoverableResolutionTickets({
+                memorySpaceId: space,
+                now: 30000,
+                limit: 100,
+              })).find((t) => t.ticket.attemptId === uncertain.ticket.attemptId);
+              assert.deepStrictEqual(retained?.submission, submitted);
+              assert.strictEqual(generations, 2);
+              assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+              yield* restarted.shutdown;
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+        }).pipe(Effect.provide(fixture(client, model))),
       );
     }),
 );

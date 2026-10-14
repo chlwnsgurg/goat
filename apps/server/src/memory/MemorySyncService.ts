@@ -42,6 +42,14 @@ export class MemorySyncRuntime extends Context.Service<
     readonly cwd: string;
     /** SQL-free committed authority; absent until the application snapshot adapter is wired. */
     readonly readIntentBinding?: Effect.Effect<Service.IntentBinding, Service.MemoryAccessError>;
+    /** Application observations, never inferred from a timer: credential, descriptor or reconnect. */
+    readonly rearmEvents?: Stream.Stream<
+      {
+        memorySpaceId: M.MemorySpaceId;
+        holdClass: Store.MemoryHoldClass;
+      },
+      Service.MemoryAccessError
+    >;
     readonly readBootstrap: (
       space: M.MemorySpaceId,
       hub: M.EnvironmentId,
@@ -183,7 +191,48 @@ const make = Effect.gen(function* () {
   const readSettings = settings.getSettings.pipe(
     Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
   );
-  let settingsEpoch = (yield* readSettings).memoryHubVersion;
+  const initialSettings = yield* readSettings;
+  let settingsEpoch = initialSettings.memoryHubVersion;
+  const bindingKey = (s: typeof initialSettings) => ({
+    space: s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId,
+    mode: s.memoryHub.mode,
+    hub: s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local,
+    endpoint: s.memoryHub.mode === "member" ? s.memoryHub.endpoint : null,
+    credential: s.memoryHub.mode === "member" ? s.memoryHub.secretName : null,
+    model: s.defaultModelSelection ? selectionKey(s.defaultModelSelection) : null,
+    epoch: s.memoryHubVersion,
+  });
+  let previousBinding = bindingKey(initialSettings);
+  // One current binding, four classes, two keyset cursors per class.
+  const rearms = new Map<
+    Store.MemoryHoldClass,
+    {
+      epoch: number;
+      space: M.MemorySpaceId;
+      syncAfter: string;
+      resolutionAfter: string;
+      syncDone: boolean;
+      resolutionDone: boolean;
+    }
+  >();
+  const enqueueRearm = (
+    epoch: number,
+    space: M.MemorySpaceId,
+    classes: readonly Store.MemoryHoldClass[],
+  ) => {
+    for (const c of classes) {
+      const pending = rearms.get(c);
+      if (!pending || pending.epoch !== epoch || pending.space !== space)
+        rearms.set(c, {
+          epoch,
+          space,
+          syncAfter: "",
+          resolutionAfter: "",
+          syncDone: false,
+          resolutionDone: false,
+        });
+    }
+  };
   const ensureEpoch = (epoch: number): Permit =>
     readSettings.pipe(
       Effect.flatMap((s) =>
@@ -295,6 +344,8 @@ const make = Effect.gen(function* () {
     let currentLease = initial.ticket;
     let renewalFailed = false;
     let definitiveFailure = false;
+    let generationAttempted = false;
+    let failureRecorded = false;
     const transition = Effect.fnUntraced(function* (
       state: Store.TicketState,
       approval?: M.MemoryHubReceipt,
@@ -441,6 +492,7 @@ const make = Effect.gen(function* () {
         });
         yield* ensureEpoch(r.settings.memoryHubVersion);
         yield* eligibility(row.ticket);
+        generationAttempted = true;
         const generated = yield* Effect.scoped(
           Effect.gen(function* () {
             // Renewal failure interrupts the provider, including a hung one-shot execution.
@@ -577,13 +629,52 @@ const make = Effect.gen(function* () {
     });
     yield* execute.pipe(
       Effect.tapError((error) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           definitiveFailure = !row.submission && !transient(error);
+          if (row.approval || row.state === "terminal") return;
+          yield* ensureEpoch(r.settings.memoryHubVersion);
+          const now = yield* Clock.currentTimeMillis;
+          const failed = yield* store.transact(
+            Effect.gen(function* () {
+              const saved = yield* store.failResolutionTicketTx({
+                ownership: ownership(row),
+                now,
+                failureCode: failureCode(error),
+                nextAttemptAt: definitiveFailure
+                  ? now
+                  : Math.max(
+                      now + 30000,
+                      renewalFailed ? Date.parse(currentLease.expiresAtHubTime) : 0,
+                    ),
+                reportConflictFailure: definitiveFailure && generationAttempted && !renewalFailed,
+              });
+              if (!saved || !definitiveFailure) return saved;
+              // Keep definitive retirement and its report in the same local owner lineage.
+              const acquired = yield* store.acquireResolutionTicketTx({
+                key: {
+                  memorySpaceId: saved.ticket.memorySpaceId,
+                  attemptId: saved.ticket.attemptId,
+                },
+                expectedVersion: saved.version,
+                owner,
+                coordinatorEpoch: r.settings.memoryHubVersion,
+                now,
+                ownedUntil: now + 60000,
+              });
+              if (!acquired) return yield* new M.MemoryHubError({ code: "fenced" });
+              return acquired;
+            }),
+          );
+          if (failed) {
+            row = failed;
+            failureRecorded = !definitiveFailure;
+          }
         }),
       ),
       Effect.ensuring(
         Effect.gen(function* () {
           const released = yield* release(r, row.ticket);
+          if (failureRecorded) return;
           if (row.state !== "terminal") {
             if (definitiveFailure && released) {
               const candidate = yield* store.findClaimCandidate({
@@ -726,6 +817,7 @@ const make = Effect.gen(function* () {
           conflictHeads: metadata.sortedHeads,
         };
         let reserved = false;
+        let claimOwned = false;
         const prepared: { value: Effect.Success<ReturnType<typeof store.prepareClaimAttemptTx>> } =
           { value: null };
         const attempt = yield* Effect.result(
@@ -754,6 +846,7 @@ const make = Effect.gen(function* () {
             if (!frozen) return;
             prepared.value = frozen;
             if (!(yield* store.claimCandidate(work.id, r.settings.memoryHubVersion, now))) return;
+            claimOwned = true;
             reservations++;
             reserved = true;
             yield* ensureEpoch(r.settings.memoryHubVersion);
@@ -815,6 +908,26 @@ const make = Effect.gen(function* () {
               }),
             );
             if (retired) continue;
+          }
+          if (
+            claimOwned &&
+            prepared.value &&
+            !transient(attempt.failure) &&
+            code !== "claim_busy"
+          ) {
+            const held = yield* store.transact(
+              store.holdClaimCandidateTx({
+                memorySpaceId: r.space,
+                candidateId: work.id,
+                expectedGeneration: prepared.value.generation,
+                attemptId: prepared.value.claim.attemptId,
+                coordinatorEpoch: r.settings.memoryHubVersion,
+                now: yield* Clock.currentTimeMillis,
+                failureCode: code,
+                holdClass: holdClass(attempt.failure),
+              }),
+            );
+            if (held) continue;
           }
           const knownExpiry =
             code === "claim_busy"
@@ -1202,6 +1315,42 @@ const make = Effect.gen(function* () {
       }
     }
   });
+  const rearmPage = Effect.fnUntraced(function* (r: Route) {
+    for (const [c, pending] of rearms) {
+      if (pending.epoch !== r.settings.memoryHubVersion || pending.space !== r.space) {
+        rearms.delete(c);
+        continue;
+      }
+      yield* ensureEpoch(pending.epoch);
+      const now = yield* Clock.currentTimeMillis;
+      const page = yield* store.transact(
+        Effect.gen(function* () {
+          const input = { memorySpaceId: pending.space, holdClass: c, now, limit: 100 };
+          const sync = pending.syncDone
+            ? []
+            : yield* store.rearmSyncHoldsTx({ ...input, afterId: pending.syncAfter });
+          const resolution = pending.resolutionDone
+            ? []
+            : yield* store.rearmResolutionHoldsTx({ ...input, afterId: pending.resolutionAfter });
+          const key = { memorySpaceId: pending.space, hubEnvironmentId: r.hubId };
+          const retry = yield* store.readPullRetry(key);
+          if (retry.holdClass === c)
+            yield* store.writePullRetryTx({
+              ...key,
+              expectedVersion: retry.version,
+              retry: { attempts: 0, nextAttemptAt: now, failureCode: null, holdClass: null },
+            });
+          return { sync, resolution };
+        }),
+      );
+      pending.syncDone ||= page.sync.length < 100;
+      pending.resolutionDone ||= page.resolution.length < 100;
+      pending.syncAfter = page.sync.at(-1) ?? pending.syncAfter;
+      pending.resolutionAfter = page.resolution.at(-1) ?? pending.resolutionAfter;
+      if (pending.syncDone && pending.resolutionDone) rearms.delete(c);
+    }
+    if (rearms.size) pendingSync = true;
+  });
   const syncCycle = mutex.withPermit(
     Effect.gen(function* () {
       if (stopped) return;
@@ -1217,6 +1366,7 @@ const make = Effect.gen(function* () {
         if (entry.epoch !== r.settings.memoryHubVersion && entry.fiber)
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
+      yield* rearmPage(r);
       const budget = { pages: 0, entries: 0 };
       if (!(yield* synchronizePull(r, budget)) || budget.pages >= 10) return;
       for (const entry of executions.values()) {
@@ -1308,6 +1458,7 @@ const make = Effect.gen(function* () {
       cancelling = true;
       pendingSweep = false;
       pendingSync = false;
+      rearms.clear();
       const active = cycle;
       // No sync/registry mutex is held while cancellation is requested. Cycle interruption
       // finishes any registration reservation first; matching release has a 15s bound.
@@ -1342,11 +1493,39 @@ const make = Effect.gen(function* () {
       yield* Stream.runForEach(changes, (s) =>
         Effect.gen(function* () {
           if (s.memoryHubVersion !== settingsEpoch) yield* cancelEpoch;
+          const next = bindingKey(s);
+          const classes: Store.MemoryHoldClass[] = [];
+          if (
+            next.epoch !== previousBinding.epoch ||
+            next.credential !== previousBinding.credential
+          )
+            classes.push("authorization");
+          if (
+            next.mode !== previousBinding.mode ||
+            next.hub !== previousBinding.hub ||
+            next.space !== previousBinding.space
+          )
+            classes.push("identity");
+          if (next.endpoint !== previousBinding.endpoint) classes.push("protocol", "availability");
+          if (next.model !== previousBinding.model) classes.push("availability");
+          previousBinding = next;
+          if (next.space) enqueueRearm(next.epoch, next.space, classes);
           // Do not block the settings consumer on the next transport.
           yield* requestCycle(syncCycle, false, false).pipe(Effect.ignore);
         }),
       ).pipe(Effect.forkIn(scope)),
     );
+    if (runtime.rearmEvents)
+      background.push(
+        yield* Stream.runForEach(runtime.rearmEvents, (event) =>
+          Effect.gen(function* () {
+            const r = yield* route();
+            if (!r?.space || r.space !== event.memorySpaceId || stopped) return;
+            enqueueRearm(r.settings.memoryHubVersion, r.space, [event.holdClass]);
+            yield* requestCycle(syncCycle, false, false);
+          }),
+        ).pipe(Effect.ignore, Effect.forkIn(scope)),
+      );
     background.push(
       yield* Effect.forever(Effect.sleep("30 seconds").pipe(Effect.andThen(guardedSync))).pipe(
         Effect.forkIn(scope),
