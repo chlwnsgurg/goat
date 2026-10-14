@@ -882,6 +882,10 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
     }) => Effect.Effect<PullRetryState, MemoryStorageError>;
+    readonly readPersistedHoldClasses: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      hubEnvironmentId: M.EnvironmentId;
+    }) => Effect.Effect<readonly MemoryHoldClass[], MemoryStorageError>;
     readonly writePullRetryTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -5835,6 +5839,34 @@ const make = Effect.gen(function* () {
       ? yield* pullRetryCodec.decode(rows[0].pull_retry_json, strict)
       : emptyPullRetry;
   });
+  // Discovery is a snapshot of presence, not rearm authority. Outbox work belongs to
+  // the space; only pull retry is scoped to the current hub binding.
+  const readPersistedHoldClasses: MemoryStore["Service"]["readPersistedHoldClasses"] = Effect.fn(
+    "MemoryStore.readPersistedHoldClasses",
+  )(function* (input) {
+    return yield* transact(
+      Effect.gen(function* () {
+        const pull = yield* readPullRetry(input);
+        const classes: MemoryHoldClass[] = [];
+        for (const holdClass of HoldClass.literals) {
+          const held = yield* stored(
+            "persisted-hold-discovery",
+            sql`SELECT 1 FROM memory_outbox INDEXED BY memory_outbox_held_class
+              WHERE space=${input.memorySpaceId} AND hold_class=${holdClass}
+                AND hold_class IS NOT NULL AND next_attempt_at=9007199254740991
+                AND kind IN ('sync','revert_intent','claim','resolve')
+                AND status IN ('pending','retry','running') LIMIT 1`,
+          );
+          if (
+            held.length ||
+            (pull.nextAttemptAt === Number.MAX_SAFE_INTEGER && pull.holdClass === holdClass)
+          )
+            classes.push(holdClass);
+        }
+        return classes;
+      }),
+    );
+  });
   const writePullRetryTx: MemoryStore["Service"]["writePullRetryTx"] = Effect.fn(
     "MemoryStore.writePullRetryTx",
   )(function* (input) {
@@ -8925,6 +8957,7 @@ const make = Effect.gen(function* () {
     retrySyncWorkTx,
     readWorkHold,
     readPullRetry,
+    readPersistedHoldClasses,
     writePullRetryTx,
     rearmSyncHoldsTx,
     prepareClaimAttemptTx,
