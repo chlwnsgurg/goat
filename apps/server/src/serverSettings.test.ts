@@ -128,12 +128,16 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
 const withRegisteredSettingsWatchers = <A, E, R>(
   use: (
     awaitWatch: (directory: string, count?: number) => Effect.Effect<void>,
+    notify: (filePath: string) => Effect.Effect<void>,
   ) => Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const events = yield* PubSub.unbounded<FileSystem.WatchEvent>();
+    const events = yield* PubSub.unbounded<{
+      event: FileSystem.WatchEvent;
+      seen: Deferred.Deferred<void>;
+    }>();
     const registrations = new Map<string, Deferred.Deferred<void>>();
     const counts = new Map<string, number>();
     const registration = (directory: string, count = 1) => {
@@ -146,7 +150,11 @@ const withRegisteredSettingsWatchers = <A, E, R>(
       return deferred;
     };
     const notify = (filePath: string) =>
-      PubSub.publish(events, { _tag: "Update" as const, path: filePath });
+      Effect.gen(function* () {
+        const seen = yield* Deferred.make<void>();
+        yield* PubSub.publish(events, { event: { _tag: "Update" as const, path: filePath }, seen });
+        if ((counts.get(path.dirname(filePath)) ?? 0) > 0) yield* Deferred.await(seen);
+      });
     const controlledFs = FileSystem.FileSystem.of({
       ...fs,
       rename: (from, to) => fs.rename(from, to).pipe(Effect.tap(() => notify(to))),
@@ -163,17 +171,22 @@ const withRegisteredSettingsWatchers = <A, E, R>(
             }),
             Effect.map((subscription) =>
               Stream.fromSubscription(subscription).pipe(
-                Stream.filter((event) => path.dirname(event.path) === directory),
+                Stream.filter(({ event }) => path.dirname(event.path) === directory),
+                Stream.tap(({ seen }) => Deferred.succeed(seen, undefined)),
+                Stream.map(({ event }) => event),
               ),
             ),
           ),
         ),
     });
-    return yield* use((directory, count) => Deferred.await(registration(directory, count))).pipe(
+    return yield* use(
+      (directory, count) => Deferred.await(registration(directory, count)),
+      notify,
+    ).pipe(
       Effect.provide(layerServerSettings()),
       Effect.provideService(FileSystem.FileSystem, controlledFs),
     );
-  }).pipe(TestClock.withLive);
+  });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
@@ -337,6 +350,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           contents: `{ "responseStreamingMode": "paragraph" }`,
         });
 
+        yield* TestClock.adjust(100);
         const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
       }),
@@ -367,6 +381,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const repointChanges = yield* service.subscribeChanges;
         yield* fs.remove(config.settingsPath);
         yield* fs.symlink(secondSettingsPath, config.settingsPath);
+        yield* TestClock.adjust(100);
         const repointed = yield* repointChanges.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(repointed)?.responseStreamingMode, "paragraph");
 
@@ -376,6 +391,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           filePath: secondSettingsPath,
           contents: `{ "responseStreamingMode": "turn" }`,
         });
+        yield* TestClock.adjust(100);
         const edited = yield* editChanges.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(edited)?.responseStreamingMode, "turn");
       }),
@@ -400,10 +416,151 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           filePath: linkedSettingsPath,
           contents: `{ "responseStreamingMode": "paragraph" }`,
         });
+        yield* TestClock.adjust(100);
         const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
       }),
     ),
+  );
+
+  it.effect.each([
+    "truncated JSON",
+    "invalid hub",
+    "invalid unrelated setting",
+    "sparse replacement",
+    "missing version",
+    "deleted file",
+    "missing symlink target",
+  ] as const)("retains committed hub through %s and publishes repaired settings", (damage) =>
+    withRegisteredSettingsWatchers((awaitWatch, notify) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const config = yield* ServerConfig.ServerConfig;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        const hub: MemoryHubSettings = {
+          mode: "hub",
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000091"),
+        };
+        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-epoch-" });
+        const target = path.join(dotfiles, "settings.json");
+        const filePath = damage === "missing symlink target" ? target : config.settingsPath;
+        yield* fs.writeFileString(
+          filePath,
+          JSON.stringify({ memoryHub: hub, memoryHubVersion: 7 }),
+        );
+        if (damage === "missing symlink target") {
+          yield* fs.remove(config.settingsPath, { force: true });
+          yield* fs.symlink(target, config.settingsPath);
+        }
+        yield* service.start;
+        yield* awaitWatch(path.dirname(config.settingsPath), 2);
+        if (damage === "missing symlink target") yield* awaitWatch(path.dirname(target));
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        const changes = yield* service.subscribeChanges;
+        if (damage === "deleted file" || damage === "missing symlink target") {
+          yield* fs.remove(filePath);
+        } else {
+          const raw =
+            damage === "truncated JSON"
+              ? '{ "memoryHub":'
+              : damage === "invalid hub"
+                ? JSON.stringify({ memoryHub: { mode: "broken" }, memoryHubVersion: 8 })
+                : damage === "invalid unrelated setting"
+                  ? JSON.stringify({
+                      memoryHub: { mode: "disabled" },
+                      memoryHubVersion: 8,
+                      defaultTheme: 42,
+                    })
+                  : damage === "sparse replacement"
+                    ? "{}"
+                    : JSON.stringify({ memoryHub: { mode: "disabled" } });
+          yield* fs.writeFileString(filePath, raw);
+          yield* notify(filePath);
+        }
+        yield* TestClock.adjust(100);
+        const rejected = yield* changes.pipe(Stream.runHead);
+        assert.deepStrictEqual(Option.getOrThrow(rejected).memoryHub, hub);
+        assert.strictEqual(Option.getOrThrow(rejected).memoryHubVersion, 7);
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        // Rejected input must remain for repair; migrations cannot rewrite it.
+        if (damage === "deleted file" || damage === "missing symlink target") {
+          assert.strictEqual(yield* fs.exists(filePath), false);
+        }
+        const repairedChanges = yield* service.subscribeChanges;
+        yield* fs.writeFileString(
+          filePath,
+          JSON.stringify({ memoryHub: { mode: "disabled" }, memoryHubVersion: 8 }),
+        );
+        yield* notify(filePath);
+        yield* TestClock.adjust(100);
+        const repaired = yield* repairedChanges.pipe(Stream.runHead);
+        assert.deepStrictEqual(Option.getOrThrow(repaired).memoryHub, { mode: "disabled" });
+        assert.strictEqual(Option.getOrThrow(repaired).memoryHubVersion, 8);
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 8,
+        });
+      }),
+    ),
+  );
+
+  it.effect("invalid external settings cannot enable a disabled committed hub", () =>
+    withRegisteredSettingsWatchers((awaitWatch, notify) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const config = yield* ServerConfig.ServerConfig;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        const hub: MemoryHubSettings = {
+          mode: "hub",
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000092"),
+        };
+        yield* fs.writeFileString(config.settingsPath, JSON.stringify({ memoryHubVersion: 7 }));
+        yield* service.start;
+        yield* awaitWatch(path.dirname(config.settingsPath), 2);
+        const changes = yield* service.subscribeChanges;
+        const invalid = JSON.stringify({ memoryHub: hub, memoryHubVersion: 8, defaultTheme: 42 });
+        yield* fs.writeFileString(config.settingsPath, invalid);
+        yield* notify(config.settingsPath);
+        yield* TestClock.adjust(100);
+        yield* changes.pipe(Stream.runHead);
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 7,
+        });
+        assert.strictEqual(yield* fs.readFileString(config.settingsPath), invalid);
+        const repairedChanges = yield* service.subscribeChanges;
+        yield* fs.writeFileString(
+          config.settingsPath,
+          JSON.stringify({ memoryHub: hub, memoryHubVersion: 8 }),
+        );
+        yield* notify(config.settingsPath);
+        yield* TestClock.adjust(100);
+        yield* repairedChanges.pipe(Stream.runHead);
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 8 });
+      }),
+    ),
+  );
+
+  it.effect.each(["absent", "sparse"] as const)(
+    "initial %s settings retain disabled version zero",
+    (initial) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const config = yield* ServerConfig.ServerConfig;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        if (initial === "absent") yield* fs.remove(config.settingsPath, { force: true });
+        else yield* fs.writeFileString(config.settingsPath, "{}");
+        yield* service.start;
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 0,
+        });
+      }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("preserves context when reading a provider environment secret fails", () => {

@@ -552,12 +552,12 @@ const ServerSettingsJson = fromLenientJson(
   }),
 );
 const decodeServerSettingsJsonExit = Schema.decodeUnknownExit(ServerSettingsJson);
-// Decode only the authorization epoch: provider migrations/history are unrelated.
+// Inspect field presence separately from decoding defaults for external replacements.
 const decodeCommittedHubJson = Schema.decodeUnknownExit(
   fromLenientJson(
     Schema.Struct({
       memoryHub: ServerSettings.fields.memoryHub,
-      memoryHubVersion: ServerSettings.fields.memoryHubVersion,
+      memoryHubVersion: Schema.optionalKey(Schema.Number),
     }),
   ),
 );
@@ -909,12 +909,49 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  const hasCommittedHubEpoch = (view: MemoryHubSettingsView) =>
+    view.version !== 0 || view.settings.mode !== "disabled";
+
+  const publishExternalHub = (raw: string) =>
+    Effect.gen(function* () {
+      const decoded = decodeServerSettingsJsonExit(raw);
+      const projection = decodeCommittedHubJson(raw);
+      const legacy = decodeLegacyProviderSettingsJsonExit(raw);
+      const current = yield* Ref.get(committedHubRef);
+      if (
+        Exit.isFailure(decoded) ||
+        Exit.isFailure(projection) ||
+        Exit.isFailure(legacy) ||
+        (projection.value.memoryHubVersion === undefined && hasCommittedHubEpoch(current))
+      ) {
+        yield* Effect.logWarning(
+          "invalid external settings projection, retaining committed memory hub",
+          {
+            path: settingsPath,
+            reason:
+              Exit.isFailure(decoded) || Exit.isFailure(projection) || Exit.isFailure(legacy)
+                ? "decode"
+                : "missing-version",
+          },
+        );
+        return false;
+      }
+      yield* publishCommittedHub(decoded.value);
+      return true;
+    });
+
   const refreshCommittedHub = Effect.gen(function* () {
-    const decoded = (yield* readConfigExists)
-      ? decodeCommittedHubJson(yield* readRawConfig)
-      : Exit.succeed(DEFAULT_SERVER_SETTINGS);
-    // A malformed hub epoch cannot keep granting the last enabled configuration.
-    yield* publishCommittedHub(Exit.isSuccess(decoded) ? decoded.value : DEFAULT_SERVER_SETTINGS);
+    if (yield* readConfigExists) {
+      return yield* publishExternalHub(yield* readRawConfig);
+    }
+    // Deletion, editor replacement and a dangling symlink are indistinguishable.
+    // Keep the epoch; resetting an established hub requires an explicit valid version.
+    if (hasCommittedHubEpoch(yield* Ref.get(committedHubRef))) {
+      yield* Effect.logWarning("settings file unavailable, retaining committed memory hub", {
+        path: settingsPath,
+      });
+    }
+    return false;
   });
 
   const writeSettingsAtomically = Effect.fnUntraced(
@@ -988,7 +1025,6 @@ const make = Effect.gen(function* () {
     });
 
   const loadSettingsFromDisk = Effect.gen(function* () {
-    yield* refreshCommittedHub;
     let settings = DEFAULT_SERVER_SETTINGS;
     let legacyProviders: Readonly<Record<string, unknown>> | undefined;
     let legacySourceControl: Parameters<typeof migrateLegacySourceControlSettings>[1] = {};
@@ -996,8 +1032,10 @@ const make = Effect.gen(function* () {
     // the fold below only writes when it started from the file's real contents.
     let settingsFileTrusted = true;
 
-    if (yield* readConfigExists) {
+    const settingsExists = yield* readConfigExists;
+    if (settingsExists) {
       const raw = yield* readRawConfig;
+      settingsFileTrusted = yield* publishExternalHub(raw);
       const decoded = decodeServerSettingsJsonExit(raw);
       const legacySettings = decodeLegacyProviderSettingsJsonExit(raw);
       if (legacySettings._tag === "Success") {
@@ -1028,6 +1066,20 @@ const make = Effect.gen(function* () {
         };
       }
     }
+
+    const committedHub = yield* Ref.get(committedHubRef);
+    if (!settingsExists && hasCommittedHubEpoch(committedHub)) {
+      settingsFileTrusted = false;
+      yield* Effect.logWarning("settings file unavailable, retaining committed memory hub", {
+        path: settingsPath,
+      });
+    }
+    // Full settings and migrations must not turn a rejected projection into a new commit.
+    settings = {
+      ...settings,
+      memoryHub: committedHub.settings,
+      memoryHubVersion: committedHub.version,
+    };
 
     const providerHistory = yield* sql<{
       readonly providerName: string;
@@ -1120,9 +1172,8 @@ const make = Effect.gen(function* () {
     // A file still carrying the retired `providers`, `bitbucket`, or `github` keys is rewritten
     // once so the migrated values persist and the old keys disappear.
     if (
-      migrated !== loaded ||
-      (settingsFileTrusted && legacyProviders !== undefined) ||
-      hasLegacySourceControl
+      settingsFileTrusted &&
+      (migrated !== loaded || legacyProviders !== undefined || hasLegacySourceControl)
     ) {
       yield* writeSettingsAtomically(migrated);
       for (const move of sourceControlMigration.secretMoves) {
