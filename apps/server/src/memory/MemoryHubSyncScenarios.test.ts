@@ -87,7 +87,6 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const released = yield* Deferred.make<M.MemoryId>();
     let generated = 0;
     let claimed: M.MemoryResolutionLease | null = null;
-    let releaseResult: M.MemoryHubReleaseResult | null = null;
     let descriptorHealthy = true;
     let probes = 0;
     let rearmObservations = 0;
@@ -202,14 +201,11 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               ),
             ),
           release: (connection, input) =>
-            client.release(connection, input).pipe(
-              Effect.tap((result) =>
-                Effect.sync(() => {
-                  releaseResult = result;
-                }),
+            client
+              .release(connection, input)
+              .pipe(
+                Effect.onExit(() => Deferred.succeed(released, input.memoryId).pipe(Effect.asVoid)),
               ),
-              Effect.onExit(() => Deferred.succeed(released, input.memoryId).pipe(Effect.asVoid)),
-            ),
         });
       }),
     ).pipe(Layer.provideMerge(Runtime.layer));
@@ -316,7 +312,6 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       released,
       generated: () => generated,
       claimed: () => claimed,
-      releaseResult: () => releaseResult,
       startProduction,
       setDescriptorHealthy: (healthy: boolean) => {
         descriptorHealthy = healthy;
@@ -741,7 +736,9 @@ it.effect(
       assert.strictEqual(Date.parse(takeover.claimedAtHubTime), 120000);
       assert.strictEqual(Date.parse(takeover.expiresAtHubTime), 240000);
       assert.isAbove(takeover.fencingToken, lease.fencingToken);
-      assert.strictEqual(c.a.releaseResult()?.released, true);
+      // Approval already fences the canonical lease. Cleanup release may be
+      // refused; durable resolution and lease retirement prove completion.
+      assert.isNull((yield* c.h.aggregate(c.space, target)).fence?.activeLease ?? null);
       assert.strictEqual(
         activeText(yield* c.a.aggregate(c.space, target)),
         "resolved synthetic fact",
