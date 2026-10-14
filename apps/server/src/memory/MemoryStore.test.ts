@@ -4229,6 +4229,18 @@ it.effect("keeps the successor frontier and exposure on body-free canonical meta
         ),
       );
     }
+    const scanner = (yield* store.readDeferred(0, 100)).find((row) => row.kind === "scanner")!;
+    assert.isDefined(scanner);
+    const scanned = yield* store.readScannerChunk(scanner);
+    assert.isNull(scanned.nextCursor);
+    assert.strictEqual(scanMemoryValue({ payloads: scanned.payloads }).kind, "allowed");
+    assert.isTrue(yield* store.claimDeferred(scanner, "replay-scanner", 0, 1000));
+    assert.isTrue(
+      yield* store.finishOwnedDeferred(scanner, "replay-scanner", 1000, {
+        now: 0,
+        scannerPolicyVersion: 1,
+      }),
+    );
     const before = yield* store.loadAggregate(space, memory);
     assert.deepStrictEqual(before.heads, [second.revision.revisionId]);
     assert.strictEqual(before.item?.localAvailability.exposure, "visible");
