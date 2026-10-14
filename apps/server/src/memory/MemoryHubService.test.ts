@@ -805,11 +805,15 @@ describe("MemoryHubService resolution approval", () => {
       );
       const op = (yield* store.readWorkOperation(`sync:${space}:${operationId}`))!;
       yield* hub.push(pushInput(op), principal());
-      const response = yield* hub.respondSourceRead(
-        { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId, outcome },
-        principal(otherEnv),
-      );
-      assert.isFalse(response.accepted);
+      const response = yield* hub
+        .respondSourceRead(
+          { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId, outcome },
+          principal(otherEnv),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(response._tag, "MemoryHubError");
+      if (response._tag === "MemoryHubError")
+        assert.strictEqual(response.code, "identity_mismatch");
       assert.deepStrictEqual(
         yield* hub.resultSourceRead(
           { protocolVersion: 1, memorySpaceId: space, requestId: sourceRequest.requestId },
