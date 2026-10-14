@@ -4407,75 +4407,74 @@ it.effect(
     }).pipe(Effect.provide(live)),
 );
 
-it.effect(
-  "recovery preserves current frontier tickets while cancelling stale tickets and discovering unrelated claims",
-  () =>
-    Effect.gen(function* () {
-      const { store, sql, ticket, key, ownership, submission } = yield* seedSubmission;
+it.effect("recovery preserves stale submissions while discovering unrelated claims", () =>
+  Effect.gen(function* () {
+    const { store, sql, ticket, key, ownership, submission } = yield* seedSubmission;
+    const submitted = yield* store.transact(
+      store.persistResolutionSubmissionTx({
+        ownership,
+        submission,
+        digest: memoryOperationDigest(submission.operation),
+      }),
+    );
+    // A second memory becomes quarantined while the first submission is in flight.
+    const other = M.MemoryId.make(id(980));
+    const aggregate = yield* store.loadAggregate(space, memory);
+    if (aggregate.item?.status !== "quarantined") throw new Error("fixture");
+    const item = {
+      ...aggregate.item,
+      memoryId: other,
+      conflict: { ...aggregate.item.conflict, memoryId: other },
+    };
+    yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) SELECT space,${other},scope_json,scope_key,heads_json,status,projection_watermark,${JSON.stringify(item)},availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+    yield* store.recoverClaimCandidates(0);
+    const rows = yield* sql<{
+      status: string;
+      ticket_json: string;
+    }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+    assert.strictEqual(rows[0]!.status, "pending");
+    assert.strictEqual(JSON.parse(rows[0]!.ticket_json).state, "submitting");
+    assert.isNotNull(JSON.parse(rows[0]!.ticket_json).submission);
+    assert.isTrue(
+      (yield* store.readDueClaimCandidates(100, 0, space)).some((c) => c.memoryId === other),
+    );
+    const changed = {
+      ...aggregate.item,
+      conflict: {
+        ...aggregate.item.conflict,
+        heads: [M.MemoryRevisionId.make(id(981)), M.MemoryRevisionId.make(id(982))],
+      },
+    };
+    yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(changed)},heads_json=${JSON.stringify(changed.conflict.heads)} WHERE space=${space} AND memory_id=${memory}`;
+    yield* store.recoverClaimCandidates(1);
+    const stale = yield* sql<{
+      status: string;
+      ticket_json: string;
+    }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+    assert.strictEqual(stale[0]!.status, "pending");
+    const retained = JSON.parse(stale[0]!.ticket_json);
+    assert.strictEqual(retained.state, "submitting");
+    assert.strictEqual(retained.owner, "fixture");
+    assert.isNotNull(retained.submission);
+    assert.isTrue(retained.reconcileRequired);
+    assert.isNull(
       yield* store.transact(
-        store.persistResolutionSubmissionTx({
-          ownership,
-          submission,
-          digest: memoryOperationDigest(submission.operation),
+        store.acquireResolutionTicketTx({
+          key,
+          expectedVersion: submitted.version,
+          owner: "late",
+          coordinatorEpoch: 2,
+          now: 101,
+          ownedUntil: 200,
         }),
-      );
-      // A second memory becomes quarantined while the first submission is in flight.
-      const other = M.MemoryId.make(id(980));
-      const aggregate = yield* store.loadAggregate(space, memory);
-      if (aggregate.item?.status !== "quarantined") throw new Error("fixture");
-      const item = {
-        ...aggregate.item,
-        memoryId: other,
-        conflict: { ...aggregate.item.conflict, memoryId: other },
-      };
-      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) SELECT space,${other},scope_json,scope_key,heads_json,status,projection_watermark,${JSON.stringify(item)},availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
-      yield* store.recoverClaimCandidates(0);
-      const rows = yield* sql<{
-        status: string;
-        ticket_json: string;
-      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
-      assert.strictEqual(rows[0]!.status, "pending");
-      assert.strictEqual(JSON.parse(rows[0]!.ticket_json).state, "submitting");
-      assert.isNotNull(JSON.parse(rows[0]!.ticket_json).submission);
-      assert.isTrue(
-        (yield* store.readDueClaimCandidates(100, 0, space)).some((c) => c.memoryId === other),
-      );
-      const changed = {
-        ...aggregate.item,
-        conflict: {
-          ...aggregate.item.conflict,
-          heads: [M.MemoryRevisionId.make(id(981)), M.MemoryRevisionId.make(id(982))],
-        },
-      };
-      yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(changed)},heads_json=${JSON.stringify(changed.conflict.heads)} WHERE space=${space} AND memory_id=${memory}`;
-      yield* store.recoverClaimCandidates(1);
-      const stale = yield* sql<{
-        status: string;
-        ticket_json: string;
-      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
-      assert.strictEqual(stale[0]!.status, "cancelled");
-      const terminal = JSON.parse(stale[0]!.ticket_json);
-      assert.strictEqual(terminal.state, "terminal");
-      assert.isNull(terminal.owner);
-      assert.isNull(terminal.submission);
-      assert.isNull(
-        yield* store.transact(
-          store.acquireResolutionTicketTx({
-            key,
-            expectedVersion: terminal.version,
-            owner: "late",
-            coordinatorEpoch: 2,
-            now: 101,
-            ownedUntil: 200,
-          }),
-        ),
-      );
-      assert.strictEqual(
-        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
-          .length,
-        0,
-      );
-    }).pipe(Effect.provide(live)),
+      ),
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
+        .length,
+      1,
+    );
+  }).pipe(Effect.provide(live)),
 );
 
 it.effect(
@@ -5355,6 +5354,9 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
     );
     if (!owner) throw new Error("fixture");
     const newOwnership = { ...key, owner: "fresh", coordinatorEpoch: 2, version: owner.version };
+    // Discover before submission: once uncertainty exists no new candidate may start.
+    yield* fresh.recoverClaimCandidates(0);
+    const candidate = (yield* fresh.readDueClaimCandidates(1, 0, space))[0]!;
     const submitted = yield* fresh.transact(
       fresh.persistResolutionSubmissionTx({
         ownership: newOwnership,
@@ -5380,8 +5382,6 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
     assert.deepStrictEqual(held?.submission, submission);
     assert.strictEqual((yield* fresh.pendingReports(100)).length, 1);
     // Claim-stage hold also needs its generation, frozen attempt and live coordinator ownership.
-    yield* fresh.recoverClaimCandidates(0);
-    const candidate = (yield* fresh.readDueClaimCandidates(1, 0, space))[0]!;
     yield* sql`UPDATE memory_outbox SET status='running',claimed_by='2',claimed_until=100,frozen_claim_json=${JSON.stringify(M.MemoryHubClaimInput.make({ protocolVersion: 1, memorySpaceId: ticket.memorySpaceId, memoryId: ticket.memoryId, conflictId: ticket.conflictId, conflictHeadSet: ticket.conflictHeadSet, holderEnvironmentId: ticket.holderEnvironmentId, attemptId: ticket.attemptId, frozenDefaultModelSelection: ticket.frozenDefaultModelSelection }))} WHERE id=${candidate.id}`;
     const hold = {
       memorySpaceId: space,
@@ -6253,4 +6253,333 @@ it.effect("held uncertain submission rearms without loading its body", () =>
       submission,
     );
   }).pipe(Effect.provide(live)),
+);
+
+it.effect.each([
+  ["uncertain", "frontier"],
+  ["approved", "frontier"],
+  ["uncertain", "exposure"],
+  ["approved", "exposure"],
+  ["uncertain", "orphan"],
+  ["approved", "orphan"],
+] as const)("r14 recovery preserves %s submission through %s", ([state, path]) =>
+  Effect.gen(function* () {
+    const { store, sql, ticket, ownership, submission } = yield* seedSubmission;
+    // Freeze a real discovered candidate before saving the submission.
+    yield* store.recoverClaimCandidates(0);
+    const candidate = (yield* store.readDueClaimCandidates(1, 0, space))[0]!;
+    const claim: M.MemoryHubClaimInput = {
+      protocolVersion: 1,
+      memorySpaceId: space,
+      memoryId: memory,
+      holderEnvironmentId: env,
+      conflictId: ticket.conflictId,
+      conflictHeadSet: ticket.conflictHeadSet,
+      attemptId: ticket.attemptId,
+      frozenDefaultModelSelection: ticket.frozenDefaultModelSelection,
+    };
+    yield* store.transact(
+      store.prepareClaimAttemptTx({
+        memorySpaceId: space,
+        candidateId: candidate.id,
+        expectedGeneration: 0,
+        conflictHeads: ticket.conflictHeadSet,
+        proposedClaim: claim,
+      }),
+    );
+    let saved = yield* store.transact(
+      store.persistResolutionSubmissionTx({
+        ownership,
+        submission,
+        digest: memoryOperationDigest(submission.operation),
+      }),
+    );
+    if (state === "approved") {
+      const op = submission.operation;
+      if (op.kind !== "resolve") throw new Error("fixture");
+      saved = (yield* store.transact(
+        store.transitionResolutionTicketTx({
+          ownership: { ...ownership, version: saved.version },
+          now: 1,
+          nextState: "approved",
+          ownedUntil: 100,
+          nextAttemptAt: 0,
+          approval: {
+            operationId: op.operationId,
+            operationDigest: saved.submissionDigest!,
+            memoryId: memory,
+            outcome: "accepted",
+            hubSequence: 7,
+            resolutionApproval: {
+              resolutionId: op.resolution.resolutionId,
+              appliedAtUtc: op.resolution.appliedAtUtc,
+              revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+            },
+          },
+        }),
+      ))!;
+    }
+    if (path === "orphan")
+      yield* sql`DELETE FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+    else if (path === "exposure")
+      yield* sql`UPDATE memory_items SET item_json=json_set(item_json,'$.localAvailability.reasons',json('["secret_detected"]')) WHERE space=${space} AND memory_id=${memory}`;
+    else {
+      const next = operation(6);
+      if (next.kind !== "upsert") throw new Error("fixture");
+      const op = {
+        ...next,
+        expectedHeads: [M.MemoryRevisionId.make(id(13))],
+        revision: { ...next.revision, parents: [M.MemoryRevisionId.make(id(13))] },
+      };
+      yield* store.apply(
+        decideMemoryOperation(yield* store.loadAggregate(space, memory), op, Store.hubAdmission, {
+          kind: "allowed",
+        }),
+      );
+    }
+    yield* store
+      .transact(store.recoverClaimCandidates(101).pipe(Effect.andThen(Effect.fail("rollback"))))
+      .pipe(Effect.flip);
+    const workId = `resolve:${space}:${ticket.attemptId}`;
+    const before = (yield* sql<{
+      ticket_json: string;
+    }>`SELECT ticket_json FROM memory_outbox WHERE id=${workId}`)[0]!;
+    assert.deepStrictEqual(JSON.parse(before.ticket_json).submission, {
+      ...submission,
+      operation: JSON.parse(before.ticket_json).submission.operation,
+    });
+    assert.isUndefined(JSON.parse(before.ticket_json).reconcileRequired);
+    yield* store.recoverClaimCandidates(101);
+    const durable = (yield* sql<{
+      ticket_json: string;
+    }>`SELECT ticket_json FROM memory_outbox WHERE id=${workId}`)[0]!;
+    assert.isNotNull(
+      JSON.parse(durable.ticket_json).submission,
+      "recovery must retain uncertain/accepted submission metadata and body",
+    );
+    const recovered = (yield* store.readRecoverableResolutionTickets({
+      memorySpaceId: space,
+      now: 101,
+      limit: 10,
+    }))[0]!;
+    assert.deepStrictEqual(recovered.submission, submission);
+    assert.strictEqual(recovered.submissionDigest, saved.submissionDigest);
+    assert.deepStrictEqual(recovered.approval, saved.approval);
+    assert.isTrue(recovered.reconcileRequired);
+    assert.notStrictEqual(recovered.state, "terminal");
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
+        .length,
+      1,
+    );
+    assert.deepStrictEqual(yield* store.readDueClaimCandidates(10, 101, space), []);
+    // The CAS and prepare paths enforce the barrier too, even if a caller retained an old candidate.
+    yield* sql`UPDATE memory_outbox SET status='pending',next_attempt_at=0 WHERE id=${candidate.id}`;
+    assert.isFalse(yield* store.claimCandidate(candidate.id, 2, 101));
+    const generation = (yield* sql<{
+      sync_version: number;
+    }>`SELECT sync_version FROM memory_outbox WHERE id=${candidate.id}`)[0]!.sync_version;
+    assert.isNull(
+      yield* store.transact(
+        store.prepareClaimAttemptTx({
+          memorySpaceId: space,
+          candidateId: candidate.id,
+          expectedGeneration: generation,
+          conflictHeads: ticket.conflictHeadSet,
+          proposedClaim: { ...claim, attemptId: M.MemoryOperationId.make(id(70001)) },
+        }),
+      ),
+    );
+    // Repeated recovery neither regenerates a claim nor grows/fences the same result again.
+    yield* store.recoverClaimCandidates(102);
+    assert.strictEqual(
+      (yield* store.readRecoverableResolutionTickets({
+        memorySpaceId: space,
+        now: 102,
+        limit: 10,
+      }))[0]!.version,
+      recovered.version,
+    );
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim'`)
+        .length,
+      1,
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["uncertain", "rejected"] as const)(
+  "r14 changed frontier reconciles %s without guessing absence",
+  (outcome) =>
+    Effect.gen(function* () {
+      const { store, sql, key, ticket, ownership, submission } = yield* seedSubmission;
+      const saved = yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership,
+          submission,
+          digest: memoryOperationDigest(submission.operation),
+        }),
+      );
+      const next = operation(6);
+      if (next.kind !== "upsert") throw new Error("fixture");
+      const other = {
+        ...next,
+        expectedHeads: [M.MemoryRevisionId.make(id(13))],
+        revision: { ...next.revision, parents: [M.MemoryRevisionId.make(id(13))] },
+      };
+      yield* store.apply(
+        decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          other,
+          Store.hubAdmission,
+          { kind: "allowed" },
+        ),
+      );
+      yield* store.recoverClaimCandidates(101);
+      const durable = (yield* sql<{
+        ticket_json: string;
+      }>`SELECT ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`)[0]!;
+      assert.isNotNull(
+        JSON.parse(durable.ticket_json).submission,
+        "recovery must retain uncertain/accepted submission metadata and body",
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        1,
+      );
+      const recovered = (yield* store.readRecoverableResolutionTickets({
+        memorySpaceId: space,
+        now: 101,
+        limit: 10,
+      }))[0]!;
+      assert.deepStrictEqual(recovered.submission, submission);
+      const owner = (yield* store.transact(
+        store.acquireResolutionTicketTx({
+          key,
+          expectedVersion: recovered.version,
+          owner: "reconcile",
+          coordinatorEpoch: 2,
+          now: 101,
+          ownedUntil: 200,
+        }),
+      ))!;
+      const owned = { ...key, owner: "reconcile", coordinatorEpoch: 2, version: owner.version };
+      const rejection: M.MemoryHubReceipt = {
+        operationId: submission.operation.operationId,
+        memoryId: memory,
+        operationDigest: saved.submissionDigest!,
+        outcome: "rejected",
+        hubSequence: null,
+        failureCode: "fenced",
+      };
+      assert.strictEqual(
+        (yield* store.transact(
+          store.reconcileResolutionSubmissionTx({ ownership: owned, now: 101 }),
+        ))?.outcome,
+        "uncertain",
+      );
+      assert.strictEqual(
+        yield* store.transact(
+          store.reconcileResolutionSubmissionTx({
+            ownership: { ...owned, version: owned.version - 1 },
+            now: 101,
+          }),
+        ),
+        null,
+      );
+      const result = yield* store.transact(
+        store.reconcileResolutionSubmissionTx({
+          ownership: owned,
+          now: 101,
+          ...(outcome === "rejected" ? { rejection } : {}),
+        }),
+      );
+      assert.strictEqual(result?.outcome, outcome === "rejected" ? "retired" : "uncertain");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        outcome === "rejected" ? 0 : 1,
+      );
+      yield* store.recoverClaimCandidates(102);
+      assert.strictEqual(
+        (yield* store.readDueClaimCandidates(10, 102, space)).length,
+        outcome === "rejected" ? 1 : 0,
+      );
+      const plan = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT 1 FROM memory_outbox r WHERE r.space=${space} AND r.memory_id=${memory} AND r.kind='resolve' AND r.status IN ('pending','retry','running') AND json_extract(r.ticket_json,'$.submission') IS NOT NULL LIMIT 1`;
+      assert.isTrue(plan.some((r) => r.detail.includes("memory_outbox_active_resolution")));
+      assert.isFalse(
+        plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "r14 keyed canonical lookup sees checkpoint approval behind a local pending receipt",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ownership, submission } = yield* seedSubmission;
+      const op = submission.operation;
+      if (op.kind !== "resolve") throw new Error("fixture");
+      const digest = memoryOperationDigest(op);
+      const saved = yield* store.transact(
+        store.persistResolutionSubmissionTx({ ownership, submission, digest }),
+      );
+      const args = { ownership: { ...ownership, version: saved.version }, now: 1 };
+      for (const rejection of [
+        {
+          operationId: M.MemoryOperationId.make(id(79999)),
+          memoryId: memory,
+          operationDigest: digest,
+          outcome: "rejected" as const,
+          hubSequence: null,
+          failureCode: "fenced" as const,
+        },
+        {
+          operationId: op.operationId,
+          memoryId: memory,
+          operationDigest: "b".repeat(64),
+          outcome: "rejected" as const,
+          hubSequence: null,
+          failureCode: "fenced" as const,
+        },
+      ])
+        assert.strictEqual(
+          (yield* store
+            .transact(store.reconcileResolutionSubmissionTx({ ...args, rejection }))
+            .pipe(Effect.flip))._tag,
+          "MemoryStoreConflict",
+        );
+      const receipt: M.MemoryHubReceipt = {
+        operationId: op.operationId,
+        memoryId: memory,
+        operationDigest: digest,
+        outcome: "accepted",
+        hubSequence: 7,
+        resolutionApproval: {
+          resolutionId: op.resolution.resolutionId,
+          appliedAtUtc: op.resolution.appliedAtUtc,
+          revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+        },
+      };
+      // Snapshot representations may coexist with a local pending event. Three PK probes,
+      // rather than the first local receipt, decide admission without reading the operation body.
+      const local: M.MemoryMutationReceipt = {
+        operationId: op.operationId,
+        memoryId: memory,
+        outcome: "accepted",
+        revisionId: op.revision.revisionId,
+        pendingSync: true,
+      };
+      yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES(1,${space},${memory},${op.operationId},'resolve',${env},${digest},'{}',${JSON.stringify(local)},0)`;
+      yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES(${space},'hubReceipt',${op.operationId},${memory},${JSON.stringify({ receipt })})`;
+      const result = yield* store.transact(store.reconcileResolutionSubmissionTx(args));
+      assert.strictEqual(result?.outcome, "admitted");
+      if (result?.outcome !== "admitted") throw new Error("fixture");
+      assert.deepStrictEqual(result.receipt, receipt);
+      assert.deepStrictEqual(result.row.submission, submission);
+      assert.strictEqual(result.row.state, "approved");
+    }).pipe(Effect.provide(live)),
 );

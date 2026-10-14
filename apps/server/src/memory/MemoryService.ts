@@ -122,6 +122,14 @@ export class MemoryService extends Context.Service<
       page: M.MemoryHubPullResult;
       reauthorize: Permit;
     }) => Effect.Effect<readonly Store.Settlement[], MemoryServiceError>;
+    readonly reconcileResolutionSubmission: (input: {
+      ownership: Store.TicketOwner;
+      now: number;
+      hubEnvironmentId: M.EnvironmentId;
+      localEnvironmentId: M.EnvironmentId;
+      rejection?: M.MemoryHubReceipt;
+      reauthorize: Permit;
+    }) => Effect.Effect<Store.SubmissionReconciliation | null, MemoryServiceError>;
     readonly settleHubAcknowledgement: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -1552,6 +1560,38 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const reconcileResolutionSubmission: MemoryService["Service"]["reconcileResolutionSubmission"] =
+    Effect.fn("MemoryService.reconcileResolutionSubmission")(function* (input) {
+      return yield* store.transact(
+        Effect.gen(function* () {
+          yield* input.reauthorize;
+          const result = yield* store.reconcileResolutionSubmissionTx(input);
+          if (!result || result.outcome !== "admitted") return result;
+          const operation = result.row.submission!.operation;
+          yield* settleHubEntryTx({
+            memorySpaceId: input.ownership.memorySpaceId,
+            hubEnvironmentId: input.hubEnvironmentId,
+            localEnvironmentId: input.localEnvironmentId,
+            entry: {
+              kind: "operation",
+              operation,
+              receipt: result.receipt,
+              hubSequence: result.receipt.hubSequence!,
+            },
+          });
+          yield* input.reauthorize;
+          const row = yield* store.transitionResolutionTicketTx({
+            ownership: { ...input.ownership, version: result.row.version },
+            now: input.now,
+            nextState: "terminal",
+            ownedUntil: null,
+            nextAttemptAt: input.now,
+          });
+          if (!row) return yield* new Store.MemoryStoreConflict({ code: "fenced" });
+          return { ...result, row };
+        }),
+      );
+    });
   const settleHubAcknowledgement: MemoryService["Service"]["settleHubAcknowledgement"] = Effect.fn(
     "MemoryService.settleHubAcknowledgement",
   )(function* (input) {
@@ -1666,6 +1706,7 @@ const make = Effect.gen(function* () {
     admitHubOperationTx,
     settleHubEntryTx,
     receiveHubPage,
+    reconcileResolutionSubmission,
     settleHubAcknowledgement,
     getProjectBinding,
     updateProjectBinding,
