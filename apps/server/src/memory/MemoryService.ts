@@ -68,6 +68,17 @@ export class MemoryService extends Context.Service<
       input: { request: ValidatedSourceRequest; outcome: M.MemorySourceReadOutcome },
       permit: Permit,
     ) => Effect.Effect<M.MemorySourceReadOutcome, MemoryServiceError>;
+    readonly admitHubOperation: (input: {
+      authority: Store.HubAuthority;
+      operation: M.MemoryOperation;
+      resolutionRequest?: M.MemoryHubApplyResolutionInput;
+    }) => Effect.Effect<
+      M.MemoryHubReceipt,
+      | MemoryServiceError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
+    >;
     readonly admitHubOperationTx: (input: {
       authority: Store.HubAuthority;
       operation: M.MemoryOperation;
@@ -1215,64 +1226,88 @@ const make = Effect.gen(function* () {
       return replay.entry.receipt;
     }
     const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
-    if (op.kind !== "forget" && current.pendingForget)
-      return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
-    let approval: M.MemoryResolutionApproval | undefined;
-    if (op.kind === "resolve") {
-      if (!input.resolutionRequest) return yield* new M.MemoryHubError({ code: "lease_required" });
-      const request = yield* decode(decodeResolutionRequest(input.resolutionRequest, strict));
-      const lease = current.fence?.activeLease;
-      if (
-        request.memorySpaceId !== op.memorySpaceId ||
-        request.holderEnvironmentId !== member.environmentId ||
-        M.encodeMemoryOperation(request.operation) !== M.encodeMemoryOperation(op)
-      )
+    // Only the read-only semantic decision is caught; every subsequent write can fail the outer transaction.
+    const prepared = yield* Effect.gen(function* () {
+      if (op.kind !== "forget" && current.pendingForget)
+        return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+      let approval: M.MemoryResolutionApproval | undefined;
+      if (op.kind === "resolve") {
+        if (!input.resolutionRequest)
+          return yield* new M.MemoryHubError({ code: "lease_required" });
+        const request = yield* decode(decodeResolutionRequest(input.resolutionRequest, strict));
+        const lease = current.fence?.activeLease;
+        if (
+          request.memorySpaceId !== op.memorySpaceId ||
+          request.holderEnvironmentId !== member.environmentId ||
+          M.encodeMemoryOperation(request.operation) !== M.encodeMemoryOperation(op)
+        )
+          return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+        if (!lease) return yield* new M.MemoryHubError({ code: "lease_required" });
+        if (
+          lease.attemptId !== request.attemptId ||
+          lease.holderEnvironmentId !== member.environmentId ||
+          lease.fencingToken !== op.fencingToken ||
+          current.fence?.highestFencingToken !== op.fencingToken
+        )
+          return yield* new M.MemoryHubError({ code: "fenced" });
+        if (
+          Date.parse(lease.expiresAtHubTime) <= now ||
+          Date.parse(lease.attemptDeadlineHubTime) <= now
+        )
+          return yield* new M.MemoryHubError({ code: "lease_expired" });
+        if (
+          encodeSelection(lease.frozenDefaultModelSelection) !==
+            encodeSelection(op.resolution.requestedModelSelection) ||
+          op.resolution.resolvingEnvironmentId !== member.environmentId
+        )
+          return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+        const iso = (value: number) =>
+          M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(value)));
+        approval = {
+          resolutionId: op.resolution.resolutionId,
+          appliedAtUtc: iso(now),
+          revertDeadlineUtc: iso(now + M.MEMORY_REVERT_WINDOW_MS),
+        };
+      } else if (input.resolutionRequest)
         return yield* new M.MemoryHubError({ code: "identity_mismatch" });
-      if (!lease) return yield* new M.MemoryHubError({ code: "lease_required" });
-      if (
-        lease.attemptId !== request.attemptId ||
-        lease.holderEnvironmentId !== member.environmentId ||
-        lease.fencingToken !== op.fencingToken ||
-        current.fence?.highestFencingToken !== op.fencingToken
-      )
-        return yield* new M.MemoryHubError({ code: "fenced" });
-      if (
-        Date.parse(lease.expiresAtHubTime) <= now ||
-        Date.parse(lease.attemptDeadlineHubTime) <= now
-      )
-        return yield* new M.MemoryHubError({ code: "lease_expired" });
-      if (
-        encodeSelection(lease.frozenDefaultModelSelection) !==
-          encodeSelection(op.resolution.requestedModelSelection) ||
-        op.resolution.resolvingEnvironmentId !== member.environmentId
-      )
-        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
-      const iso = (value: number) =>
-        M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(value)));
-      approval = {
-        resolutionId: op.resolution.resolutionId,
-        appliedAtUtc: iso(now),
-        revertDeadlineUtc: iso(now + M.MEMORY_REVERT_WINDOW_MS),
-      };
-    } else if (input.resolutionRequest)
-      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
-    const ancestry =
-      op.kind === "forget"
-        ? undefined
-        : yield* store.readAncestry(op.memorySpaceId, op.memoryId, op.revision.parents);
-    const decision = yield* Effect.try({
-      try: () =>
-        decideMemoryOperation(
-          current,
-          op,
-          Store.hubAdmission,
-          scanMemoryValue(op),
-          undefined,
-          ancestry,
-          now,
-        ),
-      catch: (cause) => (isConflict(cause) ? cause : invalid()),
-    });
+      const ancestry =
+        op.kind === "forget"
+          ? undefined
+          : yield* store.readAncestry(op.memorySpaceId, op.memoryId, op.revision.parents);
+      const decision = yield* Effect.try({
+        try: () =>
+          decideMemoryOperation(
+            current,
+            op,
+            Store.hubAdmission,
+            scanMemoryValue(op),
+            undefined,
+            ancestry,
+            now,
+          ),
+        catch: (cause) => (isConflict(cause) ? cause : invalid()),
+      });
+      return { kind: "decision" as const, decision, approval };
+    }).pipe(
+      Effect.catchTags({
+        MemoryHubError: (error) =>
+          Effect.succeed({ kind: "refusal" as const, failureCode: error.code }),
+        MemoryStoreConflict: (error) =>
+          Effect.succeed({ kind: "refusal" as const, failureCode: error.code }),
+      }),
+    );
+    if (prepared.kind === "refusal") {
+      if (prepared.failureCode === "capacity_exceeded")
+        return yield* new Store.MemoryStoreConflict({ code: "capacity_exceeded" });
+      return (yield* store.appendHubEntryTx({
+        operation: op,
+        operationDigest: digest,
+        outcome: "rejected",
+        failureCode: prepared.failureCode,
+        now,
+      })).entry.receipt;
+    }
+    const { decision, approval } = prepared;
     return yield* quota.withAdmission(
       { operation: op, admission: Store.hubAdmission, environmentId, receipt: decision.receipt },
       Effect.gen(function* () {
@@ -1312,6 +1347,55 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  // Transport entry: owns the rollback boundary. Tx callers must propagate capacity failures.
+  const admitHubOperation: MemoryService["Service"]["admitHubOperation"] = (input) =>
+    store.transact(admitHubOperationTx(input), { requireOuter: true }).pipe(
+      Effect.catchTags({
+        MemoryCapacityError: (error) =>
+          store.transact(
+            Effect.gen(function* () {
+              // The failed append/apply has rolled back before this separate authorization/replay read.
+              yield* input.authority.reauthorize;
+              const member = yield* store.requireHubMemberTx(input.authority.principal);
+              if (
+                input.operation.memorySpaceId !== member.memorySpaceId ||
+                input.operation.originEnvironmentId !== member.environmentId
+              )
+                return yield* new M.MemoryHubForbiddenError({});
+              const digest = memoryOperationDigest(input.operation);
+              const replay = yield* store.readHubReceiptTx(
+                input.operation.memorySpaceId,
+                input.operation.operationId,
+              );
+              if (replay) {
+                if (replay.entry.receipt.operationDigest !== digest)
+                  return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+                return replay.entry.receipt;
+              }
+              return yield* decode(
+                decodeHubReceipt(
+                  {
+                    operationId: input.operation.operationId,
+                    memoryId: input.operation.memoryId,
+                    operationDigest: digest,
+                    outcome: "rejected" as const,
+                    hubSequence: null,
+                    failureCode: "capacity_exceeded" as const,
+                    capacity: {
+                      code: "capacity_exceeded" as const,
+                      dimension: error.dimension,
+                      current: error.current ?? error.limit,
+                      limit: error.limit,
+                      reclaimable: 0,
+                    },
+                  },
+                  strict,
+                ),
+              );
+            }),
+          ),
+      }),
+    );
   const settleHubEntryTx: MemoryService["Service"]["settleHubEntryTx"] = Effect.fn(
     "MemoryService.settleHubEntryTx",
   )(function* (input) {
@@ -1374,10 +1458,7 @@ const make = Effect.gen(function* () {
         return yield* new Store.MemoryStoreConflict({ code: "invalid_cursor" });
       previous = entry.hubSequence;
     }
-    if (
-      (previous !== page.throughSequence) ||
-      page.throughSequence < input.expectedSequence
-    )
+    if (previous !== page.throughSequence || page.throughSequence < input.expectedSequence)
       return yield* new Store.MemoryStoreConflict({ code: "invalid_cursor" });
     return yield* store.transact(
       Effect.gen(function* () {
@@ -1465,6 +1546,7 @@ const make = Effect.gen(function* () {
   return MemoryService.of({
     prepareSourceRead,
     validateSourceOutcome,
+    admitHubOperation,
     admitHubOperationTx,
     settleHubEntryTx,
     receiveHubPage,

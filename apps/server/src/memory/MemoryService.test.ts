@@ -726,6 +726,108 @@ it.effect("rejects an empty pull that skips canonical sequences and leaves the c
   }).pipe(Effect.provide(live)),
 );
 
+it.effect(
+  "records semantic refusals once but rolls back unallocatable and post-append failures",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      const op: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "revert",
+        memorySpaceId: space,
+        memoryId,
+        operationId: M.MemoryOperationId.make(id(900)),
+        originEnvironmentId: environmentId,
+        expectedHeads: [M.MemoryRevisionId.make(id(901))],
+        revertsResolutionId: M.MemoryResolutionId.make(id(905)),
+        restoredRevisionId: M.MemoryRevisionId.make(id(906)),
+        revision: {
+          memorySpaceId: space,
+          memoryId,
+          revisionId: M.MemoryRevisionId.make(id(902)),
+          operationId: M.MemoryOperationId.make(id(900)),
+          parents: [M.MemoryRevisionId.make(id(901))],
+          scope: { kind: "user" },
+          payloadRef: M.MemoryRevisionId.make(id(902)),
+          assertionKind: "inference",
+          provenance: { environmentId },
+          createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+        },
+        payload: { text: "synthetic refused body", evidence: [], derivedFromMemoryRevisions: [] },
+      };
+      const refusal = yield* service.admitHubOperation({ authority, operation: op });
+      assert.strictEqual(refusal.outcome, "rejected");
+      assert.isNotNull(refusal.hubSequence);
+      assert.deepStrictEqual(
+        yield* service.admitHubOperation({ authority, operation: op }),
+        refusal,
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 1);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_identity_ledger`).length, 0);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_payloads`).length, 0);
+      const before = yield* sql`SELECT * FROM memory_quota_counters`;
+      // Permit row allocation, then fail the actual encoded-entry byte gate after append's placeholder INSERT.
+      yield* sql`UPDATE memory_hub_operations SET entry_json=CAST(zeroblob(${M.MEMORY_LOG_MAX_TAIL_BYTES - 1}) AS TEXT)`;
+      const second = {
+        ...op,
+        operationId: M.MemoryOperationId.make(id(903)),
+        revision: { ...op.revision, operationId: M.MemoryOperationId.make(id(903)) },
+      };
+      assert.strictEqual(
+        (yield* store
+          .transact(service.admitHubOperation({ authority, operation: second }))
+          .pipe(Effect.flip))._tag,
+        "MemoryStorageError",
+      );
+      const capacity = yield* service.admitHubOperation({ authority, operation: second });
+      assert.strictEqual(capacity.failureCode, "capacity_exceeded");
+      assert.isNull(capacity.hubSequence);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 1);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_compact_receipts`).length, 1);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM memory_quota_counters`, before);
+      yield* sql`UPDATE memory_hub_operations SET entry_json='{}'`;
+      yield* sql`CREATE TRIGGER fixture_apply_failure BEFORE INSERT ON memory_events BEGIN SELECT RAISE(ABORT,'synthetic apply failure'); END`;
+      const {
+        revertsResolutionId: _resolution,
+        restoredRevisionId: _restored,
+        ...rootMetadata
+      } = second;
+      const root = {
+        ...rootMetadata,
+        kind: "upsert" as const,
+        operationId: M.MemoryOperationId.make(id(904)),
+        expectedHeads: [],
+        revision: {
+          ...second.revision,
+          operationId: M.MemoryOperationId.make(id(904)),
+          parents: [],
+        },
+      };
+      assert.strictEqual(
+        (yield* service.admitHubOperation({ authority, operation: root }).pipe(Effect.flip))._tag,
+        "MemoryStorageError",
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 1);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_compact_receipts`).length, 1);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_payloads`).length, 0);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_identity_ledger`).length, 0);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM memory_quota_counters`, before);
+    }).pipe(Effect.provide(live)),
+);
+
 it.effect.each(["accepted", "rejected"] as const)(
   "settles lost revert ACK by %s pull without resending or retaining a refused body",
   (outcome) =>
