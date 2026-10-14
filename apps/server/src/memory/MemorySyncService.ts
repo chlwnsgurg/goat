@@ -905,7 +905,23 @@ const make = Effect.gen(function* () {
             }
             if (!frozen) return;
             prepared.value = frozen;
-            if (!(yield* store.claimCandidate(work.id, r.settings.memoryHubVersion, now))) return;
+            const claimed = yield* store.transact(
+              Effect.gen(function* () {
+                yield* ensureEpoch(r.settings.memoryHubVersion);
+                // A held ticket may be on the next rearm page. Its frozen attempt
+                // resumes through ticket recovery without acquiring the candidate again.
+                const existing = yield* store.readWork(
+                  `resolve:${r.space}:${frozen.claim.attemptId}`,
+                );
+                if (
+                  existing?.metadata.kind === "resolve" &&
+                  !["completed", "cancelled", "failed"].includes(existing.status)
+                )
+                  return false;
+                return yield* store.claimCandidate(work.id, r.settings.memoryHubVersion, now);
+              }),
+            );
+            if (!claimed) return;
             claimOwned = true;
             reservations++;
             reserved = true;

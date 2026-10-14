@@ -4283,17 +4283,19 @@ it.effect.each([
 );
 
 it.effect.each([
-  ["authorization", true, false],
-  ["authorization", false, false],
-  ["identity", true, false],
-  ["identity", false, false],
-  ["authorization", true, true],
-  ["authorization", false, true],
-  ["identity", true, true],
-  ["identity", false, true],
+  ["authorization", true, false, false],
+  ["authorization", false, false, false],
+  ["identity", true, false, false],
+  ["identity", false, false, false],
+  ["authorization", true, true, false],
+  ["authorization", false, true, false],
+  ["identity", true, true, false],
+  ["identity", false, true, false],
+  ["authorization", true, false, true],
+  ["identity", true, false, true],
 ] as const)(
-  "permanent ticket refusal pairs %s holds (released=%s, parallel=%s) across restart and matching rearm",
-  ([holdClass, released, parallel]) =>
+  "permanent ticket refusal pairs %s holds (released=%s, parallel=%s) across restart and matching rearm (splitPage=%s)",
+  ([holdClass, released, parallel, splitPage]) =>
     Effect.gen(function* () {
       const events = yield* PubSub.bounded<{
         memorySpaceId: M.MemorySpaceId;
@@ -4307,10 +4309,18 @@ it.effect.each([
       let claims = 0;
       let generations = 0;
       let refused = false;
+      let premature = false;
+      let sqlObserver: SqlClient.SqlClient | undefined;
       const client = peer({
         claim: (_c, { protocolVersion: _protocol, ...claim }) =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
             claims++;
+            if (claims > 1 && sqlObserver) {
+              const rows = yield* sqlObserver<{
+                hold_class: string | null;
+              }>`SELECT hold_class FROM memory_outbox WHERE kind='resolve'`.pipe(Effect.orDie);
+              premature ||= rows.some((row) => row.hold_class !== null);
+            }
             lease = {
               ...claim,
               fencingToken: 1,
@@ -4348,6 +4358,7 @@ it.effect.each([
           yield* conflict();
           const store = yield* Store.MemoryStore;
           const sql = yield* SqlClient.SqlClient;
+          sqlObserver = sql;
           const first = yield* Sync.MemorySyncService;
           yield* first.syncOnce;
           if (parallel) {
@@ -4364,7 +4375,7 @@ it.effect.each([
             frozen_claim_json: string | null;
             ticket_json: string | null;
             attempt: number;
-          }>`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`;
+          }>`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') AND status!='completed' ORDER BY id`;
           assert.strictEqual(pair.length, 2);
           for (const row of pair) {
             assert.strictEqual(row.hold_class, holdClass);
@@ -4381,7 +4392,7 @@ it.effect.each([
               yield* TestClock.adjust("30 seconds");
               yield* restarted.syncOnce;
               assert.deepStrictEqual(
-                yield* sql`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`,
+                yield* sql`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') AND status!='completed' ORDER BY id`,
                 pair,
               );
               yield* PubSub.publish(events, {
@@ -4393,14 +4404,29 @@ it.effect.each([
               });
               yield* restarted.syncOnce;
               assert.deepStrictEqual(
-                yield* sql`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`,
+                yield* sql`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') AND status!='completed' ORDER BY id`,
                 pair,
               );
               assert.strictEqual(claims, 1);
+              if (splitPage) {
+                // Completed history consumes the visited-page budget, not eligible work.
+                const ticketId = `resolve:${space}:${attemptId}`;
+                for (let n = 0; n < 100; n++) {
+                  const middleId = `middle:${n.toString().padStart(3, "0")}`;
+                  assert.isTrue(frozen.id < middleId && middleId < ticketId);
+                  yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) SELECT ${middleId},space,memory_id,kind,'completed',metadata_json,0 FROM memory_outbox WHERE id=${frozen.id}`;
+                }
+                const firstPage = yield* sql<{
+                  id: string;
+                }>`SELECT id FROM memory_outbox ORDER BY id LIMIT 100`;
+                assert.isTrue(firstPage.some((row) => row.id === frozen.id));
+                assert.isFalse(firstPage.some((row) => row.id === ticketId));
+              }
               yield* PubSub.publish(events, { memorySpaceId: space, holdClass });
               const input = yield* Deferred.await(resumed);
               yield* restarted.syncOnce;
               assert.deepStrictEqual(input.modelSelection, selection);
+              assert.isFalse(premature, "Hub claim occurred while matching ticket remained held");
               assert.strictEqual(claims, 1);
               assert.strictEqual(generations, parallel ? 2 : 1);
               const resumedCandidate = yield* store.findClaimCandidate({
