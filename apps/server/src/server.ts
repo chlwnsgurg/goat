@@ -11,6 +11,7 @@ import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemorySync from "./memory/MemorySyncService.ts";
+import * as MemoryOwnerSourceReadPolicyBinding from "./memory/MemoryOwnerSourceReadPolicyBinding.ts";
 import * as MemorySyncRuntimeLive from "./memory/MemorySyncRuntimeLive.ts";
 import * as MemoryWorker from "./memory/MemoryWorker.ts";
 import * as MemoryHub from "./memory/MemoryHubService.ts";
@@ -495,14 +496,14 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 // Sync needs the core service at construction; source reads need Sync only at invocation.
 // The application owns this single binding so neither service constructs a second core.
-class MemorySourceReadBinding extends Context.Service<
+export class MemorySourceReadBinding extends Context.Service<
   MemorySourceReadBinding,
   {
     readonly readSource: MemoryService.MemorySourceReadAuthority["readSource"];
     readonly bind: (sync: MemorySync.MemorySyncService["Service"]) => Effect.Effect<void>;
   }
 >()("goat/server/MemorySourceReadBinding") {}
-const layerMemorySourceReadBinding = Layer.effect(
+export const layerMemorySourceReadBinding = Layer.effect(
   MemorySourceReadBinding,
   Effect.gen(function* () {
     const current = yield* Ref.make<MemorySync.MemorySyncService["Service"] | null>(null);
@@ -520,13 +521,13 @@ const layerMemorySourceReadBinding = Layer.effect(
   }),
 );
 const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
-const layerMemoryService = Layer.unwrap(
+export const layerMemorySourceReadService = Layer.unwrap(
   Effect.gen(function* () {
     const binding = yield* MemorySourceReadBinding;
     return MemoryService.layerWithSourceReadAuthority(binding.readSource);
   }),
-).pipe(
-  Layer.provide(layerMemorySourceReadBinding),
+).pipe(Layer.provide(layerMemorySourceReadBinding));
+const layerMemoryService = layerMemorySourceReadService.pipe(
   Layer.provideMerge(layerMemoryQuota),
   Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provide(layerRepositoryIdentityResolver),
@@ -674,7 +675,9 @@ export const layerMemorySyncStarted = Layer.effectDiscard(
 
 const layerMemorySync = layerMemorySyncStarted.pipe(
   Layer.provide(layerMemorySourceReadBinding),
-  Layer.provideMerge(MemorySyncRuntimeLive.layer),
+  Layer.provideMerge(
+    MemorySyncRuntimeLive.layer.pipe(Layer.provide(MemoryOwnerSourceReadPolicyBinding.layer)),
+  ),
   Layer.provide(layerMemoryHub),
   Layer.provide(layerTextGeneration),
   Layer.provide(ServerEnvironment.layerIdentity),
