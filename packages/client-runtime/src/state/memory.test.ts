@@ -670,7 +670,7 @@ describe("shared memory client", () => {
     ),
   );
 
-  it("bounds ledger metadata without evicting tombstones and removes only absent environments", () => {
+  it("bounds ledger metadata without evicting tombstones until owner disposal", () => {
     const ledger = createMemoryTombstoneLedger(2, 1);
     const selected = ledger.space(env, space);
     ledger.forget(selected, id);
@@ -683,11 +683,13 @@ describe("shared memory client", () => {
     expect(
       ledger.space(env, MemorySpaceId.make("00000000-0000-4000-8000-000000000010")).blocked,
     ).toBe(true);
-    ledger.retainEnvironments(new Map([[env, {}]]));
     expect(ledger.space(env, space)).toBe(selected);
-    expect(ledger.space(other, space)).not.toBe(foreign);
+    expect(ledger.space(other, space)).toBe(foreign);
     ledger.dispose();
+    expect(ledger.space(env, space)).not.toBe(selected);
+    expect(ledger.space(env, space).forgotten.size).toBe(0);
     expect(ledger.space(env, space).blocked).toBe(true);
+    expect(ledger.space(other, space)).not.toBe(foreign);
   });
 
   it.effect("factory disposal closes mounted exposure, body and derived draft", () =>
@@ -958,7 +960,7 @@ describe("shared memory client", () => {
       }),
     ),
   );
-  it.effect("unready empty catalog preserves an existing ledger until registration is known", () =>
+  it.effect("unready and ready empty catalogs preserve an existing ledger", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const h = yield* harness();
@@ -981,9 +983,99 @@ describe("shared memory client", () => {
         expect(h.registry.get(body)).toBe(false);
         h.registry.set(catalog, { isReady: true, entries: new Map() });
         yield* waitFor(h.registry, exposure, (state) => !state.ready);
-        expect(h.ledger.space(env, space)).not.toBe(retained);
+        expect(h.ledger.space(env, space)).toBe(retained);
+        expect(retained.forgotten.has(id)).toBe(true);
       }),
     ),
+  );
+
+  it.effect.each(["pending", "visible"] as const)(
+    "ready catalog absence closes %s body/draft but preserves forget through recovery",
+    (phase) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* harness();
+          const exposure = h.memory.exposureAtom(target);
+          h.registry.mount(exposure);
+          yield* Queue.offer(h.queue, signal("reset"));
+          yield* waitFor(h.registry, exposure, (state) => state.ready);
+          yield* Queue.offer(h.queue, signal("forget"));
+          yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+          const retained = h.ledger.space(env, space);
+          const foreign = h.ledger.space(other, space);
+          h.ledger.forget(foreign, unrelated);
+          const body = hasBody(
+            h.memory.read({
+              ...readTarget,
+              input: { ...readTarget.input, memoryId: unrelated },
+            }),
+          );
+          h.registry.mount(body);
+          const first = yield* Queue.take(h.reads);
+          const edit = h.memory.draftAtom({ ...target, draftId: "catalog-absence" });
+          h.registry.mount(edit);
+          h.registry.set(edit, { text: "Derived before absence", memoryIds: [unrelated] });
+          if (phase === "visible") {
+            yield* Deferred.succeed(first.reply, { ...item, memoryId: unrelated });
+            yield* waitFor(h.registry, body, Boolean);
+          }
+          const entries = yield* SubscriptionRef.get(h.entries);
+          // Model a ready platform reconciliation that drops only the expired backend.
+          yield* SubscriptionRef.set(h.entries, new Map([[other, entries.get(other)!]]));
+          yield* waitFor(h.registry, exposure, (state) => !state.ready);
+          expect(h.registry.get(body)).toBe(false);
+          expect(h.registry.get(edit)).toBeNull();
+          expect(h.ledger.space(env, space)).toBe(retained);
+          expect(retained.forgotten.has(id)).toBe(true);
+          yield* Deferred.await(first.finalized);
+          yield* Deferred.succeed(first.reply, { ...item, memoryId: unrelated });
+          expect(h.registry.get(body)).toBe(false);
+          // Removing a different registration must not clean the retained E ledger either.
+          yield* SubscriptionRef.set(h.entries, new Map());
+          expect(h.registry.get(exposure).ready).toBe(false);
+          expect(h.ledger.space(env, space)).toBe(retained);
+          expect(h.ledger.space(other, space)).toBe(foreign);
+          yield* SubscriptionRef.set(h.entries, entries);
+          yield* Queue.offer(h.queue, signal("reset"));
+          yield* waitFor(h.registry, exposure, (state) => state.ready);
+          const before = h.registry.get(exposure);
+          yield* Queue.offer(h.queue, signal("upsert"));
+          yield* waitFor(h.registry, exposure, (state) => state !== before);
+          expect(h.registry.get(exposure).forgotten.has(id)).toBe(true);
+          expect(
+            memoryExposureMatches(h.registry.get(exposure), h.registry.get(exposure), [id]),
+          ).toBe(false);
+          const restoredRead = yield* Queue.take(h.reads);
+          const forgottenBody = hasBody(h.memory.read(readTarget));
+          h.registry.mount(forgottenBody);
+          const list = hasBody(
+            h.memory.list({
+              ...target,
+              input: { ...target.input, limit: 10, includeQuarantined: false },
+            }),
+          );
+          h.registry.mount(list);
+          yield* Deferred.succeed(restoredRead.reply, { ...item, memoryId: unrelated });
+          yield* waitFor(h.registry, body, Boolean);
+          yield* waitFor(
+            h.registry,
+            h.memory.list({
+              ...target,
+              input: { ...target.input, limit: 10, includeQuarantined: false },
+            }),
+            (result) => result._tag === "Success",
+          );
+          expect(h.registry.get(forgottenBody)).toBe(false);
+          expect(h.registry.get(list)).toBe(false);
+          expect(h.readCount()).toBe(2);
+          expect(h.registry.get(edit)).toBeNull();
+          h.memory.dispose(h.registry);
+          expect(h.registry.get(body)).toBe(false);
+          expect(h.ledger.space(env, space)).not.toBe(retained);
+          expect(h.ledger.space(env, space).forgotten.size).toBe(0);
+          expect(h.ledger.space(env, space).blocked).toBe(true);
+        }),
+      ),
   );
 
   it.effect.each(["pending", "visible"] as const)(

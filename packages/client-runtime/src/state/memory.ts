@@ -107,7 +107,7 @@ interface MemoryTarget {
 const BODY_TTL = "1 minute";
 
 /** Body-free ledger owned by the factory, independent of weak atom-family lifetimes.
- * Removal forgets an environment's metadata. Disposal is permanent. Capacity never
+ * Catalog absence can be transient; only owner disposal releases metadata. Capacity never
  * evicts a tombstone: overflow stays closed, even on reset (reset carries no tombstones).
  * A new runtime must acquire a fresh reset before it can expose bodies again.
  */
@@ -133,11 +133,6 @@ export function createMemoryTombstoneLedger(maxSpaces = 256, maxIdsPerSpace = 10
       if (ledger.forgotten.has(id)) return;
       if (ledger.forgotten.size >= maxIdsPerSpace) ledger.blocked = true;
       else ledger.forgotten.add(id);
-    },
-    retainEnvironments(entries: ReadonlyMap<EnvironmentId, unknown>) {
-      for (const [key, ledger] of spaces) {
-        if (!entries.has(ledger.environmentId)) spaces.delete(key);
-      }
     },
     dispose() {
       disposed = true;
@@ -167,10 +162,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
         const allowed = get(readPermissions.permissionAtom(environmentId));
         const prepared = get(sessions.preparedConnectionValueAtom(environmentId));
         const config = get(sessions.initialConfigValueAtom(environmentId));
-        const catalog = get(catalogValueAtom);
-        const entries = catalog.entries;
-        // The initial empty catalog is not evidence of environment removal.
-        if (catalog.isReady) ledger.retainEnvironments(entries);
+        const entries = get(catalogValueAtom).entries;
         if (get(disposedAtom) || !entries.get(environmentId)?.enabled) {
           return Stream.succeed(emptyMemoryExposure());
         }
