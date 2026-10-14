@@ -518,8 +518,32 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly projectionReads?: { getThread: number; getThreadShell: number };
   readonly fileSystem?: FileSystem.FileSystem;
 }) {
+  const reads = input.projectionReads;
+  const layerConfiguredStores = reads
+    ? Layer.merge(
+        layerTestStores,
+        Layer.effect(
+          ProjectionStore.ProjectionStoreV2,
+          Effect.gen(function* () {
+            const delegate = yield* ProjectionStore.ProjectionStoreV2;
+            return ProjectionStore.ProjectionStoreV2.of({
+              ...delegate,
+              getThread: (threadId) =>
+                Effect.sync(() => reads.getThread++).pipe(
+                  Effect.andThen(delegate.getThread(threadId)),
+                ),
+              getThreadShell: (threadId) =>
+                Effect.sync(() => reads.getThreadShell++).pipe(
+                  Effect.andThen(delegate.getThreadShell(threadId)),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(layerTestStores)),
+      )
+    : layerTestStores;
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
@@ -562,14 +586,14 @@ function layerTest(input: {
       Layer.mergeAll(
         layerConfiguredEventSink,
         IdAllocator.layer,
-        layerTestStores,
+        layerConfiguredStores,
         ThreadCommandExecutor.layer,
       ),
     ),
   );
   return Layer.mergeAll(
     AdapterInfrastructure.layerMemoryAdmission,
-    layerTestStores,
+    layerConfiguredStores,
     layerConfiguredEventSink,
     IdAllocator.layer,
     layerConfiguredMcpRegistry,
@@ -586,7 +610,7 @@ function layerTest(input: {
           IdAllocator.layer,
           layerProviderEventIngestorTest,
           layerConfiguredMcpRegistry,
-          layerTestStores,
+          layerConfiguredStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
         ),
@@ -5590,9 +5614,12 @@ it.effect.each(turnStartMemoryCases)(
   (testCase: TurnStartMemoryCase) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
-      const settingsLayer = ServerSettings.layerTest();
+      const settingsLayer = ServerSettings.layerTest({ enableAgentMemoryAccess: true });
       const delivered = yield* Deferred.make<void>();
       let selections = 0;
+      const projectionReads = { getThread: 0, getThreadShell: 0 };
+      const refreshReads: Array<{ getThread: number; getThreadShell: number; selections: number }> =
+        [];
       const frame = MemoryContext.packMemoryContext({
         memorySpaceId: MemoryContracts.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
         projectionWatermark: 1,
@@ -5612,13 +5639,23 @@ it.effect.each(turnStartMemoryCases)(
       const onTurnInput = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
         Effect.gen(function* () {
           assert.isDefined(turnInput.refreshMemoryContext);
-          const snapshot = yield* turnInput.refreshMemoryContext!();
-          if (testCase.expected === "none") assert.isUndefined(snapshot);
-          else
-            assert.equal(
-              MemoryContext.memoryContextText(snapshot),
-              MemoryContext.memoryContextText(frame),
-            );
+          // Admission is complete at the provider send boundary. Count only refresh work,
+          // including a second send with the same callback (native retry).
+          for (let send = 0; send < 2; send++) {
+            projectionReads.getThread = 0;
+            projectionReads.getThreadShell = 0;
+            const beforeSelections = selections;
+            const snapshot = yield* turnInput.refreshMemoryContext!();
+            if (testCase.expected === "none") {
+              assert.isUndefined(snapshot);
+            } else {
+              assert.equal(
+                MemoryContext.memoryContextText(snapshot),
+                MemoryContext.memoryContextText(frame),
+              );
+            }
+            refreshReads.push({ ...projectionReads, selections: selections - beforeSelections });
+          }
           yield* Deferred.succeed(delivered, undefined);
         });
       yield* Effect.gen(function* () {
@@ -6053,7 +6090,15 @@ it.effect.each(turnStartMemoryCases)(
             "actual send must reach fixture before start returns",
           );
           yield* Deferred.await(delivered);
-          assert.equal(selections, testCase.expected === "none" ? 0 : 1);
+          // Check counters outside the provider: a regression must report the actual reads,
+          // rather than being translated into a failed send by the manager.
+          const expectedReads =
+            testCase.expected === "none"
+              ? { getThread: 0, getThreadShell: 0, selections: 0 }
+              : { getThread: 2, getThreadShell: 2, selections: 1 };
+          // Allowed refreshes check initial authority and the snapshot's live checkpoint.
+          assert.deepEqual(refreshReads, [expectedReads, expectedReads]);
+          assert.equal(selections, testCase.expected === "none" ? 0 : 2);
           const config = yield* configs.read(threadId);
           assert.isDefined(config);
           const expectedScopes =
@@ -6094,6 +6139,7 @@ it.effect.each(turnStartMemoryCases)(
               state,
               idleTimeoutMs: 1000,
               serverSettingsLayer: settingsLayer,
+              projectionReads,
               onTurnInput,
             }),
             settingsLayer,

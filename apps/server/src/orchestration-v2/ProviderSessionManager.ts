@@ -544,12 +544,15 @@ export const layerWithOptions = (
           const denied = { grant: "none" as const, policyEpoch: committed?.epoch ?? 0 };
           if (!committed?.policyReady || !committed.enableAgentMemoryAccess) return denied;
           const config = yield* mcpSessions.read(threadId);
-          if (!config || !(yield* isCurrentAttachment(config))) return denied;
+          if (!config) return denied;
           const policy = yield* (
             mcpSessionRegistry.currentMemoryPolicy?.(config.providerSessionId) ??
               Effect.succeed(undefined)
           );
-          return policy?.policyEpoch === committed.epoch ? policy : denied;
+          // Denied credentials never need the attachment's thread projection.
+          if (!policy || policy.grant === "none" || policy.policyEpoch !== committed.epoch)
+            return denied;
+          return (yield* isCurrentAttachment(config)) ? policy : denied;
         });
       if (Option.isSome(admission))
         yield* admission.value.bind(currentMemoryPolicy, isCurrentAttachment);
