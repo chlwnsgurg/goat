@@ -572,6 +572,17 @@ export type SyncWorkOwner = {
   version: number;
   ownedUntil: number;
 };
+export type IntentIdentityInput = {
+  environmentId: M.EnvironmentId;
+  intentId: string;
+  memorySpaceId: M.MemorySpaceId;
+  operationId: M.MemoryOperationId;
+  revisionId: M.MemoryRevisionId;
+};
+export type MaterializedIntent = {
+  readonly operation: M.MemoryOperation;
+  readonly operationDigest: string;
+};
 export type AssignedIntent = {
   intent: LocalMemoryIntent;
   memorySpaceId: M.MemorySpaceId;
@@ -1393,16 +1404,16 @@ export class MemoryStore extends Context.Service<
     readonly refreshLocalSummaryIntent: (
       intent: LocalMemoryIntent,
     ) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
-    readonly materializeLocalIntent: (input: {
-      readonly environmentId: M.EnvironmentId;
-      readonly intentId: string;
-      readonly memorySpaceId: M.MemorySpaceId;
-      readonly operationId: M.MemoryOperationId;
-      readonly revisionId: M.MemoryRevisionId;
-    }) => Effect.Effect<
-      { readonly operation: M.MemoryOperation; readonly operationDigest: string },
-      MemoryStorageError | MemoryStoreConflict
-    >;
+    readonly materializeLocalIntent: (
+      input: IntentIdentityInput,
+    ) => Effect.Effect<MaterializedIntent, MemoryStorageError | MemoryStoreConflict>;
+    readonly materializeLocalIntentTx: (input: IntentIdentityInput) => InTx<MaterializedIntent>;
+    readonly completeLocalIntentTx: (input: {
+      environmentId: M.EnvironmentId;
+      intentId: string;
+      materialized: MaterializedIntent;
+      now: number;
+    }) => InTx<void>;
     readonly installCheckpointPage: (input: {
       readonly checkpointId: string;
       readonly page: M.MemoryHubCheckpointPage;
@@ -4815,74 +4826,106 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  const materializeLocalIntent = Effect.fn("MemoryStore.materializeLocalIntent")(function* (input: {
-    environmentId: M.EnvironmentId;
-    intentId: string;
-    memorySpaceId: M.MemorySpaceId;
-    operationId: M.MemoryOperationId;
-    revisionId: M.MemoryRevisionId;
-  }) {
-    return yield* transact(
-      Effect.gen(function* () {
-        const ready = yield* stored(
-          "local-binding-ready",
-          sql`SELECT 1 FROM memory_compaction_state WHERE space=${input.memorySpaceId} AND published=1`,
-        );
-        if (!ready.length) return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
-        const id = `local:${input.environmentId}:${input.intentId}`;
-        const rows = yield* stored(
-          "local-intent",
-          sql<{
-            metadata_json: string;
-            body_json: string;
-          }>`SELECT o.metadata_json,p.body_json FROM memory_outbox o JOIN memory_payloads p ON p.space=o.space AND p.payload_ref=o.payload_ref WHERE o.id=${id} AND o.status!='cancelled'`,
-        );
-        const row = rows[0];
-        if (!row) return yield* new MemoryStoreConflict({ code: "not_found" });
-        const draft = yield* localMetadataCodec.decode(row.metadata_json, strict);
-        if (draft.mapping && draft.mapping.memorySpaceId !== input.memorySpaceId)
-          return yield* new MemoryStoreConflict({ code: "space_mismatch" });
-        const mapping = draft.mapping ?? {
-          memorySpaceId: input.memorySpaceId,
-          operationId: input.operationId,
-          revisionId: input.revisionId,
-        };
-        const payload = yield* payloadCodec.decode(row.body_json, strict);
-        const operation = yield* stored(
-          "materialize-codec",
-          decodeOperation(
-            {
-              protocolVersion: 1,
-              kind: "upsert",
-              memorySpaceId: mapping.memorySpaceId,
-              memoryId: draft.memoryId,
-              operationId: mapping.operationId,
-              originEnvironmentId: draft.environmentId,
-              expectedHeads: [],
-              revision: {
-                memorySpaceId: mapping.memorySpaceId,
-                memoryId: draft.memoryId,
-                operationId: mapping.operationId,
-                revisionId: mapping.revisionId,
-                payloadRef: mapping.revisionId,
-                parents: [],
-                scope: draft.scope,
-                assertionKind: draft.assertionKind,
-                provenance: draft.provenance,
-                createdAtUtc: draft.createdAtUtc,
-              },
-              payload,
-            },
-            strict,
-          ),
-        );
-        yield* stored(
-          "materialize-map",
-          sql`UPDATE memory_outbox SET metadata_json=${yield* localMetadataCodec.encode({ ...draft, mapping })} WHERE id=${id}`,
-        );
-        return { operation, operationDigest: hashText(M.encodeMemoryOperation(operation)) };
-      }),
+  const materializeLocalIntentTx: MemoryStore["Service"]["materializeLocalIntentTx"] = Effect.fn(
+    "MemoryStore.materializeLocalIntentTx",
+  )(function* (input) {
+    yield* Transaction;
+    const ready = yield* stored(
+      "local-binding-ready",
+      sql`SELECT 1 FROM memory_compaction_state WHERE space=${input.memorySpaceId} AND published=1`,
     );
+    if (!ready.length) return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+    const id = `local:${input.environmentId}:${input.intentId}`;
+    const rows = yield* stored(
+      "local-intent",
+      sql<{
+        metadata_json: string;
+        body_json: string;
+      }>`SELECT o.metadata_json,p.body_json FROM memory_outbox o JOIN memory_payloads p ON p.space=o.space AND p.payload_ref=o.payload_ref WHERE o.id=${id} AND o.status!='cancelled'`,
+    );
+    const row = rows[0];
+    if (!row) return yield* new MemoryStoreConflict({ code: "not_found" });
+    const draft = yield* localMetadataCodec.decode(row.metadata_json, strict);
+    if (draft.mapping && draft.mapping.memorySpaceId !== input.memorySpaceId)
+      return yield* new MemoryStoreConflict({ code: "space_mismatch" });
+    const mapping = draft.mapping ?? {
+      memorySpaceId: input.memorySpaceId,
+      operationId: input.operationId,
+      revisionId: input.revisionId,
+    };
+    const payload = yield* payloadCodec.decode(row.body_json, strict);
+    const operation = yield* stored(
+      "materialize-codec",
+      decodeOperation(
+        {
+          protocolVersion: 1,
+          kind: "upsert",
+          memorySpaceId: mapping.memorySpaceId,
+          memoryId: draft.memoryId,
+          operationId: mapping.operationId,
+          originEnvironmentId: draft.environmentId,
+          expectedHeads: [],
+          revision: {
+            memorySpaceId: mapping.memorySpaceId,
+            memoryId: draft.memoryId,
+            operationId: mapping.operationId,
+            revisionId: mapping.revisionId,
+            payloadRef: mapping.revisionId,
+            parents: [],
+            scope: draft.scope,
+            assertionKind: draft.assertionKind,
+            provenance: draft.provenance,
+            createdAtUtc: draft.createdAtUtc,
+          },
+          payload,
+        },
+        strict,
+      ),
+    );
+    yield* stored(
+      "materialize-map",
+      sql`UPDATE memory_outbox SET metadata_json=${yield* localMetadataCodec.encode({ ...draft, mapping })} WHERE id=${id}`,
+    );
+    return { operation, operationDigest: hashText(M.encodeMemoryOperation(operation)) };
+  });
+  const materializeLocalIntent = (input: IntentIdentityInput) =>
+    transact(materializeLocalIntentTx(input));
+  const completeLocalIntentTx: MemoryStore["Service"]["completeLocalIntentTx"] = Effect.fn(
+    "MemoryStore.completeLocalIntentTx",
+  )(function* (input) {
+    yield* Transaction;
+    const { operation: op, operationDigest } = input.materialized;
+    const record = yield* receipt(op.memorySpaceId, op.operationId);
+    if (
+      !record ||
+      record.operationDigest !== operationDigest ||
+      op.kind !== "upsert" ||
+      op.originEnvironmentId !== input.environmentId
+    )
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    if (
+      record.receipt.outcome !== "rejected" &&
+      !("hubSequence" in record.receipt && record.receipt.hubSequence !== null)
+    ) {
+      const sync = yield* stored(
+        "intent-sync",
+        sql`SELECT 1 FROM memory_outbox WHERE id=${`sync:${op.memorySpaceId}:${op.operationId}`} AND (operation_digest IS NULL OR operation_digest=${operationDigest})`,
+      );
+      if (!sync.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      yield* stored(
+        "intent-sync-digest",
+        sql`UPDATE memory_outbox SET operation_digest=${operationDigest} WHERE id=${`sync:${op.memorySpaceId}:${op.operationId}`} AND operation_digest IS NULL`,
+      );
+    }
+    const rows = yield* stored(
+      "intent-complete",
+      sql`UPDATE memory_outbox SET status='completed',terminal_at=coalesce(terminal_at,${input.now}),claimed_by=NULL,claimed_until=NULL
+      WHERE id=${`local:${input.environmentId}:${input.intentId}`} AND kind='admin' AND status!='cancelled'
+      AND json_extract(metadata_json,'$.mapping.memorySpaceId')=${op.memorySpaceId}
+      AND json_extract(metadata_json,'$.mapping.operationId')=${op.operationId}
+      AND json_extract(metadata_json,'$.mapping.revisionId')=${op.revision.revisionId} RETURNING id`,
+    );
+    if (rows.length !== 1) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
   });
 
   const settleForgetExpansion = Effect.fn("MemoryStore.settleForgetExpansion")(function* (
@@ -8274,6 +8317,8 @@ const make = Effect.gen(function* () {
     samples,
     putLocalIntent,
     materializeLocalIntent,
+    materializeLocalIntentTx,
+    completeLocalIntentTx,
     readLocalSummaryPayload,
     refreshLocalSummaryIntent,
     installCheckpointPage,
