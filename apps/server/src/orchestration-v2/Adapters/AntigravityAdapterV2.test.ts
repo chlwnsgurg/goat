@@ -563,3 +563,9 @@ describe("AntigravityAdapterV2 client file system under restrictive policies", (
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });
+
+import { acpMemoryDelivery } from "./memoryDelivery.testkit.ts";
+
+it.live.each([true, false])("WP4 memory delivery antigravity attached=%s", (attached) =>
+  acpMemoryDelivery("antigravity", attached),
+);

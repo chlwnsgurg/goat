@@ -75,6 +75,8 @@ import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
 import * as OpenCode2Server from "./OpenCode2Server.ts";
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
+import * as McpProviderSession from "@goat/provider-core/server/mcpSession";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSessions";
 import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
 import { goatOrchestrationSystemPrompt } from "@goat/provider-core/server/orchestrationInstructions";
@@ -416,9 +418,16 @@ interface ThreadState {
   readonly strandedSteers: Set<string>;
   /** T3's MCP server as registered for this thread, and the instructions entry sent with it. */
   mcp:
-    | { readonly name: string; readonly directory: string; readonly credential: string }
+    | {
+        readonly name: string;
+        readonly directory: string;
+        readonly credential: string;
+        readonly endpoint: string;
+      }
     | undefined;
   instructions: string | undefined;
+  /** Digest of the last successfully installed value; memory bodies are never retained locally. */
+  memoryDigest: string | undefined;
 }
 
 type TurnTerminal =
@@ -680,6 +689,7 @@ const isWakeTurn = (turn: OrchestrationV2ProviderTurn) =>
 const INTERRUPT_TIMEOUT = "10 seconds";
 /** The session instructions entry T3 writes its per-turn system prompt to. */
 const INSTRUCTIONS_KEY = "goat";
+const MEMORY_INSTRUCTIONS_KEY = "goat_memory";
 /** A lost event stream is resubscribed this many times, this far apart, before the session breaks. */
 const RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = "2 seconds";
@@ -981,6 +991,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       strandedSteers: new Set(),
       mcp: undefined,
       instructions: undefined,
+      memoryDigest: undefined,
     });
 
     /** The thread whose session started this one, through any nesting. */
@@ -1283,7 +1294,17 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       providerTurn: OrchestrationV2ProviderTurn,
       options: { readonly scope: string; readonly awaitingStart: boolean },
     ): ActiveTurn => ({
-      input: owner,
+      // A background subagent can keep this owner after its parent settles.
+      // Copy the routing fields so a wider ordinary input cannot retain memory or its closure.
+      input: {
+        appThread: owner.appThread,
+        threadId: owner.threadId,
+        runId: owner.runId,
+        runOrdinal: owner.runOrdinal,
+        rootNodeId: owner.rootNodeId,
+        modelSelection: owner.modelSelection,
+        runtimePolicy: owner.runtimePolicy,
+      },
       providerTurn,
       texts: new Map(),
       tools: new Map(),
@@ -3383,14 +3404,26 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const wanted =
         mcpSession === undefined || connection.external
           ? undefined
-          : { name, directory, credential: mcpSession.authorizationHeader };
+          : {
+              name,
+              directory,
+              credential: mcpSession.authorizationHeader,
+              endpoint: mcpSession.endpoint,
+            };
       if (
         state.mcp !== undefined &&
         (wanted === undefined ||
           state.mcp.directory !== wanted.directory ||
-          state.mcp.credential !== wanted.credential)
+          state.mcp.credential !== wanted.credential ||
+          state.mcp.endpoint !== wanted.endpoint)
       ) {
-        yield* removeMcp(state.mcp);
+        // Admission must stop if the old route cannot be removed; cleanup alone is best-effort.
+        yield* client.mcp
+          .remove({
+            server: state.mcp.name,
+            location: { directory: state.mcp.directory },
+          })
+          .pipe(Effect.timeout(INVENTORY_TIMEOUT));
         state.mcp = undefined;
       }
       // T3's tools are an addition: a server that cannot add them still runs the turn.
@@ -3401,7 +3434,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             location: { directory },
             config: new Mcp.RemoteConfig({
               type: "remote",
-              url: mcpSession!.endpoint,
+              url: wanted.endpoint,
               headers: { Authorization: wanted.credential },
               oauth: false,
             }),
@@ -3417,9 +3450,20 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           );
         if (added) state.mcp = wanted;
       }
+      const availability = McpProviderSession.memoryToolAvailability(
+        state.mcp !== undefined &&
+          state.mcp.directory === directory &&
+          state.mcp.endpoint === mcpSession?.endpoint &&
+          state.mcp.credential === mcpSession?.authorizationHeader
+          ? mcpSession
+          : undefined,
+      );
       const instructions = [
         buildRuntimeInstructions({ harness: "OpenCode", model: turnInput.modelSelection.model }),
         goatOrchestrationSystemPrompt(state.mcp !== undefined),
+        availability.read || availability.write || availability.source
+          ? `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`
+          : undefined,
       ]
         .filter((part) => part !== undefined && part.length > 0)
         .join("\n\n");
@@ -3702,6 +3746,36 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
      * directory only when the text could use them. A turn stopped meanwhile
      * sends nothing.
      */
+    const prepareMemory = Effect.fnUntraced(function* (
+      sessionId: string,
+      state: ThreadState,
+      turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+    ) {
+      const snapshot = turnInput.refreshMemoryContext
+        ? yield* turnInput.refreshMemoryContext()
+        : turnInput.memoryContext;
+      const value =
+        snapshot === undefined
+          ? ""
+          : yield* Effect.try({
+              try: () => MemoryContext.memoryContextText(snapshot),
+              catch: () =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: OPENCODE_PROVIDER,
+                  detail: "Invalid memory context frame",
+                }),
+            });
+      // Always replace, including empty clear; no local body survives this admission.
+      yield* client.session.instructions.entry.put({
+        sessionID: Session.ID.make(sessionId),
+        key: MEMORY_INSTRUCTIONS_KEY,
+        value,
+      });
+      state.memoryDigest = Hex.encode(
+        yield* crypto.digest("SHA-256", new TextEncoder().encode(value)),
+      );
+    });
+
     const submit = Effect.fnUntraced(function* (
       sessionId: string,
       turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
@@ -3736,6 +3810,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           // so the turn remembers where the history stood before it.
           const newest = yield* client.message.list({ sessionID, order: "desc", limit: 1 });
           yield* markBefore(sessionId, newest.data[0]?.id ?? null);
+          if (state.active !== turn || turn.interrupted) return;
+          yield* prepareMemory(sessionId, state, turnInput);
           if (!sending()) return;
           return yield* client.session.command({ sessionID, ...command });
         }
@@ -3750,6 +3826,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ),
           )
         : [];
+      if (state.active !== turn || turn.interrupted) return;
+      yield* prepareMemory(sessionId, state, turnInput);
       if (!sending()) return;
       return yield* client.session
         .prompt({
@@ -4062,7 +4140,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 ? Effect.gen(function* () {
                     // Without a clear rejection the server may have taken the
                     // prompt, so the next turn checks before it prompts again.
-                    if (!CLEAR_PROMPT_REJECTIONS.has(cause._tag)) markUnsettled(state);
+                    if (!turn.unsent && !CLEAR_PROMPT_REJECTIONS.has(cause._tag))
+                      markUnsettled(state);
                     yield* finishTurn(state, {
                       status: "failed",
                       failure: makeProviderFailure({ cause, class: "provider_error" }),

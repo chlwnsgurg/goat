@@ -1,3 +1,8 @@
+import type { AuthEnvironmentScope } from "@goat/contracts";
+import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
+import * as Exit from "effect/Exit";
+import { MemoryId, MemoryRevisionId, MemorySpaceId } from "@goat/contracts";
+import { packMemoryContext, memoryContextText } from "@goat/provider-core/server/memoryContext";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import type { InteractionUpdate } from "@cursor/sdk";
@@ -86,6 +91,10 @@ describe("CursorAdapterV2", () => {
                 close: Effect.void,
                 send: (input) =>
                   Effect.gen(function* () {
+                    assert.notInclude(
+                      typeof input.message === "string" ? input.message : input.message.text,
+                      "GOAT memory tools:",
+                    );
                     sentWithMcpOverride = Object.hasOwn(input.options ?? {}, "mcpServers");
                     // Recorded Cursor task calls (see fixtures/subagent) stream a
                     // partial-tool-call before tool-call-started with the same args.
@@ -363,6 +372,334 @@ describe("CursorAdapterV2", () => {
         Stream.runHead,
       );
       assert.equal(sentMessages[1], "/compress");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
+  it.effect("WP4 Cursor memory refresh, clear and tamper preserve native /compress", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-errors-" });
+      const hostContext = yield* Layer.build(TestProviderHost.layer({ cwd: workspace }));
+      const host = yield* Effect.service(ProviderHost.ProviderHost).pipe(
+        Effect.provide(hostContext),
+      );
+      yield* fileSystem.writeFileString(`${host.paths.attachmentsDir}/memory.png`, "fixture image");
+      const imageCounts: number[] = [];
+      const sentMessages: Array<string> = [];
+      const snapshot = wp4Snapshot();
+      let refreshes = 0;
+      let memory: typeof snapshot | undefined = snapshot;
+      let sendCalls = 0;
+      const opens: CursorAgentSdk.CursorAgentSdkOpenInput[] = [];
+      const connections: string[] = [];
+      let closes = 0;
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-transport-error-thread");
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      const config = (grantedScopes: ReadonlyArray<AuthEnvironmentScope>) => ({
+        environmentId: EnvironmentId.make("fixture"),
+        threadId,
+        providerSessionId: "cursor-error-session",
+        providerInstanceId: instanceId,
+        endpoint: "http://fixture.invalid/mcp",
+        authorizationHeader: "Bearer memory-fixture",
+        browserToolsAvailable: false,
+        grantedScopes,
+      });
+      yield* sessions.set(config(["memory:read", "memory:write", "orchestration:read"]));
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: workspace,
+      });
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        settings: yield* decodeCursorSettings({}),
+        environment: { HOME: workspace },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: (openInput) =>
+            Effect.gen(function* () {
+              opens.push(openInput);
+              connections.push("open");
+              return {
+                agentId: "native-cursor-error",
+                listMessages: Effect.succeed([]),
+                close: Effect.sync(() => {
+                  closes++;
+                  connections.push("close");
+                }),
+                send: (input) =>
+                  Effect.sync(() => {
+                    sendCalls += 1;
+                    imageCounts.push(
+                      typeof input.message === "string" ? 0 : (input.message.images?.length ?? 0),
+                    );
+                    sentMessages.push(
+                      typeof input.message === "string" ? input.message : input.message.text,
+                    );
+                    const runId = `native-cursor-run-${sendCalls}`;
+                    return {
+                      agentId: "native-cursor-error",
+                      runId,
+                      wait: Effect.succeed({
+                        id: runId,
+                        requestId: `native-request-${sendCalls}`,
+                        status: "finished" as const,
+                        model: { id: "composer-2.5" },
+                        durationMs: 1,
+                        ...(sendCalls === 1
+                          ? { result: "Error: RetriableError: WritableIterable is closed" }
+                          : {}),
+                      }),
+                      cancel: Effect.void,
+                    };
+                  }),
+              };
+            }),
+        }),
+        Effect.provide(hostContext),
+      );
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-error-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const appThread = {
+        id: threadId,
+        projectId: ProjectId.make("cursor-error-project"),
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        title: "Cursor transport failure",
+        providerInstanceId: instanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: providerThread.id,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+      const ordinaryInput: ProviderAdapter.ProviderAdapterV2TurnInput = {
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        memoryContext: snapshot,
+        refreshMemoryContext: () =>
+          Effect.sync(() => {
+            refreshes++;
+            return memory;
+          }),
+        runId: RunId.make("cursor-error-run"),
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make("cursor-error-attempt"),
+        rootNodeId: NodeId.make("cursor-error-root"),
+        appThread,
+        message: {
+          messageId: MessageId.make("cursor-error-message"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "continue",
+          attachments: [],
+        },
+      };
+      yield* runtime.startTurn(ordinaryInput);
+      const first = yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.isTrue(Option.isSome(first));
+      if (Option.isSome(first)) {
+        assert.equal(first.value.status, "failed");
+        assert.equal(first.value.failure?.class, "transport_error");
+      }
+
+      assert.include(sentMessages[0]!, memoryContextText(snapshot));
+      assert.equal(refreshes, 1);
+      assert.include(sentMessages[0]!, "read=true, write=true, source=true");
+      assert.isDefined(runtime.compactThread);
+      yield* runtime.compactThread!({
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        refreshMemoryContext: ordinaryInput.refreshMemoryContext!,
+        runId: RunId.make("cursor-compact-run"),
+        runOrdinal: 2,
+        providerTurnOrdinal: 2,
+        attemptId: RunAttemptId.make("cursor-compact-attempt"),
+        rootNodeId: NodeId.make("cursor-compact-root"),
+        appThread,
+        message: {
+          messageId: MessageId.make("cursor-compact-message"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "ignored by compactThread",
+          attachments: [],
+        },
+      });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.equal(sentMessages[1], "/compress");
+      assert.equal(refreshes, 1);
+      memory = undefined;
+      yield* sessions.set(config([]));
+      yield* runtime.startTurn({
+        ...ordinaryInput,
+        runOrdinal: 3,
+        providerTurnOrdinal: 3,
+        message: {
+          ...ordinaryInput.message,
+          attachments: [
+            {
+              type: "image",
+              id: "memory.png",
+              name: "memory.png",
+              mimeType: "image/png",
+              sizeBytes: 13,
+            },
+          ],
+        },
+      });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.notInclude(sentMessages[2]!, "external_goat_memory");
+      assert.equal(refreshes, 2);
+      assert.deepEqual(imageCounts, [0, 0, 1]);
+      assert.include(sentMessages[2]!, "read=false, write=false, source=false");
+      yield* runtime.startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.notInclude(sentMessages[3]!, "GOAT memory tools:");
+      memory = snapshot;
+      const grants: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
+        ["memory:read"],
+        ["memory:read", "memory:write", "orchestration:read"],
+      ];
+      for (const [index, grant] of grants.entries()) {
+        yield* sessions.set(config(grant));
+        yield* runtime.startTurn({
+          ...ordinaryInput,
+          runOrdinal: index + 5,
+          providerTurnOrdinal: index + 5,
+        });
+        yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.include(sentMessages[index + 4]!, memoryContextText(snapshot));
+        assert.include(
+          sentMessages[index + 4]!,
+          `read=true, write=${index === 1}, source=${index === 1}`,
+        );
+      }
+      // Grants alone reuse the installed transport; attachment changes reopen the same agent.
+      assert.equal(opens.length, 1);
+      assert.equal(closes, 0);
+      const baseConfig = config(["memory:read", "memory:write", "orchestration:read"]);
+      const endpointConfig = { ...baseConfig, endpoint: "http://rotated.fixture.invalid/mcp" };
+      const authorizationConfig = {
+        ...endpointConfig,
+        authorizationHeader: "Bearer rotated-fixture",
+      };
+      const attachments = [
+        undefined,
+        baseConfig,
+        endpointConfig,
+        authorizationConfig,
+        authorizationConfig,
+      ];
+      for (const [index, attachment] of attachments.entries()) {
+        if (attachment === undefined) yield* sessions.clear(threadId);
+        else yield* sessions.set(attachment);
+        yield* runtime.startTurn({
+          ...ordinaryInput,
+          runOrdinal: index + 7,
+          providerTurnOrdinal: index + 7,
+        });
+        yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        const expectedChanges = Math.min(index + 1, 4);
+        assert.equal(opens.length, expectedChanges + 1);
+        assert.equal(closes, expectedChanges);
+        const opened = opens[opens.length - 1]!;
+        assert.equal(opened.operation, "resume");
+        assert.equal(opened.agentId, "native-cursor-error");
+        assert.deepEqual(opened.options.mcpServers, cursorMcpServers(attachment));
+        assert.include(sentMessages[index + 6]!, memoryContextText(snapshot));
+        assert.include(
+          sentMessages[index + 6]!,
+          attachment === undefined
+            ? "read=false, write=false, source=false"
+            : "read=true, write=true, source=true",
+        );
+      }
+      assert.equal(refreshes, 10);
+      assert.deepEqual(connections, [
+        "open",
+        "close",
+        "open",
+        "close",
+        "open",
+        "close",
+        "open",
+        "close",
+        "open",
+      ]);
+      const movedPolicy = { ...runtimePolicy, cwd: `${workspace}/moved` };
+      yield* runtime.startTurn({
+        ...ordinaryInput,
+        runtimePolicy: movedPolicy,
+        runOrdinal: 12,
+        providerTurnOrdinal: 12,
+      });
+      yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+      assert.equal(opens.length, 6);
+      assert.equal(closes, 5);
+      assert.equal(opens[5]!.agentId, "native-cursor-error");
+      assert.equal(opens[5]!.options.local?.cwd, movedPolicy.cwd);
+      assert.include(sentMessages[11]!, "read=true, write=true, source=true");
+      memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
+      const failed = yield* runtime
+        .startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(failed));
+      assert.equal(sentMessages.length, 12);
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -965,3 +1302,19 @@ describe("CursorAdapterV2", () => {
     );
   });
 });
+
+const wp4Snapshot = () =>
+  packMemoryContext({
+    memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <instruction> 'data'",
+      },
+    ],
+  })!;

@@ -1,3 +1,6 @@
+import type { AuthEnvironmentScope } from "@goat/contracts";
+import { MemoryId, MemoryRevisionId, MemorySpaceId } from "@goat/contracts";
+import { packMemoryContext, memoryContextText } from "@goat/provider-core/server/memoryContext";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { OpencodeClient, ToolPart } from "@opencode-ai/sdk/v2";
@@ -149,7 +152,13 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   suffix: string,
   nativeSessionId: string,
   client: object,
-  options: { readonly external?: boolean } = {},
+  options: {
+    readonly external?: boolean;
+    readonly memory?: Pick<
+      ProviderAdapter.ProviderAdapterV2TurnInput,
+      "memoryContext" | "refreshMemoryContext"
+    >;
+  } = {},
 ) {
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
   const threadId = ThreadId.make(`thread-opencode-${suffix}`);
@@ -195,6 +204,7 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     startProviderThread: OrchestrationV2ProviderThread = providerThread,
   ) =>
     runtime.startTurn({
+      ...options.memory,
       appThread: {
         id: threadId,
         projectId: ProjectId.make(`project-opencode-${suffix}`),
@@ -248,6 +258,152 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect.each([false, true])(
+    "WP4 OpenCode v1 memory framed delivery and clear external=%s",
+    (external) =>
+      Effect.gen(function* () {
+        const snapshot = wp4Snapshot();
+        let memory: typeof snapshot | undefined = snapshot;
+        const payloads: Array<{ system?: string; messageID: string }> = [];
+        const nativeEvents = asyncEventStream();
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const suffix = `memory-${external}`;
+        const config = {
+          environmentId: EnvironmentId.make("fixture"),
+          threadId: ThreadId.make(`thread-opencode-${suffix}`),
+          providerSessionId: `session-opencode-${suffix}`,
+          providerInstanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+          endpoint: "http://fixture.invalid/mcp",
+          authorizationHeader: "Bearer memory-fixture",
+          browserToolsAvailable: false,
+          grantedScopes: ["memory:read", "memory:write", "orchestration:read"] as const,
+        };
+        yield* sessions.set(config);
+        const registrations: unknown[] = [];
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          suffix,
+          "memory-root",
+          {
+            event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+            mcp: {
+              add: async (input: unknown) => {
+                registrations.push(input);
+                return { data: true };
+              },
+            },
+            session: {
+              create: async () => ({
+                data: { id: "memory-root", time: { created: 1, updated: 1 } },
+              }),
+              get: async () => ({ data: { id: "memory-root", time: { created: 1, updated: 1 } } }),
+              promptAsync: async (input: { system?: string; messageID: string }) => {
+                payloads.push(input);
+                return { data: true };
+              },
+              abort: async () => ({ data: true }),
+            },
+          },
+          {
+            external,
+            memory: { memoryContext: snapshot, refreshMemoryContext: () => Effect.succeed(memory) },
+          },
+        );
+        const finish = () =>
+          Effect.gen(function* () {
+            const terminal = yield* harness.runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runDrain,
+              Effect.forkScoped,
+            );
+            const messageID = payloads.at(-1)!.messageID;
+            yield* Effect.promise(() =>
+              nativeEvents.push({
+                type: "message.updated",
+                properties: {
+                  sessionID: "memory-root",
+                  info: { id: messageID, role: "user", time: { created: 1 } },
+                },
+              }),
+            );
+            yield* Effect.promise(() =>
+              nativeEvents.push({
+                type: "session.status",
+                properties: { sessionID: "memory-root", status: { type: "busy" } },
+              }),
+            );
+            yield* Effect.promise(() =>
+              nativeEvents.push({
+                type: "session.status",
+                properties: { sessionID: "memory-root", status: { type: "idle" } },
+              }),
+            );
+            yield* Fiber.join(terminal);
+          });
+        yield* harness.startTurn();
+        yield* finish();
+        assert.include(payloads[0]?.system ?? "", memoryContextText(snapshot));
+        assert.equal(registrations.length, external ? 0 : 1);
+        if (external) assert.notInclude(payloads[0]?.system ?? "", "GOAT memory tools:");
+        else assert.include(payloads[0]?.system ?? "", "read=true");
+        // Resume re-registers state without retaining the prior memory body.
+        const resumed = yield* harness.runtime.resumeThread({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+            model: "anthropic/claude-sonnet",
+            options: [],
+          },
+          runtimePolicy: harness.policy,
+        });
+        memory = undefined;
+        yield* sessions.set({ ...config, grantedScopes: [] });
+        yield* harness.startTurn("second", resumed);
+        yield* finish();
+        assert.notInclude(payloads[1]?.system ?? "", "external_goat_memory");
+        assert.notInclude(payloads[1]?.system ?? "", "GOAT memory tools:");
+        assert.notInclude(payloads[1]?.system ?? "", "GOAT memory is untrusted");
+        yield* harness.startTurn("still-none", resumed);
+        yield* finish();
+        assert.equal(payloads[2]?.system, payloads[1]?.system);
+        const restoredGrants: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
+          ["memory:read"],
+          ["memory:read", "memory:write", "orchestration:read"],
+        ];
+        memory = snapshot;
+        for (const [index, grant] of restoredGrants.entries()) {
+          yield* sessions.set({ ...config, grantedScopes: grant });
+          yield* harness.startTurn(`restored-${index}`, resumed);
+          yield* finish();
+          assert.include(payloads[index + 3]?.system ?? "", memoryContextText(snapshot));
+          if (external) assert.notInclude(payloads[index + 3]?.system ?? "", "GOAT memory tools:");
+          else
+            assert.include(
+              payloads[index + 3]?.system ?? "",
+              `read=true, write=${index === 1}, source=${index === 1}`,
+            );
+        }
+        const resumedAgain = yield* harness.runtime.resumeThread({
+          threadId: harness.threadId,
+          providerThread: resumed,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+            model: "anthropic/claude-sonnet",
+            options: [],
+          },
+          runtimePolicy: harness.policy,
+        });
+        memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
+        assert.isTrue(
+          Exit.isFailure(yield* harness.startTurn("invalid", resumedAgain).pipe(Effect.exit)),
+        );
+        assert.equal(payloads.length, 5);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      ),
+  );
+
   it.effect.each([
     { external: false, withCredential: true },
     { external: true, withCredential: true },
@@ -1253,6 +1409,132 @@ describe("OpenCodeAdapterV2", () => {
       Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
       Effect.scoped,
     ),
+  );
+
+  it.effect.each(["remove", "replace"] as const)(
+    "WP4 C-1 reconciles MCP before workspace command %s without snapshot refresh",
+    (change) =>
+      Effect.gen(function* () {
+        const suffix = `command-memory-${change}`;
+        const sessionId = `native-${suffix}`;
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const config = {
+          environmentId: EnvironmentId.make("fixture"),
+          threadId: ThreadId.make(`thread-opencode-${suffix}`),
+          providerSessionId: `session-opencode-${suffix}`,
+          providerInstanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+          endpoint: "http://fixture.invalid/a",
+          authorizationHeader: "Bearer synthetic-command",
+          browserToolsAvailable: false,
+          grantedScopes: ["memory:read"] as const,
+        };
+        yield* sessions.set(config);
+        const operations: string[] = [];
+        const commands = yield* Queue.unbounded<{ messageID: string; parts: unknown[] }>();
+        const nativeEvents = asyncEventStream();
+        let refreshes = 0;
+        const prompts: Array<{ messageID: string; system?: string }> = [];
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          suffix,
+          sessionId,
+          {
+            event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+            command: { list: async () => ({ data: [{ name: "review" }] }) },
+            mcp: {
+              add: async (input: { config: { url: string } }) => {
+                operations.push(`add:${input.config.url}`);
+                return { data: true };
+              },
+              disconnect: async () => {
+                operations.push("disconnect");
+                return { data: true };
+              },
+            },
+            session: {
+              create: async () => ({ data: { id: sessionId, time: { created: 1, updated: 1 } } }),
+              command: async (input: { messageID: string; parts: unknown[] }) => {
+                operations.push("command");
+                Queue.offerUnsafe(commands, input);
+                return { data: true };
+              },
+              promptAsync: async (input: { messageID: string; system?: string }) => {
+                prompts.push(input);
+                return { data: true };
+              },
+            },
+          },
+          {
+            external: false,
+            memory: {
+              refreshMemoryContext: () =>
+                Effect.sync(() => {
+                  refreshes++;
+                  return wp4Snapshot();
+                }),
+            },
+          },
+        );
+        assert.deepEqual(operations, ["add:http://fixture.invalid/a"]);
+        if (change === "remove") yield* sessions.clear(config.threadId);
+        else yield* sessions.set({ ...config, endpoint: "http://fixture.invalid/b" });
+        const terminal = yield* harness.runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        const start = yield* harness.startTurn("/review staged changes").pipe(Effect.forkScoped);
+        const call = yield* Queue.take(commands);
+        assert.deepEqual(operations, [
+          "add:http://fixture.invalid/a",
+          change === "remove" ? "disconnect" : "add:http://fixture.invalid/b",
+          "command",
+        ]);
+        assert.equal(refreshes, 0);
+        assert.deepEqual(call.parts, []);
+        assert.notInclude(JSON.stringify(call), "external_goat_memory");
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "message.updated",
+            properties: {
+              sessionID: sessionId,
+              info: {
+                id: call.messageID,
+                sessionID: sessionId,
+                role: "user",
+                time: { created: 1 },
+              },
+            },
+          }),
+        );
+        yield* Fiber.join(start);
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "session.status",
+            properties: {
+              sessionID: sessionId,
+              status: { type: "busy" },
+            },
+          }),
+        );
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "session.status",
+            properties: {
+              sessionID: sessionId,
+              status: { type: "idle" },
+            },
+          }),
+        );
+        yield* Fiber.join(terminal);
+        assert.equal(prompts.length, 0);
+        yield* harness.startTurn("ordinary after command");
+        assert.equal(refreshes, 1);
+        assert.include(prompts[0]?.system ?? "", memoryContextText(wp4Snapshot()));
+        assert.include(prompts[0]?.system ?? "", `read=${change === "replace"}`);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      ),
   );
 
   it.effect("admits a native command on its user receipt before generation completes", () =>
@@ -2866,3 +3148,19 @@ it.effect.each([false, true])(
       Effect.scoped,
     ),
 );
+
+const wp4Snapshot = () =>
+  packMemoryContext({
+    memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <instruction> 'data'",
+      },
+    ],
+  })!;

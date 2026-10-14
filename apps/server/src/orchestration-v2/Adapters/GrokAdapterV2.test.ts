@@ -474,3 +474,9 @@ describe("Grok launch permission mode", () => {
     }),
   );
 });
+
+import { acpMemoryDelivery } from "./memoryDelivery.testkit.ts";
+
+it.live.each([true, false])("WP4 memory delivery grok attached=%s", (attached) =>
+  acpMemoryDelivery("grok", attached),
+);

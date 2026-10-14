@@ -1,3 +1,5 @@
+import { memoryFixture } from "./memoryDelivery.testkit.ts";
+import { memoryContextText } from "@goat/provider-core/server/memoryContext";
 /**
  * Failures and settings a live OpenCode 2 server cannot produce on demand,
  * driven through the real adapter and `@opencode/client` against a replayed
@@ -166,6 +168,24 @@ const withInstructions = (
         "skill.list",
       ].includes(String(entry.frame.type)),
   );
+  if (
+    entries
+      .slice(0, first)
+      .some(
+        (entry) =>
+          entry.type === "expect_outbound" &&
+          typeof entry.frame === "object" &&
+          entry.frame !== null &&
+          "type" in entry.frame &&
+          entry.frame.type === "session.instructions.entry.put" &&
+          "input" in entry.frame &&
+          typeof entry.frame.input === "object" &&
+          entry.frame.input !== null &&
+          "key" in entry.frame.input &&
+          entry.frame.input.key === "goat",
+      )
+  )
+    return entries;
   // T3's MCP server is added before the entry that describes it.
   const after = entries.findIndex(
     (entry, index) =>
@@ -328,6 +348,8 @@ const resumed = (
   options?: {
     readonly external?: boolean;
     readonly supervised?: boolean;
+    readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly replayGate?: ProviderReplayGate;
   },
 ) =>
@@ -349,6 +371,12 @@ const resumed = (
         ...entries,
       ]),
       {
+        ...(options?.onInstructions === undefined
+          ? {}
+          : { onInstructions: options.onInstructions }),
+        ...(options?.memoryInstructions === undefined
+          ? {}
+          : { memoryInstructions: options.memoryInstructions }),
         ...(options?.external === undefined ? {} : { external: options.external }),
         ...(options?.replayGate === undefined ? {} : { replayGate: options.replayGate }),
       },
@@ -423,6 +451,208 @@ const history = {
 };
 
 it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
+  it.effect.each([false, true])(
+    "WP4 OpenCode v2 framed instruction refresh and clear external=%s",
+    (external) =>
+      Effect.gen(function* () {
+        const snapshot = memoryFixture();
+        let memory: typeof snapshot | undefined = snapshot;
+        const values: string[] = [];
+        const oneTurn = [
+          out("session.prompt", { sessionID: SESSION, text: "hi" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ];
+        const { runtime, thread } = yield* resumed([...oneTurn, ...oneTurn, ...oneTurn], {
+          external,
+          memoryInstructions: (value) => {
+            values.push(value);
+            return new Response(null, { status: 204 });
+          },
+        });
+        let refreshes = 0;
+        for (let index = 0; index < 3; index++) {
+          memory = index === 1 ? undefined : snapshot;
+          const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+          yield* runtime.startTurn({
+            ...turnInput(thread),
+            providerTurnOrdinal: index + 1,
+            runOrdinal: index + 1,
+            memoryContext: snapshot,
+            refreshMemoryContext: () =>
+              Effect.sync(() => {
+                refreshes++;
+                return memory;
+              }),
+          });
+          assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+        }
+        assert.deepEqual(values, [memoryContextText(snapshot), "", memoryContextText(snapshot)]);
+        assert.equal(refreshes, 3);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([false, true])("WP4 OpenCode v2 grant transitions external=%s", (external) =>
+    Effect.gen(function* () {
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      yield* Effect.addFinalizer(() => sessions.clear(threadId));
+      const grants: ReadonlyArray<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>> = [
+        [],
+        ["memory:read", "memory:write", "orchestration:read"],
+        [],
+        [],
+        ["memory:read"],
+        ["memory:read", "memory:write", "orchestration:read"],
+      ];
+      const config = {
+        environmentId: EnvironmentId.make("fixture"),
+        threadId,
+        providerSessionId: "provider-session:opencode2-adapter",
+        providerInstanceId: instanceId,
+        endpoint: "http://fixture.invalid/mcp",
+        authorizationHeader: "Bearer memory-fixture",
+        browserToolsAvailable: false,
+      };
+      yield* sessions.set({ ...config, grantedScopes: grants[0]! });
+      const serverName = yield* goatMcpServerName(threadId).pipe(Effect.provide(NodeCrypto.layer));
+      const values: string[] = [];
+      const systems: string[] = [];
+      const entries: ProviderReplayEntry[] = [];
+      if (!external)
+        entries.push(
+          out("mcp.add", {
+            server: serverName,
+            config: {
+              type: "remote",
+              url: config.endpoint,
+              headers: { Authorization: config.authorizationHeader },
+              oauth: false,
+            },
+          }),
+          reply("mcp.add", null),
+        );
+      for (let index = 0; index < grants.length; index++) {
+        if ((!external && index !== 3) || index === 0)
+          entries.push(
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "goat",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+          );
+        entries.push(
+          out("session.prompt", { sessionID: SESSION, text: "hi" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        );
+      }
+      if (!external)
+        entries.push(
+          out("mcp.remove", { server: serverName, "location[directory]": WORK }),
+          reply("mcp.remove", null),
+        );
+      const { runtime, thread } = yield* resumed(entries, {
+        external,
+        memoryInstructions: (value) => {
+          values.push(value);
+          return new Response(null, { status: 204 });
+        },
+        onInstructions: (key, value) => {
+          if (key === "goat") systems.push(value);
+        },
+      });
+      const snapshot = memoryFixture();
+      for (const [index, grant] of grants.entries()) {
+        yield* sessions.set({ ...config, grantedScopes: grant });
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(thread),
+          runOrdinal: index + 1,
+          providerTurnOrdinal: index + 1,
+          refreshMemoryContext: () =>
+            Effect.succeed(grant.includes("memory:read") ? snapshot : undefined),
+        });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+        if (!external && grant.includes("memory:read")) {
+          assert.include(
+            systems.at(-1) ?? "",
+            `read=true, write=${grant.includes("memory:write")}, source=${grant.includes("orchestration:read")}`,
+          );
+        } else assert.notInclude(systems.at(-1) ?? "", "GOAT memory tools:");
+      }
+      assert.deepEqual(values, [
+        "",
+        memoryContextText(snapshot),
+        "",
+        "",
+        memoryContextText(snapshot),
+        memoryContextText(snapshot),
+      ]);
+      assert.equal(systems.length, external ? 1 : 5, "unchanged instructions need no put");
+      yield* runtime.unloadThread!({ providerThread: thread });
+    }).pipe(Effect.scoped),
+  );
+  it.effect.each(["tampered", "put-failure"] as const)(
+    "WP4 OpenCode v2 blocks a prompt on %s and permits retry",
+    (reason) =>
+      Effect.gen(function* () {
+        const snapshot = memoryFixture();
+        const values: string[] = [];
+        let failPut = reason === "put-failure";
+        const { runtime, thread } = yield* resumed(
+          [
+            out("session.instructions.entry.put", {
+              sessionID: SESSION,
+              key: "goat",
+              value: "<any>",
+            }),
+            reply("session.instructions.entry.put", null),
+            out("message.list", { sessionID: SESSION, order: "asc", limit: "100" }),
+            reply("message.list", history),
+            out("session.prompt", { sessionID: SESSION, text: "hi" }),
+            promptAccepted,
+            event("session.execution.succeeded", { sessionID: SESSION }),
+          ],
+          {
+            memoryInstructions: (value) => {
+              values.push(value);
+              return failPut
+                ? new Response(JSON.stringify({ error: "fixture put failed" }), {
+                    status: 500,
+                    headers: { "content-type": "application/json" },
+                  })
+                : new Response(null, { status: 204 });
+            },
+          },
+        );
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        const memory =
+          reason === "tampered"
+            ? { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") }
+            : snapshot;
+        const failed = yield* runtime
+          .startTurn({ ...turnInput(thread), refreshMemoryContext: () => Effect.succeed(memory) })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(failed));
+        assert.equal((yield* Fiber.join(terminal))?.status, "failed");
+        assert.equal(values.length, reason === "tampered" ? 0 : 1);
+        const readable = yield* runtime.readThreadSnapshot({ providerThread: thread });
+        assert.isTrue(readable.messages.length > 0);
+        failPut = false;
+        const success = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(thread),
+          providerTurnOrdinal: 2,
+          runOrdinal: 2,
+          refreshMemoryContext: () => Effect.succeed(snapshot),
+        });
+        assert.equal((yield* Fiber.join(success))?.status, "completed");
+        assert.equal(values.at(-1), memoryContextText(snapshot));
+        assert.equal(values.length, reason === "tampered" ? 1 : 2);
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("switches the session's model and variant before a turn that changed them", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
