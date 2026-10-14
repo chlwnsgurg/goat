@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
+import * as Console from "effect/Console";
+import * as References from "effect/References";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as Clock from "effect/Clock";
@@ -6930,6 +6932,105 @@ it.effect("r16 nullable processing reads the actual local item counters and PK p
     }
     yield* Effect.log("R16_PROCESSING_EXPLAIN", JSON.stringify(plans)).pipe(
       Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("recovery skips completed installCredential admin before work decoding", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const requestId = M.MemoryOperationId.make(id(17000));
+    const first: Store.AdminRecord = {
+      requestId,
+      requestDigest: hash,
+      expectedVersion: 0,
+      stage: "prepared",
+      action: {
+        requestId,
+        expectedVersion: 0,
+        action: "installCredential",
+        hubEnvironmentId: env,
+        endpoint: "http://127.0.0.1:43123",
+        memorySpaceId: space,
+      },
+      secretName: "synthetic-installed-member",
+      result: null,
+      memberVersion: null,
+    };
+    const result = {
+      view: {
+        settings: {
+          mode: "member" as const,
+          hubEnvironmentId: env,
+          endpoint: "http://127.0.0.1:43123",
+          memorySpaceId: space,
+          secretName: "synthetic-installed-member",
+        },
+        version: 1,
+      },
+    };
+    yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+    for (const [stage, expectedStage] of [
+      ["activated", "prepared"],
+      ["ready", "activated"],
+      ["acknowledged", "ready"],
+    ] as const)
+      yield* store.transact(
+        store.writeHubAdminTx({
+          record: { ...first, stage, result: stage === "activated" ? null : result },
+          expectedStage,
+        }),
+      );
+    const adminBefore = yield* sql`SELECT * FROM memory_outbox WHERE kind='admin'`;
+
+    assert.strictEqual(adminBefore.length, 1);
+    // A full page of unrelated work must still consume exactly one frozen page.
+    for (let n = 0; n < 100; n++) yield* store.enqueueWork(backgroundWork(`unrelated:${n}`));
+    const countersBefore =
+      yield* sql`SELECT * FROM memory_quota_counters WHERE space!='_claim_recovery' ORDER BY space,dimension,scope_key`;
+    const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+    yield* fresh.recoverClaimCandidates(0);
+    const cursor = yield* sql<{
+      value: number;
+    }>`SELECT value FROM memory_quota_counters WHERE space='_claim_recovery' AND dimension='orphan'`;
+    assert.strictEqual(cursor[0]!.value, 100);
+    yield* fresh.recoverClaimCandidates(1);
+    yield* fresh.recoverClaimCandidates(2);
+    assert.deepStrictEqual(yield* sql`SELECT * FROM memory_outbox WHERE kind='admin'`, adminBefore);
+    assert.deepStrictEqual(
+      yield* sql`SELECT * FROM memory_quota_counters WHERE space!='_claim_recovery' ORDER BY space,dimension,scope_key`,
+      countersBefore,
+    );
+    assert.strictEqual(
+      (yield* fresh.transact(fresh.readHubAdminTx(requestId)))?.stage,
+      "acknowledged",
+    );
+    assert.isUndefined(yield* fresh.readWork(`admin:${requestId}`));
+    assert.isUndefined(yield* fresh.readWorkOperation(`admin:${requestId}`));
+    const ack = yield* fresh
+      .acknowledgeOutbox(`admin:${requestId}`, {
+        operationId: requestId,
+        memoryId: memory,
+        operationDigest: hash,
+        outcome: "accepted",
+        hubSequence: 1,
+      })
+      .pipe(Effect.flip);
+    assert.strictEqual(ack._tag, "MemoryStoreConflict");
+    const plans = yield* sql<{ detail: string }>`EXPLAIN QUERY PLAN WITH page AS MATERIALIZED (
+      SELECT rowid FROM memory_outbox WHERE rowid>0 AND rowid<=101 ORDER BY rowid LIMIT 100
+    ) SELECT page.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone
+    FROM page LEFT JOIN memory_outbox o ON o.rowid=page.rowid AND o.kind IN ('claim','resolve') ORDER BY page.rowid`;
+    assert.isTrue(
+      plans.some(
+        (row) => row.detail.includes("INTEGER PRIMARY KEY") && row.detail.includes("rowid>"),
+      ),
+    );
+    yield* Effect.logInfo("R17_ORPHAN_EXPLAIN", JSON.stringify(plans)).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+      Effect.provideService(Console.Console, console),
+      Effect.provideService(References.MinimumLogLevel, "Info"),
     );
   }).pipe(Effect.provide(live)),
 );
