@@ -1491,6 +1491,14 @@ const make = Effect.gen(function* () {
       cancelling = true;
       pendingSweep = false;
       pendingSync = false;
+      const unfinished = [...rearms]
+        .filter(
+          ([, pending]) =>
+            pending.epoch === previousBinding.epoch &&
+            pending.space === previousBinding.space &&
+            !(pending.syncDone && pending.resolutionDone),
+        )
+        .map(([c]) => c);
       rearms.clear();
       const active = cycle;
       // No sync/registry mutex is held while cancellation is requested. Cycle interruption
@@ -1503,6 +1511,17 @@ const make = Effect.gen(function* () {
       const s = yield* committedSettings.read;
       settingsEpoch = s.version;
       resetStatus(s.version);
+      // Cancellation fences old transports, but an accepted observation still belongs to
+      // the same space/hub. Restart its bounded cursors under the committed epoch.
+      if (
+        !stopped &&
+        s.settings.mode !== "disabled" &&
+        s.settings.memorySpaceId !== null &&
+        s.settings.mode === previousBinding.mode &&
+        s.settings.memorySpaceId === previousBinding.space &&
+        (s.settings.mode === "member" ? s.settings.hubEnvironmentId : local) === previousBinding.hub
+      )
+        enqueueRearm(s.version, s.settings.memorySpaceId, unfinished);
       cancelling = false;
     }),
   );

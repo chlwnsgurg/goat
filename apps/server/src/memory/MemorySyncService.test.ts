@@ -4169,3 +4169,107 @@ it.effect.each(["canonical receipt", "saved approval"] as const)(
       );
     }),
 );
+it.effect.each([
+  ["protocol", "credential"],
+  ["authorization", "credential"],
+  ["protocol", "hub"],
+] as const)(
+  "unfinished rearm follows only a valid binding across transition %s",
+  ([holdClass, change]) =>
+    Effect.gen(function* () {
+      const events = yield* PubSub.bounded<{
+        memorySpaceId: M.MemorySpaceId;
+        holdClass: Store.MemoryHoldClass;
+      }>(4);
+      const firstPage = yield* Deferred.make<void>();
+      const newEpoch = yield* Deferred.make<void>();
+      let observing = false;
+      let blocked = false;
+      const client = peer({
+        pull: (_c, input) =>
+          Effect.gen(function* () {
+            if (observing && !blocked) {
+              blocked = true;
+              yield* Deferred.succeed(firstPage, undefined);
+              return yield* Effect.never;
+            }
+            if (observing) yield* Deferred.succeed(newEpoch, undefined);
+            return {
+              highWatermark: input.afterSequence,
+              throughSequence: input.afterSequence,
+              hasMore: false,
+              entries: [],
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const sql = yield* SqlClient.SqlClient;
+          const store = yield* Store.MemoryStore;
+          const base = yield* Sync.MemorySyncRuntime;
+          // Actual work payloads, synthetic initial permanent holds. The service owns all rearm transitions.
+          for (let n = 9200; n < 9303; n++) yield* enqueue(n, M.MemoryId.make(id(n + 10000)));
+          yield* sql`UPDATE memory_outbox SET hold_class=${holdClass},failure_code='invalid_output',status='retry',next_attempt_at=${Number.MAX_SAFE_INTEGER} WHERE kind='sync'`;
+          yield* sql`UPDATE memory_outbox SET hold_class='identity' WHERE id='sync:9301'`;
+          yield* sql`UPDATE memory_outbox SET hold_class='authorization' WHERE id='sync:9302'`;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              yield* sync.start;
+              observing = true;
+              yield* PubSub.publish(events, { memorySpaceId: space, holdClass });
+              yield* Deferred.await(firstPage);
+              assert.strictEqual(
+                (yield* sql`SELECT id FROM memory_outbox WHERE kind='sync' AND hold_class=${holdClass} AND id<='sync:9300'`)
+                  .length,
+                1,
+              );
+              assert.strictEqual((yield* store.readWorkHold("sync:9300"))?.holdClass, holdClass);
+              if (change === "hub")
+                yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},'fixture-other-hub',0,'ready')`;
+              yield* changeHub(
+                1,
+                change === "credential"
+                  ? { ...member, secretName: "memory-hub-fixture-next" }
+                  : { ...member, hubEnvironmentId: M.EnvironmentId.make("fixture-other-hub") },
+              );
+              yield* Deferred.await(newEpoch);
+              yield* sync.syncOnce;
+              yield* sync.shutdown;
+              assert.strictEqual(
+                (yield* store.readWorkHold("sync:9300"))?.holdClass,
+                change === "credential" ? null : "protocol",
+                "101st row follows the observation only for the same space/hub",
+              );
+              assert.strictEqual(
+                (yield* store.readWorkHold("sync:9302"))?.holdClass,
+                null,
+                "credential change supplies authorization observation",
+              );
+              assert.strictEqual(
+                (yield* store.readWorkHold("sync:9301"))?.holdClass,
+                change === "credential" ? "identity" : null,
+              );
+              assert.strictEqual(
+                (yield* sql`SELECT id FROM memory_outbox WHERE kind='sync' AND status='completed'`)
+                  .length,
+                102,
+              );
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(
+                    Layer.succeed(Sync.MemorySyncRuntime, {
+                      ...base,
+                      rearmEvents: Stream.fromPubSub(events),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client, undefined, false, true))),
+      );
+    }),
+);
