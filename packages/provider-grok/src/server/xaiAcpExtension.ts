@@ -1699,8 +1699,9 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
         // Do not call start here: cancellation must be able to reach the
         // underlying runtime when startup is stalled. Pending entries already
         // carry their session ids, and this runtime owns all of them.
-        yield* abortPendingPromptCompletions(pendingXAiPromptCompletionsRef);
-        yield* runtime.cancel;
+        yield* runtime.cancel.pipe(
+          Effect.ensuring(abortPendingPromptCompletions(pendingXAiPromptCompletionsRef)),
+        );
       }),
     } satisfies AcpSessionRuntime.AcpSessionRuntime["Service"];
   },

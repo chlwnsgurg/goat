@@ -3,6 +3,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -68,7 +69,13 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         environment: isolated.environment,
         cwd: isolated.cwd,
         mcpServers: [],
-        ...(memory ? { runtimeMode: "approval-required" as const } : {}),
+        ...(memory
+          ? {
+              runtimeMode: "approval-required" as const,
+              cancelBehavior: "wait-for-prompt" as const,
+              cancelTimeout: 2_000,
+            }
+          : {}),
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
       }).pipe(
         Effect.provideService(Crypto.Crypto, crypto),
@@ -121,7 +128,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
 
       let promptStarted = false;
       let effectiveModel: string | undefined;
-      const promptResult = yield* Effect.gen(function* () {
+      const promptFiber = yield* Effect.gen(function* () {
         const resolvedModel = resolveGrokAcpBaseModelId(modelSelection.model);
         const started = yield* runtime.start();
         const requestedReasoningEffort = getModelSelectionStringOptionValue(
@@ -164,8 +171,10 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         });
         if (memory && (yield* Deferred.isDone(rejected))) return yield* Deferred.await(rejected);
         return result;
-      }).pipe(
-        Effect.raceFirst(Deferred.await(rejected)),
+      }).pipe(Effect.raceFirst(Deferred.await(rejected)), Effect.forkChild);
+      // Timeout the join, keeping the prompt alive until ACP acknowledges cancel.
+      // Interrupting it first can tear down the session before cancel reaches the agent.
+      const promptResult = yield* Fiber.join(promptFiber).pipe(
         Effect.onInterrupt(() => runtime.cancel.pipe(Effect.timeoutOption(2_000), Effect.ignore)),
         Effect.timeoutOption(GROK_TIMEOUT_MS),
         Effect.flatMap(

@@ -33,10 +33,19 @@ const layerGrokTextGenerationTest = ServerConfig.ServerConfig.layerTest(process.
 
 function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
   const scriptPath = NodePath.join(dir, "mock.mjs");
-  const source = NodeFS.readFileSync(mockAgentPath, "utf8").replace(
-    'case "session/prompt":',
-    `case "session/prompt":
-      if (process.env.GOAT_MEMORY_STALL) { continue; }
+  const source = NodeFS.readFileSync(mockAgentPath, "utf8")
+    .replace(
+      "if (request.id === undefined) continue;",
+      `if (request.method === "session/cancel" && globalThis.stalledPromptId !== undefined) {
+      write({ jsonrpc: "2.0", id: globalThis.stalledPromptId, result: { stopReason: "cancelled" } });
+      globalThis.stalledPromptId = undefined;
+    }
+    if (request.id === undefined) continue;`,
+    )
+    .replace(
+      'case "session/prompt":',
+      `case "session/prompt":
+      if (process.env.GOAT_MEMORY_STALL) { globalThis.stalledPromptId = request.id; continue; }
       if (process.env.GOAT_MEMORY_TOOL) {
         write({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: {
           sessionUpdate: "tool_call", toolCallId: "synthetic", title: "unsafe", status: "pending"
@@ -47,7 +56,7 @@ function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
           sessionId, toolCall: { toolCallId: "synthetic", title: "unsafe" }, options: []
         } });
       }`,
-  );
+    );
   NodeFS.writeFileSync(scriptPath, source);
   return writeFakeCli({
     directory: NodePath.join(dir, "bin"),
