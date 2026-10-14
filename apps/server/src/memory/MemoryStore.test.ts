@@ -2300,3 +2300,233 @@ describe("MemoryStore transient source relay", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+describe("MemoryStore durable hub checkpoints", () => {
+  const authority: Store.HubAuthority = {
+    principal: {
+      memorySpaceId: space,
+      environmentId: env,
+      credentialVersion: 1,
+      scopes: ["memory:sync"],
+    },
+    now: Clock.currentTimeMillis,
+    reauthorize: Effect.void,
+  };
+  const seed = Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${env},${"a".repeat(64)},1,'active',0)`;
+    const op = operation(401);
+    yield* store.transact(
+      Effect.gen(function* () {
+        const current = yield* store.loadAggregate(space, memory);
+        const decision = decideMemoryOperation(
+          current,
+          op,
+          Store.hubAdmission,
+          scanMemoryValue(op),
+        );
+        const ledger = yield* store.appendHubEntryTx({
+          operation: op,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "accepted",
+          now: 0,
+        });
+        yield* store.apply({ ...decision, receipt: ledger.entry.receipt });
+      }),
+    );
+  });
+  it.effect(
+    "pins complete pages with immutable expiry and publishes recovery independently of token lifetime",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const preparation = {
+          authority,
+          checkpointId: "synthetic-cp-401",
+          snapshotToken: "synthetic-token-401",
+          hubEnvironmentId: env,
+        };
+        const handle = yield* store.transact(store.prepareHubCheckpointTx(preparation));
+        yield* TestClock.adjust(1000);
+        assert.deepStrictEqual(
+          yield* store.transact(store.prepareHubCheckpointTx(preparation)),
+          handle,
+        );
+        const page = yield* store.transact(
+          store.readHubCheckpointPageTx({
+            authority,
+            snapshotToken: handle.snapshotToken,
+            cursor: null,
+          }),
+        );
+        assert.strictEqual(page.bootstrapComplete, true);
+        assert.strictEqual(page.revisions[0]?.payload?.text, "synthetic searchable text");
+        assert.strictEqual(M.validateMemoryCheckpointRecords([page]), true);
+        const retention = yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: handle.checkpointId,
+            expectedFloor: 0,
+            nextFloor: 1,
+            now: 1000,
+          }),
+        );
+        assert.strictEqual(retention.retentionFloor, 1);
+        yield* TestClock.adjust(599000);
+        assert.strictEqual(
+          (yield* store
+            .transact(
+              store.readHubCheckpointPageTx({
+                authority,
+                snapshotToken: handle.snapshotToken,
+                cursor: null,
+              }),
+            )
+            .pipe(Effect.flip))._tag,
+          "MemoryHubError",
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE reason='hub_snapshot'`).length,
+          1,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_compaction_state WHERE published=1`).length,
+          1,
+        );
+        assert.strictEqual(
+          (yield* store.transact(store.readHubUsageTx(space))).publishedPinnedBytes > 0,
+          true,
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("forget scrubs a pinned snapshot immediately without changing its continuation", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const preparation = {
+        authority,
+        checkpointId: "synthetic-cp-402",
+        snapshotToken: "synthetic-token-402",
+        hubEnvironmentId: env,
+      };
+      const handle = yield* store.transact(store.prepareHubCheckpointTx(preparation));
+      const before = yield* store.transact(
+        store.readHubCheckpointPageTx({
+          authority,
+          snapshotToken: handle.snapshotToken,
+          cursor: null,
+        }),
+      );
+      const op = decodeOperation({
+        protocolVersion: 1,
+        kind: "forget",
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: id(402),
+        originEnvironmentId: env,
+        expectedHeads: [id(411)],
+        tombstone: {
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: id(402),
+          deletingEnvironmentId: env,
+          deletedAtUtc: now,
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      });
+      yield* store.transact(
+        Effect.gen(function* () {
+          const decision = decideMemoryOperation(
+            yield* store.loadAggregate(space, memory),
+            op,
+            Store.hubAdmission,
+            scanMemoryValue(op),
+          );
+          const ledger = yield* store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome: "deleted",
+            now: 1,
+          });
+          yield* store.apply({ ...decision, receipt: ledger.entry.receipt });
+        }),
+      );
+      const after = yield* store.transact(
+        store.readHubCheckpointPageTx({
+          authority,
+          snapshotToken: handle.snapshotToken,
+          cursor: null,
+        }),
+      );
+      assert.strictEqual(after.pageOrdinal, before.pageOrdinal);
+      assert.strictEqual(after.nextCursor, before.nextCursor);
+      assert.strictEqual(after.checkpointSequence, before.checkpointSequence);
+      assert.strictEqual(after.revisions[0]?.payload, null);
+      assert.strictEqual(after.items[0]?.status, "blocked");
+      assert.strictEqual(M.validateMemoryCheckpointRecords([after]), true);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "floor publication rolls back and covered tail compaction preserves replay metadata",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const handle = yield* store.transact(
+          store.prepareHubCheckpointTx({
+            authority,
+            checkpointId: "synthetic-cp-403",
+            snapshotToken: "synthetic-token-403",
+            hubEnvironmentId: env,
+          }),
+        );
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              yield* store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: handle.checkpointId,
+                expectedFloor: 0,
+                nextFloor: 1,
+                now: 0,
+              });
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual(
+          (yield* store.transact(store.readHubRetentionTx(space))).retentionFloor,
+          0,
+        );
+        yield* store.transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: handle.checkpointId,
+            expectedFloor: 0,
+            nextFloor: 1,
+            now: 0,
+          }),
+        );
+        const status = yield* store.transact(
+          store.compactEligibleHistoryTx({
+            memorySpaceId: space,
+            expectedFloor: 1,
+            now: 2592000000,
+            limit: 1,
+          }),
+        );
+        assert.strictEqual(status.removedRows, 1);
+        assert.strictEqual(
+          (yield* store.transact(store.readHubReceiptTx(space, operation(401).operationId)))?.entry
+            .receipt.outcome,
+          "accepted",
+        );
+        assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 0);
+      }).pipe(Effect.provide(live)),
+  );
+});
