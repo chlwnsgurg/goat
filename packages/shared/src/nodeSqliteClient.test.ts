@@ -815,7 +815,7 @@ const checkpointWorkerReply = (worker: NodeWorkerThreads.Worker) =>
         };
         const onError = (cause: Error) => {
           stop();
-          reject(new Error(`checkpoint worker failed: ${cause.message}`));
+          reject(new Error(`checkpoint worker failed: ${cause.stack ?? cause.message}`));
         };
         const onExit = (code: number) => {
           stop();

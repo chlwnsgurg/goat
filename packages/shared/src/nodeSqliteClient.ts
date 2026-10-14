@@ -532,6 +532,9 @@ const checkpointWorkerSource = `
 const { parentPort, workerData } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync(workerData.filename);
+// Like the reader: preparing below reads the schema, which waits while a writer
+// holds the lock, such as when it switches the journal mode.
+db.exec("PRAGMA busy_timeout = 5000;");
 const version = db.prepare("SELECT sqlite_version() AS version").get().version;
 const [major, minor] = version.split(".").map(Number);
 if (major < 3 || (major === 3 && minor < 51)) throw new Error("SQLite " + version + " has no NOOP checkpoint");
@@ -539,8 +542,8 @@ if (major < 3 || (major === 3 && minor < 51)) throw new Error("SQLite " + versio
 db.exec("PRAGMA checkpoint_fullfsync = ON;");
 const frames = db.prepare("PRAGMA wal_checkpoint(NOOP)");
 const checkpoint = db.prepare("PRAGMA wal_checkpoint(PASSIVE)");
-// Another connection can hold a lock that even NOOP needs (SQLITE_BUSY, such as
-// an exclusive-mode writer). Skip that round: the next request checks again.
+// Checkpoints do not wait on the busy timeout, so one can still meet SQLITE_BUSY
+// from another connection. Skip that round: the next request checks again.
 const unlessBusy = (run) => {
   try {
     run();
