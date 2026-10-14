@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
-import RemoteDispatchQuestionsMigration from "./066_RemoteDispatchQuestions.ts";
+import RemoteDispatchQuestionsMigration from "./067_RemoteDispatchQuestions.ts";
 
 it.effect("runs again over its own column, as a relocated migration id would", () =>
   Effect.gen(function* () {

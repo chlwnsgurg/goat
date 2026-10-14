@@ -1,4 +1,6 @@
 import { assert, it } from "@effect/vitest";
+import * as ThreadLaunchService from "./ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { vi } from "vite-plus/test";
 import {
   CommandId,
@@ -1987,6 +1989,8 @@ it.effect.each([
         ),
       });
       const mcp = McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(runtime),
         Layer.provide(registry),
@@ -2887,6 +2891,8 @@ it.effect.each([
         },
       );
       const mcp = McpHttpServer.layerOrchestratorToolkit.pipe(
+        Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(
           Layer.merge(

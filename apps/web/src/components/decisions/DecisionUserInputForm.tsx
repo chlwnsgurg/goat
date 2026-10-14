@@ -48,6 +48,8 @@ export function DecisionUserInputForm({
               <h3 className="text-sm font-medium">{question.header}</h3>
               <PendingUserInputQuestionBody
                 question={question}
+                cwd={undefined}
+                threadRef={item.ref}
                 selectedOptionValues={draft?.selectedOptionValues ?? []}
                 customAnswerActive={
                   question.initialAnswer !== undefined

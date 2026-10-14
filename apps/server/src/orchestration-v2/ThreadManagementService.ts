@@ -577,6 +577,20 @@ export function latestRun(
   return projection.runs.toSorted((left, right) => right.ordinal - left.ordinal)[0];
 }
 
+/** The newest run in `run`'s restart continuation chain, or `run` itself. */
+function latestRestartContinuation(
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  run: OrchestrationV2Run,
+): OrchestrationV2Run {
+  let current = run;
+  for (let hops = 0; hops < runs.length; hops++) {
+    const next = runs.find((candidate) => candidate.restartContinuationOfRunId === current.id);
+    if (next === undefined) break;
+    current = next;
+  }
+  return current;
+}
+
 export function latestActiveRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
 ): OrchestrationV2Run | undefined {
@@ -1287,17 +1301,27 @@ const make = Effect.gen(function* () {
       if (selectedRun === undefined)
         return { threadId: input.threadId, run: null, timedOut: false };
       const ignoredRequestIds = new Set(input.ignoreRequestIds ?? []);
-      const state = (run: OrchestrationV2Run) =>
+      const state = (runs: ReadonlyArray<OrchestrationV2Run>) =>
         Effect.gen(function* () {
+          const selected = runs.find((candidate) => candidate.id === selectedRun.id);
+          if (selected === undefined)
+            return yield* new ThreadManagementRunNotFoundError({
+              threadId: input.threadId,
+              runId: selectedRun.id,
+            });
+          const run = latestRestartContinuation(runs, selected);
+          const pending =
+            isTerminalRunStatus(run.status) &&
+            (yield* orchestrator.restartContinuationPending(run));
           let pendingRequestIds: ReadonlyArray<RuntimeRequestId> = [];
           if (input.releaseOnPendingQuestion !== false) {
             const items = yield* getProjectThreadRecords(input, ["turnItems"], {
               turnItemTypes: ["user_input_request"],
-              turnItemRunIds: [selectedRun.id],
+              turnItemRunIds: [run.id],
             });
             const requestIds = items.turnItems.flatMap((item) =>
               item.type === "user_input_request" &&
-              item.runId === selectedRun.id &&
+              item.runId === run.id &&
               !ignoredRequestIds.has(item.requestId)
                 ? [item.requestId]
                 : [],
@@ -1308,14 +1332,15 @@ const make = Effect.gen(function* () {
               });
               pendingRequestIds = pendingUserInputRequestIdsForRun(
                 { ...items, ...requests },
-                selectedRun.id,
+                run.id,
               ).filter((requestId) => !ignoredRequestIds.has(requestId));
             }
           }
           return {
             run,
+            pending,
             pendingRequestIds,
-            ready: isTerminalRunStatus(run.status) || pendingRequestIds.length > 0,
+            ready: (isTerminalRunStatus(run.status) && !pending) || pendingRequestIds.length > 0,
           };
         });
       const result = (
@@ -1329,51 +1354,46 @@ const make = Effect.gen(function* () {
           ? {}
           : { pendingRequestIds: current.pendingRequestIds }),
       });
-      const initial = yield* state(selectedRun);
+      const initial = yield* state(target.runs);
       if (initial.ready) return result(initial, false);
       const reload = () =>
-        Effect.gen(function* () {
-          const records = yield* getProjectThreadRecords(input, ["runs"], {
-            runIds: [selectedRun.id],
-          });
-          const run = records.runs.find((run) => run.id === selectedRun.id);
-          if (run === undefined)
-            return yield* new ThreadManagementRunNotFoundError({
-              threadId: input.threadId,
-              runId: selectedRun.id,
-            });
-          return yield* state(run);
-        });
+        getProjectThreadRecords(input, ["runs"]).pipe(
+          Effect.flatMap((current) => state(current.runs)),
+        );
+      // Restart continuations and pending questions both release this event-driven wait.
+      // A declined continuation has no event, so its effect settling also wakes the wait.
+      const updates = Stream.mergeAll(
+        (
+          ["run.updated", "thread.deleted", "runtime-request.updated", "turn-item.updated"] as const
+        ).map((eventType) =>
+          orchestrator.streamStoredEventsFrom({
+            threadId: input.threadId,
+            afterSequence,
+            eventType,
+          }),
+        ),
+        { concurrency: "unbounded" },
+      ).pipe(
+        Stream.mapError(loadError),
+        Stream.filter(
+          (stored) =>
+            stored.event.type !== "run.updated" ||
+            stored.event.payload.id === selectedRun.id ||
+            stored.event.payload.restartContinuationOfRunId !== undefined,
+        ),
+        Stream.filter(
+          (stored) =>
+            stored.event.type !== "turn-item.updated" ||
+            stored.event.payload.type === "user_input_request",
+        ),
+      );
       const waited = Option.flatten(
-        yield* Stream.mergeAll(
-          (
-            [
-              "run.updated",
-              "thread.deleted",
-              "runtime-request.updated",
-              "turn-item.updated",
-            ] as const
-          ).map((eventType) =>
-            orchestrator.streamStoredEventsFrom({
-              threadId: input.threadId,
-              afterSequence,
-              eventType,
-            }),
-          ),
-          { concurrency: "unbounded" },
+        yield* Stream.merge(
+          updates,
+          initial.pending
+            ? Stream.fromEffect(orchestrator.awaitRestartContinuation(initial.run))
+            : Stream.empty,
         ).pipe(
-          Stream.mapError(loadError),
-          Stream.filter(
-            (stored) =>
-              stored.event.type !== "run.updated" || stored.event.payload.id === selectedRun.id,
-          ),
-          // Some providers store the request before its question item arrives.
-          Stream.filter(
-            (stored) =>
-              stored.event.type !== "turn-item.updated" ||
-              (stored.event.payload.type === "user_input_request" &&
-                stored.event.payload.runId === selectedRun.id),
-          ),
           Stream.mapEffect(reload),
           Stream.filter((current) => current.ready),
           Stream.runHead,
