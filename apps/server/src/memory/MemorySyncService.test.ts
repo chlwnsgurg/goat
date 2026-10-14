@@ -5481,7 +5481,7 @@ it.effect.each(["claim", "paired"] as const)(
     Effect.gen(function* () {
       let probes = 0;
       let attempts = 0;
-      let availabilityChecks = 0;
+      let lease: M.MemoryResolutionLease | undefined;
       const held = yield* Deferred.make<void>();
       const resumed = yield* Deferred.make<void>();
       const refuse = Effect.gen(function* () {
@@ -5498,52 +5498,47 @@ it.effect.each(["claim", "paired"] as const)(
             probes++;
             return recoveredDescriptor;
           }),
-        ...(stage === "claim" ? { claim: () => refuse } : {}),
+        claim: (_c, { protocolVersion: _protocol, ...claim }) => {
+          if (stage === "claim") return refuse;
+          lease = {
+            ...claim,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          };
+          return Effect.succeed(lease);
+        },
+        renew: () =>
+          Effect.suspend(() => {
+            if (attempts === 0) return refuse;
+            return Effect.succeed(lease!);
+          }),
         release: () => Deferred.succeed(held, undefined).pipe(Effect.as({ released: true })),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: () =>
+          Deferred.succeed(resumed, undefined).pipe(Effect.andThen(Effect.never)),
       });
       yield* Effect.scoped(
         Effect.gen(function* () {
           yield* ready;
           yield* conflict();
-          const base = yield* Sync.MemorySyncRuntime;
-          yield* Effect.scoped(
-            Effect.gen(function* () {
-              const sync = yield* Sync.MemorySyncService;
-              const sql = yield* SqlClient.SqlClient;
-              yield* sync.start;
-              if (stage === "paired") yield* Deferred.await(held);
-              assert.strictEqual(attempts, 1);
-              const heldRows = yield* sql`SELECT id FROM memory_outbox WHERE hold_class='identity'`;
-              assert.strictEqual(heldRows.length, stage === "claim" ? 1 : 2);
-              yield* TestClock.adjust(29999);
-              assert.strictEqual(probes, 0);
-              yield* TestClock.adjust(1);
-              assert.strictEqual(probes, 1);
-              yield* Deferred.await(resumed);
-              assert.strictEqual(attempts, 2);
-              yield* sync.shutdown;
-            }).pipe(
-              Effect.provide(
-                Layer.fresh(Sync.layer).pipe(
-                  Layer.provide(
-                    Layer.succeed(Sync.MemorySyncRuntime, {
-                      ...base,
-                      ...(stage === "paired"
-                        ? {
-                            available: () =>
-                              Effect.suspend(() => {
-                                availabilityChecks++;
-                                return availabilityChecks % 2 === 1 ? Effect.void : refuse;
-                              }),
-                          }
-                        : {}),
-                    }),
-                  ),
-                ),
-              ),
-            ),
-          );
-        }).pipe(Effect.provide(fixture(client))),
+          const sync = yield* Sync.MemorySyncService;
+          const sql = yield* SqlClient.SqlClient;
+          yield* sync.start;
+          if (stage === "paired") yield* Deferred.await(held);
+          assert.strictEqual(attempts, 1);
+          const heldRows = yield* sql`SELECT id FROM memory_outbox WHERE hold_class='identity'`;
+          assert.strictEqual(heldRows.length, stage === "claim" ? 1 : 2);
+          yield* TestClock.adjust(29999);
+          assert.strictEqual(probes, 0);
+          yield* TestClock.adjust(1);
+          assert.strictEqual(probes, 1);
+          yield* Deferred.await(resumed);
+          assert.strictEqual(attempts, stage === "claim" ? 2 : 1);
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client, model))),
       );
     }),
 );
