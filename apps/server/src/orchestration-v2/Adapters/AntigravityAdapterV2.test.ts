@@ -86,8 +86,8 @@ describe("AntigravityAdapterV2 flavor", () => {
     assert.equal(mode("full-access"), "yolo");
   });
 
-  it("exposes Antigravity's /compact command through the v2 compaction path", () => {
-    assert.isTrue(flavor.supportsCompaction);
+  it("does not invent native Antigravity compaction support", () => {
+    assert.isFalse(flavor.supportsCompaction);
   });
 
   it("routes interaction_* permission requests to the question card", () => {
