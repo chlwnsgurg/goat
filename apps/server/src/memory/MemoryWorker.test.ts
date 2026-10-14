@@ -192,6 +192,30 @@ const work = (kind: Store.MemoryWork["kind"] = "summary"): Store.MemoryWork => (
     modelSelection: selection,
   },
 });
+// Summary A covers a run that is then rolled back, and run B adds 101 messages. The next
+// summary must drop A and regenerate from the start: two bounded chunks in one work item.
+const seedRolledBackRegeneration = Effect.gen(function* () {
+  yield* seed;
+  const sql = yield* SqlClient.SqlClient;
+  const worker = yield* Worker.MemoryWorker;
+  const earlyMessageRow = (yield* sql<{
+    payload_json: string;
+  }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+  const earlyMessage = yield* decodeMessage(earlyMessageRow.payload_json);
+  yield* sql`UPDATE orchestration_events SET sequence=3 WHERE sequence=2`;
+  yield* sql`INSERT INTO orchestration_events VALUES (2,${id(1299)},${threadId},'message.updated',${encodeMessage({ ...earlyMessage, id: M.MessageId.make("survivor"), runId: null })},${now},2,'thread')`;
+  yield* worker.sweepDue();
+  const runRow = (yield* sql<{
+    payload_json: string;
+  }>`SELECT payload_json FROM orchestration_events WHERE sequence=3`)[0]!;
+  const run = yield* decodeRun(runRow.payload_json);
+  yield* sql`INSERT INTO orchestration_events VALUES (4,${id(1300)},${threadId},'run.updated',${encodeRun({ ...run, status: "rolled_back" })},${now},2,'thread')`;
+  const nextRunId = M.RunId.make("run-b");
+  for (let index = 0; index < 101; index++) {
+    yield* sql`INSERT INTO orchestration_events VALUES (${index + 5},${id(1400 + index)},${threadId},'message.updated',${encodeMessage({ ...earlyMessage, id: M.MessageId.make(`run-b-${index}`), runId: nextRunId })},${now},2,'thread')`;
+  }
+  yield* sql`INSERT INTO orchestration_events VALUES (106,${id(1600)},${threadId},'run.updated',${encodeRun({ ...run, id: nextRunId, userMessageId: M.MessageId.make("run-b-0"), status: "completed" })},${now},2,'thread')`;
+});
 describe("MemoryWorker", () => {
   it.effect("started idle worker drains without waking itself", () =>
     Effect.scoped(
@@ -503,36 +527,13 @@ describe("MemoryWorker", () => {
     (local) => {
       const inputs: M.GenerateMemorySummaryInput[] = [];
       return Effect.gen(function* () {
-        yield* seed;
-        const sql = yield* SqlClient.SqlClient;
+        yield* seedRolledBackRegeneration;
         const worker = yield* Worker.MemoryWorker;
         const store = yield* Store.MemoryStore;
-        const earlyMessageRow = (yield* sql<{
-          payload_json: string;
-        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
-        const earlyMessage = yield* decodeMessage(earlyMessageRow.payload_json);
-        yield* sql`UPDATE orchestration_events SET sequence=3 WHERE sequence=2`;
-        yield* sql`INSERT INTO orchestration_events VALUES (2,${id(1299)},${threadId},'message.updated',${encodeMessage({ ...earlyMessage, id: M.MessageId.make("survivor"), runId: null })},${now},2,'thread')`;
-        yield* worker.sweepDue();
         assert.include(
           inputs[0]!.messages.map((m) => m.messageId),
           M.MessageId.make("message"),
         );
-        const messageRow = (yield* sql<{
-          payload_json: string;
-        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
-        const message = yield* decodeMessage(messageRow.payload_json);
-        const runRow = (yield* sql<{
-          payload_json: string;
-        }>`SELECT payload_json FROM orchestration_events WHERE sequence=3`)[0]!;
-        const run = yield* decodeRun(runRow.payload_json);
-        yield* sql`INSERT INTO orchestration_events VALUES (4,${id(1300)},${threadId},'run.updated',${encodeRun({ ...run, status: "rolled_back" })},${now},2,'thread')`;
-        const nextRunId = M.RunId.make("run-b");
-        // Force regeneration to cross the bounded 100-message chunk.
-        for (let index = 0; index < 101; index++) {
-          yield* sql`INSERT INTO orchestration_events VALUES (${index + 5},${id(1400 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`run-b-${index}`), runId: nextRunId })},${now},2,'thread')`;
-        }
-        yield* sql`INSERT INTO orchestration_events VALUES (106,${id(1600)},${threadId},'run.updated',${encodeRun({ ...run, id: nextRunId, userMessageId: M.MessageId.make("run-b-0"), status: "completed" })},${now},2,'thread')`;
         // The hook itself is bounded to 100 events per sweep.
         yield* worker.sweepDue();
         yield* worker.sweepDue();
@@ -571,52 +572,31 @@ describe("MemoryWorker", () => {
     },
   );
   it.effect.each([false, true])(
-    "keeps its claim across a summary that outlasts the claim deadline (local=%s)",
+    "keeps one claim while a regeneration outlasts the claim deadline (local=%s)",
     (local) => {
       const inputs: M.GenerateMemorySummaryInput[] = [];
       return Effect.gen(function* () {
-        yield* seed;
+        yield* seedRolledBackRegeneration;
         const sql = yield* SqlClient.SqlClient;
         const worker = yield* Worker.MemoryWorker;
-        const store = yield* Store.MemoryStore;
-        const row = (yield* sql<{
-          payload_json: string;
-        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
-        const message = yield* decodeMessage(row.payload_json);
-        // 151 messages before the terminal run need two bounded chunks for one summary.
-        yield* sql`UPDATE orchestration_events SET sequence=200 WHERE sequence=2`;
-        for (let index = 0; index < 150; index++) {
-          yield* sql`INSERT INTO orchestration_events VALUES (${index + 2},${id(3000 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`long-${index}`), runId: null })},${now},2,'thread')`;
-        }
-        // The hook reads 100 events per sweep; the extra sweep would reclaim a lapsed claim.
         yield* worker.sweepDue();
         yield* worker.sweepDue();
         yield* worker.sweepDue();
-        // Two 400s provider calls outlast the 600s claim, so each call must renew it.
-        assert.strictEqual(inputs.length, 2);
-        assert.isUndefined(inputs[0]!.previousSummary);
-        assert.isDefined(inputs[1]!.previousSummary);
-        const seen = inputs.flatMap((input) => input.messages.map((m) => m.messageId));
-        assert.strictEqual(seen.length, 151);
-        assert.strictEqual(new Set(seen).size, seen.length);
-        assert.strictEqual(
-          (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='summary' AND status!='completed'`)
-            .length,
-          0,
+        yield* worker.sweepDue();
+        // Summary A, the two-call regeneration in one work item, then the continuation chunk.
+        // Two 400s calls outlast the 600s claim, so without renewal the regeneration repeats.
+        assert.strictEqual(inputs.length, 4);
+        assert.isUndefined(inputs[1]!.previousSummary);
+        assert.isDefined(inputs[2]!.previousSummary);
+        const rows = yield* sql<{
+          attempt: number;
+          status: string;
+        }>`SELECT attempt,status FROM memory_outbox WHERE kind='summary'`;
+        assert.isAbove(rows.length, 0);
+        assert.deepStrictEqual(
+          [...new Set(rows.map((row) => `${row.status}:${row.attempt}`))],
+          ["completed:1"],
         );
-        const summaryId = M.MemoryId.make(
-          Service.memoryStableUuid(`${environmentId}:${threadId}:summary`),
-        );
-        const aggregate = local ? undefined : yield* store.loadAggregate(space, summaryId);
-        const final = local
-          ? yield* store.readLocalSummaryPayload(
-              environmentId,
-              `${environmentId}:${threadId}:summary`,
-            )
-          : aggregate?.revisions.find((pair) => pair.revision.revisionId === aggregate.heads[0])
-              ?.payload;
-        if (!final) throw new Error("Missing summary");
-        assert.include(final.text, "long-149");
       }).pipe(Effect.provide(live(false, (input) => inputs.push(input), local, 400000)));
     },
   );
