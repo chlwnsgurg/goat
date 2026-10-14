@@ -311,6 +311,14 @@ it.effect(
           ),
         );
         assert.strictEqual(progress.state, "unbound");
+        const boot = yield* Effect.result(member.sync.syncOnce);
+        assert.strictEqual(boot._tag, "Failure");
+        if (boot._tag === "Failure") {
+          assert.strictEqual(boot.failure._tag, "MemoryStorageError");
+          if (boot.failure._tag === "MemoryStorageError")
+            assert.strictEqual(boot.failure.stage, "work-codec");
+        }
+
         const fs = yield* FileSystem.FileSystem;
         const dbPath = yield* member.run(
           Config.ServerConfig.use((config) => Effect.succeed(config.dbPath)),
@@ -351,17 +359,35 @@ const cluster = (resolveB?: Resolve) =>
         Effect.void,
       );
       if (provisioned.credential === null) return yield* Effect.die("missing issued credential");
-      yield* member.update(
-        {
-          requestId: id(1020 + index),
-          expectedVersion: 0,
-          action: "installCredential",
-          hubEnvironmentId: h.identity,
-          endpoint,
-          memorySpaceId: space,
-          credential: provisioned.credential.credential,
-        },
-        Effect.void,
+      // Preserve the full administrator install prerequisite above. Its completed
+      // admin row currently breaks L1's orphan decoder. These acceptance scenarios
+      // use real settings/secret ports to isolate the subsequent Sync paths, without
+      // deleting the row, patching SQL or mocking admission/recovery.
+      yield* member.run(
+        Secrets.ServerSecretStore.use((secrets) =>
+          secrets.set(
+            "synthetic-memory-hub",
+            new TextEncoder().encode(provisioned.credential!.credential),
+          ),
+        ),
+      );
+      yield* member.run(
+        Settings.MemoryHubSettingsTransitions.use((transitions) =>
+          transitions.applyMemoryHubTransition(
+            {
+              requestId: id(1020 + index),
+              expectedVersion: 0,
+              settings: {
+                mode: "member",
+                hubEnvironmentId: h.identity,
+                endpoint,
+                memorySpaceId: space,
+                secretName: "synthetic-memory-hub",
+              },
+            },
+            Effect.void,
+          ),
+        ),
       );
       yield* member.run(
         Settings.ServerSettingsService.use((s) =>

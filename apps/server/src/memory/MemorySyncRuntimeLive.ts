@@ -184,7 +184,7 @@ const make = Effect.gen(function* () {
         .getInstance(selection.instanceId)
         .pipe(
           Effect.flatMap((instance) =>
-            instance === undefined
+            instance === undefined || !instance.enabled
               ? Effect.fail(new M.MemoryHubError({ code: "route_unavailable" }))
               : instance.textGeneration.resolveMemoryConflict === undefined
                 ? Effect.fail(new M.MemoryHubError({ code: "unsupported_operation" }))
