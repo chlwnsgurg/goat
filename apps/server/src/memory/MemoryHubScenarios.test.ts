@@ -757,7 +757,7 @@ describe("Memory hub assembled HTTP scenarios", () => {
       );
       const enabled = yield* descriptor;
       assert.strictEqual(enabled.capabilities.memoryHubProtocolVersion, 1);
-      assert.strictEqual(enabled.capabilities.memory, undefined);
+      assert.deepStrictEqual(enabled.capabilities.memory, { protocolVersion: 1 });
       yield* s.configure("disabled");
       const disabled = yield* descriptor;
       assert.strictEqual(disabled.environmentId, enabled.environmentId);
