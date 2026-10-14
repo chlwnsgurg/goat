@@ -86,8 +86,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
     const released = yield* Deferred.make<M.MemoryId>();
     let generated = 0;
-    const claimed = yield* Deferred.make<M.MemoryResolutionLease>();
-    const releaseResult = yield* Deferred.make<M.MemoryHubReleaseResult>();
+    let claimed: M.MemoryResolutionLease | null = null;
+    let releaseResult: M.MemoryHubReleaseResult | null = null;
     let descriptorHealthy = true;
     let probes = 0;
     let rearmObservations = 0;
@@ -168,9 +168,13 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         return Client.MemoryHubClient.of({
           ...client,
           claim: (connection, input) =>
-            client
-              .claim(connection, input)
-              .pipe(Effect.tap((lease) => Deferred.succeed(claimed, lease))),
+            client.claim(connection, input).pipe(
+              Effect.tap((lease) =>
+                Effect.sync(() => {
+                  claimed = lease;
+                }),
+              ),
+            ),
           preflight: (connection) =>
             client.preflight(connection).pipe(
               Effect.tap(() =>
@@ -199,7 +203,11 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
             ),
           release: (connection, input) =>
             client.release(connection, input).pipe(
-              Effect.tap((result) => Deferred.succeed(releaseResult, result)),
+              Effect.tap((result) =>
+                Effect.sync(() => {
+                  releaseResult = result;
+                }),
+              ),
               Effect.onExit(() => Deferred.succeed(released, input.memoryId).pipe(Effect.asVoid)),
             ),
         });
@@ -307,8 +315,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       aggregate,
       released,
       generated: () => generated,
-      claimed,
-      releaseResult,
+      claimed: () => claimed,
+      releaseResult: () => releaseResult,
       startProduction,
       setDescriptorHealthy: (healthy: boolean) => {
         descriptorHealthy = healthy;
@@ -727,11 +735,13 @@ it.effect(
       assert.strictEqual(yield* Deferred.await(c.a.released), target);
       yield* c.a.worker.drain;
       assert.strictEqual(c.a.generated(), 1);
-      const takeover = yield* Deferred.await(c.a.claimed);
+      const takeover = c.a.claimed();
+      assert.isNotNull(takeover);
+      if (takeover === null) return yield* Effect.die("missing observed takeover claim");
       assert.strictEqual(Date.parse(takeover.claimedAtHubTime), 120000);
       assert.strictEqual(Date.parse(takeover.expiresAtHubTime), 240000);
       assert.isAbove(takeover.fencingToken, lease.fencingToken);
-      assert.strictEqual((yield* Deferred.await(c.a.releaseResult)).released, true);
+      assert.strictEqual(c.a.releaseResult()?.released, true);
       assert.strictEqual(
         activeText(yield* c.a.aggregate(c.space, target)),
         "resolved synthetic fact",
