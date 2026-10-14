@@ -1428,7 +1428,15 @@ const make = Effect.gen(function* () {
       "hubSequence" in old.receipt &&
       old.receipt.hubSequence !== null &&
       (yield* decode(encodeHubReceipt(old.receipt))) !==
-        (yield* decode(encodeHubReceipt(entry.receipt)))
+        (yield* decode(
+          encodeHubReceipt({
+            ...entry.receipt,
+            ...(old.receipt.forgetExpansion
+              ? { forgetExpansion: old.receipt.forgetExpansion }
+              : {}),
+            ...(old.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+          }),
+        ))
     )
       return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
     const incorporated =

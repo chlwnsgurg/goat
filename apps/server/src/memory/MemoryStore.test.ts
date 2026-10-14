@@ -2336,7 +2336,26 @@ describe("MemoryStore transient source relay", () => {
         const nextBase = operation(305);
         if (nextBase.kind !== "upsert") throw new Error("fixture");
         const current = yield* store.loadAggregate(space, memory);
-        const next = { ...nextBase, revision: { ...nextBase.revision, parents: current.heads } };
+        const next = {
+          ...nextBase,
+          expectedHeads: current.heads,
+          revision: {
+            ...nextBase.revision,
+            parents: current.heads,
+            provenance: { environmentId: env, sourceThread: thread, sourceWatermark: watermark },
+          },
+          payload: {
+            ...nextBase.payload,
+            evidence: [
+              {
+                origin: "thread" as const,
+                sourceThread: thread,
+                watermark,
+                messageIds: [messageId],
+              },
+            ],
+          },
+        };
         const approved = decideMemoryOperation(
           current,
           next,
@@ -3068,4 +3087,191 @@ it.effect("purges submission bodies in every ticket state and fences cancelled o
       0,
     );
   }).pipe(Effect.provide(live)),
+);
+
+const seedSubmission = Effect.gen(function* () {
+  const { store, sql, claim } = yield* seedResolutionConflict;
+  const ticket = yield* store.transact(
+    store.transitionHubLeaseTx({
+      authority: leaseAuthority,
+      action: { kind: "claim", request: claim },
+    }),
+  );
+  if (!ticket || "released" in ticket) throw new Error("fixture");
+  yield* store.persistResolutionTicket(ticket);
+  const key = { memorySpaceId: space, attemptId: ticket.attemptId };
+  const owner = yield* store.transact(
+    store.acquireResolutionTicketTx({
+      key,
+      expectedVersion: 0,
+      owner: "fixture",
+      coordinatorEpoch: 1,
+      now: 0,
+      ownedUntil: 100,
+    }),
+  );
+  const base = operation(80);
+  if (base.kind !== "upsert" || !owner) throw new Error("fixture");
+  const op = decodeOperation({
+    ...base,
+    kind: "resolve",
+    expectedHeads: claim.conflictHeadSet,
+    revision: { ...base.revision, parents: claim.conflictHeadSet },
+    conflictId: claim.conflictId,
+    fencingToken: ticket.fencingToken,
+    payload: { ...base.payload, text: "synthetic submission body" },
+    resolution: {
+      resolutionId: id(81),
+      memorySpaceId: space,
+      memoryId: memory,
+      inputRevisionIds: claim.conflictHeadSet,
+      inputPayloadRefs: claim.conflictHeadSet,
+      judgmentRef: id(81),
+      requestedModelSelection: claim.frozenDefaultModelSelection,
+      effectiveProvider: "codex",
+      effectiveModel: "fixture",
+      resolvingEnvironmentId: env,
+      fencingToken: ticket.fencingToken,
+      resultRevisionId: base.revision.revisionId,
+      appliedAtUtc: now,
+      revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+    },
+    resolutionPayload: { resolutionId: id(81), judgment: "synthetic submission judgment" },
+  });
+  const submission = {
+    protocolVersion: 1 as const,
+    memorySpaceId: space,
+    holderEnvironmentId: env,
+    attemptId: ticket.attemptId,
+    operation: op,
+  };
+  const ownership = { ...key, owner: "fixture", coordinatorEpoch: 1, version: owner.version };
+  return { store, sql, ticket, key, ownership, submission };
+});
+
+it.effect("rejects mismatched ticket identities before saving a submission and on recovery", () =>
+  Effect.gen(function* () {
+    const { store, sql, key, ownership, submission } = yield* seedSubmission;
+    const base = submission.operation;
+    if (base.kind !== "resolve") throw new Error("fixture");
+    for (const op of [
+      {
+        ...base,
+        memoryId: M.MemoryId.make(id(950)),
+        revision: { ...base.revision, memoryId: M.MemoryId.make(id(950)) },
+        resolution: { ...base.resolution, memoryId: M.MemoryId.make(id(950)) },
+      },
+      { ...base, conflictId: M.MemoryConflictId.make(id(951)) },
+      {
+        ...base,
+        fencingToken: base.fencingToken + 1,
+        resolution: { ...base.resolution, fencingToken: base.fencingToken + 1 },
+      },
+    ]) {
+      const failure = yield* store
+        .transact(
+          store.persistResolutionSubmissionTx({
+            ownership,
+            submission: { ...submission, operation: op },
+            digest: memoryOperationDigest(op),
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryStoreConflict");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        0,
+      );
+    }
+    yield* store.transact(
+      store.persistResolutionSubmissionTx({
+        ownership,
+        submission,
+        digest: memoryOperationDigest(base),
+      }),
+    );
+    const workId = `resolve:${space}:${key.attemptId}`;
+    yield* sql`UPDATE memory_outbox SET ticket_json=json_set(ticket_json,'$.ticket.memoryId',${id(950)}) WHERE id=${workId}`;
+    const failure = yield* store
+      .readRecoverableResolutionTickets({ now: 101, limit: 10 })
+      .pipe(Effect.flip);
+    assert.strictEqual(failure.stage, "ticket-payload-identity");
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["completed", "failed", "cancelled", "transition"] as const)(
+  "clears terminal submission atomically while protecting uncertain recovery: %s",
+  (status) =>
+    Effect.gen(function* () {
+      const { store, sql, key, ownership, submission } = yield* seedSubmission;
+      const written = yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership,
+          submission,
+          digest: memoryOperationDigest(submission.operation),
+        }),
+      );
+      const deadline = Date.parse(
+        submission.operation.kind === "resolve"
+          ? submission.operation.resolution.revertDeadlineUtc
+          : now,
+      );
+      yield* store.prunePayloads(deadline + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS, 100);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        1,
+      );
+      assert.deepStrictEqual(
+        (yield* store.readRecoverableResolutionTickets({ now: 101, limit: 10 }))[0]?.submission,
+        submission,
+      );
+      const workId = `resolve:${space}:${key.attemptId}`;
+      const finish = Effect.gen(function* () {
+        return yield* status === "transition"
+          ? store.transact(
+              store.transitionResolutionTicketTx({
+                ownership: { ...ownership, version: written.version },
+                nextState: "terminal",
+                now: 1,
+                ownedUntil: null,
+                nextAttemptAt: 1,
+              }),
+            )
+          : store.finishWork(workId, status).pipe(Effect.as(null));
+      });
+      yield* store
+        .transact(
+          finish.pipe(
+            Effect.andThen(
+              Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" })),
+            ),
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        1,
+      );
+      yield* finish;
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref LIKE 'submission:%'`).length,
+        0,
+      );
+      assert.deepStrictEqual(
+        yield* store.readRecoverableResolutionTickets({ now: 101, limit: 10 }),
+        [],
+      );
+      const rows = yield* sql<{
+        ticket_json: string;
+      }>`SELECT ticket_json FROM memory_outbox WHERE id=${workId}`;
+      const terminal = JSON.parse(rows[0]!.ticket_json);
+      assert.isNull(terminal.submission);
+      assert.isNull(terminal.owner);
+      assert.isAbove(terminal.version, written.version);
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(
+        yield* fresh.readRecoverableResolutionTickets({ now: 101, limit: 10 }),
+        [],
+      );
+    }).pipe(Effect.provide(live)),
 );

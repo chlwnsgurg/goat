@@ -999,3 +999,104 @@ describe("body-free hub metadata report ownership", () => {
       }).pipe(Effect.provide(live)),
   );
 });
+
+it.effect.each(["ack", "pull", "metadata"] as const)(
+  "preserves local forget retry and expansion relations after %s promotion and replay",
+  (path) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.upsert(input(), Effect.void);
+      const originalId = M.MemoryOperationId.make(id(961));
+      yield* service.forget(
+        { memorySpaceId: space, memoryId, operationId: originalId, expectedHeads: [] },
+        Effect.void,
+      );
+      const original = yield* store.readOperation(space, originalId);
+      if (original?.kind !== "forget") throw new Error("fixture");
+      const rejected = {
+        operationId: originalId,
+        memoryId,
+        outcome: "rejected" as const,
+        revisionId: null,
+        pendingSync: false,
+        failureCode: "capacity_exceeded" as const,
+      };
+      yield* sql`UPDATE memory_events SET receipt_json=${JSON.stringify(rejected)} WHERE operation_id=${originalId}`;
+      const retryId = M.MemoryOperationId.make(id(962));
+      const op = {
+        ...original,
+        operationId: retryId,
+        tombstone: { ...original.tombstone, deleteOperationId: retryId },
+      };
+      const decision = decideMemoryOperation(
+        yield* store.loadAggregate(space, memoryId),
+        op,
+        Store.localIntent,
+        { kind: "allowed" },
+      );
+      const links = {
+        forgetRetryOf: {
+          operationId: originalId,
+          operationDigest: memoryOperationDigest(original),
+        },
+        forgetExpansion: {
+          requestDigest: "b".repeat(64),
+          operationId: M.MemoryOperationId.make(id(963)),
+          operationDigest: "c".repeat(64),
+          status: "accepted" as const,
+        },
+      };
+      yield* store.apply({ ...decision, receipt: { ...decision.receipt, ...links } });
+      assert.deepStrictEqual(yield* store.pendingForgetIntents(100), []);
+      const canonical: M.MemoryHubReceipt = {
+        operationId: retryId,
+        memoryId,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "deleted",
+        hubSequence: 1,
+      };
+      const entry: M.MemoryHubEntry =
+        path === "metadata"
+          ? {
+              kind: "metadata",
+              operationKind: "forget",
+              memoryId,
+              receipt: canonical,
+              hubSequence: 1,
+              tombstone: op.tombstone,
+            }
+          : { kind: "operation", operation: op, receipt: canonical, hubSequence: 1 };
+      const base = {
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        reauthorize: Effect.void,
+      };
+      if (path === "ack") {
+        const args = {
+          ...base,
+          workId: `sync:${space}:${retryId}`,
+          operation: { operationId: retryId, operationDigest: canonical.operationDigest },
+          receipt: canonical,
+        };
+        yield* service.settleHubAcknowledgement(args);
+        yield* service.settleHubAcknowledgement(args);
+      } else {
+        yield* service.receiveHubPage({
+          ...base,
+          expectedSequence: 0,
+          page: { entries: [entry], throughSequence: 1, highWatermark: 1, hasMore: false },
+        });
+        yield* store.transact(service.settleHubEntryTx({ ...base, entry }));
+      }
+      const promoted = (yield* store.receipt(space, retryId))!.receipt;
+      assert.deepStrictEqual(promoted.forgetRetryOf, links.forgetRetryOf);
+      assert.deepStrictEqual(promoted.forgetExpansion, links.forgetExpansion);
+      assert.deepStrictEqual(yield* store.pendingForgetIntents(100), []);
+      assert.strictEqual((yield* store.readWork(`sync:${space}:${retryId}`))?.status, "completed");
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(yield* fresh.pendingForgetIntents(100), []);
+    }).pipe(Effect.provide(live)),
+);

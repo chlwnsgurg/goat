@@ -2212,7 +2212,7 @@ const make = Effect.gen(function* () {
             if (!promote) return old;
             yield* stored(
               "receipt-promote",
-              sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(decision.receipt)} WHERE memory_space_id=${op.memorySpaceId} AND operation_id=${op.operationId}`,
+              sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode({ ...decision.receipt, ...(old.receipt.forgetExpansion ? { forgetExpansion: old.receipt.forgetExpansion } : {}), ...(old.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}) })} WHERE memory_space_id=${op.memorySpaceId} AND operation_id=${op.operationId}`,
             );
           }
         } else if (expectedGeneration !== undefined) {
@@ -2264,7 +2264,19 @@ const make = Effect.gen(function* () {
             return yield* new MemoryStoreConflict({ code: "missing_parent" });
           if (!decision.item) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
         }
-        const outcome = yield* stored("receipt-codec", decodeReceipt(decision.receipt, strict));
+        const outcome = yield* stored(
+          "receipt-codec",
+          decodeReceipt(
+            {
+              ...decision.receipt,
+              ...(old?.receipt.forgetExpansion
+                ? { forgetExpansion: old.receipt.forgetExpansion }
+                : {}),
+              ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+            },
+            strict,
+          ),
+        );
         if (
           outcome.operationId !== op.operationId ||
           outcome.memoryId !== op.memoryId ||
@@ -2767,14 +2779,41 @@ const make = Effect.gen(function* () {
     );
     return rows.length === 1;
   });
+  const clearTerminalSubmission = Effect.fnUntraced(function* (id: string) {
+    const rows = yield* stored(
+      "terminal-submission",
+      sql<{
+        space: string;
+        ticket_json: string;
+      }>`SELECT space,ticket_json FROM memory_outbox WHERE id=${id} AND kind='resolve' AND ticket_json IS NOT NULL`,
+    );
+    if (!rows[0]) return;
+    const row = yield* stored(
+      "terminal-ticket",
+      storedTicketRowCodec.decode(rows[0].ticket_json, strict),
+    );
+    yield* stored(
+      "terminal-submission-purge",
+      sql`DELETE FROM memory_payloads WHERE space=${rows[0].space} AND payload_ref=${`submission:${row.ticket.attemptId}`}`,
+    );
+    yield* stored(
+      "terminal-ticket-fence",
+      sql`UPDATE memory_outbox SET ticket_json=${yield* storedTicketRowCodec.encode({ ...row, state: "terminal", version: row.version + 1, submission: null, submissionDigest: null, owner: null, ownedUntil: null })},sync_version=sync_version+1,payload_ref=NULL WHERE id=${id}`,
+    );
+  });
   const finishWork = Effect.fn("MemoryStore.finishWork")(function* (
     id: string,
     status: "completed" | "cancelled" | "failed",
     result?: M.MemoryHubReceipt,
   ) {
-    yield* stored(
-      "finish-work",
-      sql`UPDATE memory_outbox SET status=${status},claimed_by=NULL,claimed_until=NULL,completed_receipt_json=${result ? yield* receiptCodec.encode(result) : null},payload_ref=NULL WHERE id=${id}`,
+    yield* transact(
+      Effect.gen(function* () {
+        yield* clearTerminalSubmission(id);
+        yield* stored(
+          "finish-work",
+          sql`UPDATE memory_outbox SET status=${status},terminal_at=${yield* Clock.currentTimeMillis},claimed_by=NULL,claimed_until=NULL,completed_receipt_json=${result ? yield* receiptCodec.encode(result) : null},payload_ref=NULL WHERE id=${id}`,
+        );
+      }),
     );
   });
   const readEligibleOutbox = Effect.fn("MemoryStore.readEligibleOutbox")(function* (
@@ -5099,6 +5138,30 @@ const make = Effect.gen(function* () {
           }
         : null,
     });
+  const submissionMatchesTicket = (
+    submission: M.MemoryHubApplyResolutionInput,
+    ticket: M.MemoryResolutionLease,
+  ) => {
+    const op = submission.operation;
+    return (
+      op.kind === "resolve" &&
+      submission.memorySpaceId === ticket.memorySpaceId &&
+      submission.attemptId === ticket.attemptId &&
+      submission.holderEnvironmentId === ticket.holderEnvironmentId &&
+      op.memorySpaceId === ticket.memorySpaceId &&
+      op.memoryId === ticket.memoryId &&
+      op.originEnvironmentId === ticket.holderEnvironmentId &&
+      op.conflictId === ticket.conflictId &&
+      op.fencingToken === ticket.fencingToken &&
+      op.resolution.fencingToken === ticket.fencingToken &&
+      op.resolution.resolvingEnvironmentId === ticket.holderEnvironmentId &&
+      sameHeadSet(op.expectedHeads, ticket.conflictHeadSet) &&
+      sameHeadSet(op.revision.parents, ticket.conflictHeadSet) &&
+      sameHeadSet(op.resolution.inputRevisionIds, ticket.conflictHeadSet) &&
+      JSON.stringify(op.resolution.requestedModelSelection) ===
+        JSON.stringify(ticket.frozenDefaultModelSelection)
+    );
+  };
   const decodeTicketRow = Effect.fnUntraced(function* (json: string) {
     const row = yield* stored("ticket-decode", storedTicketRowCodec.decode(json, strict));
     if (!row.submission) return { ...row, submission: null };
@@ -5115,6 +5178,7 @@ const make = Effect.gen(function* () {
       codec(M.MemoryHubApplyResolutionInput).decode(bodies[0].body_json, strict),
     );
     if (
+      !submissionMatchesTicket(submission, row.ticket) ||
       hashText(M.encodeMemoryOperation(submission.operation)) !== row.submissionDigest ||
       (yield* metadataCodec.encode(metadataOf(submission.operation))) !==
         (yield* metadataCodec.encode(row.submission.operation))
@@ -5276,7 +5340,24 @@ const make = Effect.gen(function* () {
         approval: input.approval ?? row.approval,
         owner: input.ownedUntil === null ? null : row.owner,
       };
-      return yield* writeTicket(input.ownership, next, row.version);
+      const updated = yield* writeTicket(input.ownership, next, row.version);
+      if (updated && input.nextState === "terminal") {
+        yield* clearTerminalSubmission(ticketId(input.ownership));
+        yield* stored(
+          "terminal-resolution-work",
+          sql`UPDATE memory_outbox SET status=${updated.approval?.outcome === "rejected" ? "failed" : "completed"},terminal_at=${input.now} WHERE id=${ticketId(input.ownership)}`,
+        );
+        return {
+          ...updated,
+          state: "terminal" as const,
+          version: updated.version + 1,
+          submission: null,
+          submissionDigest: null,
+          owner: null,
+          ownedUntil: null,
+        };
+      }
+      return updated;
     });
   const persistResolutionSubmissionTx: MemoryStore["Service"]["persistResolutionSubmissionTx"] =
     Effect.fn("MemoryStore.persistResolutionSubmissionTx")(function* (input) {
@@ -5288,9 +5369,7 @@ const make = Effect.gen(function* () {
         submissionDecode(input.submission, strict),
       );
       if (
-        submission.attemptId !== row.ticket.attemptId ||
-        submission.holderEnvironmentId !== row.ticket.holderEnvironmentId ||
-        submission.memorySpaceId !== row.ticket.memorySpaceId ||
+        !submissionMatchesTicket(submission, row.ticket) ||
         hashText(M.encodeMemoryOperation(submission.operation)) !== input.digest
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
@@ -7130,11 +7209,16 @@ const make = Effect.gen(function* () {
     const old = yield* receipt(input.memorySpaceId, entry.receipt.operationId);
     if (old && old.operationDigest !== entry.receipt.operationDigest)
       return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+    const settledReceipt = {
+      ...entry.receipt,
+      ...(old?.receipt.forgetExpansion ? { forgetExpansion: old.receipt.forgetExpansion } : {}),
+      ...(old?.receipt.forgetRetryOf ? { forgetRetryOf: old.receipt.forgetRetryOf } : {}),
+    };
     if (
       old &&
       "hubSequence" in old.receipt &&
       old.receipt.hubSequence !== null &&
-      (yield* receiptCodec.encode(old.receipt)) !== (yield* receiptCodec.encode(entry.receipt))
+      (yield* receiptCodec.encode(old.receipt)) !== (yield* receiptCodec.encode(settledReceipt))
     )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
     if (entry.receipt.outcome !== "rejected" && entry.revision) {
@@ -7228,14 +7312,15 @@ const make = Effect.gen(function* () {
     }
     yield* stored(
       "metadata-receipt-promotion",
-      sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(entry.receipt)} WHERE memory_space_id=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId}`,
+      sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(settledReceipt)} WHERE memory_space_id=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId}`,
     );
     // A compact guard retains body-free approval even when no local operation body remains.
     const existing = yield* stored(
       "metadata-compact",
-      sql`UPDATE memory_compact_receipts SET receipt_json=${yield* receiptCodec.encode(entry.receipt)},hub_sequence=${entry.hubSequence} WHERE space=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId} RETURNING operation_id`,
+      sql`UPDATE memory_compact_receipts SET receipt_json=${yield* receiptCodec.encode(settledReceipt)},hub_sequence=${entry.hubSequence} WHERE space=${input.memorySpaceId} AND operation_id=${entry.receipt.operationId} RETURNING operation_id`,
     );
-    if (entry.compactReceipt) yield* persistCompactReceipt(entry.compactReceipt);
+    if (entry.compactReceipt)
+      yield* persistCompactReceipt({ ...entry.compactReceipt, receipt: settledReceipt });
     if (!entry.compactReceipt && !old && !existing.length)
       yield* stored(
         "metadata-ledger",
