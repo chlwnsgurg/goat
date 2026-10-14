@@ -6,6 +6,11 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Ref from "effect/Ref";
+import * as Option from "effect/Option";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Secrets from "../auth/ServerSecretStore.ts";
+import * as ServerConfig from "../config.ts";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
@@ -207,7 +212,7 @@ describe("MemoryHubService", () => {
     Effect.gen(function* () {
       yield* seed;
       const sql = yield* SqlClient.SqlClient;
-      yield* sql`INSERT INTO memory_hub_retention(space,checkpoint_bytes,published_pinned_bytes) VALUES (${space},${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES},0)`;
+      yield* sql`WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<${M.MEMORY_LOG_MAX_TAIL_ROWS}) INSERT INTO memory_hub_operations(space,operation_id,memory_id,origin_environment,operation_digest,entry_json,committed_at) SELECT ${space},'tail-'||n,${memoryId},${hubEnv},${"c".repeat(64)},'{}',0 FROM rows`;
       const hub = yield* Hub.MemoryHubService;
       const result = yield* hub.push(pushInput(operation()), principal());
       assert.strictEqual(result.receipts[0]!.failureCode, "capacity_exceeded");
@@ -217,7 +222,7 @@ describe("MemoryHubService", () => {
       assert.strictEqual(
         (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_operations`)[0]!
           .count,
-        0,
+        M.MEMORY_LOG_MAX_TAIL_ROWS,
       );
     }).pipe(Effect.provide(live)),
   );
@@ -504,5 +509,167 @@ describe("MemoryHubService source relay", () => {
         0,
       );
     }).pipe(Effect.provide(live)),
+  );
+});
+
+const adminDependencies = Secrets.layer.pipe(
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "goat-wp3-l2-admin-" })),
+  Layer.provide(NodeServices.layer),
+  Layer.provideMerge(core),
+);
+const adminFixture = Effect.gen(function* () {
+  yield* seed;
+  const view = yield* Ref.make<M.MemoryHubSettingsView>({
+    settings: { mode: "hub", memorySpaceId: space },
+    version: 0,
+  });
+  const failApply = yield* Ref.make(false);
+  const backend: Hub.MemoryHubAdminSettings["Service"] = {
+    withLock: (effect) => effect,
+    read: Ref.get(view),
+    apply: (record, permit) =>
+      Effect.gen(function* () {
+        yield* permit;
+        if (yield* Ref.get(failApply)) return yield* new M.MemoryHubError({ code: "hub_disabled" });
+        const current = yield* Ref.get(view);
+        // This fixture is the settings CAS owner; SQL/admin service is real.
+        if (current.version === record.expectedVersion) {
+          const next = { ...current, version: current.version + 1 };
+          yield* Ref.set(view, next);
+          return { view: next };
+        }
+        if (current.version !== record.expectedVersion + 1)
+          return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+        return { view: current };
+      }),
+  };
+  const admin = yield* Hub.makeAdministrator.pipe(
+    Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+  );
+  return { admin, backend, failApply, view };
+});
+const provision: M.MemoryHubSettingsUpdateInput = {
+  requestId: M.MemoryOperationId.make(id(400)),
+  expectedVersion: 0,
+  action: "provisionMember",
+  environmentId: M.EnvironmentId.make("new-member"),
+};
+
+describe("MemoryHubAdministrator", () => {
+  it.effect(
+    "resumes after activation/settings failure using the same private secret and member version",
+    () =>
+      Effect.gen(function* () {
+        const { admin, backend, failApply } = yield* adminFixture;
+        yield* Ref.set(failApply, true);
+        assert.strictEqual(
+          (yield* admin.update(provision, Effect.void).pipe(Effect.flip))._tag,
+          "MemoryHubError",
+        );
+        const pending = yield* admin.pending(Effect.void);
+        assert.strictEqual(pending[0]!.stage, "activated");
+        assert.strictEqual(pending[0]!.memberVersion, 1);
+        const secrets = yield* Secrets.ServerSecretStore;
+        const staged = yield* secrets.get(pending[0]!.secretName!);
+        assert.isTrue(Option.isSome(staged));
+        yield* Ref.set(failApply, false);
+        const restarted = yield* Hub.makeAdministrator.pipe(
+          Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+        );
+        const result = yield* restarted.update(provision, Effect.void);
+        assert.strictEqual(result.credential!.credentialVersion, 1);
+        assert.strictEqual(
+          result.credential!.credential,
+          Buffer.from(Option.getOrThrow(staged)).toString("base64url"),
+        );
+        assert.deepStrictEqual(yield* restarted.update(provision, Effect.void), result);
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{
+          admin_json: string;
+        }>`SELECT admin_json FROM memory_outbox WHERE kind='admin'`;
+        assert.isFalse(rows[0]!.admin_json.includes(result.credential!.credential));
+        assert.isFalse(rows[0]!.admin_json.includes('"credential":'));
+      }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect("acknowledgement erases outgoing bytes and replay cannot disclose them", () =>
+    Effect.gen(function* () {
+      const { admin } = yield* adminFixture;
+      const issued = yield* admin.update(provision, Effect.void);
+      const record = (yield* admin.pending(Effect.void))[0]!;
+      yield* admin.update(
+        {
+          requestId: M.MemoryOperationId.make(id(401)),
+          expectedVersion: 1,
+          action: "acknowledgeCredential",
+          credentialRequestId: provision.requestId,
+        },
+        Effect.void,
+      );
+      const secrets = yield* Secrets.ServerSecretStore;
+      assert.isTrue(Option.isNone(yield* secrets.get(record.secretName!)));
+      assert.isNull((yield* admin.update(provision, Effect.void)).credential);
+      const store = yield* Store.MemoryStore;
+      assert.strictEqual(
+        (yield* store.readHubMember(space, issued.credential!.environmentId))!.credentialVersion,
+        1,
+      );
+    }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect("denied owner permission creates neither secret nor member/admin record", () =>
+    Effect.gen(function* () {
+      const { admin } = yield* adminFixture;
+      assert.strictEqual(
+        (yield* admin
+          .update(provision, Effect.fail(new M.MemoryHubForbiddenError({})))
+          .pipe(Effect.flip))._tag,
+        "MemoryHubForbiddenError",
+      );
+      assert.deepStrictEqual(yield* admin.pending(Effect.void), []);
+      const store = yield* Store.MemoryStore;
+      assert.isUndefined(yield* store.readHubMember(space, M.EnvironmentId.make("new-member")));
+    }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect("rotate/revoke invalidate old principals and changed request bytes cannot replay", () =>
+    Effect.gen(function* () {
+      const { admin } = yield* adminFixture;
+      const first = yield* admin.update(provision, Effect.void);
+      assert.strictEqual(
+        (yield* admin
+          .update({ ...provision, environmentId: M.EnvironmentId.make("changed") }, Effect.void)
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      const env = first.credential!.environmentId;
+      const rotated = yield* admin.update(
+        {
+          requestId: M.MemoryOperationId.make(id(402)),
+          expectedVersion: 1,
+          action: "rotateMemberCredential",
+          environmentId: env,
+        },
+        Effect.void,
+      );
+      assert.strictEqual(rotated.credential!.credentialVersion, 2);
+      assert.notStrictEqual(rotated.credential!.credential, first.credential!.credential);
+      const store = yield* Store.MemoryStore;
+      assert.strictEqual(
+        (yield* store.transact(store.requireHubMemberTx(principal(env))).pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+      yield* admin.update(
+        {
+          requestId: M.MemoryOperationId.make(id(403)),
+          expectedVersion: 2,
+          action: "revokeMember",
+          environmentId: env,
+        },
+        Effect.void,
+      );
+      assert.strictEqual((yield* store.readHubMember(space, env))!.status, "revoked");
+      assert.strictEqual(
+        (yield* admin.update(provision, Effect.void).pipe(Effect.flip))._tag,
+        "MemoryHubError",
+      );
+    }).pipe(Effect.provide(adminDependencies)),
   );
 });

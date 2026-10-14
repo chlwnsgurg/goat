@@ -6,6 +6,8 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
+import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -326,3 +328,228 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(MemoryHubService, make);
+
+export type MemoryHubAdministrationError = MemoryHubServiceError | Secrets.SecretStoreError;
+type AdminPermit = Effect.Effect<void, M.MemoryHubForbiddenError>;
+type SafeAdminResult = Omit<M.MemoryHubSettingsUpdateResult, "credential">;
+
+/** L3 binds the existing settings admin lock and dedicated idempotent settings CAS. */
+export class MemoryHubAdminSettings extends Context.Service<
+  MemoryHubAdminSettings,
+  {
+    readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+    readonly read: Effect.Effect<M.MemoryHubSettingsView, M.MemoryHubError>;
+    readonly apply: (
+      record: Store.AdminRecord,
+      permit: AdminPermit,
+    ) => Effect.Effect<SafeAdminResult, M.MemoryHubError | M.MemoryHubForbiddenError>;
+  }
+>()("goat/memory/MemoryHubService/MemoryHubAdminSettings") {}
+
+/** Owner administration is separate from the memory:sync member principal. */
+export class MemoryHubAdministrator extends Context.Service<
+  MemoryHubAdministrator,
+  {
+    readonly update: (
+      input: M.MemoryHubSettingsUpdateInput,
+      permit: AdminPermit,
+    ) => Effect.Effect<M.MemoryHubSettingsUpdateResult, MemoryHubAdministrationError>;
+    readonly pending: (
+      permit: AdminPermit,
+    ) => Effect.Effect<readonly Store.AdminRecord[], MemoryHubAdministrationError>;
+  }
+>()("goat/memory/MemoryHubService/MemoryHubAdministrator") {}
+
+/** @public Shares SQL/secret/settings owners without holding SQL across file writes. */
+export const makeAdministrator = Effect.gen(function* () {
+  const store = yield* Store.MemoryStore;
+  const secrets = yield* Secrets.ServerSecretStore;
+  const settings = yield* MemoryHubAdminSettings;
+  const encode = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubSettingsUpdateInput));
+  const decode = Schema.decodeUnknownEffect(M.MemoryHubSettingsUpdateInput);
+  const tx = <A, E, R>(permit: AdminPermit, effect: Effect.Effect<A, E, R>) =>
+    store.transact(Effect.andThen(permit, effect));
+  const update: MemoryHubAdministrator["Service"]["update"] = Effect.fn(
+    "MemoryHubAdministrator.update",
+  )(function* (input, permit) {
+    const request = yield* decode(input, { onExcessProperty: "error" }).pipe(
+      Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
+    );
+    const digest = NodeCrypto.createHash("sha256")
+      .update(
+        yield* encode(request).pipe(
+          Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
+        ),
+      )
+      .digest("hex");
+    return yield* settings.withLock(
+      Effect.gen(function* () {
+        yield* permit;
+        let record = yield* tx(permit, store.readHubAdminTx(request.requestId));
+        if (record && record.requestDigest !== digest)
+          return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+        const outgoing =
+          request.action === "provisionMember" || request.action === "rotateMemberCredential";
+        if (!record) {
+          const view = yield* settings.read;
+          if (view.version !== request.expectedVersion)
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          let action: Store.PersistedAdminAction;
+          if (request.action === "installCredential") {
+            const { credential: _credential, ...safe } = request;
+            if (!/^[A-Za-z0-9_-]{43}$/.test(request.credential))
+              return yield* new M.MemoryHubError({ code: "invalid_output" });
+            action = safe;
+          } else action = request;
+          record = yield* tx(
+            permit,
+            store.writeHubAdminTx({
+              record: {
+                requestId: request.requestId,
+                requestDigest: digest,
+                expectedVersion: request.expectedVersion,
+                action,
+                stage: "prepared",
+                memberVersion: null,
+                result: null,
+                secretName:
+                  outgoing || request.action === "installCredential"
+                    ? `memory-hub-${request.action === "installCredential" ? "installed" : "outgoing"}-${request.requestId}`
+                    : null,
+              },
+              expectedStage: null,
+            }),
+          );
+        }
+        if (record.stage === "prepared") {
+          yield* permit;
+          if (request.action === "installCredential") {
+            // Retry stages identical bytes to the same private reference.
+            yield* secrets.set(record.secretName!, new TextEncoder().encode(request.credential));
+          }
+          if (outgoing || request.action === "revokeMember") {
+            const view = yield* settings.read;
+            if (view.settings.mode !== "hub" || view.settings.memorySpaceId === null)
+              return yield* new M.MemoryHubError({ code: "hub_disabled" });
+            const memorySpaceId = view.settings.memorySpaceId;
+            const environmentId = request.environmentId;
+            let credentialDigest: string | null = null;
+            if (outgoing) {
+              const bytes = yield* secrets.getOrCreateRandom(record.secretName!, 32);
+              credentialDigest = NodeCrypto.createHash("sha256")
+                .update(Buffer.from(bytes).toString("base64url"))
+                .digest("hex");
+            }
+            yield* tx(
+              permit,
+              Effect.gen(function* () {
+                const member = yield* store.readHubMember(memorySpaceId, environmentId);
+                if (request.action === "provisionMember" && member)
+                  return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+                if (request.action !== "provisionMember" && !member)
+                  return yield* new Store.MemoryStoreConflict({ code: "not_found" });
+                yield* store.activateHubMemberTx({
+                  requestId: request.requestId,
+                  requestDigest: digest,
+                  memorySpaceId,
+                  environmentId,
+                  expectedCredentialVersion: member?.credentialVersion ?? null,
+                  next:
+                    credentialDigest === null
+                      ? "revoked"
+                      : {
+                          credentialDigest,
+                          credentialVersion: (member?.credentialVersion ?? 0) + 1,
+                        },
+                  now: yield* Clock.currentTimeMillis,
+                });
+              }),
+            );
+            record = (yield* tx(permit, store.readHubAdminTx(request.requestId)))!;
+          } else {
+            record = yield* tx(
+              permit,
+              store.writeHubAdminTx({
+                record: { ...record, stage: "activated" },
+                expectedStage: "prepared",
+              }),
+            );
+          }
+        }
+        if (record.stage === "activated") {
+          if (request.action === "acknowledgeCredential") {
+            const original = yield* tx(permit, store.readHubAdminTx(request.credentialRequestId));
+            if (
+              !original ||
+              (original.stage !== "ready" && original.stage !== "acknowledged") ||
+              (original.action.action !== "provisionMember" &&
+                original.action.action !== "rotateMemberCredential")
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "not_found" });
+            yield* permit;
+            if (original.secretName) yield* secrets.remove(original.secretName);
+            yield* tx(
+              permit,
+              store.writeHubAdminTx({
+                record: { ...original, stage: "acknowledged" },
+                expectedStage: "ready",
+              }),
+            );
+          }
+          // The settings helper owns version/CAS, request-id replay and initial hub
+          // bootstrap. It receives only a persisted action and private secret name.
+          const result = yield* settings.apply(record, permit);
+          record = yield* tx(
+            permit,
+            store.writeHubAdminTx({
+              record: { ...record, stage: "ready", result },
+              expectedStage: "activated",
+            }),
+          );
+        }
+        if (!record.result) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+        let credential: M.MemoryHubCredentialResult | null = null;
+        if (outgoing && record.stage !== "acknowledged") {
+          yield* permit;
+          const saved = yield* secrets.get(record.secretName!);
+          if (Option.isNone(saved))
+            return yield* new M.MemoryHubError({ code: "source_unavailable" });
+          const view = record.result.view;
+          if (
+            view.settings.mode !== "hub" ||
+            view.settings.memorySpaceId === null ||
+            record.memberVersion === null
+          )
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          // Replaying a superseded rotation never discloses an obsolete credential.
+          const member = yield* tx(
+            permit,
+            store.readHubMember(view.settings.memorySpaceId, request.environmentId),
+          );
+          if (
+            !member ||
+            member.status !== "active" ||
+            member.credentialVersion !== record.memberVersion
+          )
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          credential = {
+            requestId: record.requestId,
+            environmentId: request.environmentId,
+            memorySpaceId: view.settings.memorySpaceId,
+            credentialVersion: record.memberVersion,
+            credential: Buffer.from(saved.value).toString("base64url"),
+          };
+        }
+        return { ...record.result, credential };
+      }),
+    );
+  });
+  const pending: MemoryHubAdministrator["Service"]["pending"] = Effect.fn(
+    "MemoryHubAdministrator.pending",
+  )((permit) =>
+    Effect.andThen(permit, store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS)),
+  );
+  return MemoryHubAdministrator.of({ update, pending });
+});
+
+export const administratorLayer = Layer.effect(MemoryHubAdministrator, makeAdministrator);
