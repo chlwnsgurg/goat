@@ -13,6 +13,7 @@ import type { SqlError } from "effect/sql/SqlError";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
+import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -102,9 +103,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(database),
-);
+const setup = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const checkpoint = () => {
@@ -411,6 +412,159 @@ describe("MemoryStore", () => {
       );
     }).pipe(Effect.provide(live)),
   );
+  it.effect("examines an empty 1000-row window and reaches a later match in both modes", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      yield* store.apply(decision(op));
+      const item = yield* store.loadAggregate(space, memory);
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      yield* store.index({
+        memorySpaceId: space,
+        memoryId: memory,
+        revisionId: op.revision.revisionId,
+        generation: item.generation,
+      });
+      // Real keyset rows with no searchable body precede the active item.
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
+        INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
+        SELECT ${space},printf('00000000-0000-4000-8000-%012d',n),'{}','user','[]','quarantined',0,'{}','{}' FROM ids WHERE n!=2`;
+      // Move the fixture to the tail while preserving its projection identity.
+      const tail = M.MemoryId.make(id(1002));
+      yield* sql`UPDATE memory_items SET memory_id=${tail},item_json=json_set(item_json,'$.memoryId',${tail},'$.revision.memoryId',${tail}) WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.searchCoverage({ memorySpaceId: space, scope: { kind: "user" }, limit: 100 });
+      yield* store.searchCoverage({ memorySpaceId: space, scope: { kind: "user" }, limit: 100 });
+      for (const mode of ["fts", "substring"] as const) {
+        const first = yield* store.search(
+          { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+          "synthetic",
+          mode,
+        );
+        assert.deepStrictEqual(first.items, []);
+        assert.strictEqual(first.examinedAfterMemoryId, id(1001));
+        assert.isFalse(first.exhausted);
+        const last = yield* store.search(
+          {
+            memorySpaceId: space,
+            scope: { kind: "user" },
+            limit: 100,
+            afterMemoryId: first.examinedAfterMemoryId!,
+          },
+          "synthetic",
+          mode,
+        );
+        assert.deepStrictEqual(
+          last.items.map((i) => i.memoryId),
+          [tail],
+        );
+        assert.strictEqual(last.examinedAfterMemoryId, tail);
+        assert.isTrue(last.exhausted);
+        const absent = yield* store.search(
+          { memorySpaceId: space, scope: { kind: "user" }, limit: 100, afterMemoryId: tail },
+          "synthetic",
+          mode,
+        );
+        assert.isTrue(absent.exhausted);
+      }
+      const plan = yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN WITH window AS MATERIALIZED (SELECT rowid,memory_id FROM memory_items WHERE space=${space} AND scope_key='user' AND memory_id>'' ORDER BY memory_id LIMIT 1000) SELECT memory_id,EXISTS(SELECT 1 FROM memory_items_fts WHERE rowid=window.rowid AND memory_items_fts MATCH 'synthetic') FROM window ORDER BY memory_id`;
+      assert.isTrue(plan.some((row) => row.detail.includes("MATERIALIZE window")));
+      assert.isTrue(plan.some((row) => row.detail.includes("SEARCH memory_items USING")));
+      assert.isTrue(
+        plan.some((row) => row.detail.includes("VIRTUAL TABLE INDEX") && row.detail.includes("=")),
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("keeps the first unreturned match after the byte cap", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      const large = { ...op, payload: { ...op.payload, text: "synthetic " + "x".repeat(15000) } };
+      yield* store.apply(decision(large));
+      for (const n of [100, 101, 102, 103]) {
+        const second = M.MemoryId.make(id(n));
+        yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation)
+          SELECT space,${second},scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,json_set(item_json,'$.memoryId',${second},'$.revision.memoryId',${second}),availability_json,generation FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      }
+      const first = yield* store.search(
+        { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
+        "synthetic",
+        "substring",
+      );
+      assert.isTrue(first.items.length > 0 && first.items.length < 5);
+      assert.strictEqual(first.examinedAfterMemoryId, first.items.at(-1)!.memoryId);
+      assert.isFalse(first.exhausted);
+      const wire = yield* Schema.encodeEffect(Schema.fromJsonString(M.MemoryPage))({
+        items: first.items,
+        nextCursor: first.examinedAfterMemoryId,
+        projectionWatermark: 0,
+      });
+      assert.isTrue(new TextEncoder().encode(wire).length <= M.MEMORY_PAGE_MAX_UTF8_BYTES);
+      const next = yield* store.search(
+        {
+          memorySpaceId: space,
+          scope: { kind: "user" },
+          limit: 100,
+          afterMemoryId: first.examinedAfterMemoryId!,
+        },
+        "synthetic",
+        "substring",
+      );
+      assert.deepStrictEqual(
+        [...first.items, ...next.items].map((i) => i.memoryId),
+        [memory, ...[100, 101, 102, 103].map((n) => M.MemoryId.make(id(n)))],
+      );
+      assert.isTrue(next.exhausted);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "maintains scoped counters through index/hold/scope/delete and transaction rollback",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const filter = { memorySpaceId: space, scope: { kind: "user" as const }, limit: 100 };
+        const op = operation();
+        if (op.kind === "forget") throw new Error("Fixture kind");
+        yield* store.apply(decision(op));
+        const initial = yield* store.searchCoverage(filter);
+        assert.deepStrictEqual(initial, {
+          ready: true,
+          eligible: 1,
+          indexed: 0,
+          textBytes: new TextEncoder().encode(op.payload.text).length,
+        });
+        const item = yield* store.loadAggregate(space, memory);
+        yield* store.index({
+          memorySpaceId: space,
+          memoryId: memory,
+          revisionId: op.revision.revisionId,
+          generation: item.generation,
+        });
+        assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 1);
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              yield* sql`UPDATE memory_items SET status='blocked' WHERE space=${space}`;
+              return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 1);
+        yield* sql`UPDATE memory_items SET scope_key='explicit:fixture' WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 0);
+        yield* sql`UPDATE memory_items SET scope_key='user',status='blocked' WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).textBytes, 0);
+        yield* sql`UPDATE memory_items SET status='active',generation=generation+1 WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).indexed, 0);
+        yield* sql`DELETE FROM memory_items WHERE space=${space}`;
+        assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 0);
+      }).pipe(Effect.provide(live)),
+  );
   it.effect("escapes FTS input and caps pages", () =>
     Effect.gen(function* () {
       const store = yield* Store.MemoryStore;
@@ -425,7 +579,7 @@ describe("MemoryStore", () => {
           { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
           '" OR *',
           "fts",
-        )).length,
+        )).items.length,
         0,
       );
     }).pipe(Effect.provide(live)),
@@ -651,7 +805,7 @@ describe("MemoryStore", () => {
         "fts",
       );
       assert.deepStrictEqual(
-        results.map((item) => item.memoryId),
+        results.items.map((item) => item.memoryId),
         [memory],
       );
     }).pipe(Effect.provide(live)),
@@ -7248,4 +7402,110 @@ it.effect("r18 discovery surfaces storage failure instead of reporting no holds"
     assert.strictEqual(failure._tag, "MemoryStorageError");
     assert.strictEqual(failure.stage, "persisted-hold-discovery");
   }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "enforces substring item/text equality and +1, refreshing bytes on payload_ref replacement",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const filter = { memorySpaceId: space, scope: { kind: "user" as const }, limit: 1 };
+      const op = operation();
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      yield* store.apply(decision(op));
+      const body = (length: number) =>
+        JSON.stringify({ ...op.payload, text: "synthetic" + "x".repeat(length - 9) });
+      const sharedLength = 4194;
+      const lastLength = M.MEMORY_SUBSTRING_MAX_UTF8_BYTES - 1999 * sharedLength;
+      yield* sql`UPDATE memory_payloads SET body_json=${body(sharedLength)} WHERE space=${space}`;
+      yield* sql`UPDATE memory_items SET search_text_bytes=${sharedLength} WHERE space=${space}`;
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 3 UNION ALL SELECT n+1 FROM ids WHERE n<2001)
+      INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation)
+      SELECT space,printf('00000000-0000-4000-8000-%012d',n),scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,
+      json_set(item_json,'$.memoryId',printf('00000000-0000-4000-8000-%012d',n),'$.revision.memoryId',printf('00000000-0000-4000-8000-%012d',n)),availability_json,generation FROM memory_items,ids WHERE space=${space} AND memory_id=${memory}`;
+      const shortRef = id(9000);
+      const longRef = id(9001);
+      const longerRef = id(9002);
+      for (const [ref, length] of [
+        [shortRef, 10],
+        [longRef, lastLength],
+        [longerRef, lastLength + 1],
+      ] as const)
+        yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},${ref},${id(2001)},${body(length)},'[]')`;
+      yield* sql`UPDATE memory_items SET payload_ref=${longRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      yield* store.searchCoverage(filter);
+      yield* store.searchCoverage(filter);
+      assert.deepStrictEqual(yield* store.searchCoverage(filter), {
+        ready: true,
+        eligible: 2000,
+        indexed: 0,
+        textBytes: M.MEMORY_SUBSTRING_MAX_UTF8_BYTES,
+      });
+      assert.strictEqual((yield* store.search(filter, "synthetic", "substring")).items.length, 1);
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json)
+      SELECT space,${id(2002)},scope_json,scope_key,heads_json,status,${shortRef},projection_watermark,json_set(item_json,'$.memoryId',${id(2002)},'$.revision.memoryId',${id(2002)}),availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      // Reduce bytes so this refusal independently proves the item ceiling.
+      yield* sql`UPDATE memory_items SET payload_ref=${shortRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      assert.strictEqual((yield* store.searchCoverage(filter)).eligible, 2001);
+      assert.isTrue(
+        (yield* store.searchCoverage(filter)).textBytes < M.MEMORY_SUBSTRING_MAX_UTF8_BYTES,
+      );
+      assert.strictEqual(
+        (yield* store.search(filter, "synthetic", "substring").pipe(Effect.flip))._tag,
+        "MemoryCapacityError",
+      );
+      yield* sql`DELETE FROM memory_items WHERE space=${space} AND memory_id=${id(2002)}`;
+      yield* sql`UPDATE memory_items SET payload_ref=${longerRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      assert.strictEqual(
+        (yield* store.searchCoverage(filter)).textBytes,
+        M.MEMORY_SUBSTRING_MAX_UTF8_BYTES + 1,
+      );
+      assert.strictEqual(
+        (yield* store.search(filter, "synthetic", "substring").pipe(Effect.flip))._tag,
+        "MemoryCapacityError",
+      );
+      yield* sql`UPDATE memory_items SET payload_ref=${shortRef} WHERE space=${space} AND memory_id=${id(2001)}`;
+      assert.strictEqual((yield* store.searchCoverage(filter)).textBytes, 1999 * sharedLength + 10);
+      assert.strictEqual((yield* store.search(filter, "synthetic", "substring")).items.length, 1);
+    }).pipe(Effect.provide(live)),
+);
+it.effect.each(["fts", "substring"] as const)(
+  "%s continues across more than 100 matches at the item and byte ceilings",
+  (mode) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const op = operation();
+      if (op.kind === "forget") throw new Error("Fixture kind");
+      yield* store.apply(decision(op));
+      const aggregate = yield* store.loadAggregate(space, memory);
+      yield* store.index({
+        memorySpaceId: space,
+        memoryId: memory,
+        revisionId: op.revision.revisionId,
+        generation: aggregate.generation,
+      });
+      yield* sql`WITH RECURSIVE ids(n) AS (SELECT 3 UNION ALL SELECT n+1 FROM ids WHERE n<106)
+        INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation,index_state,indexed_generation)
+        SELECT space,printf('00000000-0000-4000-8000-%012d',n),scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,
+        json_set(item_json,'$.memoryId',printf('00000000-0000-4000-8000-%012d',n),'$.revision.memoryId',printf('00000000-0000-4000-8000-%012d',n)),availability_json,generation,index_state,indexed_generation FROM memory_items,ids WHERE space=${space} AND memory_id=${memory}`;
+      yield* sql`INSERT INTO memory_items_fts(rowid,body) SELECT rowid,'synthetic searchable text' FROM memory_items WHERE memory_id!=${memory}`;
+      const filter = { memorySpaceId: space, scope: { kind: "user" as const }, limit: 100 };
+      const first = yield* store.search(filter, "synthetic", mode);
+      assert.isTrue(first.items.length > 0 && first.items.length <= 100);
+      assert.isFalse(first.exhausted);
+      assert.strictEqual(first.examinedAfterMemoryId, first.items.at(-1)!.memoryId);
+      const next = yield* store.search(
+        { ...filter, afterMemoryId: first.examinedAfterMemoryId! },
+        "synthetic",
+        mode,
+      );
+      assert.strictEqual(next.items.length, 105 - first.items.length);
+      assert.isTrue(next.exhausted);
+      assert.deepStrictEqual(
+        [...first.items, ...next.items].map((i) => i.memoryId),
+        Array.from({ length: 105 }, (_, n) => id(n + 2)),
+      );
+    }).pipe(Effect.provide(live)),
 );
