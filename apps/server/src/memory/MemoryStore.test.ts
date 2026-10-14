@@ -4617,7 +4617,6 @@ it.effect(
       assert.strictEqual(empty.processing.deferred, 0);
       assert.strictEqual(empty.processing.oldestDeferredAtUtc, null);
       yield* store.apply(decision());
-      yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) VALUES ('status-sync',${space},${memory},'sync','pending','{}',0)`;
       const since = "2026-10-13T00:00:00.000Z";
       const later = "2026-10-14T00:00:00.000Z";
       const deferred = [

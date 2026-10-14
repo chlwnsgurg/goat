@@ -482,17 +482,16 @@ export default Effect.gen(function* () {
       );
     }
   }
-  // One scalar per deferred item and a narrow partial index supply the exact
-  // oldest timestamp with LIMIT 1, without a status-time scan or timestamp ledger.
-  yield* sql`ALTER TABLE memory_items ADD COLUMN processing_oldest_at TEXT`;
-  const oldest = (json: string) =>
-    `(SELECT min(json_extract(value,'$.sinceAtUtc')) FROM json_each(${json}) WHERE json_extract(value,'$.state')!='ready')`;
-  yield* sql.unsafe(`UPDATE memory_items SET processing_oldest_at=${oldest("deferred_json")}`);
+  // Six deferred kinds, one per kind. A virtual scalar and narrow partial
+  // index give the exact oldest row without another writer UPDATE or body index.
+  const noDeferred = "9999-12-31T23:59:59.999Z";
+  const deferredTimes = Array.from(
+    { length: 6 },
+    (_, slot) =>
+      `coalesce(CASE WHEN json_extract(deferred_json,'$[${slot}].state')!='ready' THEN json_extract(deferred_json,'$[${slot}].sinceAtUtc') END,'${noDeferred}')`,
+  ).join(",");
+  yield* sql.unsafe(
+    `ALTER TABLE memory_items ADD COLUMN processing_oldest_at TEXT GENERATED ALWAYS AS (nullif(min(${deferredTimes}),'${noDeferred}')) VIRTUAL`,
+  );
   yield* sql`CREATE INDEX memory_processing_oldest ON memory_items(space,processing_oldest_at) WHERE processing_oldest_at IS NOT NULL`;
-  yield* sql.unsafe(
-    `CREATE TRIGGER memory_processing_oldest_insert AFTER INSERT ON memory_items BEGIN UPDATE memory_items SET processing_oldest_at=${oldest("NEW.deferred_json")} WHERE rowid=NEW.rowid; END`,
-  );
-  yield* sql.unsafe(
-    `CREATE TRIGGER memory_processing_oldest_update AFTER UPDATE OF deferred_json ON memory_items BEGIN UPDATE memory_items SET processing_oldest_at=${oldest("NEW.deferred_json")} WHERE rowid=NEW.rowid; END`,
-  );
 });
