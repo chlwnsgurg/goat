@@ -513,7 +513,7 @@ export const layerWithOptions = (
        */
       const prepareMcpSession = (
         input: ProviderMemoryPrepareInput,
-        reusePreparedInput: boolean | "open" = false,
+        reusePreparedInput: boolean | ProviderMemoryPrepareInput = false,
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
@@ -523,8 +523,8 @@ export const layerWithOptions = (
               input.threadId,
               Effect.gen(function* () {
                 const previousInput = memoryPrepareInputs.get(input.threadId);
-                const pending = pendingMemoryAdmissions.get(input.threadId);
-                const admitted = reusePreparedInput === "open" ? pending : previousInput;
+                const admitted =
+                  typeof reusePreparedInput === "object" ? reusePreparedInput : previousInput;
                 const preparedInput =
                   reusePreparedInput && admitted?.providerInstanceId === input.providerInstanceId
                     ? {
@@ -532,7 +532,6 @@ export const layerWithOptions = (
                         readOnly: admitted.readOnly === true || input.readOnly === true,
                       }
                     : { ...input, readOnly: input.readOnly === true };
-                if (reusePreparedInput === "open") pendingMemoryAdmissions.delete(input.threadId);
                 const { threadId, providerInstanceId } = preparedInput;
                 memoryPrepareInputs.set(threadId, preparedInput);
                 const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
@@ -689,28 +688,38 @@ export const layerWithOptions = (
        * session's newer credential survives. Without one (attach failed before
        * a credential was recorded), fall back to thread-wide revocation.
        */
-      const clearMcpSession = (threadId: ThreadId, mcpCredentialId?: string) =>
-        mcpCredentialId === undefined
+      const clearMcpSession = (
+        threadId: ThreadId,
+        mcpCredentialId?: string,
+        admissionToClear:
+          | ProviderMemoryPrepareInput
+          | null
+          | undefined = pendingMemoryAdmissions.get(threadId),
+      ) => {
+        const clearPreparedInput = () => {
+          // Each explicit prepare publishes a distinct object. Cleanup from an
+          // older open must leave a later admission (and its rotation input) intact.
+          const pending = pendingMemoryAdmissions.get(threadId);
+          if (pending !== undefined && pending !== admissionToClear) return;
+          memoryPrepareInputs.delete(threadId);
+          if (pending === admissionToClear) pendingMemoryAdmissions.delete(threadId);
+        };
+        return mcpCredentialId === undefined
           ? mcpSessionRegistry.revokeThread(threadId).pipe(
               Effect.tap(() => mcpSessions.clear(threadId)),
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  memoryPrepareInputs.delete(threadId);
-                  pendingMemoryAdmissions.delete(threadId);
-                }),
-              ),
+              Effect.tap(() => Effect.sync(clearPreparedInput)),
             )
           : mcpSessionRegistry.revokeProviderSession(mcpCredentialId).pipe(
               Effect.tap(() =>
                 Effect.gen(function* () {
                   if ((yield* mcpSessions.read(threadId))?.providerSessionId === mcpCredentialId) {
                     yield* mcpSessions.clear(threadId);
-                    memoryPrepareInputs.delete(threadId);
-                    pendingMemoryAdmissions.delete(threadId);
+                    clearPreparedInput();
                   }
                 }),
               ),
             );
+      };
 
       const publishToSubscribers = (
         subscribers: Ref.Ref<
@@ -2253,39 +2262,85 @@ export const layerWithOptions = (
           }),
         shutdown,
         open: (input) =>
-          sessionOpen.withLock(
-            input.providerSessionId,
-            Effect.gen(function* () {
-              const cwd = input.runtimePolicy.cwd;
-              if (cwd !== null) {
-                const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
-                  Effect.map((stat) => stat.type === "Directory"),
-                  Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),
-                );
-                if (!workspaceIsDirectory) {
-                  return yield* new ProviderWorkspaceMissingError({
-                    threadId: input.threadId,
-                    cwd,
-                  });
+          Effect.suspend(() => {
+            // Consume before waiting for the open lock or doing any preflight I/O.
+            // Failure/interrupt discards this call's admission; retries need prepare.
+            const admission = pendingMemoryAdmissions.get(input.threadId);
+            pendingMemoryAdmissions.delete(input.threadId);
+            return sessionOpen.withLock(
+              input.providerSessionId,
+              Effect.gen(function* () {
+                const cwd = input.runtimePolicy.cwd;
+                if (cwd !== null) {
+                  const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
+                    Effect.map((stat) => stat.type === "Directory"),
+                    Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),
+                  );
+                  if (!workspaceIsDirectory) {
+                    return yield* new ProviderWorkspaceMissingError({
+                      threadId: input.threadId,
+                      cwd,
+                    });
+                  }
                 }
-              }
-              const key = sessionKey(input.providerSessionId);
-              const existing = (yield* Ref.get(sessions)).get(key);
-              if (existing !== undefined) {
-                const attached = existing.attachedThreadIds.has(input.threadId);
-                if (!attached && !existing.supportsMultipleProviderThreads) {
-                  return yield* new ProviderSessionOpenError({
-                    instanceId: input.modelSelection.instanceId,
+                const key = sessionKey(input.providerSessionId);
+                const existing = (yield* Ref.get(sessions)).get(key);
+                if (existing !== undefined) {
+                  const attached = existing.attachedThreadIds.has(input.threadId);
+                  if (!attached && !existing.supportsMultipleProviderThreads) {
+                    return yield* new ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
+                    });
+                  }
+                  // Joining a shared session is a new session for this thread.
+                  if (!attached) yield* agentScope.clear(input.threadId);
+                  const prepared = yield* prepareMcpSession(
+                    {
+                      threadId: input.threadId,
+                      providerInstanceId: existing.runtime.instanceId,
+                      ...(input.memoryGrantCeiling === undefined
+                        ? {}
+                        : { memoryGrantCeiling: input.memoryGrantCeiling }),
+                      ...(input.dispatchScopes === undefined
+                        ? {}
+                        : { dispatchScopes: input.dispatchScopes }),
+                      readOnly:
+                        input.readOnly === true ||
+                        input.runtimePolicy.sandboxPolicy === "read-only" ||
+                        (typeof input.runtimePolicy.sandboxPolicy === "object" &&
+                          input.runtimePolicy.sandboxPolicy !== null &&
+                          "type" in input.runtimePolicy.sandboxPolicy &&
+                          input.runtimePolicy.sandboxPolicy.type === "readOnly"),
+                    },
+                    admission ?? false,
+                  );
+                  if (prepared.mcpCredentialId)
+                    dropMcpCredentialReservation(input.threadId, prepared.mcpCredentialId);
+                  yield* ensureThreadAttached({
                     providerSessionId: input.providerSessionId,
-                    cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
+                    threadId: input.threadId,
+                    providerInstanceId: existing.runtime.instanceId,
                   });
+                  yield* touchActivity(input.providerSessionId);
+                  return existing.exposedRuntime;
                 }
-                // Joining a shared session is a new session for this thread.
-                if (!attached) yield* agentScope.clear(input.threadId);
+
+                const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionOpenError({
+                        instanceId: input.modelSelection.instanceId,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                );
                 const prepared = yield* prepareMcpSession(
                   {
                     threadId: input.threadId,
-                    providerInstanceId: existing.runtime.instanceId,
+                    providerInstanceId: input.modelSelection.instanceId,
                     ...(input.memoryGrantCeiling === undefined
                       ? {}
                       : { memoryGrantCeiling: input.memoryGrantCeiling }),
@@ -2300,191 +2355,151 @@ export const layerWithOptions = (
                         "type" in input.runtimePolicy.sandboxPolicy &&
                         input.runtimePolicy.sandboxPolicy.type === "readOnly"),
                   },
-                  "open",
+                  admission ?? false,
                 );
-                if (prepared.mcpCredentialId)
-                  dropMcpCredentialReservation(input.threadId, prepared.mcpCredentialId);
-                yield* ensureThreadAttached({
-                  providerSessionId: input.providerSessionId,
-                  threadId: input.threadId,
-                  providerInstanceId: existing.runtime.instanceId,
+                const mcpCredentialId = prepared.mcpCredentialId;
+                // The reservation from prepare protects the credential (which
+                // eager adapters bake into the provider process during
+                // openSession) from racing releases until this session's entry
+                // is recorded below. Dropped exactly once on every path.
+                let reservationDropped = mcpCredentialId === undefined;
+                const dropReservation = Effect.sync(() => {
+                  if (!reservationDropped && mcpCredentialId !== undefined) {
+                    reservationDropped = true;
+                    dropMcpCredentialReservation(input.threadId, mcpCredentialId);
+                  }
                 });
-                yield* touchActivity(input.providerSessionId);
-                return existing.exposedRuntime;
-              }
-
-              const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderSessionOpenError({
-                      instanceId: input.modelSelection.instanceId,
-                      providerSessionId: input.providerSessionId,
-                      cause,
-                    }),
-                ),
-              );
-              const prepared = yield* prepareMcpSession(
-                {
-                  threadId: input.threadId,
-                  providerInstanceId: input.modelSelection.instanceId,
-                  ...(input.memoryGrantCeiling === undefined
-                    ? {}
-                    : { memoryGrantCeiling: input.memoryGrantCeiling }),
-                  ...(input.dispatchScopes === undefined
-                    ? {}
-                    : { dispatchScopes: input.dispatchScopes }),
-                  readOnly:
-                    input.readOnly === true ||
-                    input.runtimePolicy.sandboxPolicy === "read-only" ||
-                    (typeof input.runtimePolicy.sandboxPolicy === "object" &&
-                      input.runtimePolicy.sandboxPolicy !== null &&
-                      "type" in input.runtimePolicy.sandboxPolicy &&
-                      input.runtimePolicy.sandboxPolicy.type === "readOnly"),
-                },
-                "open",
-              );
-              const mcpCredentialId = prepared.mcpCredentialId;
-              // The reservation from prepare protects the credential (which
-              // eager adapters bake into the provider process during
-              // openSession) from racing releases until this session's entry
-              // is recorded below. Dropped exactly once on every path.
-              let reservationDropped = mcpCredentialId === undefined;
-              const dropReservation = Effect.sync(() => {
-                if (!reservationDropped && mcpCredentialId !== undefined) {
-                  reservationDropped = true;
-                  dropMcpCredentialReservation(input.threadId, mcpCredentialId);
-                }
-              });
-              const sessionScope = yield* Scope.fork(sessionScopes);
-              // The previous session's agent scope must not explain this
-              // session's failures, even when this provider runs without one.
-              yield* agentScope.clear(input.threadId);
-              const runtime = yield* adapter
-                .openSession({
-                  threadId: input.threadId,
-                  providerSessionId: input.providerSessionId,
-                  modelSelection: input.modelSelection,
-                  runtimePolicy: input.runtimePolicy,
-                  ...(input.resumeFromSession === undefined
-                    ? {}
-                    : { resumeFromSession: input.resumeFromSession }),
-                  ...(input.initialNativeThreadId === undefined
-                    ? {}
-                    : { initialNativeThreadId: input.initialNativeThreadId }),
-                  ...(input.initialProviderItemIdentityVersion === undefined
-                    ? {}
-                    : {
-                        initialProviderItemIdentityVersion:
-                          input.initialProviderItemIdentityVersion,
-                      }),
-                })
-                .pipe(
-                  Effect.provideService(Scope.Scope, sessionScope),
-                  // Any failure, including a Stop that interrupts a slow
-                  // handshake, stops the provider process this open started.
-                  // The session cleanup runs first, and the close is
-                  // time-boxed: this runs under the session's open lock, so an
-                  // adapter finalizer that never finishes must not hold the
-                  // interrupter, the lock, or later opens.
-                  Effect.onError(() =>
-                    dropReservation.pipe(
-                      // Clear only a session this open freshly set up: a reused
-                      // one is held by another live provider process and must
-                      // survive this open's failure.
-                      Effect.andThen(
-                        prepared.issued
-                          ? clearMcpSession(input.threadId, mcpCredentialId)
-                          : Effect.void,
-                      ),
-                      Effect.ensuring(
-                        closeScopeWithin(sessionScope, {
-                          providerSessionId: input.providerSessionId,
-                          reason: "open_failed",
+                const sessionScope = yield* Scope.fork(sessionScopes);
+                // The previous session's agent scope must not explain this
+                // session's failures, even when this provider runs without one.
+                yield* agentScope.clear(input.threadId);
+                const runtime = yield* adapter
+                  .openSession({
+                    threadId: input.threadId,
+                    providerSessionId: input.providerSessionId,
+                    modelSelection: input.modelSelection,
+                    runtimePolicy: input.runtimePolicy,
+                    ...(input.resumeFromSession === undefined
+                      ? {}
+                      : { resumeFromSession: input.resumeFromSession }),
+                    ...(input.initialNativeThreadId === undefined
+                      ? {}
+                      : { initialNativeThreadId: input.initialNativeThreadId }),
+                    ...(input.initialProviderItemIdentityVersion === undefined
+                      ? {}
+                      : {
+                          initialProviderItemIdentityVersion:
+                            input.initialProviderItemIdentityVersion,
                         }),
+                  })
+                  .pipe(
+                    Effect.provideService(Scope.Scope, sessionScope),
+                    // Any failure, including a Stop that interrupts a slow
+                    // handshake, stops the provider process this open started.
+                    // The session cleanup runs first, and the close is
+                    // time-boxed: this runs under the session's open lock, so an
+                    // adapter finalizer that never finishes must not hold the
+                    // interrupter, the lock, or later opens.
+                    Effect.onError(() =>
+                      dropReservation.pipe(
+                        // Clear only a session this open freshly set up: a reused
+                        // one is held by another live provider process and must
+                        // survive this open's failure.
+                        Effect.andThen(
+                          prepared.issued
+                            ? clearMcpSession(input.threadId, mcpCredentialId, admission ?? null)
+                            : Effect.void,
+                        ),
+                        Effect.ensuring(
+                          closeScopeWithin(sessionScope, {
+                            providerSessionId: input.providerSessionId,
+                            reason: "open_failed",
+                          }),
+                        ),
                       ),
                     ),
-                  ),
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderSessionOpenError({
-                        instanceId: input.modelSelection.instanceId,
-                        providerSessionId: input.providerSessionId,
-                        cause,
-                      }),
-                  ),
-                  withMetrics({
-                    counter: providerSessionsTotal,
-                    attributes: { provider: adapter.driver, operation: "open" },
-                  }),
-                );
-              const eventSubscribers = yield* Ref.make<
-                ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
-              >(new Map());
-              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
-              const now = yield* Clock.currentTimeMillis;
-              const entry: LiveSessionEntry = {
-                attachedThreadIds: new Set([input.threadId]),
-                loadedProviderThreadKeyByThread: new Map(),
-                mcpCredentialIdByThread:
-                  mcpCredentialId === undefined
-                    ? new Map()
-                    : new Map([[input.threadId, mcpCredentialId]]),
-                supportsMultipleProviderThreads:
-                  runtime.providerSession.capabilities.sessions
-                    .supportsMultipleProviderThreadsPerSession,
-                runtime,
-                exposedRuntime,
-                eventSubscribers,
-                requestEventPermit: yield* Semaphore.make(1),
-                scope: sessionScope,
-                idleGeneration: 0,
-                busyTurns: new Set(),
-                busyTurnByThread: new Map(),
-                lastActivityAtMs: now,
-                idleFiber: null,
-                pinnedSinceMs: null,
-                idleThreadUnloads: new Map(),
-              };
-              yield* Ref.update(sessions, (current) => {
-                const updated = new Map(current);
-                updated.set(key, entry);
-                return updated;
-              });
-              // The entry now guards the credential via its recorded id, so
-              // the pre-open reservation can be dropped.
-              yield* dropReservation;
-              yield* withActivityError(
-                input.providerSessionId,
-                writeProviderSessionEvents({
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                    withMetrics({
+                      counter: providerSessionsTotal,
+                      attributes: { provider: adapter.driver, operation: "open" },
+                    }),
+                  );
+                const eventSubscribers = yield* Ref.make<
+                  ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
+                >(new Map());
+                const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+                const now = yield* Clock.currentTimeMillis;
+                const entry: LiveSessionEntry = {
+                  attachedThreadIds: new Set([input.threadId]),
+                  loadedProviderThreadKeyByThread: new Map(),
+                  mcpCredentialIdByThread:
+                    mcpCredentialId === undefined
+                      ? new Map()
+                      : new Map([[input.threadId, mcpCredentialId]]),
+                  supportsMultipleProviderThreads:
+                    runtime.providerSession.capabilities.sessions
+                      .supportsMultipleProviderThreadsPerSession,
                   runtime,
-                  threadIds: [input.threadId],
-                  type: "provider-session.attached",
-                  payload: runtime.providerSession,
-                }),
-              ).pipe(
-                // Released on interrupt too: this entry has no event pump or
-                // idle timer yet, so nothing else would ever release it.
-                Effect.onError((cause) =>
-                  releaseEntry(
-                    Cause.hasInterruptsOnly(cause)
-                      ? {
-                          providerSessionId: input.providerSessionId,
-                          reason: "manual_shutdown",
-                          detail: "The provider session start was interrupted.",
-                        }
-                      : {
-                          providerSessionId: input.providerSessionId,
-                          reason: "runtime_error",
-                          detail: "Failed to persist the provider-session attachment.",
-                        },
-                  ).pipe(logReleaseFailure(input.providerSessionId)),
-                ),
-              );
-              yield* startEventPump(entry);
-              yield* scheduleIdleRelease(input.providerSessionId);
-              return exposedRuntime;
-            }),
-          ),
+                  exposedRuntime,
+                  eventSubscribers,
+                  requestEventPermit: yield* Semaphore.make(1),
+                  scope: sessionScope,
+                  idleGeneration: 0,
+                  busyTurns: new Set(),
+                  busyTurnByThread: new Map(),
+                  lastActivityAtMs: now,
+                  idleFiber: null,
+                  pinnedSinceMs: null,
+                  idleThreadUnloads: new Map(),
+                };
+                yield* Ref.update(sessions, (current) => {
+                  const updated = new Map(current);
+                  updated.set(key, entry);
+                  return updated;
+                });
+                // The entry now guards the credential via its recorded id, so
+                // the pre-open reservation can be dropped.
+                yield* dropReservation;
+                yield* withActivityError(
+                  input.providerSessionId,
+                  writeProviderSessionEvents({
+                    runtime,
+                    threadIds: [input.threadId],
+                    type: "provider-session.attached",
+                    payload: runtime.providerSession,
+                  }),
+                ).pipe(
+                  // Released on interrupt too: this entry has no event pump or
+                  // idle timer yet, so nothing else would ever release it.
+                  Effect.onError((cause) =>
+                    releaseEntry(
+                      Cause.hasInterruptsOnly(cause)
+                        ? {
+                            providerSessionId: input.providerSessionId,
+                            reason: "manual_shutdown",
+                            detail: "The provider session start was interrupted.",
+                          }
+                        : {
+                            providerSessionId: input.providerSessionId,
+                            reason: "runtime_error",
+                            detail: "Failed to persist the provider-session attachment.",
+                          },
+                    ).pipe(logReleaseFailure(input.providerSessionId)),
+                  ),
+                );
+                yield* startEventPump(entry);
+                yield* scheduleIdleRelease(input.providerSessionId);
+                return exposedRuntime;
+              }),
+            );
+          }),
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));

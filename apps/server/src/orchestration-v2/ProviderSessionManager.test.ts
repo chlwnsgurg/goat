@@ -476,6 +476,7 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly fileSystem?: FileSystem.FileSystem;
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -546,7 +547,13 @@ function layerTest(input: {
         ),
       ),
     ),
-  ).pipe(Layer.provide(NodeServices.layer));
+  ).pipe(
+    Layer.provide(
+      input.fileSystem === undefined
+        ? NodeServices.layer
+        : Layer.merge(NodeServices.layer, Layer.succeed(FileSystem.FileSystem, input.fileSystem)),
+    ),
+  );
 }
 
 const fakeHttpServer = HttpServer.HttpServer.of({
@@ -5168,6 +5175,273 @@ it.effect.each(["new", "existing"] as const)(
             settingsLayer,
             MemoryToolkitFixture.layer,
           ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { branch: "new", ceiling: undefined },
+  { branch: "new", ceiling: "none" },
+  { branch: "existing", ceiling: undefined },
+  { branch: "existing", ceiling: "none" },
+] as const)(
+  "failed $branch open consumes admission before retry with ceiling=$ceiling",
+  ({ branch, ceiling }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const projection = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const now = yield* DateTime.now;
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        if (branch === "existing") yield* manager.open(input);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        const error = yield* manager
+          .open({
+            ...input,
+            runtimePolicy: { ...runtimePolicy, cwd: `${root}/missing` },
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, ProviderWorkspaceMissingError);
+        const runtime = yield* manager.open({
+          ...input,
+          ...(ceiling === undefined ? {} : { memoryGrantCeiling: ceiling }),
+        });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        yield* runtime.startTurn({
+          appThread: (yield* projection.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: makeProviderThread({ idAllocator, threadId, providerSessionId, now }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "synthetic memory turn",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        const config = yield* configs.read(threadId);
+        const scope = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.isDefined(scope);
+        assert.equal(scope!.memoryPolicy?.grant, "none");
+        for (const [tool, payload] of [
+          ["memory_list", { memorySpaceId: MemoryToolkitFixture.space, includeQuarantined: false }],
+          ["memory_upsert", MemoryToolkitFixture.upsert()],
+        ] as const) {
+          const result = yield* MemoryToolkitFixture.call(tool, payload, scope!);
+          assert.equal(result.result.isError, true);
+          assert.deepInclude(result.body, { code: "unavailable" });
+        }
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            MemoryToolkitFixture.layer,
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([
+  { branch: "new", outcome: "failure" },
+  { branch: "new", outcome: "interrupt" },
+  { branch: "existing", outcome: "failure" },
+  { branch: "existing", outcome: "interrupt" },
+] as const)(
+  "$branch open preflight $outcome preserves a later explicit admission",
+  ({ branch, outcome }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      const cwd = `${root}/missing`;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId,
+              now: yield* DateTime.now,
+            }),
+          ],
+        });
+        if (branch === "existing") yield* manager.open(input);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: "none",
+        });
+        const opening = yield* manager
+          .open({
+            ...input,
+            runtimePolicy: { ...runtimePolicy, cwd },
+          })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(entered);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: null,
+        });
+        if (outcome === "interrupt") {
+          yield* Fiber.interrupt(opening);
+        } else {
+          yield* Deferred.succeed(release, undefined);
+          const exit = yield* Fiber.join(opening);
+          assert.isTrue(Exit.isFailure(exit));
+        }
+        yield* manager.open(input);
+        const config = yield* configs.read(threadId);
+        const scope = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(scope?.memoryPolicy?.grant, "read_write");
+        // The new admission is also single-use.
+        yield* manager.open(input);
+        const next = yield* configs.read(threadId);
+        const nextScope = yield* registry.resolve(
+          next!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(nextScope?.memoryPolicy?.grant, "none");
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverSettingsLayer: settingsLayer,
+            fileSystem: FileSystem.FileSystem.of({
+              ...fileSystem,
+              stat: (path) =>
+                path === cwd
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.andThen(fileSystem.stat(path)),
+                    )
+                  : fileSystem.stat(path),
+            }),
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["failure", "interrupt"] as const)(
+  "adapter open %s cleanup preserves a later explicit admission with the same credential",
+  (outcome) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const first = yield* Ref.make(true);
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const configs = yield* McpProviderSessions.McpProviderSessions;
+        const threadId = ThreadId.make("thread-memory-policy");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId,
+              now: yield* DateTime.now,
+            }),
+          ],
+        });
+        // No prepare before the first open: its freshly issued credential is
+        // cleared on adapter failure. A concurrent prepare can reuse that id.
+        const opening = yield* manager.open(input).pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(entered);
+        const before = yield* configs.read(threadId);
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          memoryGrantCeiling: "none",
+        });
+        assert.equal((yield* configs.read(threadId))?.providerSessionId, before?.providerSessionId);
+        if (outcome === "interrupt") {
+          yield* Fiber.interrupt(opening);
+        } else {
+          yield* Deferred.succeed(release, undefined);
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(opening)));
+        }
+        // A surviving none admission must still narrow this explicit null open.
+        // If cleanup deleted it, the retry would incorrectly grant read_write.
+        yield* manager.open({ ...input, memoryGrantCeiling: null });
+        const config = yield* configs.read(threadId);
+        const scope = yield* registry.resolve(
+          config!.authorizationHeader.replace(/^Bearer\s+/, ""),
+        );
+        assert.equal(scope?.memoryPolicy?.grant, "none");
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            serverSettingsLayer: settingsLayer,
+            beforeOpen: () =>
+              Effect.gen(function* () {
+                if (!(yield* Ref.getAndSet(first, false))) return;
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+                return yield* Effect.die("synthetic adapter handshake failure");
+              }),
+          }),
         ),
       );
     }).pipe(Effect.scoped),
