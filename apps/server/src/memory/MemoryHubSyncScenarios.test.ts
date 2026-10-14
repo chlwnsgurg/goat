@@ -22,6 +22,10 @@ import * as Git from "../vcs/GitVcsDriver.ts";
 import * as Vcs from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as Sync from "./MemorySyncService.ts";
+import * as Worker from "./MemoryWorker.ts";
+import * as Maintenance from "./MemoryFtsMaintenance.ts";
+import * as RuntimeIdentity from "../runtimeIdentity.ts";
+import * as OrchestrationRuntime from "../orchestration-v2/runtimeLayer.ts";
 import * as Runtime from "./MemorySyncRuntimeLive.ts";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -38,7 +42,7 @@ import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Hub from "./MemoryHubService.ts";
 import * as Client from "./MemoryHubClient.ts";
-import { layerMemoryHubServices, layerMemoryHubRoutes } from "../server.ts";
+import { layerMemoryHubServices, layerMemoryHubRoutes, layerMemorySyncStarted } from "../server.ts";
 
 const id = (n: number) =>
   M.MemoryOperationId.make(`00000000-0000-4000-8000-${String(n).padStart(12, "0")}`);
@@ -142,9 +146,12 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       Layer.provide(SourceControlDrivers.layer),
       Layer.provide(vcs),
     );
-    const syncLayer = Sync.layer.pipe(
+    const syncLayer = Layer.mergeAll(Sync.layer, Worker.layer).pipe(
+      Layer.provide(Maintenance.layer),
+      Layer.provide(OrchestrationRuntime.layerEventSink),
+      Layer.provide(RuntimeIdentity.layer),
       Layer.provideMerge(Runtime.layer),
-      Layer.provide(Generation.layer.pipe(Layer.provide(sourceControl))),
+      Layer.provideMerge(Generation.layer.pipe(Layer.provide(sourceControl))),
       Layer.provideMerge(providers),
       Layer.provideMerge(Layer.succeedContext(baseContext)),
     );
@@ -185,6 +192,20 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       }),
     );
     const sync = Context.get(context, Sync.MemorySyncService);
+    const worker = Context.get(context, Worker.MemoryWorker);
+    // Two explicit phases: receive/push, finish persisted scanner work, then
+    // discover the newly eligible frontier. No polling or elapsed-time oracle.
+    const tick = Effect.gen(function* () {
+      yield* sync.syncOnce;
+      yield* worker.drain;
+      yield* sync.syncOnce;
+      yield* worker.drain;
+    });
+    const startProduction = Layer.buildWithMemoMap(
+      layerMemorySyncStarted.pipe(Layer.provide(Layer.succeedContext(context))),
+      memoMap,
+      scope,
+    ).pipe(Effect.map((started) => Context.get(started, Sync.MemorySyncService)));
     const aggregate = (space: M.MemorySpaceId, memory: M.MemoryId) =>
       run(Store.MemoryStore.use((s) => s.loadAggregate(space, memory)));
     const milestone = (
@@ -213,11 +234,14 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       serve,
       connection,
       sync,
+      worker,
+      tick,
       selection,
       entered,
       aggregate,
       milestone,
       generated: () => generated,
+      startProduction,
     };
   });
 
@@ -394,7 +418,7 @@ const cluster = (resolveB?: Resolve) =>
           s.updateSettings({ defaultModelSelection: member.selection }),
         ),
       );
-      yield* member.sync.syncOnce;
+      yield* member.tick;
       assert.deepStrictEqual(yield* member.sync.readLocalReadiness(), {
         memorySpaceId: space,
         bootstrap: "ready",
@@ -436,8 +460,8 @@ const activeText = (aggregate: Store.MemoryAggregate) => {
 const common = (c: Effect.Success<ReturnType<typeof cluster>>, target: M.MemoryId) =>
   Effect.gen(function* () {
     yield* write(c.a, c.space, target, 1100, "common parent");
-    yield* c.a.sync.syncOnce;
-    yield* c.b.sync.syncOnce;
+    yield* c.a.tick;
+    yield* c.b.tick;
     return (yield* c.a.aggregate(c.space, target)).heads;
   });
 
@@ -446,8 +470,8 @@ it.effect("a: A write propagates through real H HTTP to B", () =>
     const c = yield* cluster();
     const target = memory(1);
     yield* write(c.a, c.space, target, 1101, "A shared fact");
-    yield* c.a.sync.syncOnce;
-    yield* c.b.sync.syncOnce;
+    yield* c.a.tick;
+    yield* c.b.tick;
     for (const replica of [c.a, c.h, c.b]) {
       assert.strictEqual(activeText(yield* replica.aggregate(c.space, target)), "A shared fact");
       assert.strictEqual(replica.generated(), 0);
@@ -469,9 +493,9 @@ it.effect("b: A forget dominates B concurrent edit and purges every replica", ()
         ),
       ),
     );
-    yield* c.a.sync.syncOnce;
-    yield* c.b.sync.syncOnce;
-    yield* c.a.sync.syncOnce;
+    yield* c.a.tick;
+    yield* c.b.tick;
+    yield* c.a.tick;
     for (const replica of [c.a, c.h, c.b]) {
       const aggregate = yield* replica.aggregate(c.space, target);
       assert.strictEqual(aggregate.item?.status, "forgotten");
@@ -491,16 +515,16 @@ it.effect(
       const heads = yield* common(c, target);
       yield* write(c.a, c.space, target, 1110, "A version", heads);
       yield* write(c.b, c.space, target, 1111, "B version", heads);
-      yield* c.a.sync.syncOnce;
-      yield* c.b.sync.syncOnce;
+      yield* c.a.tick;
+      yield* c.b.tick;
       const input = yield* Deferred.await(c.b.entered);
       assert.strictEqual(input.memoryId, target);
       assert.strictEqual((yield* c.h.aggregate(c.space, target)).item?.status, "quarantined");
       assert.strictEqual((yield* c.b.aggregate(c.space, target)).item?.status, "quarantined");
       const other = memory(30);
       yield* write(c.a, c.space, other, 1112, "unrelated healthy fact");
-      yield* c.a.sync.syncOnce;
-      yield* c.b.sync.syncOnce;
+      yield* c.a.tick;
+      yield* c.b.tick;
       assert.strictEqual(
         activeText(yield* c.b.aggregate(c.space, other)),
         "unrelated healthy fact",
@@ -528,14 +552,14 @@ it.effect(
         target,
         (aggregate) => aggregate.resolutions.length === 1 && aggregate.item?.status === "active",
       );
-      yield* c.a.sync.syncOnce;
-      yield* c.b.sync.syncOnce;
+      yield* c.a.tick;
+      yield* c.b.tick;
       yield* Fiber.join(committed);
       const input = yield* Deferred.await(c.b.entered);
       assert.deepStrictEqual(input.modelSelection, c.b.selection);
       assert.strictEqual(c.b.generated(), 1);
       assert.strictEqual(c.a.generated(), 0);
-      yield* c.a.sync.syncOnce;
+      yield* c.a.tick;
       const resolved = yield* c.b.aggregate(c.space, target);
       const resolution = resolved.resolutions[0]!;
       assert.deepStrictEqual([...resolution.inputRevisionIds].sort(), [aHead, bHead].sort());
@@ -579,8 +603,8 @@ it.effect(
           ),
         ),
       );
-      yield* c.b.sync.syncOnce;
-      yield* c.a.sync.syncOnce;
+      yield* c.b.tick;
+      yield* c.a.tick;
       for (const replica of [c.a, c.h, c.b])
         assert.strictEqual(activeText(yield* replica.aggregate(c.space, target)), "A original");
       assert.strictEqual(c.b.generated(), 1);
@@ -596,8 +620,8 @@ it.effect(
       const heads = yield* common(c, target);
       yield* write(c.a, c.space, target, 1130, "A takeover original", heads);
       yield* write(c.b, c.space, target, 1131, "B takeover original", heads);
-      yield* c.a.sync.syncOnce;
-      yield* c.b.sync.syncOnce;
+      yield* c.a.tick;
+      yield* c.b.tick;
       yield* Deferred.await(c.b.entered);
       // Revocation models loss of the departed device's authenticated transport.
       // Its real HTTP release is denied, leaving the hub lease to expire naturally.
@@ -612,7 +636,7 @@ it.effect(
         Effect.void,
       );
       yield* c.b.sync.shutdown;
-      yield* c.a.sync.syncOnce;
+      yield* c.a.tick;
       assert.strictEqual(c.a.generated(), 0);
       assert.strictEqual((yield* c.h.aggregate(c.space, target)).item?.status, "quarantined");
       const committed = yield* c.a.milestone(
@@ -621,7 +645,7 @@ it.effect(
         (aggregate) => aggregate.resolutions.length === 1 && aggregate.item?.status === "active",
       );
       yield* TestClock.adjust("120 seconds");
-      yield* c.a.sync.syncOnce;
+      yield* c.a.tick;
       yield* Fiber.join(committed);
       assert.strictEqual(c.a.generated(), 1);
       assert.strictEqual(
@@ -709,7 +733,7 @@ it.effect("WP3 owner source authorization fails closed while unrelated HTTP sync
     }
     const other = memory(60);
     yield* write(c.b, c.space, other, 1143, "ordinary sync survives source denial");
-    yield* c.b.sync.syncOnce;
+    yield* c.b.tick;
     assert.strictEqual(
       activeText(yield* c.h.aggregate(c.space, other)),
       "ordinary sync survives source denial",
@@ -729,4 +753,39 @@ it.effect("WP3 owner source authorization fails closed while unrelated HTTP sync
     // it must map that denial to the existing denied wire outcome in its own lane.
     assert.strictEqual(outcome.state, "pending");
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "production scoped startup reuses Sync and unbound status stays typed bootstrap_required",
+  () =>
+    Effect.gen(function* () {
+      const replica = yield* environment("A");
+      assert.strictEqual(yield* replica.startProduction, replica.sync);
+      assert.strictEqual(yield* replica.startProduction, replica.sync);
+      yield* replica.run(
+        Sync.MemorySyncRuntime.use((runtime) =>
+          Effect.gen(function* () {
+            assert.deepStrictEqual(yield* runtime.readIntentBinding!, {
+              memorySpaceId: null,
+              coordinatorEpoch: 0,
+              enabled: false,
+            });
+            for (const read of [
+              runtime.readUnboundStorage.pipe(Effect.asVoid),
+              runtime.readProcessing(null, null).pipe(Effect.asVoid),
+            ]) {
+              const result = yield* Effect.result(read);
+              assert.strictEqual(result._tag, "Failure");
+              if (result._tag === "Failure") {
+                assert.strictEqual(result.failure._tag, "MemoryStorageError");
+                assert.strictEqual(result.failure.stage, "bootstrap_required");
+              }
+            }
+          }),
+        ),
+      );
+      assert.strictEqual(replica.generated(), 0);
+      yield* replica.sync.shutdown;
+      assert.strictEqual(yield* replica.sync.activeResolutions, 0);
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
