@@ -31,10 +31,12 @@ const owner = M.EnvironmentId.make("owner");
 const requester = M.EnvironmentId.make("requester");
 const thread = { environmentId: owner, threadId: M.ThreadId.make("thread") };
 const messageId = M.MessageId.make("message");
+const assistantId = M.MessageId.make("assistant");
+const runId = M.RunId.make("fixture-run");
 const watermark = {
   fromEventId: M.EventId.make(id(3)),
-  toEventId: M.EventId.make(id(3)),
-  throughSequence: 1,
+  toEventId: M.EventId.make(id(13)),
+  throughSequence: 4,
 };
 const input: M.MemoryHubSourceReadRequestInput = {
   protocolVersion: 1,
@@ -43,7 +45,7 @@ const input: M.MemoryHubSourceReadRequestInput = {
   requestId: M.MemorySourceReadRequestId.make(id(4)),
   sourceThread: thread,
   sourceWatermark: watermark,
-  messageIds: [messageId],
+  messageIds: [messageId, assistantId],
   limit: 10,
   authorizedScopes: ["memory:read", "orchestration:read"],
 };
@@ -78,6 +80,14 @@ const message = M.OrchestrationV2ConversationMessageJson.make({
   createdAt: DateTime.makeUnsafe(0),
   updatedAt: DateTime.makeUnsafe(0),
 });
+const assistant = {
+  ...message,
+  id: assistantId,
+  role: "assistant" as const,
+  runId,
+  createdBy: "agent" as const,
+  text: "fixture completed answer",
+};
 const committed: Owner.MemoryOwnerSourceReadCommitted = {
   version: 1,
   policy: {
@@ -147,6 +157,9 @@ const seed = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${thread.threadId},NULL)`;
   yield* sql`INSERT INTO orchestration_events VALUES (1,${watermark.fromEventId},${thread.threadId},'message.updated',${encodeMessage(message)},'1970-01-01T00:00:00.000Z',2,'thread')`;
+  yield* sql`INSERT INTO orchestration_events VALUES (2,${id(11)},${thread.threadId},'run.created',${JSON.stringify({ id: runId, status: "running" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+  yield* sql`INSERT INTO orchestration_events VALUES (3,${id(12)},${thread.threadId},'message.updated',${encodeMessage(assistant)},'1970-01-01T00:00:00.000Z',2,'thread')`;
+  yield* sql`INSERT INTO orchestration_events VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
   const store = yield* Store.MemoryStore;
   const op: M.MemoryOperation = {
     protocolVersion: 1,
@@ -170,7 +183,9 @@ const seed = Effect.gen(function* () {
     },
     payload: {
       text: "fixture summary",
-      evidence: [{ origin: "thread", sourceThread: thread, watermark, messageIds: [messageId] }],
+      evidence: [
+        { origin: "thread", sourceThread: thread, watermark, messageIds: [messageId, assistantId] },
+      ],
       derivedFromMemoryRevisions: [],
     },
   };
@@ -198,7 +213,10 @@ it.effect.each([false, true])(
           page: {
             sourceThread: thread,
             watermark,
-            messages: [{ messageId, text: "fixture committed original" }],
+            messages: [
+              { messageId, text: "fixture committed original" },
+              { messageId: assistantId, text: "fixture completed answer" },
+            ],
             nextCursor: null,
           },
         });
@@ -293,17 +311,17 @@ it.effect.each([
       if (drift === "deleted thread")
         yield* sql`UPDATE orchestration_v2_projection_threads SET deleted_at='deleted'`;
       if (drift === "streaming")
-        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, streaming: true })}`;
+        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, streaming: true })} WHERE sequence=1`;
       if (drift === "new message")
-        yield* sql`INSERT INTO orchestration_events SELECT 2,${id(99)},stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind FROM orchestration_events`;
+        yield* sql`INSERT INTO orchestration_events SELECT 5,${id(99)},stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind FROM orchestration_events WHERE sequence=1`;
       if (drift === "wrong watermark")
         yield* sql`UPDATE orchestration_events SET event_id=${id(99)}`;
       if (drift === "forgotten")
         yield* sql`INSERT INTO memory_pending_forget_intents(space,memory_id,operation_id,requested_at_utc,attempts,last_failure_code,submission_state) VALUES (${space},${memory},${id(99)},'1970-01-01T00:00:00.000Z',0,NULL,'unsubmitted')`;
       if (drift === "secret")
-        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, text: "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----" })}`;
+        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, text: "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----" })} WHERE sequence=1`;
       if (drift === "oversize")
-        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, text: "x".repeat(70000) })}`;
+        yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, text: "x".repeat(70000) })} WHERE sequence=1`;
       const reader = yield* Owner.MemoryOwnerSourceReader;
       const result = yield* Effect.result(reader.reader.readCommitted(locator, Effect.void));
       if (drift === "secret") {
@@ -340,6 +358,34 @@ it.effect("rechecks committed policy after the read before releasing body", () =
       yield* Deferred.succeed(resume, undefined);
       assert.strictEqual((yield* Fiber.join(fiber))._tag, "Failure");
       assert.strictEqual(yield* Clock.currentTimeMillis, 0);
+    }).pipe(Effect.provide(fixture(policy)));
+  }),
+);
+
+it.effect.each([
+  "running",
+  "failed",
+  "rolled_back",
+  "completion after watermark",
+  "run changed after watermark",
+] as const)("rejects uncommitted run evidence: %s", (drift) =>
+  Effect.gen(function* () {
+    const policy = yield* Ref.make(committed);
+    yield* Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      if (drift === "completion after watermark") {
+        yield* sql`UPDATE orchestration_events SET payload_json=${JSON.stringify({ id: runId, status: "running" })} WHERE sequence=4`;
+        yield* sql`INSERT INTO orchestration_events VALUES (5,${id(99)},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+      } else if (drift === "run changed after watermark") {
+        yield* sql`INSERT INTO orchestration_events VALUES (5,${id(99)},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+      } else {
+        yield* sql`UPDATE orchestration_events SET payload_json=${JSON.stringify({ id: runId, status: drift })} WHERE sequence=4`;
+      }
+      const reader = yield* Owner.MemoryOwnerSourceReader;
+      const result = yield* Effect.result(reader.reader.readCommitted(locator, Effect.void));
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") assert.strictEqual(result.failure._tag, "MemoryStoreConflict");
     }).pipe(Effect.provide(fixture(policy)));
   }),
 );

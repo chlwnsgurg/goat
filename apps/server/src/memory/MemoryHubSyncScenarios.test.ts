@@ -1102,10 +1102,12 @@ const sourceFixture = (ownerIsHub = false) =>
       threadId: M.ThreadId.make("relay-fixture-thread"),
     };
     const messageId = M.MessageId.make("relay-fixture-message");
+    const assistantId = M.MessageId.make("relay-fixture-assistant");
+    const runId = M.RunId.make("relay-fixture-run");
     const watermark = {
       fromEventId: M.EventId.make(id(9100)),
-      toEventId: M.EventId.make(id(9100)),
-      throughSequence: 1,
+      toEventId: M.EventId.make(id(9113)),
+      throughSequence: 4,
     };
     const msg = M.OrchestrationV2ConversationMessageJson.make({
       id: messageId,
@@ -1129,6 +1131,22 @@ const sourceFixture = (ownerIsHub = false) =>
         const sql = yield* SqlClient.SqlClient;
         yield* sql`INSERT INTO orchestration_v2_projection_threads(thread_id,project_id,title,default_provider,runtime_mode,interaction_mode,created_at,updated_at,payload_json) VALUES (${thread.threadId},'fixture-project','fixture','codex','full-access','default','1970-01-01T00:00:00.000Z','1970-01-01T00:00:00.000Z','{}')`;
         yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (1,${watermark.fromEventId},${thread.threadId},'message.updated',${yield* encodeMessage(msg)},'1970-01-01T00:00:00.000Z',2,'thread',1,'user','{}')`;
+      }),
+    );
+    yield* owner.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const assistant = {
+          ...msg,
+          id: assistantId,
+          role: "assistant" as const,
+          createdBy: "agent" as const,
+          runId,
+          text: "synthetic completed answer",
+        };
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (2,${id(9111)},${thread.threadId},'run.created',${JSON.stringify({ id: runId, status: "running" })},'1970-01-01T00:00:00.000Z',2,'thread',2,'system','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (3,${id(9112)},${thread.threadId},'message.updated',${yield* encodeMessage(assistant)},'1970-01-01T00:00:00.000Z',2,'thread',3,'system','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread',4,'system','{}')`;
       }),
     );
     const op: M.MemoryOperation = {
@@ -1157,7 +1175,14 @@ const sourceFixture = (ownerIsHub = false) =>
       },
       payload: {
         text: "synthetic linked summary",
-        evidence: [{ origin: "thread", sourceThread: thread, watermark, messageIds: [messageId] }],
+        evidence: [
+          {
+            origin: "thread",
+            sourceThread: thread,
+            watermark,
+            messageIds: [messageId, assistantId],
+          },
+        ],
         derivedFromMemoryRevisions: [],
       },
     };
@@ -1195,7 +1220,7 @@ const sourceFixture = (ownerIsHub = false) =>
             memorySpaceId: c.space,
             memoryId: target,
             sourceThread: thread,
-            messageIds: [messageId],
+            messageIds: [messageId, assistantId],
             limit: 10,
           },
           Effect.void,
@@ -1228,7 +1253,7 @@ const sourceFixture = (ownerIsHub = false) =>
             ]
           : [],
       });
-    return { ...c, owner, target, thread, messageId, watermark, validated, remove };
+    return { ...c, owner, target, thread, messageId, assistantId, watermark, validated, remove };
   });
 
 it.effect.each([false, true])(
@@ -1248,7 +1273,10 @@ it.effect.each([false, true])(
         page: {
           sourceThread: c.thread,
           watermark: c.watermark,
-          messages: [{ messageId: c.messageId, text: "synthetic original from owner" }],
+          messages: [
+            { messageId: c.messageId, text: "synthetic original from owner" },
+            { messageId: c.assistantId, text: "synthetic completed answer" },
+          ],
           nextCursor: null,
         },
       });
