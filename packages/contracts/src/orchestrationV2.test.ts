@@ -2421,10 +2421,20 @@ describe("WP4 task ceiling propagation codecs", () => {
       updatedAt: now,
     };
     expect(decodeOrchestrationV2Subagent(child)).toMatchObject({ memoryGrantCeiling: "none" });
-    const current = decodeOrchestrationV2Subagent({ ...child, memoryGrantCeiling: "read" });
-    const json = encodeOrchestrationV2SubagentJson(current);
-    expect(Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(json)).toMatchObject({
-      memoryGrantCeiling: "read",
-    });
+    expect(
+      encodeOrchestrationV2SubagentJson(decodeOrchestrationV2Subagent(child)),
+    ).not.toHaveProperty("memoryGrantCeiling");
+    for (const memoryGrantCeiling of ["none", "read", "read_write"] as const) {
+      const current = decodeOrchestrationV2Subagent({ ...child, memoryGrantCeiling });
+      const json = JSON.parse(JSON.stringify(encodeOrchestrationV2SubagentJson(current)));
+      if (memoryGrantCeiling === "none") {
+        expect(json).not.toHaveProperty("memoryGrantCeiling");
+      } else {
+        expect(json).toHaveProperty("memoryGrantCeiling", memoryGrantCeiling);
+      }
+      expect(Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(json)).toMatchObject({
+        memoryGrantCeiling,
+      });
+    }
   });
 });

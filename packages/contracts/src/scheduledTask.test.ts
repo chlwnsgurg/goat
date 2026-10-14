@@ -56,7 +56,7 @@ describe("ScheduledTaskUpsertSchedule", () => {
 });
 
 describe("persisted task memory ceiling", () => {
-  it("normalizes legacy absence to none and preserves each explicit ceiling", () => {
+  it("omits default ceilings from JSON and preserves explicit access ceilings", () => {
     const row = {
       id: "task",
       title: "Synthetic schedule",
@@ -94,16 +94,25 @@ describe("persisted task memory ceiling", () => {
     ).toThrow();
     const codec = Schema.Struct({ memoryGrantCeiling: MemoryTaskGrantCeilingField });
     expect(Schema.decodeUnknownSync(codec)({})).toEqual({ memoryGrantCeiling: "none" });
-    expect(Schema.encodeSync(codec)({})).toEqual({ memoryGrantCeiling: "none" });
+    expect(Schema.encodeSync(codec)({})).toEqual({});
+    expect(
+      JSON.parse(Schema.encodeSync(Schema.fromJsonString(ScheduledTask))(persisted)),
+    ).not.toHaveProperty("memoryGrantCeiling");
     for (const memoryGrantCeiling of ["none", "read", "read_write"] as const) {
       expect(Schema.decodeUnknownSync(codec)({ memoryGrantCeiling })).toEqual({
         memoryGrantCeiling,
       });
-      expect(Schema.encodeSync(codec)({ memoryGrantCeiling })).toEqual({ memoryGrantCeiling });
+      expect(Schema.encodeSync(codec)({ memoryGrantCeiling })).toEqual(
+        memoryGrantCeiling === "none" ? {} : { memoryGrantCeiling },
+      );
       const json = Schema.fromJsonString(ScheduledTask);
       const task = Schema.decodeUnknownSync(ScheduledTask)({ ...row, memoryGrantCeiling });
       const encoded = Schema.encodeSync(json)(task);
-      expect(JSON.parse(encoded).memoryGrantCeiling).toBe(memoryGrantCeiling);
+      if (memoryGrantCeiling === "none") {
+        expect(JSON.parse(encoded)).not.toHaveProperty("memoryGrantCeiling");
+      } else {
+        expect(JSON.parse(encoded)).toHaveProperty("memoryGrantCeiling", memoryGrantCeiling);
+      }
       expect(Schema.decodeUnknownSync(json)(encoded).memoryGrantCeiling).toBe(memoryGrantCeiling);
     }
     const rpc = WsRpcGroup.requests.get(WS_METHODS.scheduledTasksUpsert)!;

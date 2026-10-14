@@ -1810,3 +1810,25 @@ describe("WP4 cursor, owner policy and relay contracts", () => {
     });
   });
 });
+
+describe("task memory grant ceiling JSON", () => {
+  const codec = Schema.Struct({ memoryGrantCeiling: M.MemoryTaskGrantCeilingField });
+  const json = Schema.fromJsonString(codec);
+  it("omits missing and none while decoding both to none", () => {
+    for (const input of [{}, { memoryGrantCeiling: "none" as const }]) {
+      const encoded = Schema.encodeSync(json)(input);
+      expect(JSON.parse(encoded)).not.toHaveProperty("memoryGrantCeiling");
+      expect(Schema.decodeUnknownSync(json)(JSON.stringify(input))).toEqual({
+        memoryGrantCeiling: "none",
+      });
+      expect(Schema.decodeUnknownSync(json)(encoded)).toEqual({ memoryGrantCeiling: "none" });
+    }
+  });
+  it("preserves read and read_write in JSON", () => {
+    for (const memoryGrantCeiling of ["read", "read_write"] as const) {
+      const encoded = Schema.encodeSync(json)({ memoryGrantCeiling });
+      expect(JSON.parse(encoded)).toHaveProperty("memoryGrantCeiling", memoryGrantCeiling);
+      expect(Schema.decodeUnknownSync(json)(encoded)).toEqual({ memoryGrantCeiling });
+    }
+  });
+});

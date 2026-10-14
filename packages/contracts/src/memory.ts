@@ -1378,12 +1378,13 @@ export const MemoryTaskGrantCeiling = Schema.Literals(["none", "read", "read_wri
 export type MemoryTaskGrantCeiling = typeof MemoryTaskGrantCeiling.Type;
 export const MemoryTaskGrantCeilingField = MemoryTaskGrantCeiling.pipe(
   Schema.withDecodingDefault(Effect.succeed("none")),
-  // Keep older in-process producers assignable; every codec boundary normalizes to none.
+  // Keep older in-process producers assignable; missing and none are omitted on encode and decode to none.
   Schema.decodeTo(
     Schema.optionalKey(MemoryTaskGrantCeiling),
     SchemaTransformation.transformOptional({
       decode: (value) => value,
-      encode: (value) => Option.some(Option.getOrElse(value, () => "none" as const) ?? "none"),
+      encode: (value) =>
+        Option.filter(value, (ceiling) => ceiling === "read" || ceiling === "read_write"),
     }),
   ),
 );
