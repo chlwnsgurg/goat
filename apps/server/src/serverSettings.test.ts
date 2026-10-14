@@ -2465,11 +2465,13 @@ it.effect(
       };
       const result = yield* admin.withLock(admin.apply(record, Effect.void));
       assert.strictEqual(result.view.version, 1);
+      assert.strictEqual(yield* admin.readPreviousHubRequestId, record.requestId);
       // New settings service, same real filesystem/secret/SQLite dependencies.
       const restarted = yield* Effect.gen(function* () {
         const recovered = yield* ServerSettingsModule.MemoryHubAdminSettings;
         const publicService = yield* ServerSettingsModule.ServerSettingsService;
         assert.isFalse(Object.hasOwn(yield* publicService.getSettings, "_memoryHubTransition"));
+        assert.strictEqual(yield* recovered.readPreviousHubRequestId, record.requestId);
         return yield* recovered.withLock(recovered.apply(record, Effect.void));
       }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
       assert.deepStrictEqual(restarted, result);
@@ -2584,4 +2586,41 @@ it.effect(
         ),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "administration refuses an activated hub with unresolved space and preserves disabled settings",
+  () =>
+    Effect.gen(function* () {
+      const admin = yield* ServerSettingsModule.MemoryHubAdminSettings;
+      const requestId = MemoryOperationId.make("00000000-0000-4000-8000-000000009006");
+      const error = yield* admin
+        .withLock(
+          admin.apply(
+            {
+              requestId,
+              requestDigest: "b".repeat(64),
+              expectedVersion: 0,
+              action: {
+                requestId,
+                expectedVersion: 0,
+                action: "configure",
+                settings: { mode: "hub", memorySpaceId: null },
+              },
+              stage: "activated",
+              memberVersion: null,
+              secretName: null,
+              result: null,
+            },
+            Effect.void,
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryHubError");
+      if (error._tag === "MemoryHubError") assert.strictEqual(error.code, "bootstrap_required");
+      assert.deepStrictEqual((yield* admin.read).settings, { mode: "disabled" });
+      assert.strictEqual((yield* admin.read).version, 0);
+    }).pipe(
+      Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
+    ),
 );

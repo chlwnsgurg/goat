@@ -13,6 +13,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   MemoryHubSettings,
+  MemorySpaceId,
   MemoryHubError,
   type MemoryHubSettingsUpdateResult,
   type MemoryHubForbiddenError,
@@ -84,6 +85,7 @@ export {
 const MemoryHubTransitionMarker = Schema.Struct({
   requestId: MemoryOperationId,
   version: Schema.Int,
+  previousHubSpace: Schema.optionalKey(MemorySpaceId),
 });
 type HubTransitionMarker = typeof MemoryHubTransitionMarker.Type;
 const encodeServerSettings = Schema.encodeEffect(ServerSettings);
@@ -280,6 +282,8 @@ export class MemoryHubAdminSettings extends Context.Service<
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
     readonly read: Effect.Effect<MemoryHubSettingsView, MemoryHubError>;
+    readonly readPreviousHubRequestId: Effect.Effect<MemoryOperationId | null, MemoryHubError>;
+    readonly readPreviousHubSpace: Effect.Effect<MemorySpaceId | null, MemoryHubError>;
     readonly apply: (
       record: MemoryStore.AdminRecord,
       permit: Effect.Effect<void, MemoryHubForbiddenError>,
@@ -296,11 +300,21 @@ export class MemoryHubAdminSettings extends Context.Service<
 const hubAdministrationSettings = (
   read: ServerSettingsService["Service"]["getSettings"],
   withLock: MemoryHubAdminSettings["Service"]["withLock"],
+  marker: Effect.Effect<HubTransitionMarker | null>,
   applyLocked: MemoryHubSettingsTransitions["Service"]["applyMemoryHubTransition"],
 ): MemoryHubAdminSettings["Service"] => ({
   withLock: (effect) => withLock(effect.pipe(Effect.provideService(HubSettingsLock, true))),
   read: read.pipe(
     Effect.map((current) => ({ settings: current.memoryHub, version: current.memoryHubVersion })),
+    Effect.mapError(() => new MemoryHubError({ code: "storage_failed" })),
+  ),
+  readPreviousHubRequestId: Effect.map(marker, (saved) => saved?.requestId ?? null),
+  readPreviousHubSpace: read.pipe(
+    Effect.flatMap((current) =>
+      current.memoryHub.mode === "hub" && current.memoryHub.memorySpaceId !== null
+        ? Effect.succeed(current.memoryHub.memorySpaceId)
+        : Effect.map(marker, (saved) => saved?.previousHubSpace ?? null),
+    ),
     Effect.mapError(() => new MemoryHubError({ code: "storage_failed" })),
   ),
   apply: (record, permit) =>
@@ -316,8 +330,7 @@ const hubAdministrationSettings = (
       let settings = current.memoryHub;
       if (action.action === "configure") {
         settings = action.settings;
-        // L1 owns initial space binding and checkpoint publication. Do not expose an
-        // uninitialized hub as ready; the coordinator supplies its initialized space.
+        // The administrator supplies the space only after SQL publication commits.
         if (settings.mode === "hub" && settings.memorySpaceId === null)
           return yield* new MemoryHubError({ code: "bootstrap_required" });
       } else if (action.action === "installCredential") {
@@ -432,7 +445,19 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         ),
       ).pipe(
         Effect.tap((next) =>
-          Ref.set(hubMarkerRef, { requestId: input.requestId, version: next.memoryHubVersion }),
+          Ref.get(hubMarkerRef).pipe(
+            Effect.flatMap((previous) =>
+              Ref.set(hubMarkerRef, {
+                requestId: input.requestId,
+                version: next.memoryHubVersion,
+                ...(next.memoryHub.mode === "hub" && next.memoryHub.memorySpaceId !== null
+                  ? { previousHubSpace: next.memoryHub.memorySpaceId }
+                  : previous?.previousHubSpace
+                    ? { previousHubSpace: previous.previousHubSpace }
+                    : {}),
+              }),
+            ),
+          ),
         ),
         Effect.map((next) => ({ settings: next.memoryHub, version: next.memoryHubVersion })),
       );
@@ -465,6 +490,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       adminSettings: hubAdministrationSettings(
         getSettings,
         (effect) => writeSemaphore.withPermits(1)(effect),
+        Ref.get(hubMarkerRef),
         applyHubLocked,
       ),
       withSettingsSnapshot: (use) =>
@@ -1307,13 +1333,25 @@ const make = Effect.gen(function* () {
     input,
     permit,
   ) =>
-    updateSettingsWhileLocked(
-      (current) =>
-        Ref.get(hubMarkerRef).pipe(
-          Effect.flatMap((marker) => transitionMemoryHubSettings(current, input, permit, marker)),
-        ),
-      { requestId: input.requestId, version: input.expectedVersion + 1 },
-    ).pipe(Effect.map((next) => ({ settings: next.memoryHub, version: next.memoryHubVersion })));
+    Effect.gen(function* () {
+      const current = yield* getSettingsFromCache;
+      const marker = yield* Ref.get(hubMarkerRef);
+      const previousHubSpace =
+        input.settings.mode === "hub" && input.settings.memorySpaceId !== null
+          ? input.settings.memorySpaceId
+          : current.memoryHub.mode === "hub"
+            ? current.memoryHub.memorySpaceId
+            : marker?.previousHubSpace;
+      const next = yield* updateSettingsWhileLocked(
+        (current) => transitionMemoryHubSettings(current, input, permit, marker),
+        {
+          requestId: input.requestId,
+          version: input.expectedVersion + 1,
+          ...(previousHubSpace ? { previousHubSpace } : {}),
+        },
+      );
+      return { settings: next.memoryHub, version: next.memoryHubVersion };
+    });
 
   const withSettingsSnapshot: ServerSettingsService["Service"]["withSettingsSnapshot"] = (use) =>
     writeSemaphore.withPermits(1)(
@@ -1457,6 +1495,7 @@ const make = Effect.gen(function* () {
     adminSettings: hubAdministrationSettings(
       getSettingsFromCache,
       (effect) => writeSemaphore.withPermits(1)(effect),
+      Ref.get(hubMarkerRef),
       applyHubLocked,
     ),
     withSettingsSnapshot,
