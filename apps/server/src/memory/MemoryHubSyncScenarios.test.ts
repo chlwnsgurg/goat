@@ -147,6 +147,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const sourceSecondRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
     let sourceAdmissions = 0;
     let sourceAckFault = false;
+    let sourceSendGate: Deferred.Deferred<void> | null = null;
+    const sourceSendEntered = yield* Deferred.make<void>();
     let pullFault: "failure" | "budget" | null = null;
     let pullCalls = 0;
     const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
@@ -271,8 +273,14 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
                   ),
                 ),
               ),
-          respondSourceRead: (connection, input) =>
-            client.respondSourceRead(connection, input).pipe(
+          respondSourceRead: (connection, input, prepare) =>
+            Effect.gen(function* () {
+              if (sourceSendGate && input.kind === "normal") {
+                yield* Deferred.succeed(sourceSendEntered, undefined);
+                yield* Deferred.await(sourceSendGate);
+              }
+              return yield* client.respondSourceRead(connection, input, prepare);
+            }).pipe(
               Effect.map((result) =>
                 sourceAckFault && result.kind === "revoke"
                   ? {
@@ -419,6 +427,10 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         observePull = true;
       },
       sourcePolicy,
+      sourceSendEntered,
+      blockSourceSend: (gate: Deferred.Deferred<void>) => {
+        sourceSendGate = gate;
+      },
       setPullFault: (fault: "failure" | "budget") => {
         pullFault = fault;
       },
@@ -1476,6 +1488,37 @@ it.effect(
       );
       yield* Deferred.succeed(nextGate, undefined);
       assert.strictEqual((yield* Fiber.join(next)).kind, "available");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["deleted thread", "pending forget"] as const)(
+  "response submission revalidates owner source after reader completion: %s",
+  (drift) =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      const resultGate = yield* Deferred.make<void>();
+      const sendGate = yield* Deferred.make<void>();
+      c.a.blockSourceResult(resultGate);
+      c.owner.blockSourceSend(sendGate);
+      const read = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
+      yield* Deferred.await(c.a.sourceRequested);
+      const cycle = yield* c.owner.sync.syncOnce.pipe(Effect.forkScoped);
+      yield* Deferred.await(c.owner.sourceSendEntered);
+      yield* c.owner.run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          if (drift === "deleted thread")
+            yield* sql`UPDATE orchestration_v2_projection_threads SET deleted_at='deleted' WHERE thread_id=${c.thread.threadId}`;
+          else
+            yield* sql`INSERT INTO memory_pending_forget_intents(space,memory_id,operation_id,requested_at_utc,attempts,last_failure_code,submission_state) VALUES (${c.space},${c.target},${id(9991)},'1970-01-01T00:00:00.000Z',0,NULL,'unsubmitted')`;
+        }),
+      );
+      yield* Deferred.succeed(sendGate, undefined);
+      yield* Fiber.join(cycle);
+      yield* Deferred.succeed(resultGate, undefined);
+      const outcome = yield* Fiber.join(read);
+      assert.notStrictEqual(outcome.kind, "available");
+      assert.isFalse(JSON.stringify(outcome).includes("synthetic original"));
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 

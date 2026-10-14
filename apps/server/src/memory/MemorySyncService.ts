@@ -82,7 +82,8 @@ export class MemorySyncRuntime extends Context.Service<
     ) => Effect.Effect<void, M.MemoryHubError>;
     readonly ownerPolicy?: OwnerSource.MemoryOwnerSourceReadPolicyPort["Service"];
     readonly ownerPermit: (request: M.MemorySourceReadRequest) => Permit;
-    readonly ownerReader: Service.MemoryOwnerCommittedReader;
+    readonly ownerReader: Service.MemoryOwnerCommittedReader &
+      Partial<Pick<OwnerSource.MemoryOwnerSourceReader["Service"]["reader"], "readForRelay">>;
   }
 >()("goat/memory/MemorySyncService/MemorySyncRuntime") {}
 
@@ -257,6 +258,7 @@ const make = Effect.gen(function* () {
     if (statusEpoch !== epoch) {
       statusEpoch = epoch;
       lastFailure = undefined;
+
       lastSuccess = null;
     }
   };
@@ -1317,38 +1319,36 @@ const make = Effect.gen(function* () {
     return result.success;
   });
   // Independent of summary pull progress; network and settings commits run outside SQL.
-  const propagateSourceRevokes = (r: Route) => Effect.gen(function* () {
-          // Pending removals are durable in L5 settings. Retry before accepting new reads.
-          if (runtime.ownerPolicy) {
-            const committed = yield* runtime.ownerPolicy.read;
-            for (const removal of committed.policy.removals) {
-              if (
-                removal.state !== "pending" ||
-                removal.memorySpaceId !== r.space ||
-                removal.ownerEnvironmentId !== local
-              )
-                continue;
-              const revoke: M.MemoryHubSourceReadRevokeInput = {
-                protocolVersion: 1,
-                kind: "revoke",
-                memorySpaceId: removal.memorySpaceId,
-                requesterEnvironmentId: removal.requesterEnvironmentId,
-                ownerPolicyEpoch: removal.removalEpoch,
-              };
-              yield* ensureEpoch(r.settings.memoryHubVersion);
-              const result = yield* r.connection
-                ? client.respondSourceRead(r.connection, revoke)
-                : hub.respondSourceRead(revoke, r.principal!);
-              yield* ensureEpoch(r.settings.memoryHubVersion);
-              if (
-                result.kind !== "revoke" ||
-                !M.matchesMemorySourceReadRevokeAck(removal, result.ack)
-              )
-                return yield* new M.MemoryHubError({ code: "invalid_output" });
-              yield* runtime.ownerPolicy.recordRevokeAck(result.ack);
-            }
-          }
-  });
+  const propagateSourceRevokes = (r: Route) =>
+    Effect.gen(function* () {
+      // Pending removals are durable in L5 settings. Retry before accepting new reads.
+      if (runtime.ownerPolicy) {
+        const committed = yield* runtime.ownerPolicy.read;
+        for (const removal of committed.policy.removals) {
+          if (
+            removal.state !== "pending" ||
+            removal.memorySpaceId !== r.space ||
+            removal.ownerEnvironmentId !== local
+          )
+            continue;
+          const revoke: M.MemoryHubSourceReadRevokeInput = {
+            protocolVersion: 1,
+            kind: "revoke",
+            memorySpaceId: removal.memorySpaceId,
+            requesterEnvironmentId: removal.requesterEnvironmentId,
+            ownerPolicyEpoch: removal.removalEpoch,
+          };
+          yield* ensureEpoch(r.settings.memoryHubVersion);
+          const result = yield* r.connection
+            ? client.respondSourceRead(r.connection, revoke)
+            : hub.respondSourceRead(revoke, r.principal!);
+          yield* ensureEpoch(r.settings.memoryHubVersion);
+          if (result.kind !== "revoke" || !M.matchesMemorySourceReadRevokeAck(removal, result.ack))
+            return yield* new M.MemoryHubError({ code: "invalid_output" });
+          yield* runtime.ownerPolicy.recordRevokeAck(result.ack);
+        }
+      }
+    });
   const relayMutex = yield* Semaphore.make(1);
   let lastRelayRequest: M.MemorySourceReadRequestId | null = null;
   // Rotate the bounded collected page after the last attempted request. Read time leaves
@@ -1402,9 +1402,21 @@ const make = Effect.gen(function* () {
                       : Effect.void,
                   ),
                 );
+              let validateSource: Effect.Effect<void, Service.MemoryServiceError> = Effect.fail(
+                new Service.MemoryAccessError({ code: "route_unavailable" }),
+              );
               const outcome = yield* Effect.gen(function* () {
                 const read = yield* permit.pipe(
-                  Effect.andThen(runtime.ownerReader.readCommitted(request, permit)),
+                  Effect.andThen(
+                    runtime.ownerReader.readForRelay
+                      ? runtime.ownerReader.readForRelay(request, permit).pipe(
+                          Effect.map((read) => {
+                            validateSource = read.validate;
+                            return read.outcome;
+                          }),
+                        )
+                      : runtime.ownerReader.readCommitted(request, permit),
+                  ),
                   Effect.timeout("5 seconds"),
                   Effect.catchTags({
                     TimeoutError: () =>
@@ -1465,10 +1477,27 @@ const make = Effect.gen(function* () {
                 outcome: safe,
               };
               yield* ensureEpoch(r.settings.memoryHubVersion);
+              const prepareResponse = Effect.gen(function* () {
+                if (response.outcome.kind !== "available") return response;
+                const validation = yield* Effect.result(
+                  permit.pipe(Effect.andThen(validateSource)),
+                );
+                return validation._tag === "Success"
+                  ? response
+                  : {
+                      ...response,
+                      outcome: {
+                        kind: "unavailable" as const,
+                        code: "source_invalidated" as const,
+                      },
+                    };
+              });
               yield* (
                 r.connection
-                  ? client.respondSourceRead(r.connection, response)
-                  : hub.respondSourceRead(response, r.principal!)
+                  ? client.respondSourceRead(r.connection, response, prepareResponse)
+                  : prepareResponse.pipe(
+                      Effect.flatMap((input) => hub.respondSourceRead(input, r.principal!)),
+                    )
               ).pipe(Effect.timeout("1 second"));
             }).pipe(
               Effect.catchTags({

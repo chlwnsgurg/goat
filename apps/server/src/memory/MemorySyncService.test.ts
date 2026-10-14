@@ -2916,6 +2916,21 @@ it.effect(
           const owner = {
             ...base,
             ownerReader: {
+              readForRelay: (request: M.MemorySourceReadRequest) =>
+                request.requestId === id(9101)
+                  ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+                  : Effect.succeed({
+                      outcome: {
+                        kind: "available" as const,
+                        page: {
+                          sourceThread: request.sourceThread,
+                          watermark: request.sourceWatermark,
+                          messages: [],
+                          nextCursor: null,
+                        },
+                      },
+                      validate: Effect.void,
+                    }),
               readCommitted: (request: M.MemorySourceReadRequest) =>
                 request.requestId === id(9101)
                   ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))

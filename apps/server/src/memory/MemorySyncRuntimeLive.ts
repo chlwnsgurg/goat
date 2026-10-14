@@ -103,7 +103,7 @@ const make = Effect.gen(function* () {
     release: (c, i) => observe(c, client.release(c, i)),
     requestSourceRead: (c, i) => observe(c, client.requestSourceRead(c, i)),
     collectSourceReads: (c, i) => observe(c, client.collectSourceReads(c, i)),
-    respondSourceRead: (c, i) => observe(c, client.respondSourceRead(c, i)),
+    respondSourceRead: (c, i, prepare) => observe(c, client.respondSourceRead(c, i, prepare)),
     resultSourceRead: (c, i) => observe(c, client.resultSourceRead(c, i)),
   });
   const runtime = Sync.MemorySyncRuntime.of({

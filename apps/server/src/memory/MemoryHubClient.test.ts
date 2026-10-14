@@ -523,3 +523,64 @@ it.effect.each(["normal arm", "wrong space", "wrong requester", "wrong epoch"] a
       if (result._tag === "MemoryHubError") assert.strictEqual(result.code, "invalid_output");
     }).pipe(Effect.provide(live)),
 );
+
+it.effect("revalidates source after descriptor preparation and on every retry", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const client = yield* Client.MemoryHubClient;
+    const failed = yield* Deferred.make<void>();
+    let descriptors = 0;
+    let validations = 0;
+    const outcomes: string[] = [];
+    const response: M.MemoryHubSourceReadRespondInput = {
+      protocolVersion: 1,
+      kind: "normal",
+      memorySpaceId: space,
+      ownerPolicyEpoch: 1,
+      requestId: M.MemorySourceReadRequestId.make("00000000-0000-4000-8000-000000000088"),
+      outcome: {
+        kind: "available",
+        page: {
+          sourceThread: { environmentId: environment, threadId: M.ThreadId.make("fixture") },
+          watermark: {
+            fromEventId: M.EventId.make("fixture-event"),
+            toEventId: M.EventId.make("fixture-event"),
+            throughSequence: 1,
+          },
+          messages: [],
+          nextCursor: null,
+        },
+      },
+    };
+    const prepare = Effect.sync(() => {
+      validations++;
+      assert.strictEqual(validations, descriptors);
+      return validations === 1
+        ? response
+        : {
+            ...response,
+            outcome: { kind: "unavailable" as const, code: "source_invalidated" as const },
+          };
+    });
+    const fetch: typeof globalThis.fetch = async (_url, init) => {
+      if (init?.method === "GET") {
+        descriptors++;
+        return json(descriptor);
+      }
+      outcomes.push(JSON.parse(String(init?.body)).outcome.kind);
+      if (outcomes.length === 1) {
+        Deferred.doneUnsafe(failed, Effect.void);
+        return json({}, 503);
+      }
+      return json({ kind: "normal", accepted: true });
+    };
+    const fiber = yield* client
+      .respondSourceRead(connection, response, prepare)
+      .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch), Effect.forkChild);
+    yield* Deferred.await(failed);
+    yield* TestClock.adjust("250 millis");
+    yield* Fiber.join(fiber);
+    assert.strictEqual(validations, 2);
+    assert.deepStrictEqual(outcomes, ["available", "unavailable"]);
+  }).pipe(Effect.provide(live)),
+);

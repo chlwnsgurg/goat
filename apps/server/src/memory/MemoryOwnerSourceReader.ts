@@ -72,7 +72,18 @@ export class MemoryOwnerSourceReader extends Context.Service<
     readonly permit: (
       request: M.MemorySourceReadRequest,
     ) => Effect.Effect<void, Service.MemoryAccessError>;
-    readonly reader: Service.MemoryOwnerCommittedReader;
+    readonly reader: Service.MemoryOwnerCommittedReader & {
+      readonly readForRelay: (
+        request: M.MemorySourceReadRequest,
+        permit: Effect.Effect<void, Service.MemoryAccessError>,
+      ) => Effect.Effect<
+        {
+          readonly outcome: M.MemorySourceReadOutcome;
+          readonly validate: Effect.Effect<void, Service.MemoryServiceError>;
+        },
+        Service.MemoryServiceError
+      >;
+    };
   }
 >()("goat/memory/MemoryOwnerSourceReader") {}
 
@@ -242,6 +253,32 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  return MemoryOwnerSourceReader.of({ policy, permit, reader: { readCommitted } });
+  const readForRelay: MemoryOwnerSourceReader["Service"]["reader"]["readForRelay"] = Effect.fn(
+    "MemoryOwnerSourceReader.readForRelay",
+  )(function* (request, reauthorize) {
+    const input = {
+      memorySpaceId: request.memorySpaceId,
+      memoryId: request.memoryId,
+      sourceThread: request.sourceThread,
+      messageIds: request.messageIds,
+      limit: request.limit,
+      ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+    };
+    const before = yield* service.prepareSourceRead(input, reauthorize);
+    const outcome = yield* readCommitted(request, reauthorize);
+    // Re-run bounded source SQL in a fresh transaction after transport preparation,
+    // including every retry. The closure lasts only for this in-flight response.
+    const validate = Effect.gen(function* () {
+      const current = yield* readCommitted(request, reauthorize);
+      const after = yield* service.prepareSourceRead(input, reauthorize);
+      if (
+        before.generation !== after.generation ||
+        (yield* query(encodeOutcome(current))) !== (yield* query(encodeOutcome(outcome)))
+      )
+        return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
+    });
+    return { outcome, validate };
+  });
+  return MemoryOwnerSourceReader.of({ policy, permit, reader: { readCommitted, readForRelay } });
 });
 export const layer = Layer.effect(MemoryOwnerSourceReader, make);
