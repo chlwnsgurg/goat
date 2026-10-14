@@ -6,7 +6,9 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
+import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
@@ -14,6 +16,7 @@ const memory = M.MemoryId.make(id(2));
 const env = M.EnvironmentId.make("fixture");
 const now = "2026-10-14T00:00:00.000Z";
 const hash = "a".repeat(64);
+const encodeOperationJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryOperation));
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const decodeOperation = Schema.decodeUnknownSync(M.MemoryOperation);
 const operation = (n = 3) =>
@@ -71,7 +74,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration).pipe(Layer.provideMerge(database));
+const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
+  Layer.provideMerge(database),
+);
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const checkpoint = () => {
@@ -1637,7 +1642,7 @@ it("measures the versioned compact maximum and preserves approval and correlatio
       failureCode: "capacity_exceeded",
       capacity: {
         code: "capacity_exceeded",
-        dimension: "live_bytes",
+        dimension: "live_payload_bytes",
         current: Number.MAX_SAFE_INTEGER,
         limit: Number.MAX_SAFE_INTEGER,
         reclaimable: Number.MAX_SAFE_INTEGER,
@@ -1681,3 +1686,255 @@ it("measures the versioned compact maximum and preserves approval and correlatio
     legacyRecord,
   );
 });
+
+it.effect(
+  "selects base forget and extension before LIMIT, then preserves retry ownership across restart",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const enqueue = (n: number, kind: "upsert" | "forget") =>
+        Effect.gen(function* () {
+          const base = operation(n);
+          if (base.kind !== "upsert") throw new Error("fixture");
+          const op: M.MemoryOperation =
+            kind === "upsert"
+              ? base
+              : {
+                  protocolVersion: 1,
+                  kind: "forget",
+                  memorySpaceId: space,
+                  memoryId: memory,
+                  operationId: base.operationId,
+                  originEnvironmentId: env,
+                  expectedHeads: [],
+                  tombstone: {
+                    memorySpaceId: space,
+                    memoryId: memory,
+                    deleteOperationId: base.operationId,
+                    deletingEnvironmentId: env,
+                    deletedAtUtc: M.MemoryUtcTimestamp.make(now),
+                    suppressedSourceKeys: [],
+                    suppressedContent: [],
+                    sourceExclusions: [],
+                  },
+                };
+          const { payload: _payload, ...metadata } =
+            kind === "upsert" ? base : { ...op, payload: undefined };
+          const workId = `sync:${space}:${op.operationId}`;
+          yield* store.enqueueWork({
+            id: workId,
+            space,
+            memoryId: memory,
+            kind: "sync",
+            status: "pending",
+            metadata,
+            payloadRef: null,
+            attempt: 0,
+            nextAttemptAt: 0,
+            claimedBy: null,
+            claimedUntil: null,
+          });
+          yield* sql`UPDATE memory_outbox SET operation_digest=${hash} WHERE id=${workId}`;
+          return { op, workId };
+        });
+      for (let n = 100; n < 205; n++) yield* enqueue(n, "upsert");
+      const base = yield* enqueue(500, "forget");
+      const extension = yield* enqueue(501, "forget");
+      const metadata = yield* encodeOperationJson(base.op);
+      yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,${space},${memory},${base.op.operationId},'forget',${env},${hash},${metadata},${`{"forgetExpansion":{"operationId":"${extension.op.operationId}"}}`},0)`;
+      const due = yield* store.readEligibleOutbox(space, 0, 2);
+      assert.deepStrictEqual(
+        due.map((c) => c.work.id),
+        [base.workId, extension.workId],
+      );
+      // The actual immutable forget bytes must match the ownership digest.
+      const original = yield* store.readWorkOperation(base.workId);
+      assert.isDefined(original);
+      const digest = memoryOperationDigest(original!);
+      yield* sql`UPDATE memory_outbox SET operation_digest=${digest} WHERE id=${base.workId}`;
+      const owner = yield* store.transact(
+        store.acquireSyncWorkTx({
+          workId: base.workId,
+          operationId: base.op.operationId,
+          operationDigest: digest,
+          owner: "first",
+          expectedVersion: 0,
+          now: 0,
+          ownedUntil: 10,
+        }),
+      );
+      assert.isNotNull(owner);
+      const retry = yield* store.transact(
+        store.retrySyncWorkTx({
+          ownership: owner!,
+          now: 1,
+          nextAttemptAt: 20,
+          failureCode: "source_unavailable",
+        }),
+      );
+      assert.isTrue(retry);
+      assert.isFalse(
+        yield* store.transact(
+          store.retrySyncWorkTx({
+            ownership: owner!,
+            now: 2,
+            nextAttemptAt: 30,
+            failureCode: null,
+          }),
+        ),
+      );
+      assert.isFalse(
+        (yield* store.readEligibleOutbox(space, 19, 2)).some((c) => c.work.id === base.workId),
+      );
+      const recovered = yield* Effect.gen(function* () {
+        const restarted = yield* Store.MemoryStore;
+        return yield* restarted.readEligibleOutbox(space, 20, 2);
+      }).pipe(Effect.provide(Store.layer));
+      assert.strictEqual(recovered[0]?.operationDigest, digest);
+      assert.strictEqual(recovered[0]?.work.id, base.workId);
+      assert.strictEqual(recovered[0]?.version, 2);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "recovers the full frozen claim, ignores a changed default, and retires only the matching generation",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const first = operation();
+      if (first.kind !== "upsert") throw new Error("fixture");
+      const commit = (op: M.MemoryOperation) =>
+        Effect.gen(function* () {
+          const current = yield* store.loadAggregate(space, memory);
+          yield* store.apply(
+            decideMemoryOperation(current, op, Store.hubAdmission, { kind: "allowed" }),
+          );
+        });
+      yield* commit(first);
+      const child = (n: number): M.MemoryOperation => {
+        const op = operation(n);
+        if (op.kind !== "upsert") throw new Error("fixture");
+        return {
+          ...op,
+          expectedHeads: [first.revision.revisionId],
+          revision: { ...op.revision, parents: [first.revision.revisionId] },
+        };
+      };
+      yield* commit(child(4));
+      yield* commit(child(5));
+      yield* store.recoverClaimCandidates(0);
+      const candidate = (yield* store.readDueClaimCandidates(1, 0))[0]!;
+      if (candidate.metadata.kind !== "claim") throw new Error("fixture");
+      const claim: M.MemoryHubClaimInput = {
+        protocolVersion: 1,
+        memorySpaceId: space,
+        memoryId: memory,
+        holderEnvironmentId: env,
+        conflictId: candidate.metadata.conflictId,
+        conflictHeadSet: candidate.metadata.sortedHeads,
+        attemptId: M.MemoryOperationId.make(id(60)),
+        frozenDefaultModelSelection: { instanceId: M.ProviderInstanceId.make("P"), model: "P" },
+      };
+      const prepared = yield* store.transact(
+        store.prepareClaimAttemptTx({
+          memorySpaceId: space,
+          candidateId: candidate.id,
+          expectedGeneration: 0,
+          conflictHeads: claim.conflictHeadSet,
+          proposedClaim: claim,
+        }),
+      );
+      assert.deepStrictEqual(prepared, { claim, generation: 0 });
+      const changed = {
+        ...claim,
+        attemptId: M.MemoryOperationId.make(id(61)),
+        frozenDefaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+      };
+      const recovered = yield* Effect.gen(function* () {
+        const restarted = yield* Store.MemoryStore;
+        return yield* restarted.transact(
+          restarted.prepareClaimAttemptTx({
+            memorySpaceId: space,
+            candidateId: candidate.id,
+            expectedGeneration: 0,
+            conflictHeads: claim.conflictHeadSet,
+            proposedClaim: changed,
+          }),
+        );
+      }).pipe(Effect.provide(Store.layer));
+      assert.deepStrictEqual(recovered, { claim, generation: 0 });
+      const ticket: M.MemoryResolutionLease = {
+        memorySpaceId: space,
+        memoryId: memory,
+        conflictId: claim.conflictId,
+        conflictHeadSet: claim.conflictHeadSet,
+        holderEnvironmentId: env,
+        attemptId: claim.attemptId,
+        frozenDefaultModelSelection: claim.frozenDefaultModelSelection,
+        fencingToken: 1,
+        claimedAtHubTime: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
+        expiresAtHubTime: M.MemoryUtcTimestamp.make("1970-01-01T00:02:00.000Z"),
+        attemptDeadlineHubTime: M.MemoryUtcTimestamp.make("1970-01-01T00:10:00.000Z"),
+      };
+      yield* store.persistResolutionTicket(ticket);
+      const key = { memorySpaceId: space, attemptId: claim.attemptId };
+      const owned = yield* store.transact(
+        store.acquireResolutionTicketTx({
+          key,
+          expectedVersion: 0,
+          owner: "registry",
+          coordinatorEpoch: 1,
+          now: 0,
+          ownedUntil: 100,
+        }),
+      );
+      assert.isNotNull(owned);
+      const ownership = { ...key, owner: "registry", coordinatorEpoch: 1, version: owned!.version };
+      assert.isNull(
+        yield* store.transact(
+          store.transitionResolutionTicketTx({
+            ownership,
+            nextState: "terminal",
+            now: 1,
+            ownedUntil: null,
+            nextAttemptAt: 1,
+            retireClaim: { expectedGeneration: 9, attemptId: claim.attemptId },
+          }),
+        ),
+      );
+      assert.isNotNull(
+        yield* store.transact(
+          store.transitionResolutionTicketTx({
+            ownership,
+            nextState: "terminal",
+            now: 1,
+            ownedUntil: null,
+            nextAttemptAt: 1,
+            retireClaim: { expectedGeneration: 0, attemptId: claim.attemptId },
+          }),
+        ),
+      );
+      const next = yield* store.transact(
+        store.prepareClaimAttemptTx({
+          memorySpaceId: space,
+          candidateId: candidate.id,
+          expectedGeneration: 1,
+          conflictHeads: changed.conflictHeadSet,
+          proposedClaim: changed,
+        }),
+      );
+      assert.deepStrictEqual(next, { claim: changed, generation: 1 });
+      assert.isNull(
+        yield* store.transact(
+          store.prepareClaimAttemptTx({
+            memorySpaceId: space,
+            candidateId: candidate.id,
+            expectedGeneration: 0,
+            conflictHeads: claim.conflictHeadSet,
+            proposedClaim: claim,
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(live)),
+);
