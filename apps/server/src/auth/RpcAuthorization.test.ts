@@ -659,7 +659,8 @@ it.effect(
         expect(calls).toBe(1);
         for (const missing of scopes) {
           expect(
-            (yield* Effect.flip(invoke(scopes.filter((scope) => scope !== missing)))).requiredScope,
+            (yield* Effect.flip(invoke(scopes.filter((scope) => scope !== missing))))
+              .requiredPermission,
           ).toBe(missing);
           expect(calls).toBe(1);
         }
@@ -667,7 +668,7 @@ it.effect(
           expect(
             (yield* Effect.flip(
               invoke(["memory:read", "memory:write", "orchestration:read", "providers:manage"]),
-            )).requiredScope,
+            )).requiredPermission,
           ).toBe("settings:write");
         }
       }

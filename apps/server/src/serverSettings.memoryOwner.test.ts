@@ -243,3 +243,81 @@ it.effect("a settings write failure cannot publish an enrollment", () =>
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.effect("restart preserves a pending reenrollment and its exact revocation pair", () =>
+  Effect.gen(function* () {
+    const { admin } = yield* initialize;
+    yield* update(admin, 0, [requester]);
+    yield* update(admin, 1, []);
+    const pending = yield* update(admin, 2, [requester]);
+    yield* Effect.gen(function* () {
+      const settings = yield* Settings.ServerSettingsService;
+      yield* settings.getSettings;
+      const policy = yield* Settings.MemoryOwnerSourceReadCommittedPolicy;
+      expect(yield* policy.read).toEqual({ policy: pending.policy, version: pending.version });
+      const removal = pending.policy.removals[0]!;
+      const settled = yield* policy.recordRevokeAck({
+        memorySpaceId: removal.memorySpaceId,
+        ownerEnvironmentId: removal.ownerEnvironmentId,
+        requesterEnvironmentId: removal.requesterEnvironmentId,
+        removalEpoch: removal.removalEpoch,
+        revokedThroughEpoch: removal.removalEpoch,
+      });
+      expect(settled.policy.allowedRequesterEnvironmentIds).toEqual([requester]);
+    }).pipe(
+      Effect.provide(
+        Layer.fresh(Settings.layer).pipe(
+          Layer.provide(Secrets.layer),
+          Layer.provide(identity),
+          Layer.provide(Layer.fresh(Persistence.layerMemory)),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(fixture())),
+);
+
+it.effect("the durable rename precedes committed policy publication", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    let policy: Settings.MemoryOwnerSourceReadCommittedPolicy["Service"] | undefined;
+    const versionsAtRename: number[] = [];
+    const observingFs = {
+      ...fs,
+      rename: (from: string, to: string) =>
+        fs.rename(from, to).pipe(
+          Effect.tap(() =>
+            Effect.gen(function* () {
+              if (!policy) return;
+              const saved = yield* decodePersistedSettings(yield* fs.readFileString(to)).pipe(
+                Effect.orDie,
+              );
+              expect(saved.memoryOwnerSourceReadPolicyVersion).toBe(1);
+              expect(saved.memoryOwnerSourceReadPolicy.allowedRequesterEnvironmentIds).toEqual([
+                requester,
+              ]);
+              versionsAtRename.push((yield* policy.read).version);
+            }),
+          ),
+        ),
+    };
+    yield* Effect.gen(function* () {
+      const initialized = yield* initialize;
+      policy = initialized.policy;
+      yield* update(initialized.admin, 0, [requester]);
+      expect(versionsAtRename).toEqual([0]);
+      expect((yield* policy.read).version).toBe(1);
+    }).pipe(
+      Effect.provide(
+        Settings.layer.pipe(
+          Layer.provide(Secrets.layer),
+          Layer.provide(identity),
+          Layer.provideMerge(Layer.fresh(Persistence.layerMemory)),
+          Layer.provideMerge(
+            Layer.fresh(Config.layerTest(process.cwd(), { prefix: "goat-owner-order-test-" })),
+          ),
+          Layer.provideMerge(Layer.succeed(FileSystem.FileSystem, observingFs)),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);

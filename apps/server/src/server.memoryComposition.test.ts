@@ -98,9 +98,11 @@ it.effect("disable forwards CAS and the live permit to Sync and returns a noncre
 
 it.effect("two consumers of the application Snapshot layer observe the same instance", () =>
   Effect.gen(function* () {
+    const instances = new Set<Snapshot.MemorySnapshot["Service"]>();
     const first = Layer.effectDiscard(
       Effect.gen(function* () {
         const snapshot = yield* Snapshot.MemorySnapshot;
+        instances.add(snapshot);
         expect(
           yield* snapshot.forThread(
             M.ThreadId.make("fixture-thread"),
@@ -113,20 +115,16 @@ it.effect("two consumers of the application Snapshot layer observe the same inst
     const second = Layer.effectDiscard(
       Effect.gen(function* () {
         const snapshot = yield* Snapshot.MemorySnapshot;
+        instances.add(snapshot);
         yield* snapshot.invalidate(M.ThreadId.make("fixture-thread"));
       }),
     );
-    let instances = 0;
-    const shared = layerMemorySnapshot.pipe(
-      Layer.tap(() =>
-        Effect.sync(() => {
-          instances++;
-        }),
-      ),
-    );
     yield* Effect.void.pipe(
       Effect.provide(
-        Layer.merge(first.pipe(Layer.provide(shared)), second.pipe(Layer.provide(shared))).pipe(
+        Layer.merge(
+          first.pipe(Layer.provide(layerMemorySnapshot)),
+          second.pipe(Layer.provide(layerMemorySnapshot)),
+        ).pipe(
           Layer.provide(Fixture.core),
           Layer.provide(
             Layer.mock(Sync.MemorySyncService)({
@@ -144,6 +142,6 @@ it.effect("two consumers of the application Snapshot layer observe the same inst
         ),
       ),
     );
-    expect(instances).toBe(1);
+    expect(instances.size).toBe(1);
   }),
 );
