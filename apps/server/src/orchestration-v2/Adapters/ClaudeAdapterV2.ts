@@ -8038,6 +8038,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
           }
 
+          // allowedTools is fixed at query creation. Recover the same read-only
+          // preapproval here using live authority without replacing the query.
+          if (
+            CLAUDE_MEMORY_READ_TOOLS.some((name) => name === toolName) &&
+            sandboxPolicyKindForClaudeRuntimePolicy(context.input.runtimePolicy) === "readOnly"
+          ) {
+            return { behavior: "allow", updatedInput: toolInput } satisfies PermissionResult;
+          }
+
           const nativeRequestId = callbackOptions.toolUseID;
           const nativeToolInput = claudeNativeToolInputFromRecord(toolInput);
           // While root output awaits its prompt echo, the tool's streamed

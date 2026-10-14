@@ -14273,7 +14273,7 @@ describe("Claude WP4 memory delivery", () => {
           endpoint: "http://127.0.0.1:43123/mcp",
           authorizationHeader: "Bearer fixture-first",
           browserToolsAvailable: false,
-          grantedScopes: ["memory:read", "memory:write", "orchestration:read"],
+          grantedScopes: [],
         };
         yield* sessions.set(config);
         const runtime = yield* adapter.openSession({
@@ -14346,6 +14346,15 @@ describe("Claude WP4 memory delivery", () => {
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
+        const readOnlyPolicy = {
+          ...CLAUDE_TEST_RUNTIME_POLICY,
+          approvalPolicy: "on-request" as const,
+          sandboxPolicy: {
+            type: "readOnly" as const,
+            access: { type: "fullAccess" as const },
+            networkAccess: false,
+          },
+        };
         const base = makeClaudeTestTurnInput({
           threadId,
           providerThread,
@@ -14354,6 +14363,7 @@ describe("Claude WP4 memory delivery", () => {
           text: "first",
           attachments: [],
         });
+        const readOnlyBase = { ...base, runtimePolicy: readOnlyPolicy };
         const snapshot = wp4Memory();
         let refreshes = 0;
         const refreshMemoryContext = () =>
@@ -14361,7 +14371,7 @@ describe("Claude WP4 memory delivery", () => {
             refreshes++;
             return snapshot;
           });
-        yield* runtime.startTurn({ ...base, refreshMemoryContext });
+        yield* runtime.startTurn({ ...readOnlyBase, refreshMemoryContext });
         assert.equal(offers.length, 1);
         assert.include(JSON.stringify(offers[0]?.message.content), "&lt;untrusted&gt;");
         assert.notInclude(JSON.stringify(opened[0]?.systemPrompt), "&lt;untrusted&gt;");
@@ -14389,7 +14399,7 @@ describe("Claude WP4 memory delivery", () => {
           grantedScopes: [],
         });
         yield* runtime.startTurn({
-          ...base,
+          ...readOnlyBase,
           providerTurnOrdinal: 2,
           attemptId: RunAttemptId.make("wp4-claude-2"),
           message: { ...base.message, text: "second" },
@@ -14420,12 +14430,40 @@ describe("Claude WP4 memory delivery", () => {
                 : ["memory:read", "memory:write", "orchestration:read"],
           });
           yield* runtime.startTurn({
-            ...base,
+            ...readOnlyBase,
             attemptId: RunAttemptId.make(`wp4-claude-${grant}`),
             providerTurnOrdinal: offset + 3,
             message: { ...base.message, text: grant },
             refreshMemoryContext,
           });
+          for (const tool of ClaudeAdapterV2.CLAUDE_MEMORY_READ_TOOLS) {
+            const permission = yield* Effect.promise(() =>
+              opened[0]!.canUseTool!(
+                tool,
+                {},
+                {
+                  signal: new AbortController().signal,
+                  toolUseID: `fixture-${tool}`,
+                  requestId: `fixture-${tool}`,
+                },
+              ),
+            );
+            assert.equal(permission?.behavior, "allow");
+          }
+          for (const tool of ClaudeAdapterV2.CLAUDE_MEMORY_WRITE_TOOLS) {
+            const permission = yield* Effect.promise(() =>
+              opened[0]!.canUseTool!(
+                tool,
+                {},
+                {
+                  signal: new AbortController().signal,
+                  toolUseID: `fixture-${tool}`,
+                  requestId: `fixture-${tool}`,
+                },
+              ),
+            );
+            assert.equal(permission?.behavior, "deny");
+          }
           const offered = offers[offset + 3]!;
           assert.include(JSON.stringify(offered.message.content), "&lt;untrusted&gt;");
           assert.include(JSON.stringify(registrations[offset + 1]), `fixture-${credential}`);
@@ -14437,7 +14475,7 @@ describe("Claude WP4 memory delivery", () => {
         }
         const rejected = yield* runtime
           .startTurn({
-            ...base,
+            ...readOnlyBase,
             attemptId: RunAttemptId.make("wp4-claude-tamper"),
             refreshMemoryContext: () => Effect.succeed({ ...snapshot, renderedText: "tampered" }),
           })
@@ -14446,13 +14484,22 @@ describe("Claude WP4 memory delivery", () => {
         assert.equal(offers.length, 5);
         assert.equal(refreshes, 5);
         yield* runtime.compactThread!({
-          ...base,
+          ...readOnlyBase,
           attemptId: RunAttemptId.make("wp4-claude-compact"),
           refreshMemoryContext: () => Effect.die("native control must not refresh"),
         });
         assert.equal(offers.length, 6);
         assert.notInclude(JSON.stringify(offers[5]?.message.content), "external_goat_memory");
       }).pipe(
+        Effect.provideService(McpSessionRegistry.McpSessionRegistry, {
+          issue: () => Effect.die("unused"),
+          resolve: () => Effect.succeed(undefined),
+          touch: () => Effect.void,
+          revokeProviderSession: () => Effect.void,
+          revokeThread: () => Effect.void,
+          revokeAll: Effect.void,
+          currentMemoryPolicy: () => Effect.succeed({ grant: "read_write", policyEpoch: 1 }),
+        }),
         Effect.provide(
           Layer.mergeAll(
             MemoryDerivedCache.layer,
