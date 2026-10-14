@@ -1316,18 +1316,8 @@ const make = Effect.gen(function* () {
     }
     return result.success;
   });
-  const relayMutex = yield* Semaphore.make(1);
-  let lastRelayRequest: M.MemorySourceReadRequestId | null = null;
-  // Rotate the bounded collected page after the last attempted request. Read time leaves
-  // room for the failure response; a stalled response cannot monopolize the next cycle.
-  const relay = (r: Route) =>
-    relayMutex
-      .withPermit(
-        Effect.gen(function* () {
-          const now = yield* Clock.currentTimeMillis;
-          yield* store.transact(
-            store.purgeHubTransientTx({ memorySpaceId: r.space!, now, limit: 100 }),
-          );
+  // Independent of summary pull progress; network and settings commits run outside SQL.
+  const propagateSourceRevokes = (r: Route) => Effect.gen(function* () {
           // Pending removals are durable in L5 settings. Retry before accepting new reads.
           if (runtime.ownerPolicy) {
             const committed = yield* runtime.ownerPolicy.read;
@@ -1358,6 +1348,19 @@ const make = Effect.gen(function* () {
               yield* runtime.ownerPolicy.recordRevokeAck(result.ack);
             }
           }
+  });
+  const relayMutex = yield* Semaphore.make(1);
+  let lastRelayRequest: M.MemorySourceReadRequestId | null = null;
+  // Rotate the bounded collected page after the last attempted request. Read time leaves
+  // room for the failure response; a stalled response cannot monopolize the next cycle.
+  const relay = (r: Route) =>
+    relayMutex
+      .withPermit(
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          yield* store.transact(
+            store.purgeHubTransientTx({ memorySpaceId: r.space!, now, limit: 100 }),
+          );
           const input: M.MemoryHubSourceReadCollectInput = {
             protocolVersion: 1,
             memorySpaceId: r.space!,
@@ -1630,6 +1633,9 @@ const make = Effect.gen(function* () {
         if (entry.epoch !== r.settings.memoryHubVersion && entry.fiber)
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
+      yield* propagateSourceRevokes(r).pipe(
+        Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)),
+      );
       yield* discoverRecoveries(r);
       if (discoveryEpoch === r.settings.memoryHubVersion && discoveryFailure)
         yield* noteFailure(r.settings.memoryHubVersion, discoveryFailure);

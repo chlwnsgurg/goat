@@ -147,6 +147,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const sourceSecondRequested = yield* Deferred.make<M.MemorySourceReadRequest>();
     let sourceAdmissions = 0;
     let sourceAckFault = false;
+    let pullFault: "failure" | "budget" | null = null;
+    let pullCalls = 0;
     const sourceResult = yield* Deferred.make<M.MemoryHubSourceReadResultResult>();
     let sourceAfterResultGate: Deferred.Deferred<void> | null = null;
     let sourceResultGate: Deferred.Deferred<void> | null = null;
@@ -238,11 +240,26 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
               Effect.tap(() => Deferred.succeed(probed, undefined)),
             ),
           pull: (connection, input) =>
-            client
-              .pull(connection, input)
-              .pipe(
-                Effect.tap(() => (observePull ? Deferred.succeed(pulled, undefined) : Effect.void)),
-              ),
+            Effect.suspend(() => {
+              pullCalls++;
+              if (pullFault === "failure")
+                return Effect.fail(new M.MemoryHubError({ code: "storage_failed" }));
+              return client.pull(connection, input).pipe(
+                Effect.map((page) =>
+                  pullFault === "budget"
+                    ? {
+                        ...page,
+                        hasMore: true,
+                        throughSequence: input.afterSequence + 1,
+                        highWatermark: input.highWatermark ?? 10000,
+                        entries: [],
+                      }
+                    : page,
+                ),
+              );
+            }).pipe(
+              Effect.tap(() => (observePull ? Deferred.succeed(pulled, undefined) : Effect.void)),
+            ),
           requestSourceRead: (connection, input) =>
             client
               .requestSourceRead(connection, input)
@@ -402,6 +419,10 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         observePull = true;
       },
       sourcePolicy,
+      setPullFault: (fault: "failure" | "budget") => {
+        pullFault = fault;
+      },
+      pullCalls: () => pullCalls,
       commitSourcePolicy: (policy: M.MemoryOwnerSourceReadPolicy) =>
         Effect.gen(function* () {
           const current = yield* Ref.get(sourcePolicy);
@@ -1455,5 +1476,27 @@ it.effect(
       );
       yield* Deferred.succeed(nextGate, undefined);
       assert.strictEqual((yield* Fiber.join(next)).kind, "available");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["failure", "budget"] as const)(
+  "propagates revoke independently of summary pull: %s",
+  (fault) =>
+    Effect.gen(function* () {
+      const c = yield* sourceFixture();
+      yield* c.remove(true);
+      c.owner.setPullFault(fault);
+      const before = c.owner.pullCalls();
+      const cycle = yield* Effect.result(c.owner.sync.syncOnce);
+      if (fault === "failure") assert.strictEqual(cycle._tag, "Failure");
+      else {
+        assert.strictEqual(cycle._tag, "Success");
+        assert.strictEqual(c.owner.pullCalls() - before, 10);
+      }
+      const committed = yield* Ref.get(c.owner.sourcePolicy);
+      assert.deepStrictEqual(committed.policy.removals, []);
+      assert.strictEqual(committed.policy.enrollments[0]?.state, "active");
+      assert.isAbove(committed.policy.enrollments[0]!.ownerPolicyEpoch, 2);
+      assert.deepStrictEqual(committed.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
