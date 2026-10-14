@@ -1267,10 +1267,9 @@ it.effect(
         M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
       );
       yield* store.transact(
-        store.prepareHubCheckpointTx({
+        store.prepareHubProducerCheckpointTx({
           authority,
           checkpointId: "new-required",
-          snapshotToken: "new-required-token",
           hubEnvironmentId: environmentId,
         }),
       );
@@ -1327,6 +1326,159 @@ it.effect("index-only updates preserve materialized checkpoint credit and stagin
       0,
     );
   }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "first forget reclaims large current staging at equality while retaining an older pin",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      for (let n = 0; n < 24; n++) {
+        const upsert = {
+          ...input(1500 + n),
+          memoryId: n === 0 ? memoryId : M.MemoryId.make(id(1600 + n)),
+          payload: {
+            text: n === 0 ? "small" : "synthetic bulk ".repeat(180),
+            evidence: [],
+            derivedFromMemoryRevisions: [],
+          },
+        };
+        yield* service.upsert(upsert, Effect.void);
+        const operation = yield* store.readWorkOperation(`sync:${space}:${id(1500 + n)}`);
+        if (!operation) throw new Error("fixture");
+        assert.strictEqual(
+          (yield* service.admitHubOperation({ authority, operation })).outcome,
+          "accepted",
+        );
+      }
+      const pin = yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority,
+          checkpointId: "retained-large",
+          snapshotToken: "retained-large-token",
+          hubEnvironmentId: environmentId,
+        }),
+      );
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).checkpointReservationConsumedBytes,
+        0,
+      );
+      yield* store.transact(
+        store.prepareHubProducerCheckpointTx({
+          authority,
+          checkpointId: "current-large",
+          hubEnvironmentId: environmentId,
+        }),
+      );
+      const current = yield* store.transact(store.readHubUsageTx(space));
+      assert.isAbove(current.checkpointReservationConsumedBytes, 100000);
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: 0,
+          publishedPinnedDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - current.stagingBytes,
+        }),
+      );
+      const equality = yield* store.transact(store.readHubUsageTx(space));
+      assert.strictEqual(equality.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
+      const plusOne = yield* store
+        .transact(
+          store.reserveHubCheckpointTx({
+            memorySpaceId: space,
+            checkpointDeltaBytes: 0,
+            publishedPinnedDeltaBytes: 1,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(plusOne._tag, "MemoryCapacityError");
+      const pinDenied = yield* store
+        .transact(
+          store.prepareHubCheckpointTx({
+            authority,
+            checkpointId: "current-large",
+            snapshotToken: "new-pin-token",
+            hubEnvironmentId: environmentId,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(pinDenied._tag, "MemoryCapacityError");
+      const publishDenied = yield* store
+        .transact(
+          store.publishCheckpointAndFloorTx({
+            memorySpaceId: space,
+            checkpointId: "current-large",
+            expectedFloor: 0,
+            nextFloor: 0,
+            now: 0,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(publishDenied._tag, "MemoryCapacityError");
+      assert.deepStrictEqual(yield* store.transact(store.readHubUsageTx(space)), equality);
+      assert.isNull((yield* store.transact(store.readHubRetentionTx(space))).checkpointId);
+      const forget: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "forget",
+        memorySpaceId: space,
+        memoryId,
+        operationId: M.MemoryOperationId.make(id(1599)),
+        originEnvironmentId: environmentId,
+        expectedHeads: [],
+        tombstone: {
+          memorySpaceId: space,
+          memoryId,
+          deleteOperationId: M.MemoryOperationId.make(id(1599)),
+          deletingEnvironmentId: environmentId,
+          deletedAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      };
+      assert.strictEqual(
+        (yield* service.admitHubOperation({ authority, operation: forget })).outcome,
+        "deleted",
+      );
+      const after = yield* store.transact(store.readHubUsageTx(space));
+      assert.strictEqual(after.checkpointReservationConsumedBytes, 0);
+      assert.isAtMost(after.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
+      assert.isBelow(
+        equality.requiredCheckpointBoundBytes - after.requiredCheckpointBoundBytes,
+        current.checkpointReservationConsumedBytes,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:current-large'`)
+          .length,
+        0,
+      );
+      const page = yield* store.transact(
+        store.readHubCheckpointPageTx({
+          authority,
+          snapshotToken: pin.snapshotToken,
+          cursor: null,
+        }),
+      );
+      assert.isTrue(
+        page.items.some((item) => item.memoryId === memoryId && item.status === "forgotten"),
+      );
+      assert.isTrue(
+        page.items.some((item) => item.memoryId !== memoryId && item.status === "active"),
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
+    }).pipe(Effect.provide(live)),
 );
 
 it.effect(

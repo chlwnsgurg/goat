@@ -282,7 +282,29 @@ export default Effect.gen(function* () {
           : []),
         ...(action === "UPDATE" ? [`(${inputChanged})`] : []),
       ];
+      // Credit is reversible only while a producer staging has neither publication nor a handle.
+      // Reclaim it in the input writer's transaction, including admission-free first forget.
+      const spaces =
+        action === "UPDATE"
+          ? [`OLD.${spaceColumn}`, `NEW.${spaceColumn}`]
+          : [`${prefix}.${spaceColumn}`];
+      const reclaim = spaces
+        .map(
+          (space) => `
+        UPDATE memory_hub_retention SET published_pinned_bytes=published_pinned_bytes-
+          (SELECT coalesce(sum(length(CAST(p.metadata_json AS BLOB))),0) FROM memory_inbox_pending p WHERE p.space=memory_hub_retention.space AND p.reason='hub_snapshot' AND p.checkpoint_id='hub:'||reserved_snapshot_id)
+          WHERE space=${space} AND reserved_snapshot_id IS NOT NULL AND checkpoint_id IS NOT reserved_snapshot_id
+          AND NOT EXISTS(SELECT 1 FROM json_each(handles_json) h WHERE json_extract(h.value,'$.checkpointId')=reserved_snapshot_id);
+        DELETE FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' AND checkpoint_id IN
+          (SELECT 'hub:'||reserved_snapshot_id FROM memory_hub_retention WHERE space=${space} AND reserved_snapshot_id IS NOT NULL AND checkpoint_id IS NOT reserved_snapshot_id
+          AND NOT EXISTS(SELECT 1 FROM json_each(handles_json) h WHERE json_extract(h.value,'$.checkpointId')=reserved_snapshot_id));
+        UPDATE memory_hub_retention SET reserved_snapshot_id=NULL,snapshot_generation=-1 WHERE space=${space} AND reserved_snapshot_id IS NOT NULL AND checkpoint_id IS NOT reserved_snapshot_id
+          AND NOT EXISTS(SELECT 1 FROM json_each(handles_json) h WHERE json_extract(h.value,'$.checkpointId')=reserved_snapshot_id);
+      `,
+        )
+        .join("");
       yield* sql.unsafe(`CREATE TRIGGER ${table}_snapshot_generation_${action.toLowerCase()} AFTER ${action} ON ${table} ${conditions.length ? `WHEN ${conditions.join(" AND ")}` : ""} BEGIN
+        ${reclaim}
         INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${prefix}.${spaceColumn},'hub_snapshot_generation','',1)
         ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+1;
       END`);
