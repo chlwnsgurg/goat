@@ -162,6 +162,7 @@ const make = Effect.gen(function* () {
   const readSettings = settings.getSettings.pipe(
     Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
   );
+  let settingsEpoch = (yield* readSettings).memoryHubVersion;
   const ensureEpoch = (epoch: number): Permit =>
     readSettings.pipe(
       Effect.flatMap((s) =>
@@ -1115,7 +1116,8 @@ const make = Effect.gen(function* () {
           resetStatus(epoch);
           cycle = yield* Effect.gen(function* () {
             yield* effect;
-            while (pendingSweep && !stopped && !cancelling) {
+            while (pendingSweep) {
+              if (stopped || cancelling) break;
               pendingSweep = false;
               yield* ensureEpoch(epoch);
               yield* sweep;
@@ -1151,7 +1153,10 @@ const make = Effect.gen(function* () {
         ...[...executions.values()].flatMap((e) => (e.fiber ? [e.fiber] : [])),
       ]);
       const s = yield* readSettings.pipe(Effect.catch(() => Effect.succeed(null)));
-      if (s) resetStatus(s.memoryHubVersion);
+      if (s) {
+        settingsEpoch = s.memoryHubVersion;
+        resetStatus(s.memoryHubVersion);
+      }
       cancelling = false;
     }),
   );
@@ -1172,7 +1177,7 @@ const make = Effect.gen(function* () {
     background.push(
       yield* Stream.runForEach(changes, (s) =>
         Effect.gen(function* () {
-          if (s.memoryHubVersion !== statusEpoch) yield* cancelEpoch;
+          if (s.memoryHubVersion !== settingsEpoch) yield* cancelEpoch;
           // Do not block the settings consumer on the next transport.
           yield* requestCycle(syncCycle, false, false).pipe(Effect.ignore);
         }),

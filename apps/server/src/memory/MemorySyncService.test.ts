@@ -1408,7 +1408,10 @@ it.effect.each(["pull", "owner relay", "claim"] as const)(
             : Effect.succeed({ requests: [] }),
         claim: (_c, input) =>
           Effect.gen(function* () {
-            if (phase === 1 && kind === "claim") yield* block;
+            if (kind === "claim" && input.memoryId === id(4)) {
+              phase = 1;
+              yield* block;
+            }
             const { protocolVersion: _protocol, ...claim } = input;
             return {
               ...claim,
@@ -1433,11 +1436,12 @@ it.effect.each(["pull", "owner relay", "claim"] as const)(
         Effect.gen(function* () {
           yield* ready;
           yield* conflict();
+          if (kind === "claim") yield* conflict(2);
           sync = yield* Sync.MemorySyncService;
-          yield* sync.start;
+          if (kind === "claim") yield* sync.start.pipe(Effect.forkScoped);
+          else yield* sync.start;
           yield* Deferred.await(entered);
           phase = 1;
-          if (kind === "claim") yield* conflict(2);
           const manual = yield* sync.syncOnce.pipe(Effect.forkScoped);
           yield* Deferred.await(transportEntered);
           // Only the Settings stream triggers cancellation; no direct sync/shutdown call.
@@ -1515,4 +1519,390 @@ it.effect("periodic renewal failure preserves the renewed expiry retry floor", (
       }).pipe(Effect.provide(fixture(client, model))),
     );
   }),
+);
+
+const sourceFixture = Effect.gen(function* () {
+  const sourceThread = { environmentId: local, threadId: M.ThreadId.make("deadline-thread") };
+  const watermark = {
+    fromEventId: M.EventId.make("from"),
+    toEventId: M.EventId.make("to"),
+    throughSequence: 2,
+  };
+  const messageIds = [M.MessageId.make("completed-message")];
+  const base = operation(8000);
+  if (base.kind !== "upsert") throw new Error("fixture");
+  const op = {
+    ...base,
+    revision: {
+      ...base.revision,
+      provenance: { environmentId: local, sourceThread, sourceWatermark: watermark },
+    },
+    payload: {
+      text: "synthetic linked summary",
+      evidence: [{ origin: "thread" as const, sourceThread, watermark, messageIds }],
+      derivedFromMemoryRevisions: [],
+    },
+  };
+  const store = yield* Store.MemoryStore;
+  yield* store.apply(
+    decideMemoryOperation(yield* store.loadAggregate(space, op.memoryId), op, Store.localIntent, {
+      kind: "allowed",
+    }),
+  );
+  return yield* (yield* Service.MemoryService).prepareSourceRead(
+    { memorySpaceId: space, memoryId: op.memoryId, sourceThread, messageIds, limit: 10 },
+    Effect.void,
+  );
+});
+
+it.effect.each(["owner permit", "owner read"] as const)(
+  "requester absolute deadline interrupts %s crossing the persisted 75s expiry",
+  (boundary) =>
+    Effect.gen(function* () {
+      const firstResult = yield* Deferred.make<void>();
+      const resumeResult = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      let requested: M.MemorySourceReadRequest | undefined;
+      let collects = 0;
+      let responses = 0;
+      const client = peer({
+        requestSourceRead: (_c, { protocolVersion: _p, ...input }) =>
+          Effect.sync(() => {
+            requested = {
+              ...input,
+              requesterEnvironmentId: local,
+              expiresAtHubTime: "1970-01-01T00:01:15.000Z",
+            };
+            return { request: requested };
+          }),
+        collectSourceReads: () =>
+          Effect.sync(() => ({ requests: ++collects === 1 ? [] : [requested!] })),
+        resultSourceRead: () =>
+          Deferred.succeed(firstResult, undefined).pipe(
+            Effect.andThen(Deferred.await(resumeResult)),
+            Effect.as({ state: "pending", expiresAtHubTime: "1970-01-01T00:01:15.000Z" } as const),
+          ),
+        respondSourceRead: () =>
+          Effect.sync(() => {
+            responses++;
+            return { accepted: true };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const validated = yield* sourceFixture;
+          const base = yield* Sync.MemorySyncRuntime;
+          const blocked = Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.ensuring(Deferred.succeed(cancelled, undefined)),
+          );
+          const owner = Sync.MemorySyncRuntime.of({
+            ...base,
+            ownerPermit: () => (boundary === "owner permit" ? blocked : Effect.void),
+            ownerReader: { readCommitted: () => blocked },
+          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              const read = yield* sync.readSource(validated, Effect.void).pipe(Effect.forkScoped);
+              yield* Deferred.await(firstResult);
+              yield* TestClock.adjust("70 seconds");
+              yield* Deferred.succeed(resumeResult, undefined);
+              yield* TestClock.adjust("1 second");
+              yield* Deferred.await(entered);
+              yield* TestClock.adjust("4 seconds");
+              assert.deepStrictEqual(yield* Fiber.join(read), {
+                kind: "unavailable",
+                code: "source_unavailable",
+              });
+              yield* Deferred.await(cancelled);
+              assert.strictEqual(yield* Clock.currentTimeMillis, 75000);
+              assert.strictEqual(responses, 0);
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, owner)),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect("requester deadline includes the initial requester permit", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const cancelled = yield* Deferred.make<void>();
+    let requests = 0;
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const validated = yield* sourceFixture;
+        const sync = yield* Sync.MemorySyncService;
+        const permit = Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(cancelled, undefined)),
+        );
+        const read = yield* sync.readSource(validated, permit).pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("75 seconds");
+        assert.deepStrictEqual(yield* Fiber.join(read), {
+          kind: "unavailable",
+          code: "source_unavailable",
+        });
+        yield* Deferred.await(cancelled);
+        assert.strictEqual(requests, 0);
+      }).pipe(
+        Effect.provide(
+          fixture(
+            peer({
+              requestSourceRead: () =>
+                Effect.sync(() => {
+                  requests++;
+                }).pipe(Effect.andThen(Effect.never)),
+            }),
+          ),
+        ),
+      ),
+    );
+  }),
+);
+
+it.effect("a fenced relay cannot assign an old-space local intent", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      const store = yield* Store.MemoryStore;
+      yield* store.putLocalIntent({
+        intentId: "epoch-intent",
+        memoryId: M.MemoryId.make(id(8800)),
+        environmentId: local,
+        scope: { kind: "user" },
+        provenance: { environmentId: local },
+        assertionKind: "inference",
+        createdAtUtc: timestamp,
+        payload: { text: "synthetic unsent fact", evidence: [], derivedFromMemoryRevisions: [] },
+      });
+      const sync = yield* Sync.MemorySyncService;
+      const result = yield* Effect.result(sync.syncOnce);
+      assert.strictEqual(result._tag, "Failure");
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        mapping: string | null;
+      }>`SELECT json_extract(metadata_json,'$.mapping') AS mapping FROM memory_outbox WHERE id=${`local:${local}:epoch-intent`}`;
+      assert.strictEqual(rows[0]?.mapping, null);
+      assert.strictEqual(yield* store.readCursor(space, remote), 0);
+    }).pipe(
+      Effect.provide(
+        fixture(
+          peer({
+            collectSourceReads: () =>
+              changeHub(1, { mode: "disabled" }).pipe(
+                Effect.mapError(() => new M.MemoryHubError({ code: "fenced" })),
+                Effect.andThen(Effect.fail(new M.MemoryHubError({ code: "fenced" }))),
+              ),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
+
+it.effect("recovered attempt uses only the remaining fixed 600s cap", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const cancelled = yield* Deferred.make<void>();
+    const released = yield* Deferred.make<void>();
+    let ticket: M.MemoryResolutionLease | undefined;
+    const client = peer({
+      claim: (_c, { protocolVersion: _p, ...claim }) =>
+        Effect.sync(() => {
+          ticket = {
+            ...claim,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:10:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          };
+          return ticket;
+        }),
+      renew: () => Effect.succeed(ticket!),
+      release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(cancelled, undefined)),
+        ),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        yield* TestClock.adjust("550 seconds");
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("49 seconds");
+        assert.isTrue(Option.isNone(yield* Deferred.poll(cancelled)));
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(cancelled);
+        yield* Deferred.await(released);
+        assert.strictEqual(yield* Clock.currentTimeMillis, 600000);
+        yield* sync.shutdown;
+        assert.strictEqual(yield* sync.activeResolutions, 0);
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
+);
+
+// Empty fixture snapshot is explicit. Production counter-backed reads belong to L1/L5.
+const emptyProcessing: M.MemoryProcessingStatus = {
+  lastReceivedHubSequence: 0,
+  receiveLag: null,
+  deferred: 0,
+  oldestDeferredAtUtc: null,
+  unindexedItems: 0,
+  scannerHeldItems: 0,
+  scannerPendingItems: 0,
+  missingParentItems: 0,
+  pendingCleanupItems: 0,
+  reportBacklog: 0,
+  reportFailed: 0,
+  hubAdmissionFailures: 0,
+  indexCoverage: {
+    status: "available",
+    eligibleItems: 0,
+    indexedItems: 0,
+    unindexedItems: 0,
+    projectionWatermark: 0,
+  },
+};
+const statusRuntime = Effect.gen(function* () {
+  const base = yield* Sync.MemorySyncRuntime;
+  const quota = yield* Quota.MemoryQuotaService;
+  return Sync.MemorySyncRuntime.of({
+    ...base,
+    readProcessing: () =>
+      Effect.succeed({ processing: emptyProcessing, pendingSync: 0, quarantined: 0, parked: 0 }),
+    readUnboundStorage: quota.readStorageStatus({ memorySpaceId: space, environmentId: local }),
+  });
+});
+
+it.effect("status selects disabled and bootstrapping without requiring a bound route", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const adapter = yield* statusRuntime;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          const status = () =>
+            sync
+              .syncStatus({}, Effect.void)
+              .pipe(Effect.tap((s) => Schema.decodeUnknownEffect(M.MemorySyncStatus)(s)));
+          assert.strictEqual((yield* status()).state, "disabled");
+          yield* changeHub(1, { ...member, memorySpaceId: null });
+          const unbound = yield* status();
+          assert.strictEqual(unbound.state, "bootstrapping");
+          assert.strictEqual(unbound.memorySpaceId, null);
+          yield* changeHub(2, member);
+          assert.strictEqual((yield* status()).state, "bootstrapping");
+          yield* ready;
+          yield* sync.syncOnce;
+          assert.strictEqual((yield* status()).state, "online");
+          assert.strictEqual((yield* status()).lastSuccessfulSyncAtUtc, timestamp);
+          yield* changeHub(3, { mode: "disabled" });
+          const disabled = yield* status();
+          assert.strictEqual(disabled.state, "disabled");
+          assert.strictEqual(disabled.lastSuccessfulSyncAtUtc, null);
+          assert.strictEqual(disabled.failureCode, undefined);
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(fixture(peer(), undefined, true))),
+  ),
+);
+
+it.effect(
+  "late old-epoch failure cannot contaminate new status and a status read is epoch fenced",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const statusEntered = yield* Deferred.make<void>();
+      const statusResume = yield* Deferred.make<void>();
+      let blockStatus = false;
+      let failPull = false;
+      const client = peer({
+        pull: (_c, i) =>
+          failPull
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(resume)),
+                Effect.andThen(Effect.fail(new M.MemoryHubError({ code: "unavailable" }))),
+              )
+            : Effect.succeed({
+                highWatermark: i.afterSequence,
+                throughSequence: i.afterSequence,
+                hasMore: false,
+                entries: [],
+              }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const base = yield* statusRuntime;
+          const adapter = Sync.MemorySyncRuntime.of({
+            ...base,
+            readProcessing: (s, h) =>
+              blockStatus
+                ? Deferred.succeed(statusEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(statusResume)),
+                    Effect.andThen(base.readProcessing(s, h)),
+                  )
+                : base.readProcessing(s, h),
+          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              yield* sync.syncOnce;
+              failPull = true;
+              const old = yield* Effect.result(sync.syncOnce).pipe(Effect.forkScoped);
+              yield* Deferred.await(entered);
+              yield* changeHub(1, { mode: "disabled" });
+              yield* Deferred.succeed(resume, undefined);
+              assert.strictEqual((yield* Fiber.join(old))._tag, "Failure");
+              const fresh = yield* sync.syncStatus({}, Effect.void);
+              assert.strictEqual(fresh.state, "disabled");
+              assert.strictEqual(fresh.failureCode, undefined);
+              assert.strictEqual(fresh.lastSuccessfulSyncAtUtc, null);
+              blockStatus = true;
+              const stale = yield* Effect.result(sync.syncStatus({}, Effect.void)).pipe(
+                Effect.forkScoped,
+              );
+              yield* Deferred.await(statusEntered);
+              yield* changeHub(2, member);
+              yield* Deferred.succeed(statusResume, undefined);
+              const result = yield* Fiber.join(stale);
+              assert.strictEqual(result._tag, "Failure");
+              if (result._tag === "Failure")
+                assert.deepStrictEqual(result.failure, new M.MemoryHubError({ code: "fenced" }));
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
 );
