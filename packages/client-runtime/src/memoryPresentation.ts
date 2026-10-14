@@ -8,13 +8,15 @@ import {
   type MemoryReportDelivery,
   type MemoryReportReference,
   type MemoryRevertResult,
+  type MemoryRevisionId,
   type MemorySyncStatus,
   type MemoryTaskGrantCeiling,
 } from "@goat/contracts";
 
-export const MEMORY_REVOCATION_NOTICE = "철회는 이후 요청과 허브에 남은 결과에 적용";
+export const MEMORY_REVOCATION_NOTICE =
+  "Removing a device applies to later requests and to results still waiting on the hub.";
 export const MEMORY_FORGET_NOTICE =
-  "provider 원문 대화는 남지만, 잊은 원문/내용은 다시 가져오지 않습니다";
+  "The provider's original conversation stays, but forgotten content is never imported again.";
 
 /** Navigation identity only. Renderers still check destination capability and live read permission. */
 export function memoryReportTarget(reference: MemoryReportReference) {
@@ -28,23 +30,23 @@ export function memoryReportTarget(reference: MemoryReportReference) {
 
 export function presentMemoryAvailability(availability: MemoryLocalAvailability) {
   if (availability.exposure === "forgotten") {
-    return { label: "잊은 기억", detailsAvailable: false, canForget: false };
+    return { label: "Forgotten memory", detailsAvailable: false, canForget: false };
   }
   if (availability.exposure === "visible") {
-    return { label: "사용 가능", detailsAvailable: true, canForget: true };
+    return { label: "Available", detailsAvailable: true, canForget: true };
   }
   const reasons = availability.reasons;
   const label = reasons.includes("secret_detected")
-    ? "민감한 내용으로 보류됨"
+    ? "Held for sensitive content"
     : reasons.includes("forget_pending")
-      ? "잊기 처리 중"
+      ? "Forgetting memory"
       : reasons.includes("scanner_pending")
-        ? "내용 확인 중"
+        ? "Checking content"
         : reasons.includes("dependency_invalidated")
-          ? "원문을 사용할 수 없음"
+          ? "Original content unavailable"
           : reasons.includes("missing_parent")
-            ? "이전 기억 수신 대기"
-            : "사용 보류 중";
+            ? "Waiting for earlier memory"
+            : "On hold";
   return { label, detailsAvailable: false, canForget: !reasons.includes("forget_pending") };
 }
 
@@ -52,19 +54,19 @@ export function presentMemoryItem(item: MemoryItem) {
   const availability = presentMemoryAvailability(item.localAvailability);
   return {
     ...availability,
-    label: item.status === "quarantined" ? "충돌한 기억 격리 중" : availability.label,
-    syncLabel: item.pendingSync ? "전파 대기" : null,
-    cleanupLabel: item.localAvailability.cleanupPending ? "남은 내용 정리 중" : null,
+    label: item.status === "quarantined" ? "Conflicting memory on hold" : availability.label,
+    syncLabel: item.pendingSync ? "Waiting to sync" : null,
+    cleanupLabel: item.localAvailability.cleanupPending ? "Cleaning up remaining content" : null,
     canEdit: item.status === "active" && availability.detailsAvailable,
   };
 }
 
 const REVERT_LABELS = {
-  pending: "되돌리기 승인 대기",
-  accepted: "되돌리기 승인됨",
-  revision_changed: "기억이 변경되어 되돌릴 수 없음",
-  forgotten: "잊은 기억은 되돌릴 수 없음",
-  revert_expired: "되돌리기 기간 만료",
+  pending: "Waiting for revert approval",
+  accepted: "Revert approved",
+  revision_changed: "Memory changed; cannot revert",
+  forgotten: "Forgotten memory cannot be reverted",
+  revert_expired: "Revert window expired",
 } as const;
 
 const MEMORY_RESOLVER_LABELS = new Map([
@@ -80,7 +82,10 @@ const MEMORY_RESOLVER_LABELS = new Map([
 export function presentMemoryResolution(entry: MemoryHistoryPage["resolutions"][number]) {
   const resolution = entry.resolution;
   return {
-    label: resolution.revertsResolutionId === undefined ? "자동 해결 적용됨" : "되돌리기 적용됨",
+    label:
+      resolution.revertsResolutionId === undefined
+        ? "Automatic resolution applied"
+        : "Revert applied",
     providerLabel:
       MEMORY_RESOLVER_LABELS.get(resolution.effectiveProvider) ?? resolution.effectiveProvider,
     requestedModelSelection: resolution.requestedModelSelection,
@@ -108,43 +113,53 @@ export function presentMemoryRevert(input: {
   readonly entry: MemoryHistoryPage["resolutions"][number];
   readonly history: Pick<MemoryHistoryPage, "revertResults" | "revisions" | "nextCursor">;
   readonly now: number;
+  /** Omit while choosing an original; once selected, validate only that input. */
+  readonly restoredRevisionId?: MemoryRevisionId;
 }) {
-  const { item, entry, history, now } = input;
+  const { item, entry, history, now, restoredRevisionId } = input;
   const resolution = entry.resolution;
   const result = history.revertResults.find(
     (value) => value.resolutionId === resolution.resolutionId && value.memoryId === item.memoryId,
   );
+  const restorableRevisionIds = resolution.inputRevisionIds.filter((id) =>
+    history.revisions.some((pair) => pair.revision.revisionId === id && pair.payload !== null),
+  );
+  // A client clock can warn, but cannot establish hub expiry or close admission.
+  const localDeadlineState =
+    Number.isFinite(now) && now < Date.parse(resolution.revertDeadlineUtc)
+      ? ("before_deadline" as const)
+      : ("confirmation_needed" as const);
   const reason =
     item.memoryId !== resolution.memoryId || item.memorySpaceId !== resolution.memorySpaceId
-      ? "기억 대상 불일치"
+      ? "Memory does not match"
       : item.status === "forgotten"
-        ? "잊은 기억은 되돌릴 수 없음"
+        ? "Forgotten memory cannot be reverted"
         : result !== undefined
           ? REVERT_LABELS[result.status]
           : resolution.revertsResolutionId !== undefined
-            ? "되돌리기는 다시 되돌릴 수 없음"
-            : !Number.isFinite(now)
-              ? "되돌리기 기간 확인 필요"
-              : now >= Date.parse(resolution.revertDeadlineUtc)
-                ? "되돌리기 기간 만료"
-                : item.status !== "active" ||
-                    item.revision.revisionId !== resolution.resultRevisionId
-                  ? "현재 결과 기억 확인 필요"
-                  : history.nextCursor !== null
-                    ? "나머지 해결 기록 확인 필요"
-                    : entry.payload === null ||
-                        !resolution.inputRevisionIds.every((id) =>
-                          history.revisions.some(
-                            (pair) => pair.revision.revisionId === id && pair.payload !== null,
-                          ),
-                        )
-                      ? "보존된 원본을 사용할 수 없음"
-                      : null;
+            ? "A revert cannot be reverted"
+            : item.status !== "active" || item.revision.revisionId !== resolution.resultRevisionId
+              ? "Check the current memory before reverting"
+              : history.nextCursor !== null
+                ? "Load the remaining history before reverting"
+                : restoredRevisionId !== undefined
+                  ? restorableRevisionIds.includes(restoredRevisionId)
+                    ? null
+                    : "Selected original unavailable"
+                  : restorableRevisionIds.length === 0
+                    ? "Retained originals unavailable"
+                    : null;
   return {
     canRevert: reason === null,
     reason,
-    windowLabel: "해결 후 30일 이내 한 번 되돌리기",
+    windowLabel: "Revert once within 30 days of resolution",
     revertDeadlineUtc: resolution.revertDeadlineUtc,
+    restorableRevisionIds,
+    localDeadlineState,
+    timeNotice:
+      result === undefined && localDeadlineState === "confirmation_needed"
+        ? "The hub needs to confirm the revert window"
+        : null,
   };
 }
 
@@ -153,10 +168,10 @@ export function presentMemoryForget(receipt: MemoryMutationReceipt) {
   return {
     label:
       receipt.outcome === "rejected"
-        ? "잊기 요청 거절됨"
+        ? "Forget request rejected"
         : receipt.outcome === "deleted" || receipt.outcome === "noop"
-          ? "잊기 요청 반영됨"
-          : "잊기 결과 확인 필요",
+          ? "Forget request applied"
+          : "Check the forget result",
     pendingSync: receipt.pendingSync,
     expansionStatus: receipt.forgetExpansion?.status ?? "unknown",
     failureCode: receipt.failureCode ?? null,
@@ -176,9 +191,12 @@ export function presentMemoryOwnerPolicy(view: MemoryOwnerSourceReadPolicyView) 
     ],
     pendingEnrollments: pending.map((entry) => ({
       ...entry,
-      label: "재등록 대기 — 이전 철회가 끝나면 다시 허용됩니다",
+      label: "Waiting to allow this device again after removal completes",
     })),
-    revocationLabel: view.revocationPropagation === "pending" ? "철회 전파 중" : "철회 적용 완료",
+    revocationLabel:
+      view.revocationPropagation === "pending"
+        ? "Syncing device removal"
+        : "Device removal applied",
     notice: MEMORY_REVOCATION_NOTICE,
   };
 }
@@ -206,12 +224,12 @@ export function presentMemoryReport(
   return {
     label:
       report.state === "delivered"
-        ? "보고서 전달됨"
+        ? "Report delivered"
         : report.state === "failed" && exhausted
-          ? "자동 재시도 10회 소진"
+          ? "All 10 automatic retries used"
           : report.state === "failed"
-            ? "보고서 전달 실패"
-            : "보고서 전달 대기",
+            ? "Report delivery failed"
+            : "Waiting to deliver report",
     automaticAttempts: attempts,
     retryState: attempts === null ? "unknown" : exhausted ? "exhausted" : "remaining",
     // Settings alone consumes this eligibility; a future guarded command remains authoritative.
@@ -229,16 +247,16 @@ export function presentMemoryReport(
 /** Online is a connection state, not proof of publication, exposure or policy readiness. */
 export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memorySpaceId">) {
   const labels = {
-    disabled: "메모리 공유 꺼짐",
-    bootstrapping: "메모리 초기 수신 중",
-    online: "허브 연결됨",
-    offline: "허브 연결 끊김",
-    error: "메모리 동기화 오류",
+    disabled: "Memory sharing off",
+    bootstrapping: "Receiving initial memories",
+    online: "Hub connected",
+    offline: "Hub disconnected",
+    error: "Memory sync error",
   } as const;
   return {
     label:
       status.state !== "disabled" && status.memorySpaceId === null
-        ? "메모리 공간 연결 필요"
+        ? "Connect a memory space"
         : labels[status.state],
     diagnostics: "unknown" as const,
     canReconcileInSettings: false,
