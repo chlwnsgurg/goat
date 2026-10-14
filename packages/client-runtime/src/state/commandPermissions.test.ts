@@ -522,3 +522,60 @@ it.effect("SSH command cannot borrow a grant from the selected remote environmen
     });
   }),
 );
+
+it.effect("memory commands check the destination's live grant for all 16 installed methods", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const reads = [
+        WS_METHODS.memoryList,
+        WS_METHODS.memorySearch,
+        WS_METHODS.memoryRead,
+        WS_METHODS.memoryHistory,
+        WS_METHODS.memoryChanges,
+        WS_METHODS.memorySyncStatus,
+      ];
+      const writes = [
+        WS_METHODS.memoryUpsert,
+        WS_METHODS.memoryForget,
+        WS_METHODS.memoryRevertResolution,
+        WS_METHODS.memoryProjectBindingGet,
+        WS_METHODS.memoryProjectBindingUpdate,
+      ];
+      const administration = [
+        WS_METHODS.memoryHubSettingsGet,
+        WS_METHODS.memoryHubSettingsUpdate,
+        WS_METHODS.memoryOwnerSourceReadPolicyGet,
+        WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
+      ];
+      const cases = [
+        ...reads.map((method) => ({ method, scopes: ["memory:read"] as const })),
+        ...writes.map((method) => ({ method, scopes: ["memory:write"] as const })),
+        ...administration.map((method) => ({ method, scopes: ["settings:write"] as const })),
+        {
+          method: WS_METHODS.memoryReadSource,
+          scopes: ["memory:read", "orchestration:read"] as const,
+        },
+      ];
+      for (const { method, scopes } of cases) {
+        const permission = createCommandPermissions(runtime, method);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), scopes, permissions: scopes }),
+        );
+        registry.set(sessions(other), AsyncResult.success(grant(false)));
+        expect(registry.get(permission.permissionAtom(env))).toBe(true);
+        yield* permission.authorize(registry, env);
+        expect(registry.get(permission.permissionAtom(other))).toBe(false);
+        expect((yield* Effect.flip(permission.authorize(registry, other)))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(permission.permissionAtom(env))).toBe(false);
+        expect((yield* Effect.flip(permission.authorize(registry, env)))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }
+    }),
+  ),
+);

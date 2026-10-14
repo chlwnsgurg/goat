@@ -86,8 +86,8 @@ describe("AntigravityAdapterV2 flavor", () => {
     assert.equal(mode("full-access"), "yolo");
   });
 
-  it("exposes Antigravity's /compact command through the v2 compaction path", () => {
-    assert.isTrue(flavor.supportsCompaction);
+  it("does not invent native Antigravity compaction support", () => {
+    assert.isFalse(flavor.supportsCompaction);
   });
 
   it("routes interaction_* permission requests to the question card", () => {
@@ -563,3 +563,9 @@ describe("AntigravityAdapterV2 client file system under restrictive policies", (
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });
+
+import { acpMemoryDelivery } from "./memoryDelivery.testkit.ts";
+
+it.live.each([true, false])("WP4 memory delivery antigravity attached=%s", (attached) =>
+  acpMemoryDelivery("antigravity", attached),
+);

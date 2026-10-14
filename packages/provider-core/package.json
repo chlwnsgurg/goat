@@ -194,6 +194,10 @@
     "./server/usageLimits": {
       "types": "./src/server/usageLimits.ts",
       "import": "./src/server/usageLimits.ts"
+    },
+    "./server/memoryContext": {
+      "types": "./src/server/memoryContext.ts",
+      "import": "./src/server/memoryContext.ts"
     }
   },
   "scripts": {

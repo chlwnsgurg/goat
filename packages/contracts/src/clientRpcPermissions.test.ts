@@ -59,3 +59,22 @@ it("memory write never implies source read", () => {
   expect(clientRpcRequiredScopes(WS_METHODS.memoryUpsert, {})).not.toContain("orchestration:read");
   expect(clientRpcRequiredScopes(WS_METHODS.memoryReadSource, {})).not.toContain("memory:write");
 });
+
+it("registers every core read and owner policy administration guard", () => {
+  for (const method of [
+    WS_METHODS.memorySearch,
+    WS_METHODS.memoryList,
+    WS_METHODS.memoryRead,
+    WS_METHODS.memoryHistory,
+    WS_METHODS.memoryChanges,
+    WS_METHODS.memorySyncStatus,
+  ]) {
+    expect(CLIENT_GUARDED_RPC_SCOPES[method]).toBe("memory:read");
+    expect(clientRpcRequiredScopes(method, {})).toEqual(["memory:read"]);
+  }
+  for (const method of [
+    WS_METHODS.memoryOwnerSourceReadPolicyGet,
+    WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
+  ])
+    expect(clientRpcRequiredScopes(method, {})).toEqual(["settings:write"]);
+});

@@ -39,6 +39,7 @@ import * as Hub from "./MemoryHubService.ts";
 import * as Client from "./MemoryHubClient.ts";
 import * as Sync from "./MemorySyncService.ts";
 import * as Worker from "./MemoryWorker.ts";
+import { sourceReadLocatorDigest } from "./MemoryOwnerSourceReader.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -1078,7 +1079,7 @@ it.effect.each(["permit", "reader", "recheck"] as const)(
         authorizedScopes: ["memory:read", "orchestration:read"],
         expiresAtHubTime: "1970-01-01T00:01:15.000Z",
       });
-      const responses: M.MemoryHubSourceReadRespondInput[] = [];
+      const responses: M.MemoryHubSourceReadNormalRespondInput[] = [];
       let pushes = 0;
       let permits = 0;
       let reads = 0;
@@ -1086,8 +1087,9 @@ it.effect.each(["permit", "reader", "recheck"] as const)(
         collectSourceReads: () => Effect.succeed({ requests: [requested(801), requested(802)] }),
         respondSourceRead: (_c, input) =>
           Effect.sync(() => {
+            if (input.kind !== "normal") throw new Error("Expected normal response");
             responses.push(input);
-            return { accepted: true };
+            return { kind: "normal" as const, accepted: true };
           }),
         push: (_c, input) =>
           Effect.sync(() => {
@@ -1650,6 +1652,10 @@ it.effect.each(["owner permit", "owner read"] as const)(
             requested = {
               ...input,
               requesterEnvironmentId: local,
+              stamp: {
+                requesterCredentialVersion: 1,
+                locatorDigest: sourceReadLocatorDigest({ protocolVersion: 1, ...input }),
+              },
               expiresAtHubTime: "1970-01-01T00:01:15.000Z",
             };
             return { request: requested };
@@ -1664,7 +1670,7 @@ it.effect.each(["owner permit", "owner read"] as const)(
         respondSourceRead: () =>
           Effect.sync(() => {
             responses++;
-            return { accepted: true };
+            return { kind: "normal" as const, accepted: true };
           }),
       });
       yield* Effect.scoped(
@@ -1725,6 +1731,10 @@ it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] 
             requested = {
               ...input,
               requesterEnvironmentId: local,
+              stamp: {
+                requesterCredentialVersion: 1,
+                locatorDigest: sourceReadLocatorDigest({ protocolVersion: 1, ...input }),
+              },
               expiresAtHubTime: "1970-01-01T00:01:15.000Z",
             };
             return { request: requested };
@@ -1734,8 +1744,9 @@ it.effect.each(["denied", "epoch", "revoked", "result epoch", "result revoked"] 
           Effect.suspend(() => {
             attempted++;
             if (mode === "revoked") return Effect.fail(new M.MemoryHubUnauthorizedError({}));
+            if (input.kind !== "normal") throw new Error("Expected normal response");
             completed = input.outcome;
-            return Effect.succeed({ accepted: true });
+            return Effect.succeed({ kind: "normal" as const, accepted: true });
           }),
         resultSourceRead: () =>
           Effect.gen(function* () {
@@ -2870,7 +2881,7 @@ it.effect(
           authorizedScopes: ["memory:read", "orchestration:read"],
           expiresAtHubTime: "1970-01-01T00:01:15.000Z",
         });
-      const responses: M.MemoryHubSourceReadRespondInput[] = [];
+      const responses: M.MemoryHubSourceReadNormalRespondInput[] = [];
       const client = peer({
         collectSourceReads: () =>
           Deferred.succeed(collectEntered, undefined).pipe(
@@ -2879,9 +2890,10 @@ it.effect(
           ),
         respondSourceRead: (_c, response) =>
           Effect.sync(() => {
+            if (response.kind !== "normal") throw new Error("Expected normal response");
             responses.push(response);
             pending.delete(response.requestId);
-            return { accepted: true };
+            return { kind: "normal" as const, accepted: true };
           }),
         push: (_c, input) =>
           Deferred.succeed(pushed, undefined).pipe(
@@ -2904,6 +2916,21 @@ it.effect(
           const owner = {
             ...base,
             ownerReader: {
+              readForRelay: (request: M.MemorySourceReadRequest) =>
+                request.requestId === id(9101)
+                  ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))
+                  : Effect.succeed({
+                      outcome: {
+                        kind: "available" as const,
+                        page: {
+                          sourceThread: request.sourceThread,
+                          watermark: request.sourceWatermark,
+                          messages: [],
+                          nextCursor: null,
+                        },
+                      },
+                      validate: Effect.void,
+                    }),
               readCommitted: (request: M.MemorySourceReadRequest) =>
                 request.requestId === id(9101)
                   ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never))

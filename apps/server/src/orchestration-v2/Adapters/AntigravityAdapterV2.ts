@@ -222,7 +222,8 @@ export function makeAntigravityAcpAdapterFlavor(
     normalizeToolCall: normalizeAntigravityToolCall,
     extractSubagentUpdate: extractAntigravitySubagentUpdate,
     supportsImagePrompts: true,
-    supportsCompaction: true,
+    // ACP has no native compact operation for this flavor.
+    supportsCompaction: false,
   };
 }
 

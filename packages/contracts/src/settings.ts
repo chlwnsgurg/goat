@@ -1,4 +1,8 @@
-import { MemoryHubSettings } from "./memory.ts";
+import {
+  MemoryHubSettings,
+  MemoryOwnerSourceReadPolicy,
+  DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY,
+} from "./memory.ts";
 import * as Predicate from "effect/Predicate";
 import { SshDeviceHostConfigs } from "./device.ts";
 import {
@@ -1176,6 +1180,13 @@ export function goatBotHomeClaimSupersedes(
 }
 
 export const ServerSettings = Schema.Struct({
+  memoryOwnerSourceReadPolicyVersion: NonNegativeInt.pipe(
+    Schema.withDecodingDefault(Effect.succeed(0)),
+  ),
+  memoryOwnerSourceReadPolicy: MemoryOwnerSourceReadPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY)),
+  ),
+  enableAgentMemoryAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   memoryHubVersion: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
   memoryHub: MemoryHubSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({ mode: "disabled" as const })),
@@ -1623,6 +1634,7 @@ const ServerSettingsPatchFields = Schema.Struct({
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   // Server settings
+  enableAgentMemoryAccess: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
@@ -1762,7 +1774,10 @@ const ServerSettingsPatchCodec = Schema.Unknown.check(
   Schema.makeFilter(
     (raw) =>
       !Predicate.isObject(raw) ||
-      (!Object.hasOwn(raw, "memoryHub") && !Object.hasOwn(raw, "memoryHubVersion")),
+      (!Object.hasOwn(raw, "memoryHub") &&
+        !Object.hasOwn(raw, "memoryHubVersion") &&
+        !Object.hasOwn(raw, "memoryOwnerSourceReadPolicy") &&
+        !Object.hasOwn(raw, "memoryOwnerSourceReadPolicyVersion")),
   ),
 ).pipe(Schema.decodeTo(ServerSettingsPatchFields));
 export const ServerSettingsPatch = Object.assign(ServerSettingsPatchCodec, {

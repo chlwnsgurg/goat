@@ -142,6 +142,8 @@ const operationOf = (
 const replayHttpClient = (
   controller: OpenCodeReplayController,
   replayGate: ProviderReplayGate | undefined,
+  memoryInstructions: ((value: string) => Response) | undefined,
+  onInstructions: ((key: string, value: string) => void) | undefined,
 ) =>
   HttpClient.make((request, url) =>
     Effect.tryPromise({
@@ -160,6 +162,30 @@ const replayHttpClient = (
           query,
           raw === undefined ? undefined : decodeJson(raw),
         );
+        if (
+          operation.type === "session.instructions.entry.put" &&
+          "input" in operation &&
+          typeof operation.input === "object" &&
+          operation.input !== null
+        ) {
+          const key = Reflect.get(operation.input, "key");
+          const value = Reflect.get(operation.input, "value");
+          if (typeof key === "string" && typeof value === "string") onInstructions?.(key, value);
+        }
+        if (
+          operation.type === "session.instructions.entry.put" &&
+          "input" in operation &&
+          typeof operation.input === "object" &&
+          operation.input !== null &&
+          "key" in operation.input &&
+          operation.input.key === "goat_memory"
+        ) {
+          const value = Reflect.get(operation.input, "value");
+          if (typeof value !== "string") throw new Error("Expected a memory instruction string");
+          if (memoryInstructions !== undefined) return memoryInstructions(value);
+          if (value !== "") throw new Error("Legacy replay permits only an empty memory clear");
+          return new Response(null, { status: 204 });
+        }
         // The event stream and requests are separate connections: a request
         // is matched only once what was recorded before it was delivered.
         if (operation.type !== "event.subscribe") await controller.untilInboundDelivered();
@@ -206,6 +232,8 @@ const replayHttpClient = (
 export const replayServer = (
   transcript: ProviderReplayTranscript,
   options?: {
+    readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly external?: boolean;
     readonly replayGate?: ProviderReplayGate;
     /** Counts the connections currently lent out, as the server owner's borrowers. */
@@ -223,7 +251,12 @@ export const replayServer = (
     const opencode = yield* OpenCode2Client.make.pipe(
       Effect.provideService(
         HttpClient.HttpClient,
-        replayHttpClient(controller, options?.replayGate),
+        replayHttpClient(
+          controller,
+          options?.replayGate,
+          options?.memoryInstructions,
+          options?.onInstructions,
+        ),
       ),
     );
     const connection = {
@@ -254,6 +287,8 @@ export const replayServer = (
 const makeReplayAdapter = (
   transcript: ProviderReplayTranscript,
   options?: {
+    readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly external?: boolean;
     readonly replayGate?: ProviderReplayGate;
     /** Counts the connections currently lent out, as the server owner's borrowers. */
@@ -287,6 +322,8 @@ function layerRegistry(
 export const openCode2ReplayRuntime = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {
+    readonly memoryInstructions?: (value: string) => Response;
+    readonly onInstructions?: (key: string, value: string) => void;
     readonly external?: boolean;
     readonly borrowers?: { current: number };
     readonly replayGate?: ProviderReplayGate;

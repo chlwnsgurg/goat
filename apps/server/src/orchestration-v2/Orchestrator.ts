@@ -5217,6 +5217,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ),
               );
         const run: OrchestrationV2Run = {
+          memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
           id: runId,
           threadId: command.threadId,
           ordinal,
@@ -5249,6 +5250,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.restartContinuationOfRunId === undefined
             ? {}
             : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+          ...(command.usageLimitContinuationOfRunId === undefined
+            ? {}
+            : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
           ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         };
         const attempt: OrchestrationV2RunAttempt = {
@@ -5569,6 +5573,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   mapDispatchError(command),
                 );
         const run: OrchestrationV2Run = {
+          memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
           id: runId,
           threadId: command.threadId,
           ordinal,
@@ -5589,6 +5594,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.restartContinuationOfRunId === undefined
             ? {}
             : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+          ...(command.usageLimitContinuationOfRunId === undefined
+            ? {}
+            : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
           ...(dispatchMode.type === "defer_start" && dispatchMode.workspaceStrategy !== undefined
             ? { workspacePreparation: dispatchMode.workspaceStrategy }
             : {}),
@@ -6263,6 +6271,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ),
             );
       const run: OrchestrationV2Run = {
+        memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
         id: runId,
         threadId: command.threadId,
         ordinal,
@@ -6288,6 +6297,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...(command.usageLimitContinuationOfRunId === undefined
+          ? {}
+          : { usageLimitContinuationOfRunId: command.usageLimitContinuationOfRunId }),
         ...(continuedTaskId === undefined ? {} : { delegatedTaskId: continuedTaskId }),
         ...wakeWorkStartedAt(projection.runs, command),
       };
@@ -6793,6 +6805,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ordinal: parent.subagents.length + 1,
       });
       const task: OrchestrationV2Subagent = {
+        memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
         id: taskId,
         threadId: command.parentThreadId,
         runId: run.id,
@@ -7158,6 +7171,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       };
       const task: OrchestrationV2Subagent = {
+        memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
         id: taskNodeId,
         threadId: command.parentThreadId,
         runId: parentRun.id,
@@ -7266,6 +7280,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
 
       const childMessageCommand = {
+        memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
         type: "message.dispatch",
         createdBy: command.createdBy,
         creationSource: command.creationSource,
@@ -7392,6 +7407,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const taskId = idAllocator.derive.delegatedTaskNode({ commandId: command.commandId });
     const task: OrchestrationV2Subagent = {
       ...original,
+      memoryGrantCeiling: command.memoryGrantCeiling ?? "none",
       createdBy: command.createdBy,
       driver: adapter.driver,
       id: taskId,

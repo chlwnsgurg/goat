@@ -56,6 +56,11 @@ export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): R
  * need `thread`.
  */
 export interface McpInvocationScope {
+  readonly readOnly?: boolean;
+  readonly memoryPolicy?: {
+    readonly grant: import("@goat/contracts").MemoryTaskGrantCeiling;
+    readonly policyEpoch: number;
+  };
   /** Missing scopes or live reauthorization never imply memory access. */
   readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
   readonly reauthorize?: (

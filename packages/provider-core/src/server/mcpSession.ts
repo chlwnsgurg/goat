@@ -1,6 +1,12 @@
-import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@goat/contracts";
+import type {
+  AuthEnvironmentScope,
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@goat/contracts";
 
 export interface McpProviderSessionConfig {
+  readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
@@ -38,5 +44,24 @@ export function withAgentDeviceEnvironment(
     ...base,
     ...rest,
     ...(shimDir ? { PATH: basePath ? `${shimDir}${separator}${basePath}` : shimDir } : {}),
+  };
+}
+
+/** Native tool claims are derived from the issued credential, never runtime mode. */
+export interface MemoryToolAvailability {
+  readonly read: boolean;
+  readonly write: boolean;
+  readonly source: boolean;
+}
+
+export function memoryToolAvailability(
+  config: Pick<McpProviderSessionConfig, "grantedScopes"> | undefined,
+): MemoryToolAvailability {
+  const scopes = config?.grantedScopes ?? [];
+  const read = scopes.includes("memory:read");
+  return {
+    read,
+    write: read && scopes.includes("memory:write"),
+    source: read && scopes.includes("orchestration:read"),
   };
 }

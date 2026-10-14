@@ -1,3 +1,4 @@
+import { MAX_CONTINUATION_CHAIN } from "./ContinuationChain.ts";
 import { runRanAfter } from "@goat/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
 import {
@@ -22,9 +23,6 @@ import {
 } from "./RestartBackgroundNote.ts";
 
 const CONTINUE_PROMPT = "Continue where you left off.";
-
-/** Consecutive automatic continuations allowed before a person has to step in. */
-const MAX_CONTINUATION_CHAIN = 3;
 
 /**
  * Whether a restart must leave this run for the user: the thread is put away,

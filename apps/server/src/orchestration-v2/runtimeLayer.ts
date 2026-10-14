@@ -1,3 +1,4 @@
+import * as AdapterInfrastructure from "../provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import * as RemoteReportInbox from "../remoteReports/RemoteReportInbox.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -131,6 +132,7 @@ const layerProviderSwitchServiceProvided = ProviderSwitchService.layer.pipe(
 );
 
 const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
+  Layer.provide(AdapterInfrastructure.layerMemoryAdmission),
   Layer.provide(
     Layer.mergeAll(
       layerProviderAdapterRegistryProvided,
