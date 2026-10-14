@@ -6665,11 +6665,13 @@ it.effect.each([
       );
       yield* fresh.recoverClaimCandidates(2);
       const ids = [candidate.id, `resolve:${space}:${ticket.attemptId}`];
-      for (const target of ids)
+      for (const target of ids) {
         assert.deepStrictEqual(yield* fresh.readWorkHold(target), {
           holdClass,
           failureCode: "identity_mismatch",
         });
+        assert.strictEqual((yield* fresh.readWork(target))?.nextAttemptAt, Number.MAX_SAFE_INTEGER);
+      }
       assert.deepStrictEqual(yield* fresh.readDueClaimCandidates(100, 2, space), []);
       assert.deepStrictEqual(
         yield* fresh.readRecoverableResolutionTickets({
@@ -6681,6 +6683,7 @@ it.effect.each([
       );
       assert.isFalse(yield* fresh.claimCandidate(candidate.id, 2, 2));
       assert.deepStrictEqual(yield* fresh.pendingReports(100), []);
+      const heldRows = yield* sql`SELECT * FROM memory_outbox ORDER BY id`;
       const wrong = yield* fresh.transact(
         fresh.rearmResolutionHoldsTx({
           memorySpaceId: space,
@@ -6691,6 +6694,7 @@ it.effect.each([
         }),
       );
       assert.deepStrictEqual(wrong.changedIds, []);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM memory_outbox ORDER BY id`, heldRows);
       for (const target of ids)
         assert.strictEqual((yield* fresh.readWorkHold(target))?.holdClass, holdClass);
       // One-row pages deliberately split the two holds. Follow visited keysets to completion.
