@@ -5,6 +5,7 @@ import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -1117,7 +1118,11 @@ const make = Effect.gen(function* () {
           }
           const epoch = (yield* readSettings).memoryHubVersion;
           resetStatus(epoch);
-          cycle = yield* Effect.gen(function* () {
+          // Disabled/empty cycles can finish before fork returns. Publish the tracked
+          // fiber before releasing its start gate so its finalizer cannot be overwritten.
+          const ready = yield* Deferred.make<void>();
+          const fiber = yield* Effect.gen(function* () {
+            yield* Deferred.await(ready);
             yield* effect;
             while (pendingSync || pendingSweep) {
               if (stopped || cancelling) break;
@@ -1140,8 +1145,10 @@ const make = Effect.gen(function* () {
             ),
             Effect.forkIn(scope),
           );
-          return cycle;
-        }),
+          cycle = fiber;
+          yield* Deferred.succeed(ready, undefined);
+          return fiber;
+        }).pipe(Effect.uninterruptible),
       );
       if (!active || !wait) return;
       const exit = yield* Fiber.await(active);
@@ -1162,6 +1169,7 @@ const make = Effect.gen(function* () {
         ...(active ? [active] : []),
         ...[...executions.values()].flatMap((e) => (e.fiber ? [e.fiber] : [])),
       ]);
+      cycle = null;
       const s = yield* readSettings.pipe(Effect.catch(() => Effect.succeed(null)));
       if (s) {
         settingsEpoch = s.memoryHubVersion;
