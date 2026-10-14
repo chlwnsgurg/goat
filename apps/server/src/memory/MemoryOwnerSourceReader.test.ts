@@ -88,6 +88,25 @@ const assistant = {
   createdBy: "agent" as const,
   text: "fixture completed answer",
 };
+const encodeRun = Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2RunJson));
+const run = (status: M.OrchestrationV2RunJson["status"]) =>
+  M.OrchestrationV2RunJson.make({
+    id: runId,
+    threadId: thread.threadId,
+    ordinal: 1,
+    providerInstanceId: M.ProviderInstanceId.make("fixture-provider"),
+    modelSelection: { instanceId: M.ProviderInstanceId.make("fixture-provider"), model: "fixture" },
+    providerThreadId: null,
+    userMessageId: messageId,
+    rootNodeId: null,
+    activeAttemptId: null,
+    status,
+    requestedAt: DateTime.makeUnsafe(0),
+    startedAt: DateTime.makeUnsafe(0),
+    completedAt: status === "running" ? null : DateTime.makeUnsafe(0),
+    checkpointId: null,
+    contextHandoffId: null,
+  });
 const committed: Owner.MemoryOwnerSourceReadCommitted = {
   version: 1,
   policy: {
@@ -157,9 +176,9 @@ const seed = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${thread.threadId},NULL)`;
   yield* sql`INSERT INTO orchestration_events VALUES (1,${watermark.fromEventId},${thread.threadId},'message.updated',${encodeMessage(message)},'1970-01-01T00:00:00.000Z',2,'thread')`;
-  yield* sql`INSERT INTO orchestration_events VALUES (2,${id(11)},${thread.threadId},'run.created',${JSON.stringify({ id: runId, status: "running" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+  yield* sql`INSERT INTO orchestration_events VALUES (2,${id(11)},${thread.threadId},'run.created',${encodeRun(run("running"))},'1970-01-01T00:00:00.000Z',2,'thread')`;
   yield* sql`INSERT INTO orchestration_events VALUES (3,${id(12)},${thread.threadId},'message.updated',${encodeMessage(assistant)},'1970-01-01T00:00:00.000Z',2,'thread')`;
-  yield* sql`INSERT INTO orchestration_events VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+  yield* sql`INSERT INTO orchestration_events VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${encodeRun(run("completed"))},'1970-01-01T00:00:00.000Z',2,'thread')`;
   const store = yield* Store.MemoryStore;
   const op: M.MemoryOperation = {
     protocolVersion: 1,
@@ -375,12 +394,12 @@ it.effect.each([
       yield* seed;
       const sql = yield* SqlClient.SqlClient;
       if (drift === "completion after watermark") {
-        yield* sql`UPDATE orchestration_events SET payload_json=${JSON.stringify({ id: runId, status: "running" })} WHERE sequence=4`;
-        yield* sql`INSERT INTO orchestration_events VALUES (5,${id(99)},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+        yield* sql`UPDATE orchestration_events SET payload_json=${encodeRun(run("running"))} WHERE sequence=4`;
+        yield* sql`INSERT INTO orchestration_events VALUES (5,${id(99)},${thread.threadId},'run.updated',${encodeRun(run("completed"))},'1970-01-01T00:00:00.000Z',2,'thread')`;
       } else if (drift === "run changed after watermark") {
-        yield* sql`INSERT INTO orchestration_events VALUES (5,${id(99)},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread')`;
+        yield* sql`INSERT INTO orchestration_events VALUES (5,${id(99)},${thread.threadId},'run.updated',${encodeRun(run("completed"))},'1970-01-01T00:00:00.000Z',2,'thread')`;
       } else {
-        yield* sql`UPDATE orchestration_events SET payload_json=${JSON.stringify({ id: runId, status: drift })} WHERE sequence=4`;
+        yield* sql`UPDATE orchestration_events SET payload_json=${encodeRun(run(drift))} WHERE sequence=4`;
       }
       const reader = yield* Owner.MemoryOwnerSourceReader;
       const result = yield* Effect.result(reader.reader.readCommitted(locator, Effect.void));

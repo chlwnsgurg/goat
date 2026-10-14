@@ -1202,6 +1202,25 @@ const sourceFixture = (ownerIsHub = false) =>
     const encodeMessage = Schema.encodeEffect(
       Schema.fromJsonString(M.OrchestrationV2ConversationMessageJson),
     );
+    const encodeRun = Schema.encodeEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
+    const run = (status: M.OrchestrationV2RunJson["status"]) =>
+      M.OrchestrationV2RunJson.make({
+        id: runId,
+        threadId: thread.threadId,
+        ordinal: 1,
+        providerInstanceId: owner.selection.instanceId,
+        modelSelection: owner.selection,
+        providerThreadId: null,
+        userMessageId: messageId,
+        rootNodeId: null,
+        activeAttemptId: null,
+        status,
+        requestedAt: DateTime.makeUnsafe(0),
+        startedAt: DateTime.makeUnsafe(0),
+        completedAt: status === "running" ? null : DateTime.makeUnsafe(0),
+        checkpointId: null,
+        contextHandoffId: null,
+      });
     yield* owner.run(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
@@ -1220,9 +1239,9 @@ const sourceFixture = (ownerIsHub = false) =>
           runId,
           text: "synthetic completed answer",
         };
-        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (2,${id(9111)},${thread.threadId},'run.created',${JSON.stringify({ id: runId, status: "running" })},'1970-01-01T00:00:00.000Z',2,'thread',2,'system','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (2,${id(9111)},${thread.threadId},'run.created',${yield* encodeRun(run("running"))},'1970-01-01T00:00:00.000Z',2,'thread',2,'system','{}')`;
         yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (3,${id(9112)},${thread.threadId},'message.updated',${yield* encodeMessage(assistant)},'1970-01-01T00:00:00.000Z',2,'thread',3,'system','{}')`;
-        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${JSON.stringify({ id: runId, status: "completed" })},'1970-01-01T00:00:00.000Z',2,'thread',4,'system','{}')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (4,${watermark.toEventId},${thread.threadId},'run.updated',${yield* encodeRun(run("completed"))},'1970-01-01T00:00:00.000Z',2,'thread',4,'system','{}')`;
       }),
     );
     const op: M.MemoryOperation = {
