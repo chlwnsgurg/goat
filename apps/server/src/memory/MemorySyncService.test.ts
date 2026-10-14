@@ -134,8 +134,21 @@ const runtime = Layer.effect(
     });
   }),
 ).pipe(Layer.provide(core));
-const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) =>
-  Layer.mock(Client.MemoryHubClient)({
+const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) => {
+  const issued = new Map<string, M.MemoryResolutionLease>();
+  const defaultClaim: Client.MemoryHubClient["Service"]["claim"] = (
+    _c,
+    { protocolVersion: _protocol, ...claim },
+  ) =>
+    Effect.succeed({
+      ...claim,
+      fencingToken: 1,
+      claimedAtHubTime: timestamp,
+      expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+      attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+    });
+  const claim = overrides.claim ?? defaultClaim;
+  return Layer.mock(Client.MemoryHubClient)({
     pull: (_c, i) =>
       Effect.succeed({
         highWatermark: i.highWatermark ?? i.afterSequence,
@@ -154,17 +167,26 @@ const peer = (overrides: Partial<Client.MemoryHubClient["Service"]> = {}) =>
           outcome: "accepted" as const,
         })),
       }),
-    claim: (_c, { protocolVersion: _protocolVersion, ...claim }) =>
-      Effect.succeed({
-        ...claim,
-        fencingToken: 1,
-        claimedAtHubTime: timestamp,
-        expiresAtHubTime: "1970-01-01T00:02:00.000Z",
-        attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
-      }),
     release: () => Effect.succeed({ released: true }),
     ...overrides,
+    claim: (c, i) =>
+      claim(c, i).pipe(
+        Effect.tap((ticket) =>
+          Effect.sync(() => {
+            issued.set(ticket.attemptId, ticket);
+          }),
+        ),
+      ),
+    renew:
+      overrides.renew ??
+      ((_c, i) => {
+        const ticket = issued.get(i.attemptId);
+        return ticket
+          ? Effect.succeed(ticket)
+          : Effect.fail(new M.MemoryHubError({ code: "lease_expired" }));
+      }),
   });
+};
 const realGeneration = (overrides: Partial<Generation.TextGeneration["Service"]>) => {
   const provider = Generation.TextGeneration.of({
     generateCommitMessage: () => Effect.die("unexpected fixture operation"),
@@ -1245,4 +1267,38 @@ it.effect(
         }).pipe(Effect.provide(fixture(client, model))),
       );
     }),
+);
+
+it.effect("expired recovered lease never exposes input to the provider", () =>
+  Effect.gen(function* () {
+    const released = yield* Deferred.make<void>();
+    let executions = 0;
+    let renews = 0;
+    const client = peer({
+      renew: () =>
+        Effect.sync(() => {
+          renews++;
+        }).pipe(Effect.andThen(Effect.fail(new M.MemoryHubError({ code: "lease_expired" })))),
+      release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: false })),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Effect.sync(() => {
+          executions++;
+        }).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        yield* Deferred.await(released);
+        yield* sync.shutdown;
+        assert.strictEqual(renews, 1);
+        assert.strictEqual(executions, 0);
+        assert.strictEqual(yield* sync.activeResolutions, 0);
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
 );

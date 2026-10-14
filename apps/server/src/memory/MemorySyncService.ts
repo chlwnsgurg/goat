@@ -273,6 +273,36 @@ const make = Effect.gen(function* () {
       if (!next) return yield* new M.MemoryHubError({ code: "fenced" });
       row = next;
     });
+    const refreshLease = Effect.fnUntraced(function* () {
+      const current = row.ticket;
+      const input: M.MemoryHubRenewInput = {
+        protocolVersion: 1,
+        memorySpaceId: current.memorySpaceId,
+        memoryId: current.memoryId,
+        conflictId: current.conflictId,
+        holderEnvironmentId: local,
+        attemptId: current.attemptId,
+        fencingToken: current.fencingToken,
+      };
+      const renewed = yield* r.connection
+        ? client.renew(r.connection, input)
+        : hub.renew(input, r.principal!);
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      if (
+        renewed.memorySpaceId !== current.memorySpaceId ||
+        renewed.memoryId !== current.memoryId ||
+        renewed.conflictId !== current.conflictId ||
+        renewed.holderEnvironmentId !== local ||
+        renewed.attemptId !== current.attemptId ||
+        renewed.fencingToken !== current.fencingToken ||
+        renewed.claimedAtHubTime !== current.claimedAtHubTime ||
+        renewed.attemptDeadlineHubTime !== current.attemptDeadlineHubTime ||
+        !sameHeads(renewed.conflictHeadSet, current.conflictHeadSet) ||
+        selectionKey(renewed.frozenDefaultModelSelection) !==
+          selectionKey(current.frozenDefaultModelSelection)
+      )
+        return yield* new M.MemoryHubError({ code: "fenced" });
+    });
     const settle = Effect.fnUntraced(function* (receipt: M.MemoryHubReceipt) {
       if (!row.submission) return yield* new M.MemoryHubError({ code: "invalid_output" });
       const operation = row.submission.operation;
@@ -302,6 +332,7 @@ const make = Effect.gen(function* () {
       }
       if (!row.submission) {
         yield* transition("running");
+        yield* refreshLease();
         const aggregate = yield* eligibility(row.ticket);
         yield* runtime.available(row.ticket.frozenDefaultModelSelection);
         const heads = aggregate.revisions
@@ -324,19 +355,12 @@ const make = Effect.gen(function* () {
             yield* Effect.sleep("30 seconds");
             yield* ensureEpoch(r.settings.memoryHubVersion);
             yield* eligibility(row.ticket);
-            const i: M.MemoryHubRenewInput = {
-              protocolVersion: 1,
-              memorySpaceId: row.ticket.memorySpaceId,
-              memoryId: row.ticket.memoryId,
-              conflictId: row.ticket.conflictId,
-              holderEnvironmentId: local,
-              attemptId: row.ticket.attemptId,
-              fencingToken: row.ticket.fencingToken,
-            };
-            yield* r.connection ? client.renew(r.connection, i) : hub.renew(i, r.principal!);
+            yield* refreshLease();
             yield* transition("running");
           }
         });
+        yield* ensureEpoch(r.settings.memoryHubVersion);
+        yield* eligibility(row.ticket);
         const generated = yield* Effect.scoped(
           Effect.gen(function* () {
             // Renewal failure interrupts the provider, including a hung one-shot execution.
