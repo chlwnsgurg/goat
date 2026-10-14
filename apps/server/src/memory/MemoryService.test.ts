@@ -3,6 +3,8 @@ import * as M from "@goat/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Clock from "effect/Clock";
+import { memoryOperationDigest } from "./MemoryDecider.ts";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
@@ -50,6 +52,97 @@ const encodeRevisionIds = Schema.encodeEffect(
   Schema.fromJsonString(Schema.Array(M.MemoryRevisionId)),
 );
 const denied = Effect.fail(new Service.MemoryAccessError({ code: "identity_mismatch" }));
+describe("MemoryService hub admission", () => {
+  const authority: Store.HubAuthority = {
+    principal: {
+      memorySpaceId: space,
+      environmentId,
+      credentialVersion: 1,
+      scopes: ["memory:sync"],
+    },
+    now: Clock.currentTimeMillis,
+    reauthorize: Effect.void,
+  };
+  it.effect("admits a hub-local event once and rechecks membership before replay", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
+      yield* service.upsert(input(), Effect.void);
+      const op = yield* store.readWorkOperation(`sync:${space}:${input().operationId}`);
+      assert.isDefined(op);
+      const first = yield* store.transact(
+        service.admitHubOperationTx({ authority, operation: op! }),
+      );
+      assert.strictEqual(first.outcome, "accepted");
+      assert.isNotNull(first.hubSequence);
+      assert.deepStrictEqual(
+        yield* store.transact(service.admitHubOperationTx({ authority, operation: op! })),
+        first,
+      );
+      const aggregate = yield* store.loadAggregate(space, memoryId);
+      assert.strictEqual(aggregate.item?.pendingSync, false);
+      assert.strictEqual(
+        (yield* store.receipt(space, op!.operationId))?.receipt.outcome,
+        "accepted",
+      );
+      assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 1);
+      yield* sql`UPDATE memory_hub_members SET status='revoked' WHERE space=${space}`;
+      assert.strictEqual(
+        (yield* store
+          .transact(service.admitHubOperationTx({ authority, operation: op! }))
+          .pipe(Effect.flip))._tag,
+        "MemoryHubUnauthorizedError",
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect(
+    "a fresh remote operation reaches the canonical projection despite its compact hub receipt",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Service.MemoryService;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
+        const op: M.MemoryOperation = {
+          protocolVersion: 1,
+          kind: "upsert",
+          memorySpaceId: space,
+          memoryId,
+          originEnvironmentId: environmentId,
+          operationId: M.MemoryOperationId.make(id(90)),
+          expectedHeads: [],
+          revision: {
+            memorySpaceId: space,
+            memoryId,
+            operationId: M.MemoryOperationId.make(id(90)),
+            revisionId: M.MemoryRevisionId.make(id(91)),
+            parents: [],
+            scope: { kind: "user" },
+            payloadRef: M.MemoryRevisionId.make(id(91)),
+            assertionKind: "inference",
+            createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+            provenance: { environmentId },
+          },
+          payload: {
+            text: "synthetic remote memory",
+            evidence: [],
+            derivedFromMemoryRevisions: [],
+          },
+        };
+        const receipt = yield* store.transact(
+          service.admitHubOperationTx({ authority, operation: op }),
+        );
+        assert.strictEqual(receipt.operationDigest, memoryOperationDigest(op));
+        const aggregate = yield* store.loadAggregate(space, memoryId);
+        assert.deepStrictEqual(aggregate.heads, [M.MemoryRevisionId.make(id(91))]);
+        assert.strictEqual(aggregate.revisions[0]?.payload?.text, "synthetic remote memory");
+        assert.strictEqual(aggregate.item?.pendingSync, false);
+        assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 1);
+      }).pipe(Effect.provide(live)),
+  );
+});
 describe("MemoryService", () => {
   it.effect("replays unchanged input with the original timestamp and receipt", () =>
     Effect.gen(function* () {

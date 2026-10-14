@@ -1870,13 +1870,33 @@ const make = Effect.gen(function* () {
     return yield* transact(
       Effect.gen(function* () {
         const op = yield* stored("operation-codec", decodeOperation(decision.operation, strict));
-        const old = yield* receipt(op.memorySpaceId, op.operationId);
+        // A hub append creates compact replay metadata before canonical incorporation.
+        // Only an existing domain event can make a new hub admission a promotion.
+        const eventRows =
+          decision.admission.kind === "hubAdmission"
+            ? yield* stored(
+                "hub-domain-replay",
+                sql<{
+                  operation_digest: string;
+                  receipt_json: string;
+                }>`SELECT operation_digest,receipt_json FROM memory_events WHERE memory_space_id=${op.memorySpaceId} AND operation_id=${op.operationId}`,
+              )
+            : null;
+        const old =
+          eventRows === null
+            ? yield* receipt(op.memorySpaceId, op.operationId)
+            : eventRows[0]
+              ? {
+                  operationDigest: eventRows[0].operation_digest,
+                  receipt: yield* receiptCodec.decode(eventRows[0].receipt_json, strict),
+                }
+              : undefined;
         if (old) {
           if (old.operationDigest !== decision.operationDigest)
             return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
           if (expectedGeneration === undefined) {
             const promote =
-              decision.admission.kind === "approvedReplica" &&
+              decision.admission.kind !== "localIntent" &&
               "hubSequence" in decision.receipt &&
               (!("hubSequence" in old.receipt) || old.receipt.hubSequence === null);
             if (!promote) return old;

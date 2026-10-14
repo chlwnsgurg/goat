@@ -23,7 +23,11 @@ export class MemoryQuotaService extends Context.Service<
         readonly receipt?: M.MemoryHubReceipt | M.MemoryMutationReceipt;
       },
       commit: Effect.Effect<A, E, R>,
-    ) => Effect.Effect<A, E | Store.MemoryStorageError | Store.MemoryCapacityError, R>;
+    ) => Effect.Effect<
+      A,
+      E | Store.MemoryStorageError | Store.MemoryCapacityError | Store.MemoryStoreConflict,
+      R
+    >;
     readonly commit: <E, R>(
       decision: Store.MemoryDecision,
       environmentId: M.EnvironmentId,
@@ -110,7 +114,9 @@ const make = Effect.gen(function* () {
     store.transact(
       Effect.gen(function* () {
         const op = input.operation;
-        if (yield* store.receipt(op.memorySpaceId, op.operationId)) return yield* commit;
+        if (input.admission.kind === "hubAdmission") {
+          if (yield* store.readHubReceiptTx(op.memorySpaceId, op.operationId)) return yield* commit;
+        } else if (yield* store.receipt(op.memorySpaceId, op.operationId)) return yield* commit;
         const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
         const scope =
           op.kind === "forget"

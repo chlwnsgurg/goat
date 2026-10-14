@@ -174,7 +174,7 @@ export function decideMemoryOperation(
       scope: r.scope,
       status: "blocked",
       failureCode: "missing_parent",
-      pendingSync: !replica,
+      pendingSync: admission.kind === "localIntent",
       localAvailability: {
         exposure: "held",
         reasons: ["missing_parent"],
@@ -247,7 +247,7 @@ export function decideMemoryOperation(
         scope: r.scope,
         status: "quarantined",
         conflict,
-        pendingSync: !replica,
+        pendingSync: admission.kind === "localIntent",
         localAvailability: { ...availability, exposure: "held", reasons: ["conflicted"] },
       },
     };
@@ -268,7 +268,7 @@ export function decideMemoryOperation(
       status: "active",
       revision: selected.revision,
       payload: selected.payload,
-      pendingSync: !replica,
+      pendingSync: admission.kind === "localIntent",
       localAvailability: availability,
     },
   };

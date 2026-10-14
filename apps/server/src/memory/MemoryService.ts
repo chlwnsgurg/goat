@@ -60,6 +60,17 @@ export type MemoryOwnerCommittedReader = {
 export class MemoryService extends Context.Service<
   MemoryService,
   {
+    readonly admitHubOperationTx: (input: {
+      authority: Store.HubAuthority;
+      operation: M.MemoryOperation;
+      resolutionRequest?: M.MemoryHubApplyResolutionInput;
+    }) => Store.InTx<
+      M.MemoryHubReceipt,
+      | MemoryServiceError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
+    >;
     readonly settleHubEntryTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -192,6 +203,8 @@ const decodePage = Schema.decodeUnknownEffect(M.MemoryPage);
 const decodeReportThread = Schema.decodeUnknownEffect(Schema.fromJsonString(M.ScopedThreadRef));
 const decodeReport = Schema.decodeUnknownEffect(M.MemoryReportDelivery);
 const encodeHubReceipt = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubReceipt));
+const decodeOperation = Schema.decodeUnknownEffect(M.MemoryOperation);
+const decodeResolutionRequest = Schema.decodeUnknownEffect(M.MemoryHubApplyResolutionInput);
 const decodeHubEntry = Schema.decodeUnknownEffect(M.MemoryHubEntry);
 const decodeHubPage = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeHubReceipt = Schema.decodeUnknownEffect(M.MemoryHubReceipt);
@@ -1066,6 +1079,129 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const admitHubOperationTx: MemoryService["Service"]["admitHubOperationTx"] = Effect.fn(
+    "MemoryService.admitHubOperationTx",
+  )(function* (input) {
+    // These effects require the outer Store transaction and run after its SQL write lock.
+    yield* input.authority.reauthorize;
+    const member = yield* store.requireHubMemberTx(input.authority.principal);
+    const now = yield* input.authority.now;
+    const op = yield* decode(decodeOperation(input.operation, strict));
+    if (
+      op.memorySpaceId !== member.memorySpaceId ||
+      op.originEnvironmentId !== member.environmentId
+    )
+      return yield* new M.MemoryHubForbiddenError({});
+    const digest = memoryOperationDigest(op);
+    const replay = yield* store.readHubReceiptTx(op.memorySpaceId, op.operationId);
+    if (replay) {
+      if (replay.entry.receipt.operationDigest !== digest)
+        return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+      return replay.entry.receipt;
+    }
+    const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
+    if (op.kind !== "forget" && current.pendingForget)
+      return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+    let approval: M.MemoryResolutionApproval | undefined;
+    if (op.kind === "resolve") {
+      if (!input.resolutionRequest) return yield* new M.MemoryHubError({ code: "lease_required" });
+      const request = yield* decode(
+        Schema.decodeUnknownEffect(M.MemoryHubApplyResolutionInput)(
+          input.resolutionRequest,
+          strict,
+        ),
+      );
+      const lease = current.fence?.activeLease;
+      if (
+        request.memorySpaceId !== op.memorySpaceId ||
+        request.holderEnvironmentId !== member.environmentId ||
+        M.encodeMemoryOperation(request.operation) !== M.encodeMemoryOperation(op)
+      )
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      if (!lease) return yield* new M.MemoryHubError({ code: "lease_required" });
+      if (
+        lease.attemptId !== request.attemptId ||
+        lease.holderEnvironmentId !== member.environmentId ||
+        lease.fencingToken !== op.fencingToken ||
+        current.fence?.highestFencingToken !== op.fencingToken
+      )
+        return yield* new M.MemoryHubError({ code: "fenced" });
+      if (
+        Date.parse(lease.expiresAtHubTime) <= now ||
+        Date.parse(lease.attemptDeadlineHubTime) <= now
+      )
+        return yield* new M.MemoryHubError({ code: "lease_expired" });
+      if (
+        encodeSelection(lease.frozenDefaultModelSelection) !==
+          encodeSelection(op.resolution.requestedModelSelection) ||
+        op.resolution.resolvingEnvironmentId !== member.environmentId
+      )
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      const iso = (value: number) =>
+        M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(value)));
+      approval = {
+        resolutionId: op.resolution.resolutionId,
+        appliedAtUtc: iso(now),
+        revertDeadlineUtc: iso(now + M.MEMORY_REVERT_WINDOW_MS),
+      };
+    } else if (input.resolutionRequest)
+      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+    const ancestry =
+      op.kind === "forget"
+        ? undefined
+        : yield* store.readAncestry(op.memorySpaceId, op.memoryId, op.revision.parents);
+    const decision = yield* Effect.try({
+      try: () =>
+        decideMemoryOperation(
+          current,
+          op,
+          Store.hubAdmission,
+          scanMemoryValue(op),
+          undefined,
+          ancestry,
+          now,
+        ),
+      catch: (cause) => (isConflict(cause) ? cause : invalid()),
+    });
+    return yield* quota.withAdmission(
+      { operation: op, admission: Store.hubAdmission, environmentId, receipt: decision.receipt },
+      Effect.gen(function* () {
+        const ledger = yield* store.appendHubEntryTx({
+          operation: op,
+          operationDigest: digest,
+          outcome: decision.receipt.outcome === "noop" ? "accepted" : decision.receipt.outcome,
+          ...(approval ? { resolutionApproval: approval } : {}),
+          now,
+        });
+        yield* store.apply({
+          ...decision,
+          receipt: ledger.entry.receipt,
+          ...(op.kind === "resolve"
+            ? {
+                execution: {
+                  requestedModelSelection: op.resolution.requestedModelSelection,
+                  effectiveProvider: op.resolution.effectiveProvider,
+                  effectiveModel: op.resolution.effectiveModel,
+                  providerInstanceId: op.resolution.requestedModelSelection.instanceId,
+                  environmentId: member.environmentId,
+                },
+              }
+            : {}),
+        });
+        if (current.fence?.activeLease)
+          yield* store.transitionHubLeaseTx({
+            authority: input.authority,
+            action: {
+              kind: "invalidate",
+              memoryId: op.memoryId,
+              expectedToken: current.fence.highestFencingToken,
+              reason: op.kind === "forget" ? "forget" : "heads",
+            },
+          });
+        return ledger.entry.receipt;
+      }),
+    );
+  });
   const settleHubEntryTx: MemoryService["Service"]["settleHubEntryTx"] = Effect.fn(
     "MemoryService.settleHubEntryTx",
   )(function* (input) {
@@ -1213,6 +1349,7 @@ const make = Effect.gen(function* () {
     );
   });
   return MemoryService.of({
+    admitHubOperationTx,
     settleHubEntryTx,
     receiveHubPage,
     settleHubAcknowledgement,
