@@ -26,19 +26,21 @@ const database = Layer.effectDiscard(
   migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const store = Store.layer.pipe(Layer.provideMerge(database));
-const live = Service.layer.pipe(
-  Layer.provide(
-    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
-      resolve: () => Effect.succeed(null),
-    }),
-  ),
-  Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
-  Layer.provide(
-    Layer.succeed(Environment.ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(environmentId),
-    }),
-  ),
-);
+const serviceLive = (serviceLayer = Service.layer) =>
+  serviceLayer.pipe(
+    Layer.provide(
+      Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+        resolve: () => Effect.succeed(null),
+      }),
+    ),
+    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
+    Layer.provide(
+      Layer.succeed(Environment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(environmentId),
+      }),
+    ),
+  );
+const live = serviceLive();
 const input = (n = 3): M.MemoryUpsertInput => ({
   memorySpaceId: space,
   memoryId,
@@ -2359,3 +2361,227 @@ it.effect("list refuses a valid first item exceeding the reserved page envelope"
     assert.isTrue("code" in failure && failure.code === "payload_too_large");
   }).pipe(Effect.provide(live)),
 );
+
+const sourceFixture = Effect.gen(function* () {
+  const store = yield* Store.MemoryStore;
+  const sourceThread = {
+    environmentId: M.EnvironmentId.make("synthetic-owner"),
+    threadId: M.ThreadId.make("synthetic-thread"),
+  };
+  const watermark = {
+    fromEventId: M.EventId.make("synthetic-from"),
+    toEventId: M.EventId.make("synthetic-to"),
+    throughSequence: 8,
+  };
+  const messageId = M.MessageId.make("synthetic-message");
+  const operationId = M.MemoryOperationId.make(id(9000));
+  const revisionId = M.MemoryRevisionId.make(id(9001));
+  const op: M.MemoryOperation = {
+    protocolVersion: 1,
+    kind: "upsert",
+    memorySpaceId: space,
+    memoryId,
+    operationId,
+    originEnvironmentId: environmentId,
+    expectedHeads: [],
+    revision: {
+      memorySpaceId: space,
+      memoryId,
+      operationId,
+      revisionId,
+      payloadRef: revisionId,
+      parents: [],
+      scope: { kind: "user" },
+      assertionKind: "inference",
+      createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+      provenance: { environmentId, sourceThread, sourceWatermark: watermark },
+    },
+    payload: {
+      text: "synthetic linked summary",
+      evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
+      derivedFromMemoryRevisions: [],
+    },
+  };
+  const aggregate = yield* store.loadAggregate(space, memoryId);
+  yield* store.apply(decideMemoryOperation(aggregate, op, Store.localIntent, scanMemoryValue(op)));
+  const input: M.MemoryReadSourceInput = {
+    memorySpaceId: space,
+    memoryId,
+    sourceThread,
+    messageIds: [messageId],
+    limit: 10,
+  };
+  const page: M.MemorySourcePage = {
+    sourceThread,
+    watermark,
+    messages: [{ messageId, text: "synthetic original" }],
+    nextCursor: null,
+  };
+  return { input, page };
+});
+it.effect("public readSource returns the validated page through the injected authority", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const actual = yield* service.readSource(fixture.input, Effect.void);
+    assert.deepStrictEqual(actual, fixture.page);
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority((validated, permit) =>
+          permit.pipe(
+            Effect.as({
+              kind: "available",
+              page: {
+                sourceThread: validated.request.sourceThread,
+                watermark: validated.request.sourceWatermark,
+                messages: validated.request.messageIds.map((messageId) => ({
+                  messageId,
+                  text: "synthetic original",
+                })),
+                nextCursor: null,
+              },
+            }),
+          ),
+        ),
+      ),
+    ),
+  ),
+);
+it.effect.each([
+  "source_unavailable",
+  "forgotten",
+  "source_invalidated",
+  "secret_detected",
+] as const)("public readSource preserves unavailable %s", (code) =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryStoreConflict");
+    assert.isTrue("code" in failure && failure.code === code);
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority(() => Effect.succeed({ kind: "unavailable", code })),
+      ),
+    ),
+  ),
+);
+it.effect.each(["outcome", "error", "missing"] as const)(
+  "public readSource retains auth denial from %s",
+  (kind) => {
+    const authority: Service.MemorySourceReadAuthority["readSource"] = () =>
+      kind === "error"
+        ? denied
+        : Effect.succeed({ kind: "denied", requiredPermission: "orchestration:read" });
+    return Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const fixture = yield* sourceFixture;
+      const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryAccessError");
+      assert.isTrue(
+        "code" in failure &&
+          failure.code === (kind === "error" ? "identity_mismatch" : "unavailable"),
+      );
+    }).pipe(
+      Effect.provide(
+        kind === "missing" ? live : serviceLive(Service.layerWithSourceReadAuthority(authority)),
+      ),
+    );
+  },
+);
+it.effect("public readSource fences post-await revocation", () => {
+  let revoke = false;
+  return Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    const permit = Effect.suspend(() => (revoke ? denied : Effect.void));
+    const failure = yield* service.readSource(fixture.input, permit).pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryAccessError");
+  }).pipe(
+    Effect.provide(
+      serviceLive(
+        Service.layerWithSourceReadAuthority((validated, permit) =>
+          Effect.gen(function* () {
+            yield* permit;
+            revoke = true;
+            return {
+              kind: "available" as const,
+              page: {
+                sourceThread: validated.request.sourceThread,
+                watermark: validated.request.sourceWatermark,
+                messages: [],
+                nextCursor: null,
+              },
+            };
+          }),
+        ),
+      ),
+    ),
+  );
+});
+it.effect.each(["before-authority", "before-return"] as const)(
+  "public readSource repeats permit %s",
+  (boundary) => {
+    let calls = 0;
+    let authorityCalls = 0;
+    const at = boundary === "before-authority" ? 3 : 6;
+    const authority: Service.MemorySourceReadAuthority["readSource"] = (validated) => {
+      authorityCalls++;
+      return Effect.succeed({
+        kind: "available",
+        page: {
+          sourceThread: validated.request.sourceThread,
+          watermark: validated.request.sourceWatermark,
+          messages: [],
+          nextCursor: null,
+        },
+      });
+    };
+    return Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const fixture = yield* sourceFixture;
+      const permit = Effect.suspend(() => (++calls === at ? denied : Effect.void));
+      const failure = yield* service.readSource(fixture.input, permit).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryAccessError");
+      assert.strictEqual(calls, at);
+      assert.strictEqual(authorityCalls, boundary === "before-authority" ? 0 : 1);
+    }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
+  },
+);
+it.effect("public readSource discards an available body whose locator changed during await", () => {
+  let invalidate: Effect.Effect<void, Service.MemoryServiceError> = Effect.void;
+  const authority: Service.MemorySourceReadAuthority["readSource"] = (validated) =>
+    Effect.gen(function* () {
+      yield* invalidate;
+      return {
+        kind: "available" as const,
+        page: {
+          sourceThread: validated.request.sourceThread,
+          watermark: validated.request.sourceWatermark,
+          messages: [
+            { messageId: validated.request.messageIds[0]!, text: "synthetic stale original" },
+          ],
+          nextCursor: null,
+        },
+      };
+    });
+  return Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const fixture = yield* sourceFixture;
+    invalidate = service
+      .forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(9002)),
+          expectedHeads: [],
+        },
+        Effect.void,
+      )
+      .pipe(Effect.asVoid);
+    const failure = yield* service.readSource(fixture.input, Effect.void).pipe(Effect.flip);
+    assert.isTrue("code" in failure && failure.code === "forgotten");
+  }).pipe(Effect.provide(serviceLive(Service.layerWithSourceReadAuthority(authority))));
+});

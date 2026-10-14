@@ -77,6 +77,10 @@ export class MemoryService extends Context.Service<
       Store.MaterializedIntent & { receipt: Store.StoredReceipt },
       MemoryServiceError
     >;
+    readonly readSource: (
+      input: M.MemoryReadSourceInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemorySourcePage, MemoryServiceError>;
     readonly prepareSourceRead: (
       input: M.MemoryReadSourceInput,
       permit: Permit,
@@ -261,6 +265,7 @@ const decodeHubPage = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeHubReceipt = Schema.decodeUnknownEffect(M.MemoryHubReceipt);
 const decodeHistoryPage = Schema.decodeUnknownEffect(M.MemoryHistoryPage);
 const isConflict = Schema.is(Store.MemoryStoreConflict);
+const isFailureCode = Schema.is(M.MemoryFailureCode);
 const invalid = () => new Store.MemoryStoreConflict({ code: "invalid_output" });
 const hash = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
 export const memoryStableUuid = (text: string) => {
@@ -268,7 +273,9 @@ export const memoryStableUuid = (text: string) => {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
 const decode = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(invalid));
-const make = Effect.gen(function* () {
+const make = Effect.fnUntraced(function* (
+  sourceReadAuthority?: MemorySourceReadAuthority["readSource"],
+) {
   const repositoryResolver = yield* RepositoryResolver.RepositoryIdentityResolver;
   const store = yield* Store.MemoryStore;
   const quota = yield* Quota.MemoryQuotaService;
@@ -1358,6 +1365,31 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readSource: MemoryService["Service"]["readSource"] = Effect.fn("MemoryService.readSource")(
+    function* (input, permit) {
+      yield* permit;
+      // L5 binds Sync's existing authority seam; production remains closed without that port.
+      if (!sourceReadAuthority) return yield* new MemoryAccessError({ code: "unavailable" });
+      const request = yield* prepareSourceRead(input, permit);
+      yield* permit;
+      const outcome = yield* sourceReadAuthority(request, permit).pipe(
+        Effect.catchTags({
+          MemoryHubError: (error) =>
+            Effect.fail(
+              new Store.MemoryStoreConflict({
+                code: isFailureCode(error.code) ? error.code : "source_unavailable",
+              }),
+            ),
+        }),
+      );
+      yield* permit;
+      const validated = yield* validateSourceOutcome({ request, outcome }, permit);
+      yield* permit;
+      if (validated.kind === "available") return validated.page;
+      if (validated.kind === "denied") return yield* new MemoryAccessError({ code: "unavailable" });
+      return yield* new Store.MemoryStoreConflict({ code: validated.code });
+    },
+  );
   const admitHubOperationTx: MemoryService["Service"]["admitHubOperationTx"] = Effect.fn(
     "MemoryService.admitHubOperationTx",
   )(function* (input) {
@@ -1797,6 +1829,7 @@ const make = Effect.gen(function* () {
   });
   return MemoryService.of({
     commitLocalIntent,
+    readSource,
     prepareSourceRead,
     validateSourceOutcome,
     admitHubOperation,
@@ -1833,4 +1866,7 @@ const make = Effect.gen(function* () {
     readContextRevisions,
   });
 });
-export const layer = Layer.effect(MemoryService, make);
+export const layer = Layer.effect(MemoryService, make());
+/** Bind an application-owned callback, without importing Sync or constructing a cyclic layer. */
+export const layerWithSourceReadAuthority = (authority: MemorySourceReadAuthority["readSource"]) =>
+  Layer.effect(MemoryService, make(authority));
