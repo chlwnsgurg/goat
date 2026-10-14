@@ -246,7 +246,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
   });
 
 it.effect(
-  "H/A/B use isolated file stores and the same administrator/descriptor identity through real HTTP join",
+  "installCredential automatically bootstraps fresh production Sync for isolated H/A/B over real HTTP",
   () =>
     Effect.gen(function* () {
       const h = yield* environment("H");
@@ -335,13 +335,19 @@ it.effect(
           ),
         );
         assert.strictEqual(progress.state, "unbound");
-        const boot = yield* Effect.result(member.sync.syncOnce);
-        assert.strictEqual(boot._tag, "Failure");
-        if (boot._tag === "Failure") {
-          assert.strictEqual(boot.failure._tag, "MemoryStorageError");
-          if (boot.failure._tag === "MemoryStorageError")
-            assert.strictEqual(boot.failure.stage, "work-codec");
-        }
+        assert.strictEqual(yield* member.startProduction, member.sync);
+        assert.deepStrictEqual(yield* member.sync.readLocalReadiness(), {
+          memorySpaceId: space,
+          bootstrap: "ready",
+        });
+        assert.strictEqual(
+          (yield* member.run(
+            Store.MemoryStore.use((store) =>
+              store.readBootstrap({ memorySpaceId: space, hubEnvironmentId: h.identity }),
+            ),
+          )).state,
+          "ready",
+        );
 
         const fs = yield* FileSystem.FileSystem;
         const dbPath = yield* member.run(
@@ -383,35 +389,17 @@ const cluster = (resolveB?: Resolve) =>
         Effect.void,
       );
       if (provisioned.credential === null) return yield* Effect.die("missing issued credential");
-      // Preserve the full administrator install prerequisite above. Its completed
-      // admin row currently breaks L1's orphan decoder. These acceptance scenarios
-      // use real settings/secret ports to isolate the subsequent Sync paths, without
-      // deleting the row, patching SQL or mocking admission/recovery.
-      yield* member.run(
-        Secrets.ServerSecretStore.use((secrets) =>
-          secrets.set(
-            "synthetic-memory-hub",
-            new TextEncoder().encode(provisioned.credential!.credential),
-          ),
-        ),
-      );
-      yield* member.run(
-        Settings.MemoryHubSettingsTransitions.use((transitions) =>
-          transitions.applyMemoryHubTransition(
-            {
-              requestId: id(1020 + index),
-              expectedVersion: 0,
-              settings: {
-                mode: "member",
-                hubEnvironmentId: h.identity,
-                endpoint,
-                memorySpaceId: space,
-                secretName: "synthetic-memory-hub",
-              },
-            },
-            Effect.void,
-          ),
-        ),
+      yield* member.update(
+        {
+          requestId: id(1020 + index),
+          expectedVersion: 0,
+          action: "installCredential",
+          hubEnvironmentId: h.identity,
+          endpoint,
+          memorySpaceId: space,
+          credential: provisioned.credential.credential,
+        },
+        Effect.void,
       );
       yield* member.run(
         Settings.ServerSettingsService.use((s) =>
@@ -424,6 +412,11 @@ const cluster = (resolveB?: Resolve) =>
         bootstrap: "ready",
       });
     }
+    yield* h.tick;
+    assert.deepStrictEqual(yield* h.sync.readLocalReadiness(), {
+      memorySpaceId: space,
+      bootstrap: "ready",
+    });
     return { h, a, b, space };
   });
 const memory = (n: number) =>
@@ -647,108 +640,118 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("WP3 owner source authorization fails closed while unrelated HTTP sync continues", () =>
-  Effect.gen(function* () {
-    const c = yield* cluster();
-    const target = memory(6);
-    const sourceThread = {
-      environmentId: c.b.identity,
-      threadId: M.ThreadId.make("synthetic-owner-thread"),
-    };
-    const watermark = {
-      fromEventId: M.EventId.make("synthetic-from"),
-      toEventId: M.EventId.make("synthetic-to"),
-      throughSequence: 8,
-    };
-    const messageId = M.MessageId.make("synthetic-owner-message");
-    const operation: Extract<M.MemoryOperation, { kind: "upsert" }> = {
-      protocolVersion: 1,
-      kind: "upsert",
-      memorySpaceId: c.space,
-      memoryId: target,
-      operationId: id(1140),
-      originEnvironmentId: c.a.identity,
-      expectedHeads: [],
-      revision: {
+it.effect(
+  "requester receives terminal denied from fail-closed owner while unrelated HTTP sync continues",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* cluster();
+      const target = memory(6);
+      const sourceThread = {
+        environmentId: c.b.identity,
+        threadId: M.ThreadId.make("synthetic-owner-thread"),
+      };
+      const watermark = {
+        fromEventId: M.EventId.make("synthetic-from"),
+        toEventId: M.EventId.make("synthetic-to"),
+        throughSequence: 8,
+      };
+      const messageId = M.MessageId.make("synthetic-owner-message");
+      const operation: Extract<M.MemoryOperation, { kind: "upsert" }> = {
+        protocolVersion: 1,
+        kind: "upsert",
         memorySpaceId: c.space,
         memoryId: target,
         operationId: id(1140),
-        revisionId: M.MemoryRevisionId.make(id(1141)),
-        payloadRef: M.MemoryRevisionId.make(id(1141)),
-        parents: [],
-        scope: { kind: "user" },
-        assertionKind: "inference",
-        createdAtUtc: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
-        provenance: { environmentId: c.a.identity, sourceThread, sourceWatermark: watermark },
-      },
-      payload: {
-        text: "synthetic linked summary",
-        evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
-        derivedFromMemoryRevisions: [],
-      },
-    };
-    const connection = yield* c.a.connection;
-    yield* c.a.run(
-      Client.MemoryHubClient.use((client) =>
-        client.push(connection, {
-          protocolVersion: 1,
-          memorySpaceId: c.space,
-          environmentId: c.a.identity,
-          operations: [operation],
-        }),
-      ),
-    );
-    const requested = yield* c.a.run(
-      Client.MemoryHubClient.use((client) =>
-        client.requestSourceRead(connection, {
-          protocolVersion: 1,
+        originEnvironmentId: c.a.identity,
+        expectedHeads: [],
+        revision: {
           memorySpaceId: c.space,
           memoryId: target,
-          requestId: M.MemorySourceReadRequestId.make(id(1142)),
-          sourceThread,
-          sourceWatermark: watermark,
-          messageIds: [messageId],
-          limit: 10,
-          authorizedScopes: ["memory:read", "orchestration:read"],
-        }),
-      ),
-    );
-    const denied = yield* c.b.run(
-      Sync.MemorySyncRuntime.use((runtime) =>
-        Effect.result(runtime.ownerPermit(requested.request)),
-      ),
-    );
-    assert.strictEqual(denied._tag, "Failure");
-    if (denied._tag === "Failure") {
-      assert.strictEqual(denied.failure._tag, "MemoryAccessError");
-      assert.strictEqual(denied.failure.code, "route_unavailable");
-    }
-    const other = memory(60);
-    yield* write(c.b, c.space, other, 1143, "ordinary sync survives source denial");
-    yield* c.b.tick;
-    assert.strictEqual(
-      activeText(yield* c.h.aggregate(c.space, other)),
-      "ordinary sync survives source denial",
-    );
-    const status = yield* c.b.sync.syncStatus({}, Effect.void);
-    assert.strictEqual(status.failureCode, "route_unavailable");
-    const outcome = yield* c.a.run(
-      Client.MemoryHubClient.use((client) =>
-        client.resultSourceRead(connection, {
-          protocolVersion: 1,
-          memorySpaceId: c.space,
-          requestId: requested.request.requestId,
-        }),
-      ),
-    );
-    // L4 currently records typed owner denial but leaves the remote result pending;
-    // it must map that denial to the existing denied wire outcome in its own lane.
-    assert.strictEqual(outcome.state, "pending");
-  }).pipe(Effect.provide(NodeServices.layer)),
+          operationId: id(1140),
+          revisionId: M.MemoryRevisionId.make(id(1141)),
+          payloadRef: M.MemoryRevisionId.make(id(1141)),
+          parents: [],
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          createdAtUtc: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
+          provenance: { environmentId: c.a.identity, sourceThread, sourceWatermark: watermark },
+        },
+        payload: {
+          text: "synthetic linked summary",
+          evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
+          derivedFromMemoryRevisions: [],
+        },
+      };
+      const connection = yield* c.a.connection;
+      yield* c.a.run(
+        Client.MemoryHubClient.use((client) =>
+          client.push(connection, {
+            protocolVersion: 1,
+            memorySpaceId: c.space,
+            environmentId: c.a.identity,
+            operations: [operation],
+          }),
+        ),
+      );
+      const requested = yield* c.a.run(
+        Client.MemoryHubClient.use((client) =>
+          client.requestSourceRead(connection, {
+            protocolVersion: 1,
+            memorySpaceId: c.space,
+            memoryId: target,
+            requestId: M.MemorySourceReadRequestId.make(id(1142)),
+            sourceThread,
+            sourceWatermark: watermark,
+            messageIds: [messageId],
+            limit: 10,
+            authorizedScopes: ["memory:read", "orchestration:read"],
+          }),
+        ),
+      );
+      const denied = yield* c.b.run(
+        Sync.MemorySyncRuntime.use((runtime) =>
+          Effect.result(runtime.ownerPermit(requested.request)),
+        ),
+      );
+      assert.strictEqual(denied._tag, "Failure");
+      if (denied._tag === "Failure") {
+        assert.strictEqual(denied.failure._tag, "MemoryAccessError");
+        assert.strictEqual(denied.failure.code, "route_unavailable");
+      }
+      const other = memory(60);
+      yield* write(c.b, c.space, other, 1143, "ordinary sync survives source denial");
+      yield* c.b.tick;
+      assert.strictEqual(
+        activeText(yield* c.h.aggregate(c.space, other)),
+        "ordinary sync survives source denial",
+      );
+      const status = yield* c.b.sync.syncStatus({}, Effect.void);
+      assert.strictEqual(status.failureCode, "route_unavailable");
+      const outcome = yield* c.a.run(
+        Client.MemoryHubClient.use((client) =>
+          client.resultSourceRead(connection, {
+            protocolVersion: 1,
+            memorySpaceId: c.space,
+            requestId: requested.request.requestId,
+          }),
+        ),
+      );
+      assert.strictEqual(outcome.state, "completed");
+      if (outcome.state !== "completed") return yield* Effect.die("source request stayed pending");
+      assert.deepStrictEqual(outcome.outcome, {
+        kind: "denied",
+        requiredPermission: "orchestration:read",
+      });
+      yield* c.a.tick;
+      assert.strictEqual(
+        activeText(yield* c.a.aggregate(c.space, other)),
+        "ordinary sync survives source denial",
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect(
-  "production scoped startup reuses Sync and unbound status stays typed bootstrap_required",
+  "production scoped startup reuses Sync and exposes real unbound processing and storage",
   () =>
     Effect.gen(function* () {
       const replica = yield* environment("A");
@@ -762,17 +765,16 @@ it.effect(
               coordinatorEpoch: 0,
               enabled: false,
             });
-            for (const read of [
-              runtime.readUnboundStorage.pipe(Effect.asVoid),
-              runtime.readProcessing(null, null).pipe(Effect.asVoid),
-            ]) {
-              const result = yield* Effect.result(read);
-              assert.strictEqual(result._tag, "Failure");
-              if (result._tag === "Failure") {
-                assert.strictEqual(result.failure._tag, "MemoryStorageError");
-                assert.strictEqual(result.failure.stage, "bootstrap_required");
-              }
-            }
+            const processing = yield* runtime.readProcessing(null, null);
+            assert.strictEqual(processing.pendingSync, 0);
+            assert.strictEqual(processing.quarantined, 0);
+            const storage = yield* runtime.readUnboundStorage;
+            assert.strictEqual(storage.checkpointSequence, 0);
+            assert.strictEqual(storage.retentionFloor, 0);
+            const status = yield* replica.sync.syncStatus({}, Effect.void);
+            assert.strictEqual(status.state, "disabled");
+            assert.strictEqual(status.memorySpaceId, null);
+            assert.deepStrictEqual(status.processing, processing.processing);
           }),
         ),
       );
@@ -781,5 +783,33 @@ it.effect(
       assert.strictEqual(replica.generated(), 0);
       yield* replica.sync.shutdown;
       assert.strictEqual(yield* replica.sync.activeResolutions, 0);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "hub device writes propagate H to A/B and A writes reach H local replica over real HTTP",
+  () =>
+    Effect.gen(function* () {
+      const c = yield* cluster();
+      const fromHub = memory(70);
+      yield* write(c.h, c.space, fromHub, 1170, "H device memory");
+      yield* c.h.tick;
+      yield* c.a.tick;
+      yield* c.b.tick;
+      for (const replica of [c.h, c.a, c.b])
+        assert.strictEqual(
+          activeText(yield* replica.aggregate(c.space, fromHub)),
+          "H device memory",
+        );
+      const fromA = memory(71);
+      yield* write(c.a, c.space, fromA, 1171, "A device memory");
+      yield* c.a.tick;
+      yield* c.h.tick;
+      yield* c.b.tick;
+      for (const replica of [c.h, c.a, c.b]) {
+        assert.strictEqual(activeText(yield* replica.aggregate(c.space, fromA)), "A device memory");
+        assert.strictEqual(replica.generated(), 0);
+      }
+      assert.strictEqual((yield* c.h.sync.readLocalReadiness()).bootstrap, "ready");
     }).pipe(Effect.provide(NodeServices.layer)),
 );
