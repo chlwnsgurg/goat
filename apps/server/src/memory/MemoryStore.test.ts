@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import * as Clock from "effect/Clock";
@@ -4999,10 +5000,63 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.strictEqual(after.status, "quarantined");
     assert.deepStrictEqual(after.heads, claim.conflictHeadSet);
     const heads = yield* store.readResolutionHeads({
+      expectedGeneration: after.generation,
+      maxItems: 100,
+      maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
       memorySpaceId: space,
       memoryId: memory,
       heads: claim.conflictHeadSet,
     });
+    for (const budget of [
+      {
+        expectedGeneration: after.generation + 1,
+        maxItems: 100,
+        maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+      },
+      {
+        expectedGeneration: after.generation,
+        maxItems: 1,
+        maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+      },
+      { expectedGeneration: after.generation, maxItems: 100, maxBytes: 1 },
+    ]) {
+      assert.strictEqual(
+        (yield* store
+          .readResolutionHeads({
+            memorySpaceId: space,
+            memoryId: memory,
+            heads: claim.conflictHeadSet,
+            ...budget,
+          })
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+    }
+    const exactBytes = new TextEncoder().encode(JSON.stringify(heads)).length;
+    assert.deepStrictEqual(
+      yield* store.readResolutionHeads({
+        memorySpaceId: space,
+        memoryId: memory,
+        heads: claim.conflictHeadSet,
+        expectedGeneration: after.generation,
+        maxItems: 2,
+        maxBytes: exactBytes,
+      }),
+      heads,
+    );
+    assert.strictEqual(
+      (yield* store
+        .readResolutionHeads({
+          memorySpaceId: space,
+          memoryId: memory,
+          heads: claim.conflictHeadSet,
+          expectedGeneration: after.generation,
+          maxItems: 2,
+          maxBytes: exactBytes - 1,
+        })
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
     assert.strictEqual(heads.length, 2);
     assert.isTrue(heads.every((h) => h.payload !== null));
     const plan = yield* sql<{
@@ -5018,6 +5072,9 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.strictEqual(
       (yield* store
         .readResolutionHeads({
+          expectedGeneration: after.generation,
+          maxItems: 100,
+          maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
           memorySpaceId: space,
           memoryId: memory,
           heads: [M.MemoryRevisionId.make(id(20000))],
@@ -5029,6 +5086,9 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.deepStrictEqual(yield* store.readResolutionSnapshot(space, memory), after);
     assert.isTrue(
       (yield* store.readResolutionHeads({
+        expectedGeneration: after.generation,
+        maxItems: 100,
+        maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
         memorySpaceId: space,
         memoryId: memory,
         heads: claim.conflictHeadSet,
@@ -5039,6 +5099,9 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.strictEqual(
       (yield* store
         .readResolutionHeads({
+          expectedGeneration: after.generation,
+          maxItems: 100,
+          maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
           memorySpaceId: space,
           memoryId: memory,
           heads: claim.conflictHeadSet,
@@ -5088,7 +5151,7 @@ it.effect("rearms only the persisted sync hold class and fences the old owner", 
       failureCode: "identity_mismatch",
     });
     assert.deepStrictEqual(
-      yield* fresh.transact(
+      (yield* fresh.transact(
         fresh.rearmSyncHoldsTx({
           memorySpaceId: M.MemorySpaceId.make(id(7777)),
           holdClass: "identity",
@@ -5096,7 +5159,7 @@ it.effect("rearms only the persisted sync hold class and fences the old owner", 
           afterId: "",
           limit: 100,
         }),
-      ),
+      )).changedIds,
       [],
     );
     yield* fresh
@@ -5115,7 +5178,7 @@ it.effect("rearms only the persisted sync hold class and fences the old owner", 
       .pipe(Effect.exit);
     assert.strictEqual((yield* fresh.readWorkHold(candidate.work.id))?.holdClass, "identity");
     assert.deepStrictEqual(
-      yield* fresh.transact(
+      (yield* fresh.transact(
         fresh.rearmSyncHoldsTx({
           memorySpaceId: space,
           holdClass: "identity",
@@ -5123,7 +5186,7 @@ it.effect("rearms only the persisted sync hold class and fences the old owner", 
           afterId: "",
           limit: 100,
         }),
-      ),
+      )).changedIds,
       [candidate.work.id],
     );
     assert.deepStrictEqual(yield* fresh.readWorkHold(candidate.work.id), {
@@ -5252,7 +5315,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
       Effect.provide(Layer.fresh(Store.layer)),
     );
     assert.deepStrictEqual(
-      yield* fresh.transact(
+      (yield* fresh.transact(
         fresh.rearmResolutionHoldsTx({
           memorySpaceId: space,
           holdClass: "identity",
@@ -5260,11 +5323,11 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
           afterId: "",
           limit: 100,
         }),
-      ),
+      )).changedIds,
       [],
     );
     assert.deepStrictEqual(
-      yield* fresh.transact(
+      (yield* fresh.transact(
         fresh.rearmResolutionHoldsTx({
           memorySpaceId: space,
           holdClass: "availability",
@@ -5272,7 +5335,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
           afterId: "",
           limit: 100,
         }),
-      ),
+      )).changedIds,
       [`resolve:${space}:${ticket.attemptId}`],
     );
     const recovered = (yield* fresh.readRecoverableResolutionTickets({
@@ -5324,6 +5387,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
       memorySpaceId: space,
       candidateId: candidate.id,
       expectedGeneration: 0,
+      expectedAttempt: candidate.attempt,
       attemptId: ticket.attemptId,
       coordinatorEpoch: 2,
       now: 4,
@@ -5336,7 +5400,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
     assert.isTrue(yield* fresh.transact(fresh.holdClaimCandidateTx(hold)));
     assert.deepStrictEqual(yield* fresh.readDueClaimCandidates(100, 5, space), []);
     assert.deepStrictEqual(
-      yield* fresh.transact(
+      (yield* fresh.transact(
         fresh.rearmResolutionHoldsTx({
           memorySpaceId: space,
           holdClass: "authorization",
@@ -5344,7 +5408,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
           afterId: "",
           limit: 100,
         }),
-      ),
+      )).changedIds,
       [candidate.id],
     );
   }).pipe(Effect.provide(live)),
@@ -5843,5 +5907,350 @@ it.effect("new checkpoint judgment bodies receive stage ownership at insertion",
       0,
     );
     assert.isAbove((yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space}`).length, 0);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("review-r11 stale claim hold can overwrite a reacquired owner in same epoch", () =>
+  Effect.gen(function* () {
+    const { store, claim } = yield* seedResolutionConflict;
+    yield* store.recoverClaimCandidates(0);
+    const c = (yield* store.readDueClaimCandidates(1, 0, space))[0]!;
+    yield* store.transact(
+      store.prepareClaimAttemptTx({
+        memorySpaceId: space,
+        candidateId: c.id,
+        expectedGeneration: 0,
+        conflictHeads: claim.conflictHeadSet,
+        proposedClaim: claim,
+      }),
+    );
+    assert.isTrue(yield* store.claimCandidate(c.id, 2, 0));
+    const stale = {
+      memorySpaceId: space,
+      candidateId: c.id,
+      expectedGeneration: 0,
+      expectedAttempt: c.attempt + 1,
+      attemptId: claim.attemptId,
+      coordinatorEpoch: 2,
+      now: 1,
+      failureCode: "unavailable" as const,
+      holdClass: "availability" as const,
+    };
+    assert.isTrue(yield* store.transact(store.holdClaimCandidateTx(stale)));
+    yield* store.transact(
+      store.rearmResolutionHoldsTx({
+        memorySpaceId: space,
+        holdClass: "availability",
+        now: 2,
+        afterId: "",
+        limit: 100,
+      }),
+    );
+    assert.isTrue(yield* store.claimCandidate(c.id, 2, 2));
+    const overwritten = yield* store.transact(store.holdClaimCandidateTx({ ...stale, now: 3 }));
+    assert.isFalse(overwritten);
+    assert.isTrue(
+      yield* store.transact(
+        store.holdClaimCandidateTx({ ...stale, now: 3, expectedAttempt: c.attempt + 2 }),
+      ),
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("review-r11 failure report ignores durable delivered guard after report compaction", () =>
+  Effect.gen(function* () {
+    const { store, sql, key, ownership } = yield* seedSubmission;
+    const first = yield* store.transact(
+      store.failResolutionTicketTx({
+        ownership,
+        now: 1,
+        failureCode: "generation_failed",
+        nextAttemptAt: 2,
+        reportConflictFailure: true,
+      }),
+    );
+    if (!first) throw new Error("fixture");
+    const report = (yield* store.pendingReports(100))[0]!;
+    yield* store.acknowledgeReport({
+      ...report,
+      state: "delivered",
+      reportThread: { environmentId: env, threadId: M.ThreadId.make(id(500)) },
+      sequence: 1,
+    });
+    // Model the existing retention cleanup: report row removed, persistent guard retained.
+    yield* sql`DELETE FROM memory_report_outbox WHERE report_id=${report.reportId}`;
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_import_keys WHERE space=${space} AND key_kind='report_delivered' AND key=${report.reportId}`)
+        .length,
+      1,
+    );
+    const owner = yield* store.transact(
+      store.acquireResolutionTicketTx({
+        key,
+        expectedVersion: first.version,
+        owner: "again",
+        coordinatorEpoch: 2,
+        now: 2,
+        ownedUntil: 100,
+      }),
+    );
+    if (!owner) throw new Error("fixture");
+    yield* store.transact(
+      store.failResolutionTicketTx({
+        ownership: { ...key, version: owner.version, owner: "again", coordinatorEpoch: 2 },
+        now: 3,
+        failureCode: "generation_failed",
+        nextAttemptAt: 4,
+        reportConflictFailure: true,
+      }),
+    );
+    assert.deepStrictEqual(yield* store.pendingReports(100), []);
+    assert.isFalse(yield* store.claimReport(report.reportId, "delivery", 4, 100));
+    assert.deepStrictEqual(yield* store.pendingReports(100), []);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("review-r11 held resolution sweep cannot advance past 100 live owners", () =>
+  Effect.gen(function* () {
+    const { store, sql, ticket } = yield* seedSubmission;
+    const source = (yield* sql<{
+      ticket_json: string;
+      metadata_json: string;
+    }>`SELECT ticket_json,metadata_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`)[0]!;
+    for (let n = 1000; n < 1100; n++) {
+      const t = JSON.parse(source.ticket_json);
+      t.ticket.attemptId = id(n);
+      t.nextAttemptAt = Number.MAX_SAFE_INTEGER;
+      t.ownedUntil = 1000;
+      yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,ticket_json,sync_version,next_attempt_at,hold_class) VALUES (${`resolve:${space}:${id(n)}`},${space},${memory},'resolve','pending',${source.metadata_json},${JSON.stringify(t)},${t.version},${Number.MAX_SAFE_INTEGER},'availability')`;
+    }
+    const t = JSON.parse(source.ticket_json);
+    t.ticket.attemptId = id(2000);
+    t.nextAttemptAt = Number.MAX_SAFE_INTEGER;
+    t.ownedUntil = null;
+    t.owner = null;
+    const target = `resolve:${space}:${id(2000)}`;
+    yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,ticket_json,sync_version,next_attempt_at,hold_class) VALUES (${target},${space},${memory},'resolve','pending',${source.metadata_json},${JSON.stringify(t)},${t.version},${Number.MAX_SAFE_INTEGER},'availability')`;
+    let afterId = "";
+    let seenTarget = false;
+    let sawSkipPage = false;
+    for (let n = 0; n < 10; n++) {
+      const page = yield* store.transact(
+        store.rearmResolutionHoldsTx({
+          memorySpaceId: space,
+          holdClass: "availability",
+          now: 2,
+          afterId,
+          limit: 100,
+        }),
+      );
+      // Baseline returned changed IDs only. Keep the same fixture executable when only
+      // product files are reverted: an empty skip page cannot advance to the target.
+      if (Array.isArray(page)) {
+        if (page.includes(target)) seenTarget = true;
+        afterId = page.at(-1) ?? afterId;
+        continue;
+      }
+      assert.isAtMost(page.inspected, 100);
+      if (page.inspected === 100 && page.changedIds.length === 0) sawSkipPage = true;
+      if (page.changedIds.includes(target)) seenTarget = true;
+      if (!page.more) break;
+      assert.isNotNull(page.next);
+      assert.isTrue(page.next! > afterId);
+      afterId = page.next!;
+    }
+    assert.isTrue(seenTarget);
+    assert.isTrue(sawSkipPage);
+    assert.isNull((yield* store.readWorkHold(target))?.holdClass);
+    const plan = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT id,space,kind,status,next_attempt_at,hold_class FROM memory_outbox WHERE id>'' ORDER BY id LIMIT 100`;
+    yield* Effect.log("R13_REARM_PLAN", plan).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
+    assert.isTrue(
+      plan.every((r) => !r.detail.includes("SCAN") && !r.detail.includes("TEMP B-TREE")),
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "review-r11 retry-only change invalidates snapshot staging and creates six triggers",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const triggers = yield* sql<{
+        name: string;
+      }>`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memory_sync_cursors'`;
+
+      yield* sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state) VALUES (${space},${env},0,'ready')`;
+      yield* sql`INSERT INTO memory_hub_retention(space,handles_json,reserved_snapshot_id,snapshot_generation,published_pinned_bytes) VALUES (${space},'[]','review-stage',7,2)`;
+      yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,metadata_json,reason,checkpoint_id,missing_parents_json) VALUES (${space},'review-page','checkpoint','{}','hub_snapshot','hub:review-stage','[]')`;
+      const before =
+        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
+      yield* store.transact(
+        store.writePullRetryTx({
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          expectedVersion: 0,
+          retry: { attempts: 1, nextAttemptAt: 10, failureCode: "unavailable", holdClass: null },
+        }),
+      );
+      const after =
+        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`;
+
+      assert.strictEqual(after[0]!.reserved_snapshot_id, "review-stage");
+      assert.deepStrictEqual(after, before);
+      assert.strictEqual(triggers.length, 3);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:review-stage'`)
+          .length,
+        1,
+      );
+      const charged = (yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`)[0]!
+        .value;
+      const generation =
+        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`;
+      yield* store.transact(
+        store.writePullRetryTx({
+          memorySpaceId: space,
+          hubEnvironmentId: env,
+          expectedVersion: 1,
+          retry: { attempts: 2, nextAttemptAt: 20, failureCode: "unavailable", holdClass: null },
+        }),
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT reserved_snapshot_id,snapshot_generation FROM memory_hub_retention WHERE space=${space}`,
+        before,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation' AND scope_key=''`,
+        generation,
+      );
+      assert.strictEqual(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`)[0]!
+          .value,
+        charged,
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect("sync hold rearm advances across unrelated history within the inspected budget", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* store.apply(decision(operation()));
+    const source = (yield* sql<{
+      id: string;
+      metadata_json: string;
+    }>`SELECT id,metadata_json FROM memory_outbox WHERE kind='sync' LIMIT 1`)[0]!;
+    yield* sql`UPDATE memory_outbox SET status='retry',next_attempt_at=${Number.MAX_SAFE_INTEGER},hold_class='availability' WHERE id=${source.id}`;
+    for (let n = 0; n < 210; n++) {
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at) VALUES (${`a:${String(n).padStart(4, "0")}`},'other','sync','completed',${source.metadata_json},0)`;
+    }
+    const input = {
+      memorySpaceId: space,
+      holdClass: "availability" as const,
+      now: 2,
+      afterId: "",
+      limit: 100,
+    };
+    const first = yield* store.transact(store.rearmSyncHoldsTx(input));
+    assert.deepStrictEqual(first, { changedIds: [], inspected: 100, next: "a:0099", more: true });
+    // More trailing history does not change first-page reads or bytes/continuation.
+    for (let n = 0; n < 100; n++) {
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at) VALUES (${`z:${n}`},'other','sync','completed',${source.metadata_json},0)`;
+    }
+    assert.deepStrictEqual(yield* store.transact(store.rearmSyncHoldsTx(input)), first);
+    let next = first.next!;
+    let changed = false;
+    for (let n = 0; n < 5; n++) {
+      const page = yield* store.transact(store.rearmSyncHoldsTx({ ...input, afterId: next }));
+      assert.isAtMost(page.inspected, 100);
+      if (page.changedIds.includes(source.id)) changed = true;
+      if (!page.more) break;
+      assert.isTrue(page.next! > next);
+      next = page.next!;
+    }
+    assert.isTrue(changed);
+    assert.isNull((yield* store.readWorkHold(source.id))?.holdClass);
+    const plan = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT id,space,kind,status,next_attempt_at,hold_class FROM memory_outbox WHERE id>'' ORDER BY id LIMIT 100`;
+    yield* Effect.log("R13_SYNC_REARM_PLAN", plan).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
+    assert.isTrue(
+      plan.every((r) => !r.detail.includes("SCAN") && !r.detail.includes("TEMP B-TREE")),
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("held uncertain submission rearms without loading its body", () =>
+  Effect.gen(function* () {
+    const { store, sql, submission, ownership } = yield* seedSubmission;
+    const submitted = yield* store.transact(
+      store.persistResolutionSubmissionTx({
+        ownership,
+        submission,
+        digest: memoryOperationDigest(submission.operation),
+      }),
+    );
+    const held = yield* store.transact(
+      store.failResolutionTicketTx({
+        ownership: { ...ownership, version: submitted.version },
+        now: 1,
+        failureCode: "unavailable",
+        nextAttemptAt: Number.MAX_SAFE_INTEGER,
+        holdClass: "availability",
+        reportConflictFailure: false,
+      }),
+    );
+    const before = (yield* sql<{
+      ticket_json: string;
+    }>`SELECT ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ownership.attemptId}`}`)[0]!;
+    let bodyReads = 0;
+    const observed = new Proxy(sql, {
+      apply(target, _this, args) {
+        if (String(args[0]).includes("memory_payloads")) bodyReads++;
+        return Reflect.apply(target, target, args);
+      },
+    });
+    const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+      Effect.provide(Layer.fresh(Store.layer)),
+      Effect.provideService(SqlClient.SqlClient, observed),
+    );
+    const page = yield* fresh.transact(
+      fresh.rearmResolutionHoldsTx({
+        memorySpaceId: space,
+        holdClass: "availability",
+        now: 2,
+        afterId: "",
+        limit: 100,
+      }),
+    );
+    assert.deepStrictEqual(page.changedIds, [`resolve:${space}:${ownership.attemptId}`]);
+    assert.strictEqual(bodyReads, 0);
+    const after = (yield* sql<{
+      ticket_json: string;
+    }>`SELECT ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ownership.attemptId}`}`)[0]!;
+    assert.deepStrictEqual(
+      JSON.parse(after.ticket_json).submission,
+      JSON.parse(before.ticket_json).submission,
+    );
+    assert.strictEqual(JSON.parse(after.ticket_json).submissionDigest, held!.submissionDigest);
+    assert.deepStrictEqual(
+      (yield* store.readRecoverableResolutionTickets({
+        memorySpaceId: space,
+        now: 2,
+        limit: 100,
+      }))[0]!.submission,
+      submission,
+    );
   }).pipe(Effect.provide(live)),
 );

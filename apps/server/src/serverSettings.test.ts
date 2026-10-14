@@ -31,6 +31,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as PubSub from "effect/PubSub";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -120,6 +121,71 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
         ${"2026-08-25T00:00:00.000Z"}
       )
     `;
+  });
+
+// File operations remain real; this external watch seam delivers notifications
+// after their commits instead of relying on macOS's first native event timing.
+const withRegisteredSettingsWatchers = <A, E, R>(
+  use: (
+    awaitWatch: (directory: string, count?: number) => Effect.Effect<void>,
+    notify: (filePath: string) => Effect.Effect<void>,
+  ) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const events = yield* PubSub.unbounded<{
+      event: FileSystem.WatchEvent;
+      seen: Deferred.Deferred<void>;
+    }>();
+    const registrations = new Map<string, Deferred.Deferred<void>>();
+    const counts = new Map<string, number>();
+    const registration = (directory: string, count = 1) => {
+      const key = `${directory}:${count}`;
+      let deferred = registrations.get(key);
+      if (!deferred) {
+        deferred = Deferred.makeUnsafe<void>();
+        registrations.set(key, deferred);
+      }
+      return deferred;
+    };
+    const notify = (filePath: string) =>
+      Effect.gen(function* () {
+        const seen = yield* Deferred.make<void>();
+        yield* PubSub.publish(events, { event: { _tag: "Update" as const, path: filePath }, seen });
+        if ((counts.get(path.dirname(filePath)) ?? 0) > 0) yield* Deferred.await(seen);
+      });
+    const controlledFs = FileSystem.FileSystem.of({
+      ...fs,
+      rename: (from, to) => fs.rename(from, to).pipe(Effect.tap(() => notify(to))),
+      remove: (filePath, options) =>
+        fs.remove(filePath, options).pipe(Effect.tap(() => notify(filePath))),
+      symlink: (from, to) => fs.symlink(from, to).pipe(Effect.tap(() => notify(to))),
+      watch: (directory) =>
+        Stream.unwrap(
+          PubSub.subscribe(events).pipe(
+            Effect.tap(() => {
+              const count = (counts.get(directory) ?? 0) + 1;
+              counts.set(directory, count);
+              return Deferred.succeed(registration(directory, count), undefined);
+            }),
+            Effect.map((subscription) =>
+              Stream.fromSubscription(subscription).pipe(
+                Stream.filter(({ event }) => path.dirname(event.path) === directory),
+                Stream.tap(({ seen }) => Deferred.succeed(seen, undefined)),
+                Stream.map(({ event }) => event),
+              ),
+            ),
+          ),
+        ),
+    });
+    return yield* use(
+      (directory, count) => Deferred.await(registration(directory, count)),
+      notify,
+    ).pipe(
+      Effect.provide(layerServerSettings()),
+      Effect.provideService(FileSystem.FileSystem, controlledFs),
+    );
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
@@ -264,7 +330,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   it.effect("reloads when the destination of a symlinked settings file changes", () =>
-    Effect.scoped(
+    withRegisteredSettingsWatchers((awaitWatch) =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
         const fs = yield* FileSystem.FileSystem;
@@ -276,6 +342,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(linkedSettingsPath, config.settingsPath);
         yield* service.start;
+        yield* awaitWatch(path.dirname(linkedSettingsPath));
         const changes = yield* service.subscribeChanges;
 
         yield* writeFileStringAtomically({
@@ -283,14 +350,15 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           contents: `{ "responseStreamingMode": "paragraph" }`,
         });
 
-        const change = yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        yield* TestClock.adjust(100);
+        const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
       }),
-    ).pipe(TestClock.withLive, Effect.provide(layerServerSettings())),
+    ),
   );
 
   it.effect("follows a settings link that is repointed to another directory", () =>
-    Effect.scoped(
+    withRegisteredSettingsWatchers((awaitWatch) =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
         const fs = yield* FileSystem.FileSystem;
@@ -306,26 +374,32 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(firstSettingsPath, config.settingsPath);
         yield* service.start;
+        yield* awaitWatch(path.dirname(firstSettingsPath));
+        // Reload and symlink retargeting have separate source-directory watchers.
+        yield* awaitWatch(path.dirname(config.settingsPath), 2);
 
         const repointChanges = yield* service.subscribeChanges;
         yield* fs.remove(config.settingsPath);
         yield* fs.symlink(secondSettingsPath, config.settingsPath);
-        const repointed = yield* repointChanges.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        yield* TestClock.adjust(100);
+        const repointed = yield* repointChanges.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(repointed)?.responseStreamingMode, "paragraph");
 
+        yield* awaitWatch(path.dirname(secondSettingsPath));
         const editChanges = yield* service.subscribeChanges;
         yield* writeFileStringAtomically({
           filePath: secondSettingsPath,
           contents: `{ "responseStreamingMode": "turn" }`,
         });
-        const edited = yield* editChanges.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        yield* TestClock.adjust(100);
+        const edited = yield* editChanges.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(edited)?.responseStreamingMode, "turn");
       }),
-    ).pipe(TestClock.withLive, Effect.provide(layerServerSettings())),
+    ),
   );
 
   it.effect("reloads when a dangling settings link gets its destination", () =>
-    Effect.scoped(
+    withRegisteredSettingsWatchers((awaitWatch) =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
         const fs = yield* FileSystem.FileSystem;
@@ -336,17 +410,157 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(linkedSettingsPath, config.settingsPath);
         yield* service.start;
+        yield* awaitWatch(path.dirname(linkedSettingsPath));
         const changes = yield* service.subscribeChanges;
-
         yield* writeFileStringAtomically({
           filePath: linkedSettingsPath,
           contents: `{ "responseStreamingMode": "paragraph" }`,
         });
-
-        const change = yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        yield* TestClock.adjust(100);
+        const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
       }),
-    ).pipe(TestClock.withLive, Effect.provide(layerServerSettings())),
+    ),
+  );
+
+  it.effect.each([
+    "truncated JSON",
+    "invalid hub",
+    "invalid unrelated setting",
+    "sparse replacement",
+    "missing version",
+    "deleted file",
+    "missing symlink target",
+  ] as const)("retains committed hub through %s and publishes repaired settings", (damage) =>
+    withRegisteredSettingsWatchers((awaitWatch, notify) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const config = yield* ServerConfig.ServerConfig;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        const hub: MemoryHubSettings = {
+          mode: "hub",
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000091"),
+        };
+        const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-epoch-" });
+        const target = path.join(dotfiles, "settings.json");
+        const filePath = damage === "missing symlink target" ? target : config.settingsPath;
+        yield* fs.writeFileString(
+          filePath,
+          JSON.stringify({ memoryHub: hub, memoryHubVersion: 7 }),
+        );
+        if (damage === "missing symlink target") {
+          yield* fs.remove(config.settingsPath, { force: true });
+          yield* fs.symlink(target, config.settingsPath);
+        }
+        yield* service.start;
+        yield* awaitWatch(path.dirname(config.settingsPath), 2);
+        if (damage === "missing symlink target") yield* awaitWatch(path.dirname(target));
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        const changes = yield* service.subscribeChanges;
+        if (damage === "deleted file" || damage === "missing symlink target") {
+          yield* fs.remove(filePath);
+        } else {
+          const raw =
+            damage === "truncated JSON"
+              ? '{ "memoryHub":'
+              : damage === "invalid hub"
+                ? JSON.stringify({ memoryHub: { mode: "broken" }, memoryHubVersion: 8 })
+                : damage === "invalid unrelated setting"
+                  ? JSON.stringify({
+                      memoryHub: { mode: "disabled" },
+                      memoryHubVersion: 8,
+                      defaultTheme: 42,
+                    })
+                  : damage === "sparse replacement"
+                    ? "{}"
+                    : JSON.stringify({ memoryHub: { mode: "disabled" } });
+          yield* fs.writeFileString(filePath, raw);
+          yield* notify(filePath);
+        }
+        yield* TestClock.adjust(100);
+        const rejected = yield* changes.pipe(Stream.runHead);
+        assert.deepStrictEqual(Option.getOrThrow(rejected).memoryHub, hub);
+        assert.strictEqual(Option.getOrThrow(rejected).memoryHubVersion, 7);
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 7 });
+        // Rejected input must remain for repair; migrations cannot rewrite it.
+        if (damage === "deleted file" || damage === "missing symlink target") {
+          assert.strictEqual(yield* fs.exists(filePath), false);
+        }
+        const repairedChanges = yield* service.subscribeChanges;
+        yield* fs.writeFileString(
+          filePath,
+          JSON.stringify({ memoryHub: { mode: "disabled" }, memoryHubVersion: 8 }),
+        );
+        yield* notify(filePath);
+        yield* TestClock.adjust(100);
+        const repaired = yield* repairedChanges.pipe(Stream.runHead);
+        assert.deepStrictEqual(Option.getOrThrow(repaired).memoryHub, { mode: "disabled" });
+        assert.strictEqual(Option.getOrThrow(repaired).memoryHubVersion, 8);
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 8,
+        });
+      }),
+    ),
+  );
+
+  it.effect("invalid external settings cannot enable a disabled committed hub", () =>
+    withRegisteredSettingsWatchers((awaitWatch, notify) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const config = yield* ServerConfig.ServerConfig;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        const hub: MemoryHubSettings = {
+          mode: "hub",
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000092"),
+        };
+        yield* fs.writeFileString(config.settingsPath, JSON.stringify({ memoryHubVersion: 7 }));
+        yield* service.start;
+        yield* awaitWatch(path.dirname(config.settingsPath), 2);
+        const changes = yield* service.subscribeChanges;
+        const invalid = JSON.stringify({ memoryHub: hub, memoryHubVersion: 8, defaultTheme: 42 });
+        yield* fs.writeFileString(config.settingsPath, invalid);
+        yield* notify(config.settingsPath);
+        yield* TestClock.adjust(100);
+        yield* changes.pipe(Stream.runHead);
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 7,
+        });
+        assert.strictEqual(yield* fs.readFileString(config.settingsPath), invalid);
+        const repairedChanges = yield* service.subscribeChanges;
+        yield* fs.writeFileString(
+          config.settingsPath,
+          JSON.stringify({ memoryHub: hub, memoryHubVersion: 8 }),
+        );
+        yield* notify(config.settingsPath);
+        yield* TestClock.adjust(100);
+        yield* repairedChanges.pipe(Stream.runHead);
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 8 });
+      }),
+    ),
+  );
+
+  it.effect.each(["absent", "sparse"] as const)(
+    "initial %s settings retain disabled version zero",
+    (initial) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const config = yield* ServerConfig.ServerConfig;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        if (initial === "absent") yield* fs.remove(config.settingsPath, { force: true });
+        else yield* fs.writeFileString(config.settingsPath, "{}");
+        yield* service.start;
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 0,
+        });
+      }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("preserves context when reading a provider environment secret fails", () => {
@@ -2465,11 +2679,13 @@ it.effect(
       };
       const result = yield* admin.withLock(admin.apply(record, Effect.void));
       assert.strictEqual(result.view.version, 1);
+      assert.strictEqual(yield* admin.readPreviousHubRequestId, record.requestId);
       // New settings service, same real filesystem/secret/SQLite dependencies.
       const restarted = yield* Effect.gen(function* () {
         const recovered = yield* ServerSettingsModule.MemoryHubAdminSettings;
         const publicService = yield* ServerSettingsModule.ServerSettingsService;
         assert.isFalse(Object.hasOwn(yield* publicService.getSettings, "_memoryHubTransition"));
+        assert.strictEqual(yield* recovered.readPreviousHubRequestId, record.requestId);
         return yield* recovered.withLock(recovered.apply(record, Effect.void));
       }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
       assert.deepStrictEqual(restarted, result);
@@ -2582,6 +2798,126 @@ it.effect(
             Layer.provideMerge(Layer.succeed(FileSystem.FileSystem, controlledFs)),
           ),
         ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "administration refuses an activated hub with unresolved space and preserves disabled settings",
+  () =>
+    Effect.gen(function* () {
+      const admin = yield* ServerSettingsModule.MemoryHubAdminSettings;
+      const requestId = MemoryOperationId.make("00000000-0000-4000-8000-000000009006");
+      const error = yield* admin
+        .withLock(
+          admin.apply(
+            {
+              requestId,
+              requestDigest: "b".repeat(64),
+              expectedVersion: 0,
+              action: {
+                requestId,
+                expectedVersion: 0,
+                action: "configure",
+                settings: { mode: "hub", memorySpaceId: null },
+              },
+              stage: "activated",
+              memberVersion: null,
+              secretName: null,
+              result: null,
+            },
+            Effect.void,
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(error._tag, "MemoryHubError");
+      if (error._tag === "MemoryHubError") assert.strictEqual(error.code, "bootstrap_required");
+      assert.deepStrictEqual((yield* admin.read).settings, { mode: "disabled" });
+      assert.strictEqual((yield* admin.read).version, 0);
+    }).pipe(
+      Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
+    ),
+);
+
+it.effect(
+  "publishes the committed hub epoch before atomic-write cleanup releases the settings lock",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cleanupEntered = yield* Deferred.make<void>();
+      const releaseCleanup = yield* Deferred.make<void>();
+      let holdCleanup = false;
+      const controlledFs = FileSystem.FileSystem.of({
+        ...fs,
+        remove: (path, options) =>
+          Effect.gen(function* () {
+            if (holdCleanup && path.includes("settings.json.")) {
+              holdCleanup = false;
+              yield* Deferred.succeed(cleanupEntered, undefined);
+              yield* Deferred.await(releaseCleanup);
+            }
+            yield* fs.remove(path, options);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const transitions = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        const sql = yield* SqlClient.SqlClient;
+        const config = yield* ServerConfig.ServerConfig;
+        yield* service.start;
+        yield* service.ready;
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 0,
+        });
+        const hub: MemoryHubSettings = {
+          mode: "hub",
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+        };
+        holdCleanup = true;
+        const writer = yield* transitions
+          .applyMemoryHubTransition(
+            {
+              requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000086"),
+              expectedVersion: 0,
+              settings: hub,
+            },
+            Effect.void,
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(cleanupEntered);
+        const persisted = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepStrictEqual(persisted.memoryHub, hub);
+        assert.strictEqual(persisted.memoryHubVersion, 1);
+        // Cleanup is still gated and the write semaphore is held. SQL reads must
+        // see the rename's epoch without waiting for either of those resources.
+        assert.deepStrictEqual(yield* sql.withTransaction(snapshot.read), {
+          settings: hub,
+          version: 1,
+        });
+        yield* Deferred.succeed(releaseCleanup, undefined);
+        yield* Fiber.join(writer);
+        yield* service.updateSettings({ standingInstructions: "synthetic snapshot preservation" });
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 1 });
+        yield* transitions.applyMemoryHubTransition(
+          {
+            requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000087"),
+            expectedVersion: 1,
+            settings: { mode: "disabled" },
+          },
+          Effect.void,
+        );
+        assert.deepStrictEqual(yield* sql.withTransaction(snapshot.read), {
+          settings: { mode: "disabled" },
+          version: 2,
+        });
+        assert.strictEqual((yield* service.getSettings).memoryHubVersion, 2);
+      }).pipe(
+        Effect.provide(layerServerSettingsWithSecrets()),
+        Effect.provideService(FileSystem.FileSystem, controlledFs),
       );
     }).pipe(Effect.provide(NodeServices.layer)),
 );

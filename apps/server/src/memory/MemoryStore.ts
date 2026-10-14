@@ -200,6 +200,15 @@ export const MemoryWork = Schema.Struct({
   claimedBy: Schema.NullOr(Schema.String),
   claimedUntil: Schema.NullOr(Schema.Int),
 });
+// Cursor follows inspected rows, including unrelated or protected work. `more` is conservative:
+// a full page may require one empty final page. No lookahead exceeds the inspection budget.
+export type HoldRearmPage = {
+  readonly changedIds: readonly string[];
+  readonly inspected: number;
+  readonly next: string | null;
+  readonly more: boolean;
+};
+
 export type MemoryWork = typeof MemoryWork.Type;
 const DeferredRow = Schema.Struct({
   scannerCursor: Schema.optionalKey(Schema.String),
@@ -881,7 +890,7 @@ export class MemoryStore extends Context.Service<
       now: number;
       afterId: string;
       limit: number;
-    }) => InTx<readonly string[]>;
+    }) => InTx<HoldRearmPage>;
     readonly prepareClaimAttemptTx: (input: {
       memorySpaceId: M.MemorySpaceId;
       candidateId: string;
@@ -937,6 +946,7 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       candidateId: string;
       expectedGeneration: number;
+      expectedAttempt: number;
       attemptId: M.MemoryOperationId;
       coordinatorEpoch: number;
       now: number;
@@ -949,7 +959,7 @@ export class MemoryStore extends Context.Service<
       now: number;
       afterId: string;
       limit: number;
-    }) => InTx<readonly string[]>;
+    }) => InTx<HoldRearmPage>;
     readonly persistResolutionSubmissionTx: (input: {
       ownership: TicketOwner;
       submission: M.MemoryHubApplyResolutionInput;
@@ -1228,6 +1238,9 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       memoryId: M.MemoryId;
       heads: readonly M.MemoryRevisionId[];
+      expectedGeneration: number;
+      maxItems: number;
+      maxBytes: number;
     }) => Effect.Effect<MemoryAggregate["revisions"], MemoryStorageError | MemoryStoreConflict>;
     readonly loadAggregate: (
       space: M.MemorySpaceId,
@@ -1987,14 +2000,30 @@ const make = Effect.gen(function* () {
       fence: row.fence_json ? yield* fenceCodec.decode(row.fence_json, strict) : undefined,
     };
   });
+  const resolutionHeadsCodec = codec(
+    Schema.Array(
+      Schema.Struct({
+        revision: M.MemoryRevision,
+        payload: Schema.NullOr(M.MemoryPayload),
+      }),
+    ),
+  );
   const readResolutionHeads: MemoryStore["Service"]["readResolutionHeads"] = Effect.fn(
     "MemoryStore.readResolutionHeads",
   )(function* (input) {
     // Generation input is restricted to the current frontier, never the revision history.
     // The existing conflict set carries the bound; reject unbounded caller selections.
     if (
+      !Number.isSafeInteger(input.expectedGeneration) ||
+      input.expectedGeneration < 0 ||
+      !Number.isSafeInteger(input.maxItems) ||
+      input.maxItems < 1 ||
+      input.maxItems > M.MEMORY_PAGE_MAX_ITEMS ||
+      !Number.isSafeInteger(input.maxBytes) ||
+      input.maxBytes < 1 ||
+      input.maxBytes > M.MEMORY_DEFERRED_SWEEP_MAX_BYTES ||
       input.heads.length === 0 ||
-      input.heads.length > M.MEMORY_PAGE_MAX_ITEMS ||
+      input.heads.length > input.maxItems ||
       new Set(input.heads).size !== input.heads.length
     )
       return yield* new MemoryStoreConflict({ code: "invalid_output" });
@@ -2002,6 +2031,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const snapshot = yield* readResolutionSnapshot(input.memorySpaceId, input.memoryId);
         if (
+          snapshot.generation !== input.expectedGeneration ||
           snapshot.tombstone ||
           snapshot.pendingForget ||
           snapshot.status !== "quarantined" ||
@@ -2017,6 +2047,20 @@ const make = Effect.gen(function* () {
           !sameHeadSet(snapshot.heads, input.heads)
         )
           return yield* new MemoryStoreConflict({ code: "conflict_changed" });
+        // Check selected payload lengths at the PK boundary before loading bodies. This reads
+        // only the requested frontier, irrespective of revision history. The final budget is
+        // the UTF-8 JSON encoding of the returned revision/payload array (including metadata).
+        const sizes = yield* stored(
+          "resolution-head-byte-budget",
+          sql<{
+            bytes: number;
+          }>`SELECT coalesce(sum(coalesce(length(CAST(p.body_json AS BLOB)),0)),0) AS bytes
+          FROM json_each(${yield* headsCodec.encode(input.heads)}) selected CROSS JOIN memory_revisions r
+          LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+          WHERE r.space=${input.memorySpaceId} AND r.revision_id=selected.value AND r.memory_id=${input.memoryId}`,
+        );
+        if ((sizes[0]?.bytes ?? 0) > input.maxBytes)
+          return yield* new MemoryStoreConflict({ code: "invalid_output" });
         const rows = yield* stored(
           "resolution-heads",
           sql<{
@@ -2035,7 +2079,7 @@ const make = Effect.gen(function* () {
         );
         if (rows.length !== input.heads.length)
           return yield* new MemoryStoreConflict({ code: "missing_parent" });
-        return yield* Effect.forEach(rows, (row) =>
+        const result = yield* Effect.forEach(rows, (row) =>
           Effect.gen(function* () {
             const revision = yield* stored(
               "revision-codec",
@@ -2061,6 +2105,13 @@ const make = Effect.gen(function* () {
             };
           }),
         );
+        if (
+          new TextEncoder().encode(
+            yield* stored("resolution-head-encoding", resolutionHeadsCodec.encode(result)),
+          ).length > input.maxBytes
+        )
+          return yield* new MemoryStoreConflict({ code: "invalid_output" });
+        return result;
       }),
     );
   });
@@ -4403,7 +4454,7 @@ const make = Effect.gen(function* () {
   ) {
     const rows = yield* stored(
       "claim-cas",
-      sql`UPDATE memory_outbox SET status='running',claimed_by=${String(epoch)},claimed_until=${now + M.MEMORY_LEASE_MS},attempt=min(attempt+1,2147483647) WHERE id=${id} AND kind='claim' AND status IN ('pending','retry') AND next_attempt_at<=${now} AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) RETURNING id`,
+      sql`UPDATE memory_outbox SET status='running',claimed_by=${String(epoch)},claimed_until=${now + M.MEMORY_LEASE_MS},attempt=attempt+1 WHERE id=${id} AND attempt<2147483647 AND kind='claim' AND status IN ('pending','retry') AND next_attempt_at<=${now} AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) RETURNING id`,
     );
     return rows.length === 1;
   });
@@ -5753,19 +5804,55 @@ const make = Effect.gen(function* () {
         : null,
     };
   });
+  // Page the existing ID primary key before applying class/space/state filters. Filtering in
+  // SQL would make LIMIT bound matches rather than inspected history, and can force a sort.
+  const readHoldRearmPage = (afterId: string, limit: number) =>
+    stored(
+      "hold-rearm-page",
+      sql<{
+        id: string;
+        space: string;
+        kind: string;
+        status: string;
+        next_attempt_at: number;
+        hold_class: string | null;
+      }>`SELECT id,space,kind,status,next_attempt_at,hold_class
+      FROM memory_outbox WHERE id>${afterId} ORDER BY id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
+    );
+  const holdRearmResult = (
+    rows: readonly { id: string }[],
+    changedIds: readonly string[],
+    limit: number,
+  ): HoldRearmPage => ({
+    changedIds,
+    inspected: rows.length,
+    next: rows.at(-1)?.id ?? null,
+    more: rows.length > 0 && rows.length === Math.max(0, Math.min(limit, M.MEMORY_PAGE_MAX_ITEMS)),
+  });
   const rearmSyncHoldsTx: MemoryStore["Service"]["rearmSyncHoldsTx"] = Effect.fn(
     "MemoryStore.rearmSyncHoldsTx",
   )(function* (input) {
     yield* Transaction;
-    const rows = yield* stored(
-      "sync-hold-rearm",
-      sql<{
-        id: string;
-      }>`UPDATE memory_outbox SET hold_class=NULL,failure_code=NULL,next_attempt_at=${input.now},sync_version=sync_version+1
-      WHERE id IN (SELECT id FROM memory_outbox WHERE space=${input.memorySpaceId} AND kind IN ('sync','revert_intent') AND status='retry' AND next_attempt_at=${Number.MAX_SAFE_INTEGER} AND hold_class=${input.holdClass} AND id>${input.afterId} ORDER BY id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}) RETURNING id`,
-    );
-    return rows.map((row) => row.id).toSorted();
+    const rows = yield* readHoldRearmPage(input.afterId, input.limit);
+    const changed: string[] = [];
+    for (const row of rows) {
+      if (
+        row.space !== input.memorySpaceId ||
+        !["sync", "revert_intent"].includes(row.kind) ||
+        row.status !== "retry" ||
+        row.next_attempt_at !== Number.MAX_SAFE_INTEGER ||
+        row.hold_class !== input.holdClass
+      )
+        continue;
+      const updated = yield* stored(
+        "sync-hold-rearm",
+        sql`UPDATE memory_outbox SET hold_class=NULL,failure_code=NULL,next_attempt_at=${input.now},sync_version=sync_version+1 WHERE id=${row.id} RETURNING id`,
+      );
+      if (updated.length) changed.push(row.id);
+    }
+    return holdRearmResult(rows, changed, input.limit);
   });
+
   const claimCodec = codec(M.MemoryHubClaimInput);
   const storedTicketRowCodec = codec(StoredTicketRowSchema);
   const encodeTicketRow = (row: TicketRow) =>
@@ -6112,7 +6199,8 @@ const make = Effect.gen(function* () {
       yield* stored(
         "conflict-failure-report",
         sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,failure_code,created_at)
-        VALUES (${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now}) ON CONFLICT(report_id) DO NOTHING`,
+        SELECT ${reportId},${row.ticket.memorySpaceId},${row.ticket.memoryId},${row.ticket.attemptId},NULL,${row.ticket.attemptId},${row.ticket.holderEnvironmentId},'failed','pending',${input.failureCode},${input.now}
+        WHERE NOT EXISTS (SELECT 1 FROM memory_import_keys WHERE space=${row.ticket.memorySpaceId} AND key_kind='report_delivered' AND key=${reportId}) ON CONFLICT(report_id) DO NOTHING`,
       );
     }
     return next;
@@ -6125,7 +6213,7 @@ const make = Effect.gen(function* () {
       "claim-hold",
       sql`UPDATE memory_outbox SET status='retry',hold_class=${input.holdClass},failure_code=${input.failureCode},next_attempt_at=${Number.MAX_SAFE_INTEGER},claimed_by=NULL,claimed_until=NULL
       WHERE id=${input.candidateId} AND space=${input.memorySpaceId} AND kind='claim' AND status='running' AND sync_version=${input.expectedGeneration}
-      AND json_extract(frozen_claim_json,'$.attemptId')=${input.attemptId} AND claimed_by=${String(input.coordinatorEpoch)} AND claimed_until>${input.now} RETURNING id`,
+      AND attempt=${input.expectedAttempt} AND json_extract(frozen_claim_json,'$.attemptId')=${input.attemptId} AND claimed_by=${String(input.coordinatorEpoch)} AND claimed_until>${input.now} RETURNING id`,
     );
     return rows.length === 1;
   });
@@ -6133,37 +6221,50 @@ const make = Effect.gen(function* () {
     "MemoryStore.rearmResolutionHoldsTx",
   )(function* (input) {
     yield* Transaction;
-    const rows = yield* stored(
-      "resolution-hold-list",
-      sql<{
-        id: string;
-        kind: string;
-        ticket_json: string | null;
-      }>`SELECT id,kind,ticket_json FROM memory_outbox WHERE space=${input.memorySpaceId} AND kind IN ('claim','resolve') AND status NOT IN ('cancelled','completed','failed') AND next_attempt_at=${Number.MAX_SAFE_INTEGER} AND hold_class=${input.holdClass} AND id>${input.afterId} ORDER BY id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
-    );
+    const rows = yield* readHoldRearmPage(input.afterId, input.limit);
     const changed: string[] = [];
     for (const row of rows) {
+      if (
+        row.space !== input.memorySpaceId ||
+        !["claim", "resolve"].includes(row.kind) ||
+        ["cancelled", "completed", "failed"].includes(row.status) ||
+        row.next_attempt_at !== Number.MAX_SAFE_INTEGER ||
+        row.hold_class !== input.holdClass
+      )
+        continue;
       if (row.kind === "resolve") {
-        if (!row.ticket_json) continue;
-        const ticket = yield* decodeTicketRow(row.ticket_json);
+        const tickets = yield* stored(
+          "held-ticket",
+          sql<{
+            ticket_json: string | null;
+          }>`SELECT ticket_json FROM memory_outbox WHERE id=${row.id}`,
+        );
+        if (!tickets[0]?.ticket_json) continue;
+        // Rearm is scheduling-only. Decode persisted metadata without reading uncertain
+        // submission bodies; retain that metadata and digest byte-for-byte in the next row.
+        const ticket = yield* stored(
+          "held-ticket-metadata",
+          storedTicketRowCodec.decode(tickets[0].ticket_json, strict),
+        );
         if (
           ticket.state === "terminal" ||
           ticket.approval ||
           (ticket.ownedUntil !== null && ticket.ownedUntil > input.now)
         )
           continue;
-        const next = yield* writeTicket(
-          { memorySpaceId: input.memorySpaceId, attemptId: ticket.ticket.attemptId },
-          {
-            ...ticket,
-            version: ticket.version + 1,
-            owner: null,
-            ownedUntil: null,
-            nextAttemptAt: input.now,
-          },
-          ticket.version,
+        const next = {
+          ...ticket,
+          version: ticket.version + 1,
+          owner: null,
+          ownedUntil: null,
+          nextAttemptAt: input.now,
+        };
+        const advanced = yield* stored(
+          "held-ticket-rearm",
+          sql`UPDATE memory_outbox SET ticket_json=${yield* storedTicketRowCodec.encode(next)},sync_version=${next.version},next_attempt_at=${input.now}
+          WHERE id=${row.id} AND sync_version=${ticket.version} RETURNING id`,
         );
-        if (!next) continue;
+        if (!advanced.length) continue;
       }
       const updated = yield* stored(
         "resolution-hold-rearm",
@@ -6171,7 +6272,7 @@ const make = Effect.gen(function* () {
       );
       if (updated.length) changed.push(row.id);
     }
-    return changed;
+    return holdRearmResult(rows, changed, input.limit);
   });
   const persistResolutionSubmissionTx: MemoryStore["Service"]["persistResolutionSubmissionTx"] =
     Effect.fn("MemoryStore.persistResolutionSubmissionTx")(function* (input) {
