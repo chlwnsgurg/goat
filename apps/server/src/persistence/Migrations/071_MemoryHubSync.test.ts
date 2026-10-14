@@ -318,3 +318,40 @@ it.effect("r14 indexes only active same-memory resolutions and keeps receipt loo
     assert.isFalse(plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")));
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it.effect(
+  "r16 seeds only local intents as pending sync and rolls metadata/status deltas back",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* memory;
+      const metadata = '{"kind":"localIntent","environmentId":"fixture"}';
+      yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at) VALUES ('draft','_local:fixture','admin','pending',${metadata},0),('other-admin','_local:fixture','admin','pending','{}',0),('other-space','other','admin','pending',${metadata},0)`;
+      yield* hub;
+      const pending = () =>
+        sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space='_local:fixture' AND dimension='processing_pending_sync' AND scope_key=''`.pipe(
+          Effect.map((rows) => rows[0]!.value),
+        );
+      assert.strictEqual(yield* pending(), 1);
+      yield* sql`UPDATE memory_outbox SET metadata_json='{}' WHERE id='draft'`;
+      assert.strictEqual(yield* pending(), 0);
+      yield* sql`UPDATE memory_outbox SET metadata_json=${metadata} WHERE id='draft'`;
+      assert.strictEqual(yield* pending(), 1);
+      yield* sql
+        .withTransaction(
+          sql`UPDATE memory_outbox SET status='completed' WHERE id='draft'`.pipe(
+            Effect.andThen(Effect.fail("rollback")),
+          ),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(yield* pending(), 1);
+      yield* sql`UPDATE memory_outbox SET status='completed' WHERE id='draft'`;
+      assert.strictEqual(yield* pending(), 0);
+      yield* sql`UPDATE memory_outbox SET status='retry' WHERE id='draft'`;
+      assert.strictEqual(yield* pending(), 1);
+      yield* sql`DELETE FROM memory_outbox WHERE id='draft'`;
+      assert.strictEqual(yield* pending(), 0);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

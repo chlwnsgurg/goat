@@ -1081,6 +1081,19 @@ export class MemoryStore extends Context.Service<
       },
       MemoryStorageError
     >;
+    readonly readLocalProcessingStatus: (input: {
+      environmentId: M.EnvironmentId;
+      memorySpaceId: M.MemorySpaceId | null;
+      hubEnvironmentId: M.EnvironmentId | null;
+    }) => Effect.Effect<
+      {
+        processing: M.MemoryProcessingStatus;
+        pendingSync: number;
+        quarantined: number;
+        parked: number;
+      },
+      MemoryStorageError
+    >;
     readonly readBootstrap: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -3122,7 +3135,7 @@ const make = Effect.gen(function* () {
   const readWork = Effect.fn("MemoryStore.readWork")(function* (id: string) {
     const rows = yield* stored(
       "read-work",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id} AND admin_json IS NULL`,
     );
     return (yield* workRows(rows))[0];
   });
@@ -3301,7 +3314,7 @@ const make = Effect.gen(function* () {
           "ack-work",
           sql<
             WorkRow & { completed_receipt_json: string | null }
-          >`SELECT * FROM memory_outbox WHERE id=${id}`,
+          >`SELECT * FROM memory_outbox WHERE id=${id} AND kind IN ('sync','revert_intent')`,
         );
         const work = (yield* workRows(rows))[0];
         if (
@@ -4479,17 +4492,24 @@ const make = Effect.gen(function* () {
           });
         }
         const orphan = yield* sweep("orphan", "memory_outbox");
+        // Bound inspected history before filtering kinds. Unrelated rows still
+        // advance the frozen cursor but never reach the work metadata decoder.
         const work = yield* stored(
           "claim-gone",
           sql<{
             rowid: number;
-            id: string;
+            id: string | null;
             gone: number;
-          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphan.after} AND o.rowid<=${orphan.upper} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
+          }>`WITH page AS MATERIALIZED (
+            SELECT rowid FROM memory_outbox WHERE rowid>${orphan.after} AND rowid<=${orphan.upper}
+            ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}
+          ) SELECT page.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone
+          FROM page LEFT JOIN memory_outbox o ON o.rowid=page.rowid AND o.kind IN ('claim','resolve')
+          ORDER BY page.rowid`,
         );
         yield* advance("orphan", work.at(-1)?.rowid ?? orphan.upper);
         for (const row of work)
-          if (row.gone) {
+          if (row.id !== null && row.gone) {
             const candidate = yield* readWork(row.id);
             if (
               candidate &&
@@ -5594,7 +5614,7 @@ const make = Effect.gen(function* () {
   const readWorkOperation = Effect.fn("MemoryStore.readWorkOperation")(function* (id: string) {
     const rows = yield* stored(
       "work-operation",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id} AND kind IN ('sync','resolve','revert_intent')`,
     );
     const work = (yield* workRows(rows))[0];
     return work && "protocolVersion" in work.metadata
@@ -6899,9 +6919,10 @@ const make = Effect.gen(function* () {
     });
     return next;
   });
-  const readProcessing: MemoryStore["Service"]["readProcessing"] = Effect.fn(
-    "MemoryStore.readProcessing",
-  )(function* (input) {
+  const readProcessingFor = Effect.fn("MemoryStore.readProcessingFor")(function* (input: {
+    space: string;
+    binding: { memorySpaceId: M.MemorySpaceId; hubEnvironmentId: M.EnvironmentId } | null;
+  }) {
     return yield* transact(
       Effect.gen(function* () {
         const rows = yield* stored(
@@ -6909,7 +6930,7 @@ const make = Effect.gen(function* () {
           sql<{
             dimension: string;
             value: number;
-          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.memorySpaceId} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
+          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.space} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
         );
         const values = new Map(rows.map((r) => [r.dimension, r.value]));
         const count = (name: string) => values.get(`processing_${name}`) ?? 0;
@@ -6917,14 +6938,14 @@ const make = Effect.gen(function* () {
           "processing-oldest",
           sql<{
             processing_oldest_at: string;
-          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.memorySpaceId} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
+          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.space} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
         );
-        const bootstrap = yield* readBootstrap(input);
+        const sequence = input.binding ? (yield* readBootstrap(input.binding)).afterSequence : 0;
         const state = yield* stored(
           "processing-watermark",
           sql<{
             projection_watermark: number;
-          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}`,
+          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.space}`,
         );
         const eligible = count("eligible");
         const indexed = count("indexed");
@@ -6932,7 +6953,7 @@ const make = Effect.gen(function* () {
           "processing-codec",
           codec(M.MemoryProcessingStatus).decode(
             yield* codec(M.MemoryProcessingStatus).encode({
-              lastReceivedHubSequence: bootstrap.afterSequence,
+              lastReceivedHubSequence: sequence,
               receiveLag: null,
               deferred: count("deferred"),
               oldestDeferredAtUtc: oldest[0]
@@ -6967,6 +6988,17 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readProcessing: MemoryStore["Service"]["readProcessing"] = (input) =>
+    readProcessingFor({ space: input.memorySpaceId, binding: input });
+  const readLocalProcessingStatus: MemoryStore["Service"]["readLocalProcessingStatus"] = (input) =>
+    readProcessingFor({
+      // WP2 drafts use an internal key, never a protocol MemorySpaceId or a new space.
+      space: input.memorySpaceId ?? `_local:${input.environmentId}`,
+      binding:
+        input.memorySpaceId !== null && input.hubEnvironmentId !== null
+          ? { memorySpaceId: input.memorySpaceId, hubEnvironmentId: input.hubEnvironmentId }
+          : null,
+    });
   const readBootstrap: MemoryStore["Service"]["readBootstrap"] = Effect.fn(
     "MemoryStore.readBootstrap",
   )(function* (input) {
@@ -8868,6 +8900,7 @@ const make = Effect.gen(function* () {
     readPendingHubAdmins,
     readActivatedHubAdminTx,
     readProcessing,
+    readLocalProcessingStatus,
     readBootstrap,
     discardBootstrapTx,
     retireFrozenClaimTx,

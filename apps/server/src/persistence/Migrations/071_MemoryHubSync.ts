@@ -432,11 +432,11 @@ export default Effect.gen(function* () {
     },
     {
       table: "memory_outbox",
-      columns: "space,kind,status",
+      columns: "space,kind,status,metadata_json",
       values: (p: string) => [
         [
           "pending_sync",
-          `${p}.kind IN ('sync','revert_intent') AND ${p}.status IN ('pending','retry','running')`,
+          `(${p}.kind IN ('sync','revert_intent') OR (${p}.kind='admin' AND ${p}.space='_local:'||json_extract(${p}.metadata_json,'$.environmentId') AND json_extract(${p}.metadata_json,'$.kind')='localIntent')) AND ${p}.status IN ('pending','retry','running')`,
         ],
       ],
     },
