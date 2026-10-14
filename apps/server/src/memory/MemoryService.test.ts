@@ -2039,3 +2039,102 @@ it.effect.each(["lost-response", "known-approval"] as const)(
       assert.isNull(yield* service.reconcileResolutionSubmission(args));
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "r16 reads disabled local counters then atomically hands processing to the bound space",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      const local = { environmentId, memorySpaceId: null, hubEnvironmentId: null };
+      const intent = {
+        intentId: "r16-draft",
+        environmentId,
+        memoryId,
+        scope: { kind: "user" as const },
+        assertionKind: "inference" as const,
+        provenance: { environmentId },
+        createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+        payload: { text: "한글 local draft", evidence: [], derivedFromMemoryRevisions: [] },
+      };
+      assert.strictEqual((yield* store.readLocalProcessingStatus(local)).pendingSync, 0);
+      yield* store.putLocalIntent(intent);
+      yield* store.putLocalIntent({ ...intent, environmentId: M.EnvironmentId.make("other") });
+      const processing = yield* store.readLocalProcessingStatus(local);
+      const storage = yield* quota.readUnboundStorageStatus({ environmentId });
+      assert.strictEqual(processing.pendingSync, 1);
+      assert.strictEqual(processing.processing.lastReceivedHubSequence, 0);
+      assert.strictEqual(storage.quotas.find((q) => q.dimension === "work_items")?.current, 1);
+      const bodies = yield* sql<{
+        body_json: string;
+        metadata_json: string;
+      }>`SELECT p.body_json,o.metadata_json FROM memory_payloads p JOIN memory_outbox o ON p.space=o.space AND p.payload_ref=o.payload_ref WHERE o.id='local:fixture:r16-draft'`;
+      const bytes = new TextEncoder().encode(
+        bodies[0]!.body_json + bodies[0]!.metadata_json,
+      ).length;
+      assert.strictEqual(storage.quotas.find((q) => q.dimension === "work_bytes")?.current, bytes);
+      assert.isNull(storage.measuredAtUtc);
+      assert.isNull(storage.dbFileBytes);
+      const assignment = {
+        intentId: intent.intentId,
+        memorySpaceId: space,
+        operationId: M.MemoryOperationId.make(id(16001)),
+        revisionId: M.MemoryRevisionId.make(id(16002)),
+      };
+      const disabled = yield* service
+        .commitLocalIntent({
+          assignment,
+          expectedEpoch: 1,
+          readBinding: Effect.succeed({ memorySpaceId: null, coordinatorEpoch: 1, enabled: false }),
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(disabled._tag, "MemoryAccessError");
+      assert.deepStrictEqual(yield* store.readLocalProcessingStatus(local), processing);
+      assert.deepStrictEqual(yield* quota.readUnboundStorageStatus({ environmentId }), storage);
+      yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1)`;
+      const commit = service.commitLocalIntent({
+        assignment,
+        expectedEpoch: 2,
+        readBinding: Effect.succeed({ memorySpaceId: space, coordinatorEpoch: 2, enabled: true }),
+      });
+      yield* store.transact(commit.pipe(Effect.andThen(Effect.fail("rollback")))).pipe(Effect.flip);
+      assert.deepStrictEqual(yield* store.readLocalProcessingStatus(local), processing);
+      assert.deepStrictEqual(yield* quota.readUnboundStorageStatus({ environmentId }), storage);
+      assert.strictEqual(
+        (yield* store.readProcessing({ memorySpaceId: space, hubEnvironmentId: environmentId }))
+          .pendingSync,
+        0,
+      );
+      yield* commit;
+      const boundInput = { environmentId, memorySpaceId: space, hubEnvironmentId: environmentId };
+      const bound = yield* store.readLocalProcessingStatus(boundInput);
+      assert.deepStrictEqual(bound, yield* store.readProcessing(boundInput));
+      assert.strictEqual(bound.pendingSync, 1);
+      assert.strictEqual((yield* store.readLocalProcessingStatus(local)).pendingSync, 0);
+      assert.strictEqual(
+        (yield* quota.readUnboundStorageStatus({ environmentId })).quotas.find(
+          (q) => q.dimension === "work_items",
+        )?.current,
+        0,
+      );
+      const boundStorage = yield* quota.readStorageStatus(boundInput);
+      assert.strictEqual(
+        boundStorage.quotas.find((q) => q.dimension === "space_live_items")?.current,
+        1,
+      );
+      const noHub = yield* store.readLocalProcessingStatus({
+        ...boundInput,
+        hubEnvironmentId: null,
+      });
+      assert.deepStrictEqual(noHub, bound);
+      // Enabling does not delete the retained local payload. Its actual bytes remain counted.
+      assert.isAbove(
+        (yield* quota.readUnboundStorageStatus({ environmentId })).quotas.find(
+          (q) => q.dimension === "work_bytes",
+        )!.current,
+        bytes,
+      );
+    }).pipe(Effect.provide(live)),
+);

@@ -15,6 +15,9 @@ export class MemoryQuotaService extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       environmentId: M.EnvironmentId;
     }) => Effect.Effect<M.MemoryStorageStatus, Store.MemoryStorageError>;
+    readonly readUnboundStorageStatus: (input: {
+      environmentId: M.EnvironmentId;
+    }) => Effect.Effect<M.MemoryStorageStatus, Store.MemoryStorageError>;
     readonly withAdmission: <A, E, R>(
       input: {
         readonly operation: M.MemoryOperation;
@@ -766,8 +769,73 @@ const make = Effect.gen(function* () {
         }),
       );
   });
+  const readUnboundStorageStatus: MemoryQuotaService["Service"]["readUnboundStorageStatus"] =
+    Effect.fn("MemoryQuotaService.readUnboundStorageStatus")(function* (input) {
+      return yield* store.transact(
+        Effect.gen(function* () {
+          const growth = yield* readStorageGrowth(input.environmentId);
+          const fts = yield* store.ftsState(input.environmentId);
+          // WP2 local drafts have no canonical hub inventory. Existing snapshot counters
+          // already track their serialized payload and outbox bytes transactionally.
+          const counters = yield* store.counters(`_local:${input.environmentId}`);
+          const value = (dimension: string) =>
+            counters.find((counter) => counter.dimension === dimension && counter.scope_key === "")
+              ?.value ?? 0;
+          const localLimits = [
+            ["work_items", value("processing_pending_sync"), M.MEMORY_WORK_MAX_PENDING_ITEMS],
+            ["work_bytes", value("hub_snapshot_bytes"), M.MEMORY_WORK_MAX_PAYLOAD_BYTES],
+          ] as const;
+          const quotas: M.MemoryStorageQuota[] = localLimits.map(([dimension, current, limit]) => ({
+            dimension,
+            current,
+            limit,
+            reclaimable: 0,
+            reserved: 0,
+            warning: current >= limit ? "full" : current >= limit * 0.9 ? "warning" : "normal",
+            blockedReasons: current >= limit ? ["capacity_exceeded"] : [],
+          }));
+          const sample = growth.current;
+          const iso = (time: number | null) =>
+            time === null ? null : DateTime.formatIso(DateTime.makeUnsafe(time));
+          return yield* storageStatusDecode(
+            {
+              quotas,
+              tables: sample?.tables ?? [],
+              measuredAtUtc: sample?.measuredAtUtc ?? null,
+              dbFileBytes: sample?.dbFileBytes ?? null,
+              walBytes: sample?.walBytes ?? null,
+              freelistBytes: sample?.freelistBytes ?? null,
+              freelistRatio:
+                sample?.dbFileBytes && sample.freelistBytes !== null
+                  ? sample.freelistBytes / sample.dbFileBytes
+                  : null,
+              retentionFloor: 0,
+              checkpointSequence: 0,
+              compaction: {
+                lastRunAtUtc: null,
+                removedRows: 0,
+                reclaimedLogicalBytes: 0,
+                reclaimableLogicalBytes: 0,
+                blockedReasons: [],
+              },
+              ftsAdmission: {
+                state: fts.state,
+                changedAtUtc: iso(fts.changedAt),
+                lastMeasuredAtUtc: iso(fts.measuredAt),
+                allocatedBytes: fts.allocatedBytes,
+                measurementStatus: fts.measurementStatus,
+              },
+              growth,
+              warnings: fts.state === "braked" ? ["fts_braked"] : [],
+            },
+            { onExcessProperty: "error" },
+          ).pipe(Effect.mapError(storageError));
+        }),
+      );
+    });
   return MemoryQuotaService.of({
     readStorageStatus,
+    readUnboundStorageStatus,
     withAdmission,
     commit,
     readStorageGrowth,
