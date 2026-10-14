@@ -25,13 +25,7 @@ export const ClaudeMemoryRegistryQuery = Context.Reference<
   defaultValue: () => (key, environment) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const child = yield* spawner.spawn(
-        ChildProcess.make("reg.exe", ["query", key, "/v", "Settings"], {
-          env: environment,
-          stdin: "ignore",
-        }),
-      );
-      const collect = (stream: typeof child.stdout) =>
+      const collect = (stream: ChildProcessSpawner.ChildProcessHandle["stdout"]) =>
         stream.pipe(
           Stream.decodeText(),
           Stream.runFold(
@@ -39,13 +33,71 @@ export const ClaudeMemoryRegistryQuery = Context.Reference<
             (text, chunk) => text + chunk,
           ),
         );
-      const [stdout, , code] = yield* Effect.all(
-        [collect(child.stdout), collect(child.stderr), child.exitCode],
-        { concurrency: "unbounded" },
-      );
-      if (code !== 0) return yield* new MemoryGenerationRunnerError({ code: "unavailable" });
-      return stdout;
+      const query = Effect.fn(function* (candidate: string, valueOnly = false) {
+        const child = yield* spawner.spawn(
+          ChildProcess.make(
+            "reg.exe",
+            ["query", candidate, ...(valueOnly ? ["/v", "Settings"] : [])],
+            {
+              env: environment,
+              stdin: "ignore",
+            },
+          ),
+        );
+        const [stdout, stderr, code] = yield* Effect.all(
+          [collect(child.stdout), collect(child.stderr), child.exitCode],
+          { concurrency: "unbounded" },
+        );
+        return { stdout, stderr, code };
+      });
+      const unavailable = new MemoryGenerationRunnerError({ code: "unavailable" });
+      const result = yield* query(key, true);
+      if (result.code === 0 && !result.stderr.trim()) return result.stdout;
+      // reg query documents only 0 (success) and 1 (failure), not a not-found code.
+      // Certify absence using a successful key/ancestor listing, never localized errors.
+      // https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/reg-query
+      if (result.code !== 1 || result.stdout.trim() || !result.stderr.trim())
+        return yield* unavailable;
+      const fullKey = key
+        .replace(/^HKLM/i, "HKEY_LOCAL_MACHINE")
+        .replace(/^HKCU/i, "HKEY_CURRENT_USER");
+      let candidate = fullKey;
+      let missingChild = "";
+      while (true) {
+        const listing = yield* query(candidate);
+        if (listing.code === 0 && !listing.stderr.trim()) {
+          const lines = listing.stdout.split(/\r?\n/).filter((line) => line.trim());
+          const normalized = candidate.toLowerCase();
+          const isKey = (line: string) => {
+            const name = line.trim().toLowerCase();
+            return (
+              name === normalized ||
+              (name.startsWith(`${normalized}\\`) &&
+                !name.slice(normalized.length + 1).includes("\\"))
+            );
+          };
+          if (
+            !lines.some(isKey) ||
+            lines.some((line) => !isKey(line) && !/^\s+.+?\s+REG_[A-Z0-9_]+(?:\s+.*)?$/i.test(line))
+          )
+            return yield* unavailable;
+          if (
+            missingChild
+              ? lines.some((line) => line.trim().toLowerCase() === missingChild.toLowerCase())
+              : lines.some((line) => /^\s+Settings\s+REG_/i.test(line))
+          )
+            return yield* unavailable;
+          return `${fullKey}\n    Settings    REG_SZ    {}`;
+        }
+        if (listing.code !== 1 || listing.stdout.trim() || !listing.stderr.trim())
+          return yield* unavailable;
+        const separator = candidate.lastIndexOf("\\");
+        if (separator === -1) return yield* unavailable;
+        missingChild = candidate;
+        candidate = candidate.slice(0, separator);
+      }
     }).pipe(
+      Effect.timeout("5 seconds"),
       Effect.scoped,
       Effect.mapError(() => new MemoryGenerationRunnerError({ code: "unavailable" })),
     ),
