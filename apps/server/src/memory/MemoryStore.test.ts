@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
+import * as Clock from "effect/Clock";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
@@ -2124,5 +2126,177 @@ describe("MemoryStore hub administration", () => {
         if (error._tag === "MemoryStoreConflict")
           assert.strictEqual(error.code, "bootstrap_required");
       }).pipe(Effect.provide(live)),
+  );
+});
+
+describe("MemoryStore transient source relay", () => {
+  const owner = M.EnvironmentId.make("source-owner");
+  const thread = { environmentId: owner, threadId: M.ThreadId.make("synthetic-thread") };
+  const watermark = {
+    fromEventId: M.EventId.make("synthetic-from"),
+    toEventId: M.EventId.make("synthetic-to"),
+    throughSequence: 8,
+  };
+  const messageId = M.MessageId.make("synthetic-message");
+  const authority = (environmentId = env): Store.HubAuthority => ({
+    principal: {
+      memorySpaceId: space,
+      environmentId,
+      credentialVersion: 1,
+      scopes: ["memory:sync"],
+    },
+    now: Clock.currentTimeMillis,
+    reauthorize: Effect.void,
+  });
+  const request: M.MemoryHubSourceReadRequestInput = {
+    protocolVersion: 1,
+    memorySpaceId: space,
+    memoryId: memory,
+    requestId: M.MemorySourceReadRequestId.make(id(300)),
+    sourceThread: thread,
+    sourceWatermark: watermark,
+    messageIds: [messageId],
+    limit: 10,
+    authorizedScopes: ["memory:read", "orchestration:read"],
+  };
+  const seed = Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${env},${"a".repeat(64)},1,'active',0),(${space},${owner},${"b".repeat(64)},1,'active',0)`;
+    const base = operation(301);
+    if (base.kind !== "upsert")
+      return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+    const op: M.MemoryOperation = {
+      ...base,
+      revision: {
+        ...base.revision,
+        provenance: { environmentId: env, sourceThread: thread, sourceWatermark: watermark },
+      },
+      payload: {
+        text: "synthetic linked summary",
+        evidence: [{ origin: "thread", sourceThread: thread, watermark, messageIds: [messageId] }],
+        derivedFromMemoryRevisions: [],
+      },
+    };
+    const current = yield* store.loadAggregate(space, memory);
+    yield* store.apply(decideMemoryOperation(current, op, Store.localIntent, scanMemoryValue(op)));
+  });
+  it.effect(
+    "keeps the first deadline, routes only to the owner, and erases the consumed outcome",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const first = yield* store.transact(store.requestHubSourceReadTx(authority(), request));
+        yield* TestClock.adjust(1000);
+        assert.deepStrictEqual(
+          yield* store.transact(store.requestHubSourceReadTx(authority(), request)),
+          first,
+        );
+        assert.deepStrictEqual(
+          (yield* store.transact(
+            store.collectHubSourceReadsTx(authority(), {
+              protocolVersion: 1,
+              memorySpaceId: space,
+              limit: 32,
+            }),
+          )).requests,
+          [],
+        );
+        assert.strictEqual(
+          (yield* store.transact(
+            store.collectHubSourceReadsTx(authority(owner), {
+              protocolVersion: 1,
+              memorySpaceId: space,
+              limit: 32,
+            }),
+          )).requests.length,
+          1,
+        );
+        const outcome: M.MemorySourceReadOutcome = {
+          kind: "available",
+          page: {
+            sourceThread: thread,
+            watermark,
+            messages: [{ messageId, text: "synthetic original" }],
+            nextCursor: null,
+          },
+        };
+        const response = {
+          protocolVersion: 1 as const,
+          memorySpaceId: space,
+          requestId: request.requestId,
+          outcome,
+        };
+        assert.strictEqual(
+          (yield* store
+            .transact(store.respondHubSourceReadTx(authority(), response))
+            .pipe(Effect.flip))._tag,
+          "MemoryHubError",
+        );
+        assert.strictEqual(
+          (yield* store.transact(store.respondHubSourceReadTx(authority(owner), response)))
+            .accepted,
+          true,
+        );
+        assert.strictEqual(
+          (yield* store.transact(store.respondHubSourceReadTx(authority(owner), response)))
+            .accepted,
+          true,
+        );
+        assert.deepStrictEqual(
+          yield* store.transact(
+            store.resultHubSourceReadTx(authority(), {
+              protocolVersion: 1,
+              memorySpaceId: space,
+              requestId: request.requestId,
+            }),
+          ),
+          { state: "completed", outcome },
+        );
+        const rows = yield* sql<{
+          count: number;
+        }>`SELECT count(*) AS count FROM memory_payloads WHERE payload_ref=${`relay:${request.requestId}`}`;
+        assert.strictEqual(rows[0]!.count, 0);
+        assert.strictEqual(
+          (yield* store.transact(
+            store.resultHubSourceReadTx(authority(), {
+              protocolVersion: 1,
+              memorySpaceId: space,
+              requestId: request.requestId,
+            }),
+          )).state,
+          "expired",
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect("expires at exactly 75 seconds and a bounded sweep removes the locator", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const first = yield* store.transact(store.requestHubSourceReadTx(authority(), request));
+      yield* TestClock.adjust(75000);
+      assert.deepStrictEqual(
+        yield* store.transact(
+          store.resultHubSourceReadTx(authority(), {
+            protocolVersion: 1,
+            memorySpaceId: space,
+            requestId: request.requestId,
+          }),
+        ),
+        { state: "expired", code: "source_unavailable" },
+      );
+      const cleanup = yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: Date.parse(first.request.expiresAtHubTime),
+          limit: 1,
+        }),
+      );
+      assert.strictEqual(cleanup.removedRows, 1);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 0);
+    }).pipe(Effect.provide(live)),
   );
 });

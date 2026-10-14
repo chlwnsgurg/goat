@@ -60,6 +60,14 @@ export type MemoryOwnerCommittedReader = {
 export class MemoryService extends Context.Service<
   MemoryService,
   {
+    readonly prepareSourceRead: (
+      input: M.MemoryReadSourceInput,
+      permit: Permit,
+    ) => Effect.Effect<ValidatedSourceRequest, MemoryServiceError>;
+    readonly validateSourceOutcome: (
+      input: { request: ValidatedSourceRequest; outcome: M.MemorySourceReadOutcome },
+      permit: Permit,
+    ) => Effect.Effect<M.MemorySourceReadOutcome, MemoryServiceError>;
     readonly admitHubOperationTx: (input: {
       authority: Store.HubAuthority;
       operation: M.MemoryOperation;
@@ -203,6 +211,12 @@ const decodePage = Schema.decodeUnknownEffect(M.MemoryPage);
 const decodeReportThread = Schema.decodeUnknownEffect(Schema.fromJsonString(M.ScopedThreadRef));
 const decodeReport = Schema.decodeUnknownEffect(M.MemoryReportDelivery);
 const encodeHubReceipt = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubReceipt));
+const encodeReadSource = Schema.encodeEffect(Schema.fromJsonString(M.MemoryReadSourceInput));
+const decodeReadSource = Schema.decodeUnknownEffect(M.MemoryReadSourceInput);
+const decodeSourceRequest = Schema.decodeUnknownEffect(M.MemoryHubSourceReadRequestInput);
+const decodeSourceOutcome = Schema.decodeUnknownEffect(M.MemorySourceReadOutcome);
+const encodeSourceThread = Schema.encodeEffect(Schema.fromJsonString(M.ScopedThreadRef));
+const encodeSourceWatermark = Schema.encodeEffect(Schema.fromJsonString(M.MemorySourceWatermark));
 const decodeOperation = Schema.decodeUnknownEffect(M.MemoryOperation);
 const decodeResolutionRequest = Schema.decodeUnknownEffect(M.MemoryHubApplyResolutionInput);
 const decodeHubEntry = Schema.decodeUnknownEffect(M.MemoryHubEntry);
@@ -1079,6 +1093,107 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const sourceLocator = Effect.fn("MemoryService.sourceLocator")(function* (
+    input: M.MemoryReadSourceInput,
+  ) {
+    const aggregate = yield* store.loadAggregate(input.memorySpaceId, input.memoryId);
+    if (aggregate.tombstone || aggregate.pendingForget)
+      return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
+    if (!aggregate.item || aggregate.item.localAvailability.exposure !== "visible")
+      return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
+    const thread = yield* decode(encodeSourceThread(input.sourceThread));
+    for (const pair of aggregate.revisions) {
+      const provenance = pair.revision.provenance;
+      if (
+        !aggregate.heads.includes(pair.revision.revisionId) ||
+        !pair.payload ||
+        !provenance.sourceThread ||
+        !provenance.sourceWatermark
+      )
+        continue;
+      if ((yield* decode(encodeSourceThread(provenance.sourceThread))) !== thread) continue;
+      const evidence = new Set(
+        pair.payload.evidence
+          .filter(
+            (value) =>
+              value.origin === "thread" &&
+              value.sourceThread?.environmentId === input.sourceThread.environmentId &&
+              value.sourceThread.threadId === input.sourceThread.threadId &&
+              value.watermark?.fromEventId === provenance.sourceWatermark?.fromEventId &&
+              value.watermark?.toEventId === provenance.sourceWatermark?.toEventId &&
+              value.watermark?.throughSequence === provenance.sourceWatermark?.throughSequence,
+          )
+          .flatMap((value) => value.messageIds),
+      );
+      if (input.messageIds.every((id) => evidence.has(id)))
+        return { generation: aggregate.generation, sourceWatermark: provenance.sourceWatermark };
+    }
+    return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
+  });
+  const prepareSourceRead: MemoryService["Service"]["prepareSourceRead"] = Effect.fn(
+    "MemoryService.prepareSourceRead",
+  )(function* (input, permit) {
+    const value = yield* decode(decodeReadSource(input, strict));
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        const locator = yield* sourceLocator(value);
+        const encoded = yield* decode(encodeReadSource(value));
+        return {
+          generation: locator.generation,
+          request: {
+            ...value,
+            protocolVersion: 1 as const,
+            sourceWatermark: locator.sourceWatermark,
+            requestId: M.MemorySourceReadRequestId.make(
+              memoryStableUuid(`${environmentId}:${locator.generation}:${encoded}`),
+            ),
+            authorizedScopes: ["memory:read", "orchestration:read"] as const,
+          },
+        };
+      }),
+    );
+  });
+  const validateSourceOutcome: MemoryService["Service"]["validateSourceOutcome"] = Effect.fn(
+    "MemoryService.validateSourceOutcome",
+  )(function* (input, permit) {
+    return yield* store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        const request = yield* decode(decodeSourceRequest(input.request.request, strict));
+        const { memorySpaceId, memoryId, sourceThread, messageIds, limit, cursor } = request;
+        const locator = yield* sourceLocator({
+          memorySpaceId,
+          memoryId,
+          sourceThread,
+          messageIds,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        if (
+          locator.generation !== input.request.generation ||
+          (yield* decode(encodeSourceWatermark(locator.sourceWatermark))) !==
+            (yield* decode(encodeSourceWatermark(request.sourceWatermark)))
+        )
+          return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
+        const outcome = yield* decode(decodeSourceOutcome(input.outcome, strict));
+        if (outcome.kind === "available") {
+          if (
+            (yield* decode(encodeSourceThread(outcome.page.sourceThread))) !==
+              (yield* decode(encodeSourceThread(request.sourceThread))) ||
+            (yield* decode(encodeSourceWatermark(outcome.page.watermark))) !==
+              (yield* decode(encodeSourceWatermark(request.sourceWatermark))) ||
+            outcome.page.messages.length > request.limit ||
+            outcome.page.messages.some((message) => !request.messageIds.includes(message.messageId))
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
+          if (scanMemoryValue(outcome).kind !== "allowed")
+            return { kind: "unavailable" as const, code: "secret_detected" as const };
+        }
+        return outcome;
+      }),
+    );
+  });
   const admitHubOperationTx: MemoryService["Service"]["admitHubOperationTx"] = Effect.fn(
     "MemoryService.admitHubOperationTx",
   )(function* (input) {
@@ -1344,6 +1459,8 @@ const make = Effect.gen(function* () {
     );
   });
   return MemoryService.of({
+    prepareSourceRead,
+    validateSourceOutcome,
     admitHubOperationTx,
     settleHubEntryTx,
     receiveHubPage,

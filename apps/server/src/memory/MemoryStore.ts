@@ -1,5 +1,6 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes do not depend on runtime identity.
 import * as NodeCrypto from "node:crypto";
+import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import * as M from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
@@ -874,6 +875,40 @@ export class MemoryStore extends Context.Service<
       checkpointSequence: number;
       nextCursor: string | null;
     }) => InTx<void>;
+    readonly purgeHubTransientTx: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      memoryId?: M.MemoryId;
+      now: number;
+      limit: number;
+    }) => InTx<{ removedRows: number; cleanupPending: boolean }>;
+    readonly requestHubSourceReadTx: (
+      authority: HubAuthority,
+      input: M.MemoryHubSourceReadRequestInput,
+    ) => InTx<
+      M.MemoryHubSourceReadRequestResult,
+      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError | M.MemoryHubError
+    >;
+    readonly collectHubSourceReadsTx: (
+      authority: HubAuthority,
+      input: M.MemoryHubSourceReadCollectInput,
+    ) => InTx<
+      M.MemoryHubSourceReadCollectResult,
+      MemoryStorageError | MemoryStoreConflict | M.MemoryHubError
+    >;
+    readonly respondHubSourceReadTx: (
+      authority: HubAuthority,
+      input: M.MemoryHubSourceReadRespondInput,
+    ) => InTx<
+      M.MemoryHubSourceReadRespondResult,
+      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError | M.MemoryHubError
+    >;
+    readonly resultHubSourceReadTx: (
+      authority: HubAuthority,
+      input: M.MemoryHubSourceReadResultInput,
+    ) => InTx<
+      M.MemoryHubSourceReadResultResult,
+      MemoryStorageError | MemoryStoreConflict | M.MemoryHubError
+    >;
     readonly readHubRetentionTx: (space: M.MemorySpaceId) => InTx<HubRetention>;
     readonly readHubUsageTx: (space: M.MemorySpaceId) => InTx<HubUsage>;
     readonly reserveHubCheckpointTx: (input: {
@@ -5367,6 +5402,329 @@ const make = Effect.gen(function* () {
     );
     if (!changed.length) return yield* new MemoryStoreConflict({ code: "revision_changed" });
   });
+  const sourceRequestCodec = codec(M.MemorySourceReadRequest);
+  const sourceInputCodec = codec(M.MemoryHubSourceReadRequestInput);
+  const sourceOutcomeCodec = codec(M.MemorySourceReadOutcome);
+  const sourceRespondCodec = codec(M.MemoryHubSourceReadRespondInput);
+  const sourceCollectCodec = codec(M.MemoryHubSourceReadCollectResult);
+  const sourceThreadCodec = codec(M.ScopedThreadRef);
+  const sourceWatermarkCodec = codec(M.MemorySourceWatermark);
+  type RelayRow = {
+    request_id: string;
+    memory_id: string;
+    requester: string;
+    owner: string;
+    credential_version: number;
+    request_digest: string;
+    locator_json: string;
+    state: "pending" | "completed" | "expired";
+    deadline: number;
+    response_digest: string | null;
+    payload_ref: string | null;
+  };
+  const readRelay = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    requestId: M.MemorySourceReadRequestId,
+  ) {
+    const rows = yield* stored(
+      "relay-read",
+      sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${space} AND request_id=${requestId}`,
+    );
+    return rows[0];
+  });
+  // Authorization failures are mapped to the frozen source port's safe domain channel.
+  const authorizeSource = Effect.fnUntraced(function* (
+    authority: HubAuthority,
+    space: M.MemorySpaceId,
+  ) {
+    yield* Transaction;
+    yield* authority.reauthorize.pipe(
+      Effect.catchTags({
+        MemoryHubUnauthorizedError: () =>
+          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
+        MemoryHubForbiddenError: () =>
+          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
+      }),
+    );
+    const member = yield* requireHubMemberTx(authority.principal).pipe(
+      Effect.catchTags({
+        MemoryHubUnauthorizedError: () =>
+          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
+        MemoryHubForbiddenError: () =>
+          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
+      }),
+    );
+    if (member.memorySpaceId !== space)
+      return yield* new M.MemoryHubError({ code: "space_mismatch" });
+    return { member, now: yield* authority.now };
+  });
+  const relayEligible = Effect.fnUntraced(function* (
+    space: M.MemorySpaceId,
+    request: M.MemorySourceReadRequest,
+  ) {
+    const aggregate = yield* loadAggregate(space, request.memoryId);
+    if (aggregate.tombstone || aggregate.pendingForget) return false;
+    if (!aggregate.item || aggregate.item.localAvailability.exposure !== "visible") return false;
+    for (const pair of aggregate.revisions) {
+      if (!aggregate.heads.includes(pair.revision.revisionId) || !pair.payload) continue;
+      const provenance = pair.revision.provenance;
+      if (!provenance.sourceThread || !provenance.sourceWatermark) continue;
+      if (
+        (yield* sourceThreadCodec.encode(provenance.sourceThread)) !==
+          (yield* sourceThreadCodec.encode(request.sourceThread)) ||
+        (yield* sourceWatermarkCodec.encode(provenance.sourceWatermark)) !==
+          (yield* sourceWatermarkCodec.encode(request.sourceWatermark))
+      )
+        continue;
+      const evidence = new Set(
+        pair.payload.evidence
+          .filter(
+            (value) =>
+              value.origin === "thread" &&
+              value.sourceThread?.environmentId === request.sourceThread.environmentId &&
+              value.sourceThread.threadId === request.sourceThread.threadId &&
+              value.watermark?.fromEventId === provenance.sourceWatermark?.fromEventId &&
+              value.watermark?.toEventId === provenance.sourceWatermark?.toEventId &&
+              value.watermark?.throughSequence === provenance.sourceWatermark?.throughSequence,
+          )
+          .flatMap((value) => value.messageIds),
+      );
+      if (request.messageIds.every((id) => evidence.has(id))) return true;
+    }
+    return false;
+  });
+  const eraseRelayPayload = Effect.fnUntraced(function* (space: M.MemorySpaceId, row: RelayRow) {
+    if (row.payload_ref)
+      yield* stored(
+        "relay-payload-purge",
+        sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${row.payload_ref}`,
+      );
+    yield* stored(
+      "relay-expire",
+      sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
+    );
+  });
+  const purgeHubTransientTx: MemoryStore["Service"]["purgeHubTransientTx"] = Effect.fn(
+    "MemoryStore.purgeHubTransientTx",
+  )(function* (input) {
+    yield* Transaction;
+    const limit = Math.max(0, Math.min(input.limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS));
+    const rows = yield* stored(
+      "relay-sweep",
+      sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND (deadline<=${input.now} OR state='expired' OR (${input.memoryId ?? null} IS NOT NULL AND memory_id=${input.memoryId ?? null})) ORDER BY deadline,request_id LIMIT ${limit + 1}`,
+    );
+    for (const row of rows.slice(0, limit)) {
+      yield* eraseRelayPayload(input.memorySpaceId, row);
+      yield* stored(
+        "relay-sweep-delete",
+        sql`DELETE FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND request_id=${row.request_id}`,
+      );
+    }
+    return { removedRows: Math.min(rows.length, limit), cleanupPending: rows.length > limit };
+  });
+  const requestHubSourceReadTx: MemoryStore["Service"]["requestHubSourceReadTx"] = Effect.fn(
+    "MemoryStore.requestHubSourceReadTx",
+  )(function* (authority, input) {
+    const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    const encoded = yield* sourceInputCodec.encode(input);
+    const requestDigest = hashText(encoded);
+    const old = yield* readRelay(input.memorySpaceId, input.requestId);
+    if (old) {
+      if (
+        old.request_digest !== requestDigest ||
+        old.requester !== member.environmentId ||
+        old.credential_version !== member.credentialVersion
+      )
+        return yield* new M.MemoryHubError({ code: "operation_id_reused" });
+      if (old.deadline <= now || old.state === "expired")
+        return yield* new M.MemoryHubError({ code: "source_unavailable" });
+      return { request: yield* sourceRequestCodec.decode(old.locator_json, strict) };
+    }
+    const owner = yield* readHubMember(input.memorySpaceId, input.sourceThread.environmentId);
+    if (!owner || owner.status !== "active")
+      return yield* new M.MemoryHubError({ code: "source_unavailable" });
+    const request: M.MemorySourceReadRequest = {
+      ...input,
+      requesterEnvironmentId: member.environmentId,
+      expiresAtHubTime: M.MemoryUtcTimestamp.make(
+        DateTime.formatIso(DateTime.makeUnsafe(now + M.MEMORY_SOURCE_READ_TIMEOUT_MS)),
+      ),
+    };
+    // protocolVersion belongs to transport input, not the persisted owner locator.
+    const locator: M.MemorySourceReadRequest = {
+      requestId: request.requestId,
+      memorySpaceId: request.memorySpaceId,
+      memoryId: request.memoryId,
+      sourceThread: request.sourceThread,
+      sourceWatermark: request.sourceWatermark,
+      messageIds: request.messageIds,
+      limit: request.limit,
+      ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      authorizedScopes: request.authorizedScopes,
+      requesterEnvironmentId: request.requesterEnvironmentId,
+      expiresAtHubTime: request.expiresAtHubTime,
+    };
+    if (!(yield* relayEligible(input.memorySpaceId, locator)))
+      return yield* new M.MemoryHubError({ code: "source_invalidated" });
+    yield* purgeHubTransientTx({
+      memorySpaceId: input.memorySpaceId,
+      now,
+      limit: M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS,
+    });
+    const counts = yield* stored(
+      "relay-count",
+      sql<{
+        total: number;
+        member: number;
+      }>`SELECT count(*) AS total,sum(CASE WHEN requester=${member.environmentId} THEN 1 ELSE 0 END) AS member FROM memory_hub_source_reads WHERE space=${input.memorySpaceId}`,
+    );
+    if (
+      counts[0]!.total >= M.MEMORY_SOURCE_READ_MAX_PER_HUB ||
+      (counts[0]!.member ?? 0) >= M.MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT
+    )
+      return yield* new MemoryCapacityError({
+        dimension: "source_read_requests",
+        limit: M.MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT,
+      });
+    yield* stored(
+      "relay-request",
+      sql`INSERT INTO memory_hub_source_reads(space,request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline) VALUES (${input.memorySpaceId},${input.requestId},${input.memoryId},${member.environmentId},${owner.environmentId},${member.credentialVersion},${requestDigest},${yield* sourceRequestCodec.encode(locator)},'pending',${now + M.MEMORY_SOURCE_READ_TIMEOUT_MS})`,
+    );
+    return { request: locator };
+  });
+  const collectHubSourceReadsTx: MemoryStore["Service"]["collectHubSourceReadsTx"] = Effect.fn(
+    "MemoryStore.collectHubSourceReadsTx",
+  )(function* (authority, input) {
+    const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    yield* purgeHubTransientTx({
+      memorySpaceId: input.memorySpaceId,
+      now,
+      limit: M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS,
+    });
+    const rows = yield* stored(
+      "relay-collect",
+      sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND owner=${member.environmentId} AND state='pending' AND deadline>${now} ORDER BY deadline,request_id LIMIT ${Math.max(1, Math.min(input.limit, 32))}`,
+    );
+    const requests: M.MemorySourceReadRequest[] = [];
+    for (const row of rows) {
+      const requester = yield* readHubMember(
+        input.memorySpaceId,
+        M.EnvironmentId.make(row.requester),
+      );
+      const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+      if (
+        !requester ||
+        requester.status !== "active" ||
+        requester.credentialVersion !== row.credential_version ||
+        !(yield* relayEligible(input.memorySpaceId, request))
+      ) {
+        yield* eraseRelayPayload(input.memorySpaceId, row);
+        continue;
+      }
+      const next = [...requests, request];
+      const encoded = yield* Effect.forEach(next, (value) => sourceRequestCodec.encode(value));
+      const bytes = new TextEncoder().encode(`{"requests":[${encoded.join(",")}]}`).length;
+      if (bytes > M.MEMORY_SOURCE_READ_OUTCOME_MAX_BYTES) break;
+      requests.push(request);
+    }
+    return yield* sourceCollectCodec.decode(yield* sourceCollectCodec.encode({ requests }), strict);
+  });
+  const respondHubSourceReadTx: MemoryStore["Service"]["respondHubSourceReadTx"] = Effect.fn(
+    "MemoryStore.respondHubSourceReadTx",
+  )(function* (authority, input) {
+    const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    const row = yield* readRelay(input.memorySpaceId, input.requestId);
+    if (!row || row.owner !== member.environmentId)
+      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+    const requester = yield* readHubMember(
+      input.memorySpaceId,
+      M.EnvironmentId.make(row.requester),
+    );
+    if (
+      row.deadline <= now ||
+      row.state === "expired" ||
+      !requester ||
+      requester.status !== "active" ||
+      requester.credentialVersion !== row.credential_version
+    ) {
+      yield* eraseRelayPayload(input.memorySpaceId, row);
+      return { accepted: false };
+    }
+    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    if (!(yield* relayEligible(input.memorySpaceId, request))) {
+      yield* eraseRelayPayload(input.memorySpaceId, row);
+      return { accepted: false };
+    }
+    const responseDigest = hashText(yield* sourceRespondCodec.encode(input));
+    if (row.response_digest) {
+      if (row.response_digest !== responseDigest)
+        return yield* new M.MemoryHubError({ code: "operation_id_reused" });
+      return { accepted: row.state === "completed" };
+    }
+    if (
+      input.outcome.kind === "available" &&
+      ((yield* sourceThreadCodec.encode(input.outcome.page.sourceThread)) !==
+        (yield* sourceThreadCodec.encode(request.sourceThread)) ||
+        (yield* sourceWatermarkCodec.encode(input.outcome.page.watermark)) !==
+          (yield* sourceWatermarkCodec.encode(request.sourceWatermark)) ||
+        input.outcome.page.messages.length > request.limit ||
+        input.outcome.page.messages.some((m) => !request.messageIds.includes(m.messageId)))
+    )
+      return yield* new M.MemoryHubError({ code: "source_invalidated" });
+    const outcome: M.MemorySourceReadOutcome =
+      scanMemoryValue(input.outcome).kind === "allowed"
+        ? input.outcome
+        : { kind: "unavailable", code: "secret_detected" };
+    const json = yield* sourceOutcomeCodec.encode(outcome);
+    const payloadRef = `relay:${input.requestId}`;
+    // A transient body has no revision, event, report, checkpoint or FTS reference.
+    yield* stored(
+      "relay-response-payload",
+      sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${input.memorySpaceId},${payloadRef},${request.memoryId},${json},'[]',${row.deadline})`,
+    );
+    yield* stored(
+      "relay-response",
+      sql`UPDATE memory_hub_source_reads SET state='completed',response_digest=${responseDigest},payload_ref=${payloadRef} WHERE space=${input.memorySpaceId} AND request_id=${input.requestId}`,
+    );
+    return { accepted: true };
+  });
+  const resultHubSourceReadTx: MemoryStore["Service"]["resultHubSourceReadTx"] = Effect.fn(
+    "MemoryStore.resultHubSourceReadTx",
+  )(function* (authority, input) {
+    const { member, now } = yield* authorizeSource(authority, input.memorySpaceId);
+    const row = yield* readRelay(input.memorySpaceId, input.requestId);
+    if (!row) return { state: "expired", code: "source_unavailable" };
+    if (
+      row.requester !== member.environmentId ||
+      row.credential_version !== member.credentialVersion
+    )
+      return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+    const owner = yield* readHubMember(input.memorySpaceId, M.EnvironmentId.make(row.owner));
+    if (row.deadline <= now || row.state === "expired" || !owner || owner.status !== "active") {
+      yield* eraseRelayPayload(input.memorySpaceId, row);
+      return { state: "expired", code: "source_unavailable" };
+    }
+    const request = yield* sourceRequestCodec.decode(row.locator_json, strict);
+    if (!(yield* relayEligible(input.memorySpaceId, request))) {
+      yield* eraseRelayPayload(input.memorySpaceId, row);
+      return { state: "completed", outcome: { kind: "unavailable", code: "source_invalidated" } };
+    }
+    if (row.state === "pending")
+      return { state: "pending", expiresAtHubTime: request.expiresAtHubTime };
+    const bodies = yield* stored(
+      "relay-result",
+      sql<{
+        body_json: string;
+      }>`SELECT body_json FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${row.payload_ref}`,
+    );
+    if (!bodies[0]) {
+      yield* eraseRelayPayload(input.memorySpaceId, row);
+      return { state: "expired", code: "source_unavailable" };
+    }
+    const outcome = yield* sourceOutcomeCodec.decode(bodies[0].body_json, strict);
+    yield* eraseRelayPayload(input.memorySpaceId, row);
+    return { state: "completed", outcome };
+  });
   const hubEntryCodec = codec(M.MemoryHubEntry);
   const hubReceiptDecode = Schema.decodeUnknownEffect(M.MemoryHubReceipt);
   const hubEntryDecode = Schema.decodeUnknownEffect(M.MemoryHubEntry);
@@ -5876,6 +6234,11 @@ const make = Effect.gen(function* () {
       return { reportId, deliverable };
     });
   return MemoryStore.of({
+    purgeHubTransientTx,
+    requestHubSourceReadTx,
+    collectHubSourceReadsTx,
+    respondHubSourceReadTx,
+    resultHubSourceReadTx,
     readHubAdminTx,
     writeHubAdminTx,
     activateHubMemberTx,
