@@ -266,6 +266,20 @@ describe("MemoryCompactor", () => {
         const daily = yield* Deferred.make<void>();
         const observed = Store.MemoryStore.of({
           ...store,
+          changes: (spaceId) =>
+            store
+              .changes(spaceId)
+              .pipe(
+                Effect.map((stream) =>
+                  Stream.unwrap(
+                    Effect.withFiber((fiber) =>
+                      Ref.update(workers, (all) => new Map(all).set(fiber.id, fiber)).pipe(
+                        Effect.as(stream),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
           readHubRetentionTx: (spaceId) =>
             Effect.withFiber((fiber) =>
               Ref.update(workers, (all) =>
@@ -315,11 +329,12 @@ describe("MemoryCompactor", () => {
         assert.notStrictEqual(dailyRun.checkpointId, signaledRun.checkpointId);
         yield* Scope.close(scope, Exit.void);
         const captured = yield* Ref.get(workers);
-        // Timer plus admission worker have both crossed a real Store boundary.
-        assert.isAtLeast(captured.size, 2);
+        // Changes, admissions and timer all belong to the application Scope.
+        assert.strictEqual(captured.size, 3);
         for (const fiber of captured.values()) {
           const exit = yield* Fiber.await(fiber);
           assert.isTrue(Exit.isFailure(exit));
+          if (Exit.isFailure(exit)) assert.isTrue(Cause.hasInterrupts(exit.cause));
         }
         yield* activity.notify;
         yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
