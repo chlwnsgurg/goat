@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Service from "./MemoryService.ts";
@@ -367,6 +368,7 @@ export class MemoryHubAdminSettings extends Context.Service<
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
     readonly read: Effect.Effect<M.MemoryHubSettingsView, M.MemoryHubError>;
+    readonly readPreviousHubSpace: Effect.Effect<M.MemorySpaceId | null, M.MemoryHubError>;
     readonly apply: (
       record: Store.AdminRecord,
       permit: AdminPermit,
@@ -393,6 +395,7 @@ export const makeAdministrator = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
   const secrets = yield* Secrets.ServerSecretStore;
   const settings = yield* MemoryHubAdminSettings;
+  const identity = yield* Environment.ServerEnvironmentIdentity;
   const encode = Schema.encodeEffect(Schema.fromJsonString(M.MemoryHubSettingsUpdateInput));
   const decode = Schema.decodeUnknownEffect(M.MemoryHubSettingsUpdateInput);
   const tx = <A, E, R>(permit: AdminPermit, effect: Effect.Effect<A, E, R>) =>
@@ -403,7 +406,7 @@ export const makeAdministrator = Effect.gen(function* () {
     const request = yield* decode(input, { onExcessProperty: "error" }).pipe(
       Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
     );
-    const digest = NodeCrypto.createHash("sha256")
+    let digest = NodeCrypto.createHash("sha256")
       .update(
         yield* encode(request).pipe(
           Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
@@ -435,6 +438,28 @@ export const makeAdministrator = Effect.gen(function* () {
           );
         }
         let record = yield* tx(permit, store.readHubAdminTx(request.requestId));
+        // Recovery consumes the persisted, resolved action. Accept that exact action
+        // as the alias of the original null-space request; other payloads still fail.
+        if (
+          record &&
+          record.requestDigest !== digest &&
+          "action" in record &&
+          record.action.action === "configure" &&
+          record.action.settings.mode === "hub" &&
+          request.action === "configure" &&
+          request.settings.mode === "hub" &&
+          request.settings.memorySpaceId === record.action.settings.memorySpaceId
+        ) {
+          const originalDigest = NodeCrypto.createHash("sha256")
+            .update(
+              yield* encode({
+                ...request,
+                settings: { mode: "hub", memorySpaceId: null },
+              }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" }))),
+            )
+            .digest("hex");
+          if (originalDigest === record.requestDigest) digest = originalDigest;
+        }
         if (record && record.requestDigest !== digest)
           return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
         if (request.action === "acknowledgeCredential") {
@@ -469,6 +494,22 @@ export const makeAdministrator = Effect.gen(function* () {
             if (!/^[A-Za-z0-9_-]{43}$/.test(request.credential))
               return yield* new M.MemoryHubError({ code: "invalid_output" });
             action = safe;
+          } else if (request.action === "configure" && request.settings.mode === "hub") {
+            const previousSpace = yield* settings.readPreviousHubSpace;
+            // Persist the resolved action before SQL activation. The digest still identifies
+            // the original wire request, so a retry never chooses another space.
+            const hash = NodeCrypto.createHash("sha256")
+              .update(
+                `goat-memory-hub-space:${yield* identity.getEnvironmentId}:${request.requestId}`,
+              )
+              .digest("hex");
+            const memorySpaceId =
+              request.settings.memorySpaceId ??
+              previousSpace ??
+              M.MemorySpaceId.make(
+                `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`,
+              );
+            action = { ...request, settings: { mode: "hub", memorySpaceId } };
           } else action = request;
           record = yield* tx(
             permit,
@@ -482,9 +523,11 @@ export const makeAdministrator = Effect.gen(function* () {
                 memberVersion: null,
                 result: null,
                 secretName:
-                  outgoing || request.action === "installCredential"
-                    ? `memory-hub-${request.action === "installCredential" ? "installed" : "outgoing"}-${request.requestId}`
-                    : null,
+                  request.action === "configure" && request.settings.mode === "hub"
+                    ? `memory-hub-internal-${request.requestId}`
+                    : outgoing || request.action === "installCredential"
+                      ? `memory-hub-${request.action === "installCredential" ? "installed" : "outgoing"}-${request.requestId}`
+                      : null,
               },
               expectedStage: null,
             }),
@@ -496,7 +539,49 @@ export const makeAdministrator = Effect.gen(function* () {
             // Retry stages identical bytes to the same private reference.
             yield* secrets.set(record.secretName!, new TextEncoder().encode(request.credential));
           }
-          if (outgoing || request.action === "revokeMember") {
+          if (record.action.action === "configure" && record.action.settings.mode === "hub") {
+            const memorySpaceId = record.action.settings.memorySpaceId;
+            if (memorySpaceId === null || record.secretName === null)
+              return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+            const environmentId = yield* identity.getEnvironmentId;
+            const bytes = yield* secrets.getOrCreateRandom(record.secretName, 32);
+            const credentialDigest = NodeCrypto.createHash("sha256")
+              .update(Buffer.from(bytes).toString("base64url"))
+              .digest("hex");
+            const prepared = record;
+            yield* tx(
+              permit,
+              Effect.gen(function* () {
+                const member = yield* store.readHubMember(memorySpaceId, environmentId);
+                if (member) {
+                  // Disable preserves the published space and membership; re-enable neither
+                  // rotates internal authority nor publishes over a later compaction floor.
+                  const retention = yield* store.readHubRetentionTx(memorySpaceId);
+                  if (member.status !== "active" || retention.checkpointId === null)
+                    return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+                  yield* store.writeHubAdminTx({
+                    record: {
+                      ...prepared,
+                      stage: "activated",
+                      memberVersion: member.credentialVersion,
+                    },
+                    expectedStage: "prepared",
+                  });
+                } else {
+                  yield* store.activateHubMemberTx({
+                    requestId: request.requestId,
+                    requestDigest: digest,
+                    memorySpaceId,
+                    environmentId,
+                    expectedCredentialVersion: null,
+                    next: { credentialDigest, credentialVersion: 1 },
+                    now: yield* Clock.currentTimeMillis,
+                  });
+                }
+              }),
+            );
+            record = (yield* tx(permit, store.readHubAdminTx(request.requestId)))!;
+          } else if (outgoing || request.action === "revokeMember") {
             const view = yield* settings.read;
             if (view.settings.mode !== "hub" || view.settings.memorySpaceId === null)
               return yield* new M.MemoryHubError({ code: "hub_disabled" });
@@ -569,8 +654,8 @@ export const makeAdministrator = Effect.gen(function* () {
               );
             }
           }
-          // The settings helper owns version/CAS, request-id replay and initial hub
-          // bootstrap. It receives only a persisted action and private secret name.
+          // SQL has already committed internal membership and publication. The settings
+          // helper owns version/CAS and request-id replay. It receives only a persisted action and private secret name.
           const result = yield* settings.apply(record, permit);
           record = yield* tx(
             permit,
