@@ -418,7 +418,12 @@ interface ThreadState {
   readonly strandedSteers: Set<string>;
   /** T3's MCP server as registered for this thread, and the instructions entry sent with it. */
   mcp:
-    | { readonly name: string; readonly directory: string; readonly credential: string }
+    | {
+        readonly name: string;
+        readonly directory: string;
+        readonly credential: string;
+        readonly endpoint: string;
+      }
     | undefined;
   instructions: string | undefined;
   /** Digest of the last successfully installed value; memory bodies are never retained locally. */
@@ -3399,14 +3404,26 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const wanted =
         mcpSession === undefined || connection.external
           ? undefined
-          : { name, directory, credential: mcpSession.authorizationHeader };
+          : {
+              name,
+              directory,
+              credential: mcpSession.authorizationHeader,
+              endpoint: mcpSession.endpoint,
+            };
       if (
         state.mcp !== undefined &&
         (wanted === undefined ||
           state.mcp.directory !== wanted.directory ||
-          state.mcp.credential !== wanted.credential)
+          state.mcp.credential !== wanted.credential ||
+          state.mcp.endpoint !== wanted.endpoint)
       ) {
-        yield* removeMcp(state.mcp);
+        // Admission must stop if the old route cannot be removed; cleanup alone is best-effort.
+        yield* client.mcp
+          .remove({
+            server: state.mcp.name,
+            location: { directory: state.mcp.directory },
+          })
+          .pipe(Effect.timeout(INVENTORY_TIMEOUT));
         state.mcp = undefined;
       }
       // T3's tools are an addition: a server that cannot add them still runs the turn.
@@ -3417,7 +3434,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             location: { directory },
             config: new Mcp.RemoteConfig({
               type: "remote",
-              url: mcpSession!.endpoint,
+              url: wanted.endpoint,
               headers: { Authorization: wanted.credential },
               oauth: false,
             }),
@@ -3434,7 +3451,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         if (added) state.mcp = wanted;
       }
       const availability = McpProviderSession.memoryToolAvailability(
-        state.mcp !== undefined && state.mcp.credential === mcpSession?.authorizationHeader
+        state.mcp !== undefined &&
+          state.mcp.directory === directory &&
+          state.mcp.endpoint === mcpSession?.endpoint &&
+          state.mcp.credential === mcpSession?.authorizationHeader
           ? mcpSession
           : undefined,
       );
