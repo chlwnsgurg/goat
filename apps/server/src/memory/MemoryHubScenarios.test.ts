@@ -28,7 +28,12 @@ import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Hub from "./MemoryHubService.ts";
 import * as Compactor from "./MemoryCompactor.ts";
-import { layerMemoryHubServices, layerMemoryHubRoutes, layerMemoryHubStarted } from "../server.ts";
+import {
+  layerMemoryHubServices,
+  layerMemoryHubRoutes,
+  layerMemoryHubStarted,
+  makeMemoryHubCompactorStore,
+} from "../server.ts";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
@@ -625,11 +630,39 @@ describe("Memory hub assembled HTTP scenarios", () => {
       const failed = yield* Deferred.make<string>();
       const started = yield* Deferred.make<void>();
       const prepared = yield* Deferred.make<void>();
+      const timerReady = yield* Deferred.make<void>();
+      const releaseTimer = yield* Deferred.make<void>();
+      const store = yield* s.run(makeMemoryHubCompactorStore);
+      const retentionReads = new WeakSet<object>();
+      const observedStore = Store.MemoryStore.of({
+        ...store,
+        readHubRetentionTx: (spaceId) => {
+          const read = store.readHubRetentionTx(spaceId);
+          retentionReads.add(read);
+          return read;
+        },
+        transact: (effect, options) => {
+          // Only the timer passes a standalone retention read to transact.
+          // Hold it after commit, before sampling now, until the clock advances.
+          const timerRead = retentionReads.has(effect);
+          return store.transact(effect, options).pipe(
+            Effect.tap(() =>
+              timerRead
+                ? Effect.gen(function* () {
+                    yield* Deferred.succeed(timerReady, undefined);
+                    yield* Deferred.await(releaseTimer);
+                  })
+                : Effect.void,
+            ),
+          );
+        },
+      });
       let starts = 0;
       let attempts = 0;
       const producer = Context.get(s.context, Compactor.MemoryHubCheckpointProducer);
       const compactor = yield* s.run(
         Compactor.make.pipe(
+          Effect.provideService(Store.MemoryStore, observedStore),
           Effect.provideService(Compactor.MemoryHubCheckpointProducer, {
             prepareTx: (input) =>
               producer
@@ -691,12 +724,18 @@ describe("Memory hub assembled HTTP scenarios", () => {
       const retention = s.run(
         Store.MemoryStore.use((store) => store.transact(store.readHubRetentionTx(space))),
       );
+      yield* Deferred.await(timerReady);
       const before = yield* retention;
       yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+      yield* Deferred.succeed(releaseTimer, undefined);
       yield* Deferred.await(prepared);
       // Read through the writer lock after prepare, so the observation follows commit.
       const after = yield* retention;
       assert.notStrictEqual(after.checkpointId, before.checkpointId);
+      assert.strictEqual(
+        Date.parse(after.compaction.lastRunAtUtc!),
+        M.MEMORY_CHECKPOINT_INTERVAL_MS,
+      );
       yield* s.configure("disabled");
       yield* s.configure("hub");
       assert.strictEqual(starts, 1);

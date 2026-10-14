@@ -497,12 +497,36 @@ const layerMemoryStarted = Layer.effectDiscard(
   }),
 ).pipe(Layer.provideMerge(layerMemoryWorker));
 
+// Settings reloads query this same SQL connection. Acquire the settings snapshot
+// before the compactor's writer lock, and keep file revalidation out until commit.
+export const makeMemoryHubCompactorStore = Effect.gen(function* () {
+  const store = yield* MemoryStore.MemoryStore;
+  const settings = yield* ServerSettings.ServerSettingsService;
+  return MemoryStore.MemoryStore.of({
+    ...store,
+    transact: (effect, options) =>
+      Effect.gen(function* () {
+        const result = yield* settings
+          .withSettingsSnapshot(() => Effect.exit(store.transact(effect, options)))
+          .pipe(
+            Effect.mapError(
+              (cause) => new MemoryStore.MemoryStorageError({ stage: "hub-settings", cause }),
+            ),
+          );
+        return yield* result;
+      }),
+  });
+});
+const layerMemoryHubCompactor = MemoryCompactor.layer.pipe(
+  Layer.provide(Layer.effect(MemoryStore.MemoryStore, makeMemoryHubCompactorStore)),
+);
+
 // These layers are also used by the real-store HTTP scenarios. Dependencies are
 // supplied by the application, so WP2 and the hub share one core and settings owner.
 export const layerMemoryHubServices = Layer.mergeAll(
   MemoryHub.layer,
   MemoryHub.administratorLayer,
-  MemoryCompactor.layer,
+  layerMemoryHubCompactor,
   MemoryHubAuth.layer,
 ).pipe(
   Layer.provideMerge(MemoryHub.activityLayer),
