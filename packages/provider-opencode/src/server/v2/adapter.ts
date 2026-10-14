@@ -1289,7 +1289,17 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       providerTurn: OrchestrationV2ProviderTurn,
       options: { readonly scope: string; readonly awaitingStart: boolean },
     ): ActiveTurn => ({
-      input: owner,
+      // A background subagent can keep this owner after its parent settles.
+      // Copy the routing fields so a wider ordinary input cannot retain memory or its closure.
+      input: {
+        appThread: owner.appThread,
+        threadId: owner.threadId,
+        runId: owner.runId,
+        runOrdinal: owner.runOrdinal,
+        rootNodeId: owner.rootNodeId,
+        modelSelection: owner.modelSelection,
+        runtimePolicy: owner.runtimePolicy,
+      },
       providerTurn,
       texts: new Map(),
       tools: new Map(),
