@@ -32,7 +32,7 @@ export default Effect.gen(function* () {
   yield* sql`CREATE TABLE memory_hub_retention (
     space TEXT PRIMARY KEY, checkpoint_id TEXT, checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
     retention_floor INTEGER NOT NULL DEFAULT 0, boundary_json TEXT, handles_json TEXT NOT NULL DEFAULT '[]',
-    compaction_json TEXT, checkpoint_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_bytes>=0),
+    compaction_json TEXT, last_snapshot_bytes INTEGER NOT NULL DEFAULT 0 CHECK(last_snapshot_bytes>=0), checkpoint_bytes INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_bytes>=0),
     published_pinned_bytes INTEGER NOT NULL DEFAULT 0 CHECK(published_pinned_bytes>=0),
     CHECK(retention_floor>=0 AND retention_floor<=checkpoint_sequence)
   )`;
@@ -86,7 +86,7 @@ export default Effect.gen(function* () {
     ["hub_private_metadata", privateTotal],
     [
       "hub_receipts",
-      `(SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger i WHERE NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id))+(SELECT count(*) FROM memory_import_keys WHERE key_kind IN ${guardKinds})`,
+      `(SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger i WHERE NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id))+(SELECT count(*) FROM memory_import_keys WHERE key_kind IN ${guardKinds})+(SELECT count(*) FROM memory_outbox WHERE kind='admin')`,
     ],
     [
       "hub_checkpoint",
@@ -95,7 +95,7 @@ export default Effect.gen(function* () {
     ["hub_ids", "(SELECT count(*) FROM memory_identity_ledger)"],
     [
       "hub_keys",
-      "(SELECT count(*) FROM memory_import_keys)+(SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger)",
+      "(SELECT count(*) FROM memory_import_keys)+(SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger)+(SELECT count(*) FROM memory_outbox WHERE kind='admin')",
     ],
   ] as const;
   for (const [dimension, expression] of counts)
@@ -126,15 +126,25 @@ export default Effect.gen(function* () {
       delta("hub_metadata", value) + delta("hub_private_metadata", value);
     const checkpoint = (expression: string) =>
       table === "memory_hub_retention" ? delta("hub_checkpoint", expression) : "";
+    const adminOnly = (prefix: string) =>
+      `CASE WHEN ${prefix}.kind='admin' AND NOT EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space='_admin' AND g.key_kind='hub_admin' AND g.key=substr(${prefix}.id,7)) THEN 1 ELSE 0 END`;
+    const adminReservation = (expression: string) =>
+      table === "memory_outbox"
+        ? delta("hub_receipts", expression) + delta("hub_keys", expression)
+        : "";
     yield* install(
       table,
-      charge(qualify("NEW")) + checkpoint("NEW.checkpoint_bytes+NEW.published_pinned_bytes"),
+      charge(qualify("NEW")) +
+        checkpoint("NEW.checkpoint_bytes+NEW.published_pinned_bytes") +
+        adminReservation(adminOnly("NEW")),
       charge(`${qualify("NEW")}-(${qualify("OLD")})`) +
         checkpoint(
           "NEW.checkpoint_bytes+NEW.published_pinned_bytes-OLD.checkpoint_bytes-OLD.published_pinned_bytes",
-        ),
+        ) +
+        adminReservation(`${adminOnly("NEW")}-${adminOnly("OLD")}`),
       charge(`-(${qualify("OLD")})`) +
-        checkpoint("-OLD.checkpoint_bytes-OLD.published_pinned_bytes"),
+        checkpoint("-OLD.checkpoint_bytes-OLD.published_pinned_bytes") +
+        adminReservation(`-(${adminOnly("OLD")})`),
     );
   }
   const identityCharge = (prefix: string) =>
@@ -187,19 +197,23 @@ export default Effect.gen(function* () {
       delta("hub_receipts", `-(${compactOnly("OLD")})`),
   );
   const guardCount = (prefix: string) =>
-    `CASE WHEN ${prefix}.key_kind IN ${guardKinds} THEN 1 ELSE 0 END`;
+    `CASE WHEN ${prefix}.key_kind IN ${guardKinds} THEN CASE WHEN ${prefix}.key_kind='hub_admin' AND EXISTS(SELECT 1 FROM memory_outbox o WHERE o.kind='admin' AND o.id='admin:'||${prefix}.key) THEN 0 ELSE 1 END ELSE 0 END`;
+  const keyCount = (prefix: string) =>
+    `CASE WHEN ${prefix}.key_kind='hub_admin' AND EXISTS(SELECT 1 FROM memory_outbox o WHERE o.kind='admin' AND o.id='admin:'||${prefix}.key) THEN 0 ELSE 1 END`;
   yield* install(
     "memory_import_keys",
     delta("hub_metadata", "length(CAST(NEW.record_json AS BLOB))") +
       delta("hub_receipts", guardCount("NEW")) +
-      delta("hub_keys", "1"),
+      delta("hub_keys", keyCount("NEW")),
     delta(
       "hub_metadata",
       "length(CAST(NEW.record_json AS BLOB))-length(CAST(OLD.record_json AS BLOB))",
-    ) + delta("hub_receipts", `${guardCount("NEW")}-${guardCount("OLD")}`),
+    ) +
+      delta("hub_receipts", `${guardCount("NEW")}-${guardCount("OLD")}`) +
+      delta("hub_keys", `${keyCount("NEW")}-${keyCount("OLD")}`),
     delta("hub_metadata", "-length(CAST(OLD.record_json AS BLOB))") +
       delta("hub_receipts", `-(${guardCount("OLD")})`) +
-      delta("hub_keys", "-1"),
+      delta("hub_keys", `-(${keyCount("OLD")})`),
   );
   // Deliberately retain historical and private inputs too: expiry/compaction can only reduce this upper bound.
   const snapshotInputs = [
@@ -236,9 +250,14 @@ export default Effect.gen(function* () {
         .split(",")
         .map((column) => `coalesce(length(CAST(${prefix}${column} AS BLOB)),0)`)
         .join("+") + (table === "memory_identity_ledger" ? `+${prefix}reserve_bytes` : "");
+    // The identity owns the future basic-forget rows and its source-key suppression records.
+    const recordRows = (prefix: string) =>
+      table === "memory_identity_ledger"
+        ? `1+${prefix}reserve_keys+CASE WHEN NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=${prefix}space AND t.memory_id=${prefix}memory_id) THEN 8 ELSE 0 END`
+        : "1";
     for (const [dimension, expression] of [
       ["hub_snapshot_bytes", bytes("")],
-      ["hub_snapshot_rows", "1"],
+      ["hub_snapshot_rows", recordRows("")],
     ] as const) {
       yield* sql.unsafe(
         `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
@@ -248,9 +267,9 @@ export default Effect.gen(function* () {
       );
       const change = (prefix: string, sign: number) =>
         sign < 0
-          ? `UPDATE memory_quota_counters SET value=value-(${dimension === "hub_snapshot_rows" ? "1" : bytes(`${prefix}.`)}) WHERE space=${prefix}.${spaceColumn} AND dimension='${dimension}' AND scope_key='';`
+          ? `UPDATE memory_quota_counters SET value=value-(${dimension === "hub_snapshot_rows" ? recordRows(`${prefix}.`) : bytes(`${prefix}.`)}) WHERE space=${prefix}.${spaceColumn} AND dimension='${dimension}' AND scope_key='';`
           : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
-        VALUES (${prefix}.${spaceColumn},'${dimension}','',${dimension === "hub_snapshot_rows" ? "1" : bytes(`${prefix}.`)})
+        VALUES (${prefix}.${spaceColumn},'${dimension}','',${dimension === "hub_snapshot_rows" ? recordRows(`${prefix}.`) : bytes(`${prefix}.`)})
         ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
       for (const [action, body] of [
         ["INSERT", change("NEW", 1)],
@@ -262,4 +281,11 @@ export default Effect.gen(function* () {
         );
     }
   }
+  for (const [action, prefix, sign] of [
+    ["INSERT", "NEW", -1],
+    ["DELETE", "OLD", 1],
+  ] as const)
+    yield* sql.unsafe(`CREATE TRIGGER memory_tombstones_snapshot_forget_${action.toLowerCase()} AFTER ${action} ON memory_tombstones BEGIN
+      UPDATE memory_quota_counters SET value=value+${sign}*8 WHERE space=${prefix}.space AND dimension='hub_snapshot_rows' AND scope_key='' AND EXISTS(SELECT 1 FROM memory_identity_ledger i WHERE i.space=${prefix}.space AND i.memory_id=${prefix}.memory_id);
+    END`);
 });

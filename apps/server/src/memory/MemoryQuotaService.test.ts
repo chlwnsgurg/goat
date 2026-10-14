@@ -842,7 +842,7 @@ describe("MemoryQuotaService hub storage status", () => {
       const staging = status.quotas.find((quota) => quota.dimension === "checkpoint_staging")!;
       assert.strictEqual(staging.current, status.requiredCheckpointBoundBytes! + 20);
       assert.strictEqual(staging.reserved, status.requiredCheckpointBoundBytes);
-      assert.strictEqual(status.lastSnapshotBytes, 100);
+      assert.strictEqual(status.lastSnapshotBytes, 0);
     }).pipe(Effect.provide(services)),
   );
 });

@@ -1263,3 +1263,63 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "the reserved first forget keeps checkpoint representability at a fully pinned budget",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+      yield* service.upsert(input(1300), Effect.void);
+      const upsert = yield* store.readWorkOperation(`sync:${space}:${id(1300)}`);
+      if (!upsert) throw new Error("fixture");
+      const authority: Store.HubAuthority = {
+        principal: {
+          memorySpaceId: space,
+          environmentId,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        },
+        now: Clock.currentTimeMillis,
+        reauthorize: Effect.void,
+      };
+      yield* service.admitHubOperation({ authority, operation: upsert });
+      const initial = yield* store.transact(store.readHubUsageTx(space));
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: 0,
+          publishedPinnedDeltaBytes:
+            M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - initial.requiredCheckpointBoundBytes,
+        }),
+      );
+      const forget: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "forget",
+        memorySpaceId: space,
+        memoryId,
+        operationId: M.MemoryOperationId.make(id(1301)),
+        originEnvironmentId: environmentId,
+        expectedHeads: [],
+        tombstone: {
+          memorySpaceId: space,
+          memoryId,
+          deleteOperationId: M.MemoryOperationId.make(id(1301)),
+          deletingEnvironmentId: environmentId,
+          deletedAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      };
+      const receipt = yield* service.admitHubOperation({ authority, operation: forget });
+      assert.strictEqual(receipt.outcome, "deleted");
+      assert.isAtMost(
+        (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
+        M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
+    }).pipe(Effect.provide(live)),
+);

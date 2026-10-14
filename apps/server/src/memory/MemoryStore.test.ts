@@ -3823,6 +3823,14 @@ it.effect(
           expectedStage: "ready",
         }),
       );
+      const reservedCounters = yield* sql<{
+        dimension: string;
+        value: number;
+      }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND dimension IN ('hub_receipts','hub_keys') ORDER BY dimension`;
+      assert.deepStrictEqual(reservedCounters, [
+        { dimension: "hub_keys", value: 1 },
+        { dimension: "hub_receipts", value: 1 },
+      ]);
       yield* store.transact(
         store.purgeHubTransientTx({
           memorySpaceId: space,
@@ -3852,6 +3860,10 @@ it.effect(
         }),
       );
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 0);
+      assert.deepStrictEqual(
+        yield* sql`SELECT dimension,value FROM memory_quota_counters WHERE space='_hub_global' AND dimension IN ('hub_receipts','hub_keys') ORDER BY dimension`,
+        reservedCounters,
+      );
       const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
       const guard = yield* fresh.transact(fresh.readHubAdminTx(first.requestId));
       assert.isDefined(guard);

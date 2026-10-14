@@ -662,6 +662,7 @@ const make = Effect.gen(function* () {
             permanent_metadata: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
             lifetime_ids: M.MEMORY_MAX_LIFETIME_IDS,
             receipts: M.MEMORY_DEDUP_MAX_RECEIPTS,
+            import_source_items: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
             log_tail_rows: M.MEMORY_LOG_MAX_TAIL_ROWS,
             log_tail_bytes: M.MEMORY_LOG_MAX_TAIL_BYTES,
             work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,

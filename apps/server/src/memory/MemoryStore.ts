@@ -6678,6 +6678,10 @@ const make = Effect.gen(function* () {
         checkpointDeltaBytes: bytes - usage.checkpointBytes,
         publishedPinnedDeltaBytes: bytes,
       });
+      yield* stored(
+        "hub-snapshot-size",
+        sql`UPDATE memory_hub_retention SET last_snapshot_bytes=${bytes} WHERE space=${space}`,
+      );
       for (let ordinal = 0; ordinal < pages.length; ordinal++)
         yield* stored(
           "hub-snapshot-stage",
@@ -6957,6 +6961,7 @@ const make = Effect.gen(function* () {
         relay: number;
         source_bytes: number;
         checkpoint_bytes: number;
+        last_snapshot_bytes: number;
         pinned_bytes: number;
         metadata_bytes: number;
       }>`SELECT
@@ -6966,6 +6971,7 @@ const make = Effect.gen(function* () {
       (SELECT count(*) FROM memory_hub_source_reads WHERE space=${space} AND state!='expired') AS relay,
       (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p JOIN memory_hub_source_reads r ON r.space=p.space AND r.payload_ref=p.payload_ref WHERE r.space=${space}) AS source_bytes,
       (SELECT coalesce(checkpoint_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS checkpoint_bytes,
+      (SELECT coalesce(last_snapshot_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS last_snapshot_bytes,
       (SELECT coalesce(published_pinned_bytes,0) FROM memory_hub_retention WHERE space=${space}) AS pinned_bytes,
       (SELECT coalesce(sum(length(CAST(credential_digest AS BLOB))+length(CAST(environment AS BLOB))+32),0) FROM memory_hub_members WHERE space=${space})+
       (SELECT coalesce(sum(length(CAST(lease_json AS BLOB))+32),0) FROM memory_hub_leases WHERE space=${space}) AS metadata_bytes`,
@@ -7037,7 +7043,7 @@ const make = Effect.gen(function* () {
       stagingBytes:
         Math.max(requiredCheckpointBoundBytes, row.checkpoint_bytes ?? 0) + (row.pinned_bytes ?? 0),
       requiredCheckpointBoundBytes,
-      lastSnapshotBytes: row.checkpoint_bytes ?? 0,
+      lastSnapshotBytes: row.last_snapshot_bytes ?? 0,
       checkpointBytes: row.checkpoint_bytes ?? 0,
       publishedPinnedBytes: row.pinned_bytes ?? 0,
       liveSourceReads: row.relay,
