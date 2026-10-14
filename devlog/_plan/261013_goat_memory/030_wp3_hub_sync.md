@@ -1,12 +1,13 @@
-# 030 — WP3: hub synchronization and conflict leases (rev 11)
+# 030 — WP3: hub synchronization and conflict leases (rev 11a)
 
 Committed GOAT memories converge through one configured hub. Every environment, including
 the hub, writes on equal terms. Conflicts quarantine only the affected memory; the first
 successful hub claimant resolves it using that environment's frozen default provider and
 applies the approved result immediately. Forget propagates before pending content is sent.
 
-- Date: 2026-10-14. Status: current P implementation plan, ready for architect reflection;
-  implementation, reflection, independent A and runtime closure are not claimed.
+- Date: 2026-10-14. Status: current P correction plan after reflection r1 MISALIGNED and audit r1 FAIL
+  on `e74d1e7b3`; their findings are folded below. Repeat reflection and independent A
+  remain coordinator work; implementation and runtime closure are not claimed.
 - Baseline: branch `goat/memory-wp3-hub-sync`, integrated WP2 HEAD `637b30327`
   (`637b3032772c50b7d3bc1d53f4ef90387768358a`); dev `637a98351` (#171) is an ancestor.
   WP2 includes `115eeed2b` and `637b30327`. Recheck the baseline before implementation.
@@ -27,8 +28,8 @@ provider cloud launch/resume changes, client UI and WP4 RPC/MCP activation.
 Verifier: this rewrite uses only the two-file formatting check, manual links/anchors and
 `git diff --check`; implementation focused behavior tests run in PR CI only (NOT RUN here).
 Stop for this authoring slice: commit the two requested plans once without pushing, then
-hand rev 11 to the coordinator for reflection. Memory artifact: this file and the
-[WP3 cycle](000_plan.md#wp3-cycle-hub-sync). Terminal outcomes: READY_FOR_REFLECTION or
+hand rev 11a to the coordinator for repeat reflection and independent A. Memory artifact: this file and the
+[WP3 cycle](000_plan.md#wp3-cycle-hub-sync). Terminal outcomes: READY_FOR_REVIEW or
 BLOCKED on a concrete unresolved interface/requirement. Escalation: source changes that
 invalidate frozen interfaces or require a product decision go to the coordinator before lanes
 start. This bounded planner does not launch another cycle, perform reflection or enter A/B.
@@ -92,14 +93,14 @@ handoff is complete or move wire ownership. No second local SQL connection or ta
 | Forget                 | Base deletion and excess suppression are separate operations; forgetExpansion/forgetRetryOf receipt fields                                               | Preserve every ID/digest/result; definitive refusal uses bounded retry intents; uncertain delivery retries identical bytes. Purge must not cancel forget sync.                                  |
 | Eligibility            | forget_pending is excluded by candidate CAS; invalid summaries cancel and regenerate from latest committed source                                        | Recheck before claim/generation/source output; preserve per-provider-call summary renewWork and owned retryWork. No stale payload reuse.                                                        |
 | Source read            | Private Worker summary reader; no public readSource/authority/owner reader                                                                               | Inject non-wire MemorySourceReadAuthority and committed owner reader through MemoryService/SyncService; WP4 activates live compound permit and user RPC.                                        |
-| Reports                | Receive creates resolve/revert report rows; ID hash(space:operation:resolution)                                                                          | resolutionReportId shared helper + reconcileResolutionReportTx; body-free guards on replicas, delivery only on resolving environment; checkpoint/ACK use same key.                              |
+| Reports                | Receive creates resolve/revert report rows; ID hash(space:operation:resolution)                                                                          | resolutionReportId shared helper + reconcileResolutionReportTx; body-free guards on replicas, resolve-holder/revert-submitter delivery only; checkpoint/ACK use same key.                       |
 | Storage                | readStorageGrowth, measureAllocation, counters, ftsState and maintenance samples                                                                         | readStorageStatus assembler plus readHubUsageTx; include tail/members/leases/relay/retention in global logical budget, not only discoverable measurements.                                      |
 
 ## 4. L1 frozen non-wire interfaces
 
 These TypeScript signatures are additions to existing inline Context.Service interfaces.
 `M` = @goat/contracts, `Store` = MemoryStore, `Effect` = effect/Effect. The types below
-are server-private codecs; none are new wire DTOs. L1 defines/exports them from MemoryStore
+are server-private codecs; the separate §4.3 L1-0 amendment is the only new wire schema. L1 defines/exports them from MemoryStore
 (or MemoryService for source seams). Runtime codecs reject excess properties and bound encoded
 bytes; error classes stay Schema.TaggedError. Proposed signatures are frozen for lane handoff,
 subject to architect reflection and independent A, not a claim that they compile today.
@@ -129,7 +130,8 @@ type HubMember = {
 };
 type HubAuthority = {
   principal: M.MemoryHubPrincipal;
-  now: number;
+  // Hub Clock is read inside the Tx AFTER SQL lock acquisition, never caller-supplied.
+  now: InTx<number, StorageError>;
   // Effect re-reads active membership/version/space AFTER acquiring the SQL lock.
   reauthorize: InTx<void, M.MemoryHubUnauthorizedError | M.MemoryHubForbiddenError | StorageError>;
 };
@@ -174,6 +176,8 @@ type HubUsage = {
   activeMembers: number;
   liveHandles: number;
   stagingBytes: number;
+  checkpointBytes: number; // exact encoded next required snapshot, including valid revert inputs
+  publishedPinnedBytes: number; // unique bytes of retained published/pinned pages
   liveSourceReads: number;
   sourcePayloadBytes: number;
 };
@@ -204,13 +208,69 @@ type TicketRow = {
   submissionDigest: string | null;
   approval: M.MemoryHubReceipt | null;
 };
+type SyncWorkCandidate = {
+  work: Store.MemoryWork;
+  operationId: OpId;
+  operationDigest: string;
+  version: number;
+};
+type SyncWorkOwner = {
+  workId: string;
+  operationId: OpId;
+  operationDigest: string;
+  owner: string;
+  version: number;
+  ownedUntil: number;
+};
 type TicketKey = { memorySpaceId: Space; attemptId: OpId };
 type TicketOwner = TicketKey & { owner: string; coordinatorEpoch: number; version: number };
 ```
 
-Store additions (all hub SQL stays here):
+Store additions/changed declarations (all hub SQL stays here):
 
 ```ts
+// Type-only export: export type { Transaction }; its runtime tag/constructor stays private.
+transact: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.Effect<A, E | StorageError, Exclude<R, Store.Transaction>>;
+withReceivedCursor: <A, E, R>(
+  input: {
+    memorySpaceId: Space;
+    hubEnvironmentId: Env;
+    afterSequence: number;
+    expectedSequence: number;
+  },
+  effect: Effect.Effect<A, E, R>,
+) => Effect.Effect<A, E | PortError, Exclude<R, Store.Transaction>>;
+// Static fixtures: InTx loses Transaction; Transaction | OtherService retains OtherService.
+reserveHubCheckpointTx: (input: {
+  memorySpaceId: Space;
+  checkpointDeltaBytes: number;
+  publishedPinnedDeltaBytes: number;
+}) => InTx<HubUsage, AdmissionError>;
+prepareClaimAttemptTx: (input: {
+  memorySpaceId: Space;
+  candidateId: string;
+  expectedGeneration: number;
+  conflictHeads: readonly M.MemoryRevisionId[];
+  proposedAttemptId: OpId;
+}) => InTx<{ attemptId: OpId; generation: number } | null>;
+readEligibleOutbox: (space: Space, now: number, limit: number) =>
+  Effect.Effect<readonly SyncWorkCandidate[], StorageError>;
+acquireSyncWorkTx: (input: {
+  workId: string;
+  operationId: OpId;
+  operationDigest: string;
+  owner: string;
+  expectedVersion: number;
+  now: number;
+  ownedUntil: number;
+}) => InTx<SyncWorkOwner | null>;
+retrySyncWorkTx: (input: {
+  ownership: SyncWorkOwner;
+  now: number;
+  nextAttemptAt: number;
+  failureCode: M.MemoryFailureCode | null;
+}) => InTx<boolean>;
 // Auth reads are non-mutating. Transactional authorization uses the Tx version.
 readHubMember: (space: Space, environment: Env) =>
   Effect.Effect<HubMember | undefined, StorageError>;
@@ -226,7 +286,8 @@ appendHubEntryTx: (input: {
   outcome: M.MemoryHubReceipt["outcome"];
   failureCode?: M.MemoryFailureCode;
   capacity?: M.MemoryCapacityExceeded;
-  now: number;
+  resolutionApproval?: M.MemoryResolutionApproval;
+  now: number; // obtained by authority.now under this outer transaction
 }) => InTx<HubLedgerRecord, AdmissionError>;
 readHubTailTx: (input: {
   memorySpaceId: Space;
@@ -386,7 +447,8 @@ settleHubAcknowledgement: (input: {
   hubEnvironmentId: Env;
   localEnvironmentId: Env;
   workId: string;
-  entry: M.MemoryHubEntry;
+  receipt: M.MemoryHubReceipt;
+  operation: { operationId: OpId; operationDigest: string }; // local immutable reference
   reauthorize: Effect.Effect<void, MemoryAccessError>;
 }) => Effect.Effect<Settlement, ServiceError>;
 // Quota: read counters/samples/state/retention, no per-request physical page scan.
@@ -407,7 +469,7 @@ resolutionReportId: (space: Space, operation: OpId, resolution: M.MemoryResoluti
 | admin Tx ports                                                    | Administration opens separate short Store transactions around secret I/O and settings I/O; no locks held across filesystem writes                                                                   | requestId/requestDigest/expectedVersion, expectedStage, member credential version; activation also invalidates affected leases/fences                                                    |
 | settleHubEntryTx                                                  | Caller already owns Store transaction; replica integrity, canonical data, original approval, promotion, flags/report guard/intent terminal settlement; never local quota/scanner/lease re-admission | (space,receipt.operationId,digest); repeated ACK/pull returns same approval. Different approved digest is protocol error.                                                                |
 | receiveHubPage                                                    | MemoryService opens store.withReceivedCursor (one transact), validates whole page first, settles all entries and cursor together                                                                    | (space,hub,expectedSequence,throughSequence); order strictly increases but sequence gaps allowed; replays NOOP                                                                           |
-| settleHubAcknowledgement                                          | MemoryService opens store.transact and calls common settlement; ACK never advances cursor past unseen siblings                                                                                      | workId + operationId/digest; missing body uses existing immutable operation or metadata, no invented operation                                                                           |
+| settleHubAcknowledgement                                          | MemoryService opens store.transact, resolves immutable reference, branches sequenced settlement vs null-sequence refusal; ACK never advances cursor                                                 | workId + operationId/digest; validate receipt against stored immutable operation; never synthesize sequence/approval                                                                     |
 | intent assignment/bootstrap                                       | Sync opens Store transaction for assignment/progress; existing materializeLocalIntent reuses transaction journal                                                                                    | (environment,intentId) persisted first IDs/space; different retry IDs return stored assignment, never rebind published operations                                                        |
 | checkpoint prepare/page                                           | HubService/Compactor opens Store transaction; prepare reads consistent S, bounded durable pages and token pin; pages require current authority                                                      | checkpointId; token bound to space/hub/member/version/S; one handle/member; cursor->page ordinal; initial expiry immutable; published checkpoint lifetime is independent of token expiry |
 | checkpoint publish/compact                                        | Compactor opens Store transaction after complete staging; validates all records/pages, protections and pins, publishes S/boundary/F then compacts safe prefix, persists receipt                     | (space,checkpointId,expectedFloor), monotonic F<=S; replay never advances twice; failed publication leaves old checkpoint/floor                                                          |
@@ -416,8 +478,32 @@ resolutionReportId: (space: Space, operation: OpId, resolution: M.MemoryResoluti
 | report reconcile/helper                                           | Settlement/checkpoint transaction creates bounded body-free guard; local report delivery deferred                                                                                                   | SHA-256 UTF-8 of `space:operation:resolution`, existing WP2 algorithm; same reportId for checkpoint/receive/ACK/restart                                                                  |
 | readStorageStatus                                                 | Quota assembles coherent counters + cached sample/growth/FTS + hub retention; no new sampling ring                                                                                                  | Same latest maintenance sample; unavailable allocation stays null/unavailable                                                                                                            |
 
-The Tx context is internal and Store.transact is its sole supplier. Public service wrappers
-never accept an external approvedReplica boolean/context; HTTP input cannot select admission.
+The Tx context has a type-only export; Store.transact is its sole runtime supplier.
+reserveHubCheckpointTx updates exact encoded checkpoint and unique published/pinned byte counters
+in the admission transaction; replay does not reserve twice. All mutation deltas (including
+ledger/refusal/admin/member/lease growth, payload replacement and redaction) use these counters.
+Checkpoint prepare/publish moves the existing reservation between staging/published/pinned categories;
+cleanup releases unique retained bytes once. Failed transaction rolls back counters with state.
+prepareClaimAttemptTx CASes due candidate generation/current heads/forget fence, persists the
+first attemptId and returns that same ID on restart; stale candidate returns null. Ticket
+persistence follows claim, never supplies the first durable attempt ID.
+acquireSyncWorkTx owns only sync/revert_intent rows using version + digest + expiry CAS;
+retrySyncWorkTx updates retry/next_attempt_at and releases matching ownership atomically,
+returning false on stale ownership. Neither changes operation ID/digest/payload. Restart can
+reacquire expired ownership; ACK/pull terminal settlement cancels retries under the same CAS.
+WP2 retryWork remains summary/consolidate/rebuild-only; L4 never writes SQL directly.
+
+settleHubAcknowledgement first reads work + immutable operation by the supplied ID/digest
+and validates receipt identity. For positive hubSequence it constructs the valid operation
+entry from that stored operation + receipt and calls settleHubEntryTx (or the stored metadata
+arm if bodies were purged). For hubSequence=null it requires outcome=rejected and settles
+only correlated local refusal/work/intent in this transaction: no MemoryHubEntry construction,
+no hub/compact-sequence allocation, no canonical incorporation/receipt promotion/cursor or
+success report. Definitive revert refusal terminates its intent; forget refusal records the
+existing bounded retry/coverage policy (§7.3), retaining delete knowledge. Repeated refusal
+and restart are idempotent; a later actual approval can settle through the sequenced branch.
+
+Public service wrappers never accept an external approvedReplica boolean/context; HTTP input cannot select admission.
 L1 must extend current private apply to allow receipt promotion/domain repair without triggering
 same-ID early-return. Existing applyReceived/commitAcceptedResolution remain safe wrappers over
 the common approved settlement where appropriate. Existing acknowledgeOutbox remains a low-level
@@ -461,6 +547,46 @@ source event watermark validation. WP4 supplies live memory:read + orchestration
 maps validated available outcome to MemorySourcePage. No later MemoryAccess import in WP3,
 no private Worker helper promoted to public reader, no owner lookup by colliding local thread ID.
 
+### 4.3 L1-0 contract commit (WP1-owned prerequisite)
+
+Before L1 consumers, amend `C/memory.ts` and `C/memory.test.ts` in a distinct L1-0 contract
+commit; this planner changes no source. Add exported strict `MemoryResolutionApproval`:
+`{ resolutionId: MemoryResolutionId, appliedAtUtc: MemoryUtcTimestamp,
+revertDeadlineUtc: MemoryUtcTimestamp }`, requiring exactly
+`Date.parse(revertDeadlineUtc) - Date.parse(appliedAtUtc) === 30 * 24 * 60 * 60 * 1000`.
+Add `resolutionApproval: Schema.optionalKey(MemoryResolutionApproval)` to MemoryHubReceipt.
+Receipt filter forbids it on rejected/deleted outcomes; operation-aware MemoryHubEntry,
+MemoryCompactReceipt and ACK validation require it for approved resolve and forbid it for
+other operation kinds. An approved revert carries no new window. MemoryHubEntry's operation
+arm cross-checks resolve kind/result resolutionId; its metadata arm preserves the original approval without requiring
+purged bodies. MemoryCompactReceipt checks operationKind/resolutionId against approval,
+including checkpoint records using that schema. Tighten the approved revert reportGuard check
+to resolvingEnvironmentId === originEnvironmentId as for resolve; rejected guards stay null.
+validateMemoryCheckpointRecords cross-checks
+each retained resolution's times against its originating compact approval (purged resolutions
+need only the body-free receipt). Increase MEMORY_COMPACT_RECEIPT_MAX_BYTES from 256 to 1024
+in this same contract commit: the bounded approval adds UTC/id metadata that cannot safely
+fit the old per-record allowance. Keep the 128 MiB permanent-metadata global budget and
+receipt-count cap unchanged; L1 charges actual encoded bytes and reserves checkpoint deltas.
+Add compact-receipt encoded equality/+1 fixtures; no unbounded metadata exception.
+Tighten MemoryResolution's timestamp check
+to the same exact interval; its projected times come from receipt approval, never operation
+submission timestamps. Do not change MemoryOperation, canonical digest or apply input.
+
+Producer chain: L2 reads post-lock Hub Clock once at first approval; L1 append/store persists
+approval in receipt/compact ledger; WP1 push/apply/pull/checkpoint codecs serialize and decode
+that same receipt; L1 settlement/checkpoint install populates MemoryResolution; L1 MemoryDecider
+uses persisted approval deadline instead of revision.createdAtUtc; L2 compactor and WP6 history
+consume those times. Replay returns original approval, including after body purge; forget
+releases protection immediately while retaining body-free dedup approval. Operation-supplied
+legacy times remain immutable but are never authority. Fixtures reject missing/mismatched
+approval, extra fields, non-30-day windows and invented windows on revert/refusal; cover
+ACK/pull/checkpoint round trips and off-clock submissions. No legacy approved resolution may silently invent a window: migrate only from stored
+authoritative approval if available; otherwise refuse activation with unsupported_protocol
+until a compatible authoritative checkpoint is available. Since hub v1 is not activated on
+the stated baseline, L1-0 must land before first advertisement; mixed old v1 codecs are not
+claimed compatible.
+
 ## 5. Hub persistence, admission and authority
 
 ### 5.1 Migration and bounded SQL inventory
@@ -478,6 +604,11 @@ inbox, payload, receipt, compact ledger, sample or local-intent tables.
 | memory_hub_source_reads PK(space,request_id)                       | requester/owner/version, request digest + locator-only JSON, pending/completed/expired, first deadline, response digest + purgeable payload_ref. B-trees on owner/state/deadline and memory. TTL/consumption purge; no permanent transcript log.   |
 | memory_hub_retention PK(space)                                     | published checkpoint/S/causalBoundary/F, active token pin metadata and last compaction receipt. Pins/pages use existing private checkpoint staging namespace; typed bounded JSON, no extra public wire shape or duplicate staging table.           |
 
+Persist checkpoint_bytes and published_pinned_bytes in memory_hub_retention; admission computes
+exact deterministic encoding deltas for changed records/pages rather than scanning all payloads.
+Initialize counters from a consistent state before admission is enabled. Add sync_version and
+operation_digest to existing sync/revert_intent work metadata/columns; readEligibleOutbox returns
+those CAS fields and due expired ownership is recoverable. Do not add a second queue.
 Any extra local recovery/admin/registry columns or private staging discriminators are L1-owned
 extensions to existing WP2 tables in this migration. Migration test validates upgrade from
 070, restart and ID reconciliation. Secrets stay outside SQL; source payloads live only in
@@ -486,7 +617,17 @@ private purgeable memory_payloads namespace with memory/revision dependencies.
 Published checkpoint pages remain recoverable after member-token expiry; transient token pins
 expire independently. Staging cleanup never deletes the sole published recovery snapshot. New
 publication replaces the prior snapshot only after durable completeness; old pages survive
-while live handles pin them, within staging admission bounds.
+while live handles pin them, within staging admission bounds. New hub admission reserves
+`checkpointBytes + delta + publishedPinnedBytes + retained-page delta <= MEMORY_CHECKPOINT_STAGING_MAX_BYTES`
+(the existing 128 MiB budget; use the actual WP1 export, not a new limit). checkpointBytes is
+actual deterministic encoded pages/envelopes for live payload + valid revert inputs + every
+permanent ledger, not live body bytes alone. Shared retained pages count once. Reserve the
+next publication while keeping old published/pinned pages; inability refuses only the new
+request with capacity_exceeded. Approved replica install and reserved first forget never
+re-admit (M20); first-forget metadata/checkpoint reserve is acquired with identity admission.
+Reserved forget uses that reserve and releases purged payload/history protection; new excess
+suppression still needs its own admission. No approved state relies on later compaction to
+become representable. Equality succeeds; combined size +1 refuses atomically.
 
 Private registry/admin recovery rows are bounded by existing work/report/metadata budgets and
 active slot limits; terminal detailed recovery/report/admin records compact after 30 days,
@@ -506,7 +647,8 @@ once. Reuse WP1 dimensions/errors; do not invent wire limits or aggregate replic
 
 HubService validates batch envelope then admits each operation in its own transaction, so a
 semantic rejection does not block siblings. Recheck membership after lock acquisition before
-replay lookup. Same ID/digest returns original receipt/sequence; changed digest is
+replay lookup. Read authority.now inside the transaction after the SQL lock; reuse that
+instant for lease/apply/revert checks and first resolution approval. Same ID/digest returns original receipt/sequence; changed digest is
 operation_id_reused. Pre-admission envelope/auth/protocol failure has no sequenced domain receipt.
 Admitted semantic refusal has sequenced metadata-only receipt; transient SQL failure has none.
 Bound rejection receipt allocations too: reserve their compact metadata before admission; if
@@ -581,7 +723,7 @@ Claim key is (space,memory,canonical sorted distinct conflict heads). First succ
 hub claim wins; this does not establish globally earliest observation. Claim stores attemptId,
 current credential version, holder and frozen raw defaultModelSelection including options.
 Null/unavailable default returns typed failure before claim, no title-generator fallback.
-Hub Clock alone controls 120s lease, 30s renewal and fixed 600s attempt cap; member clock only
+Post-lock Hub Clock alone controls 120s lease, 30s renewal and fixed 600s attempt cap; member clock only
 schedules. Strict now < expiry; renewal min(now+120s, original deadline). New head, forget,
 rotation/revoke invalidate ownership and monotonically advance highest token in BOTH hub row
 and identity fence in one transaction. Matching release clears ownership only; stale release
@@ -591,14 +733,19 @@ Apply checks membership, replay ID/digest first, then holder/attempt/token/curre
 strict expiry/cap/tombstone, trusted generated output/scanner, all claimed parents. Commit
 revision/resolution/judgment/original references, receipt/sequence, report guard and clear lease
 atomically. Record requested/effective model, provider instance, resolving environment,
-judgment and originals; retain revert inputs for 30 days unless forget. Validated accepted
+judgment and originals; fix approval.appliedAtUtc at this hub instant and its deadline exactly
+30 days later (§4.3), retaining revert inputs until that deadline unless forget. Replay reuses
+stored approval even if the retry clock differs. Replace the decider revision.createdAtUtc
+guard with this authoritative approval deadline; strict now < deadline, equality expires. Validated accepted
 result applies immediately; local index/report deferral does not delay canonical application.
 
 MemoryResolutionRegistry is app-scoped ownership INSIDE MemorySyncService, not a second service
 or Worker. start recovers durable candidates/tickets and runs immediate syncOnce. Every syncOnce,
 even empty push, sweeps candidates after receive. Wakeups are hints; SQL/restart sweep authoritative.
-Persist stable attemptId before claim, reload heads/forget_pending/generation, reserve slot,
-claim using frozen default, persist ticket, CAS ownership and register runClaimedResolution.
+Reload heads/forget_pending/generation, call prepareClaimAttemptTx and commit its attemptId,
+then reserve slot, claim using that stored ID/frozen default, persist ticket, CAS ownership
+and register runClaimedResolution. Hub success then crash before local ticket retries the
+same persisted claim ID to recover the same lease; never generate a replacement ID.
 scheduleConflictResolution returns after persistence + registration, never model completion.
 
 At most four reserved/running/finalizing executions/environment, one per memory. Candidate
@@ -634,8 +781,12 @@ Permanent schema/secret/auth/identity failures stop until relevant policy/settin
 Accepted result arriving by pull may complete/cancel a candidate before its retry.
 
 Report key is exactly WP2 SHA-256(space:operation:resolution), centralized by L1 for resolve and
-accepted revert. Each replica retains body-free replay/checkpoint guard; only resolving environment
-materializes/drains Bot delivery. Failed attempt IDs remain WP2's environment/work/attempt key.
+accepted revert. Each replica retains body-free replay/checkpoint guard. For resolve, the
+claim holder/result resolving environment materializes/drains Bot delivery. For accepted revert,
+the immutable revert operation origin (the revert submitter, even if different from the original
+resolver) owns delivery; reportGuard.resolvingEnvironmentId records that delivery owner. L1
+constructs and validates this guard in append/settlement/checkpoint. Original resolver and other
+replicas keep only body-free guards; no duplicate success delivery. Failed attempt IDs remain WP2's environment/work/attempt key.
 Do not copy another environment's success report; delivery quota/failure cannot block cursor or
 restart resolution. Pending revert preserves stable immutable operation as intent; only accepted
 compensation enters DAG, refusal settles terminal review without success report/descendants.
@@ -649,7 +800,17 @@ not generation/deferred drain. Ordered cycle: bootstrap if needed → bounded pu
 cleanup and bounded collect/respond → one bounded push → bounded pull → candidate sweep.
 No model wait, no provider on turn-start path, no self HTTP.
 
-Restore outbox operations using readEligibleOutbox(space,now,limit) and readWorkOperation(id).
+Restore outbox candidates using revised readEligibleOutbox(space,now,limit), then
+readWorkOperation(candidate.work.id); use candidate.version/operationId/digest for acquisition.
+The old MemoryWork[] return is replaced, not an assertion that baseline exposes CAS versions.
+L1 changes readEligibleOutbox selection SQL BEFORE LIMIT: due base forget first, then due
+suppression extension, then ordinary sync/revert_intent; within each class ORDER BY
+next_attempt_at,id. Base/extension classification uses immutable operation metadata, not a
+nullable body after purge. Retain persisted backoff and finite sweeps; failed forget becomes
+not-due, allowing unrelated work to advance, and a finite due-forget queue drains before
+ordinary work (no infinite producer fairness promise). Receive keeps hub sequence order.
+Acquire each selected work with acquireSyncWorkTx before transport; persist uncertainty/429/5xx
+backoff with retrySyncWorkTx, keeping identical submission across restart. No summary retryWork.
 Respect complete encoded wire count/byte envelopes, retain whole items; no partial fact or
 zero-progress oversized-item loop. Each ACK settles individually; persist per-work retry metadata.
 Network/5xx/429 uses 1/2/4/8/16/30s delays, bounded Retry-After<=30s. Auth/protocol/identity
@@ -674,7 +835,8 @@ and causal boundary, not all history. Reuse WP1 validation and combined page cou
 <=100 total records, checkpoint/pull envelope <=262144 bytes. Fixed page identity/ordering and S stay stable; forget may only redact payloads and invalidate
 metadata, never introduce stale text or renumber records. Fixed pages durable, no SQL lock
 held across HTTP. Member token pins needed tail from S for 600s FROM FIRST ISSUE; retry never
-extends expiry. One handle/member, <=128/hub, <=128 MiB staging. Expired/replaced token discards
+extends expiry. One handle/member, <=128/hub, <=128 MiB staging including the next publication reservation
+and retained published/pinned pages (§5.1). Expired/replaced token discards
 partial staging and rejoins; no partial install. Preparation bounds are hub admission, not
 replica quota reapproval. Token is not credential. Authorization/version is checked on pages.
 
@@ -755,7 +917,9 @@ HubService supplies principal on server side. Disabled constructs service but st
 Source request stamps trusted requester/space/deadline; exact sourceThread.environmentId owns
 read, never hostname or request override. requestId/digest retries share initial 75s deadline.
 At most 32 live reads/requester, 128/hub, <=64KiB outcome and bounded <=32/64KiB collect.
-Clean expired before admission, consumed results early. No transcript operation/log/checkpoint/
+Clean expired before admission, consumed results early. “Read the original on its device when
+needed” means no shared or accumulating original archive; the existing M16 maximum 75-second
+purgeable SQL relay buffer remains allowed. No transcript operation/log/checkpoint/
 FTS/event/report; private cache payload tied to memory/revision and purged on forget/expiry.
 
 Requester validates evidence-linked locators/watermark/current generation/live compound permit
@@ -848,14 +1012,14 @@ read-only in WP3; joint-start test consumes actual Worker unchanged.
 | L5 integration                   | MODIFY S/server.ts; NEW S/memory/MemoryHubScenarios.test.ts; MODIFY this 030 and 000 WP3 cycle only; structure/{INDEX.md,server.md,manifest.json} only if module boundary changes, subject to coordinator scope                                                                                 | Coordinator after L1–L4; one core instance/startup/source-reader injection/CloudTaskSource and real H/A/B fixtures. Risks: duplicated layers, initial hub readiness, confusing source CI with packaged evidence.               |
 
 For this rewrite ONLY 030 and 000 are writable; the above map describes future authorized
-implementation, not permission to touch source/structure now. Contracts remain WP1-owned;
-if frozen wire is insufficient, stop and amend with coordinator instead of adding DTOs in lanes.
+implementation, not permission to touch source/structure now. Contracts remain WP1-owned; §4.3 specifies the prerequisite L1-0 contract commit,
+not lane permission to invent competing DTOs. Coordinator owns its integration before L1.
 
 Integration order:
 
 1. Coordinator verifies integrated WP2 `637b30327`/dev `637a98351`, freezes SHA and obtains
    architect reflection then independent A. WP2 D remains incomplete until its review/CI close.
-2. L1 lands interface/private codec/migration and focused fixtures; signatures, error mapping,
+2. L1-0 lands the §4.3 WP1 contract amendment first; L1 then lands interface/private codec/migration and focused fixtures; signatures, error mapping,
    transaction ownership and idempotent keys reviewed before consumer parallelism.
 3. L2 and L3 proceed on disjoint files from L1; freeze HubService eleven-method interface before
    L3 consumer implementation. SQL fixes return to L1. No consumer inline SQL.
@@ -869,7 +1033,18 @@ Integration order:
 Paths below are exact future test targets; existing files are extended, new files collected by
 server test shards. Use real SQLite/service logic and controlled auth/network/provider seams.
 Race milestones use Deferred, persisted events, drain and TestClock; no sleep/poll/timeouts as
-success evidence, no real provider/network/live state. All new rows are NOT RUN here.
+success evidence, no real provider/network/live state. All new rows are NOT RUN here. Additional rev 11a activation rows below belong to the same
+focused files and CI collection, not local execution.
+
+| Owner / focused file                                       | Activation -> observable assertion                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L1 MemoryQuotaService.test.ts + L2 MemoryCompactor.test.ts | Combined live/history/permanent-ledger encoded bytes at equality/+1; old published + new publication + pinned old pages coexist. Reject only new admission atomically; previously approved recovery and reserved forget succeed; rollback/replay never drift counters.                                   |
+| L1 MemoryService.test.ts                                   | Null-sequence capacity refusal for forget and revert, crash/restart before/after settlement: correlated terminal refusal/retry policy persists, no synthesized sequence, DAG/report approval or cursor movement.                                                                                         |
+| L1 MemoryStore.test.ts + L4 MemorySyncService.test.ts      | More than 100 ordinary due rows precede base forget + extension; actual HubClient sends base then extension before ordinary content. Fail transmission, restart, honor backoff and show unrelated due rows progress. Revert response lost -> durable retry -> restart sends identical ID/digest/payload. |
+| L1 MemoryStore.test.ts + L4 MemorySyncService.test.ts      | Hub claim succeeds but no local ticket persists; restart reads candidate attemptId and replays same claim/lease, registers once. Candidate CAS loss never starts network.                                                                                                                                |
+| L2 MemoryHubService.test.ts + L1 MemoryDecider.test.ts     | Deferred SQL lock wait crosses lease/deadline, then hub Clock read rejects expiry. Skewed/offline createdAtUtc cannot alter exact 30-day approval; replay/ACK/pull/checkpoint preserve times; forget immediately removes protected inputs.                                                               |
+| L1 static type fixtures in focused CI                      | transact/withReceivedCursor discharge Transaction while preserving unrelated service R; runtime tag stays private.                                                                                                                                                                                       |
+| L5 MemoryHubScenarios.test.ts                              | A resolves, B reverts: only B delivers reverted report once across ACK/pull/checkpoint/restart; A keeps guard only; pending/rejected revert delivers none.                                                                                                                                               |
 
 | Lane / focused test files                                                                                                                                              | Activation -> observable assertion                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -892,7 +1067,7 @@ success evidence, no real provider/network/live state. All new rows are NOT RUN 
 | L5 S/memory/MemoryHubScenarios.test.ts                                                                                                                                 | H/A/B real stores fork common parent including hub local write, race automatic claims -> one accepted result with all parents and requested/effective six-provider envelope provenance. Default settings change mid-run leaves frozen model/options; unavailable provider no fallback.                                                              |
 | L5 same file                                                                                                                                                           | Third variant invalidates paused resolution; takeover at hub exact 120s rejects old output; renewal failure/600s cap leave quarantine; unrelated memory sync progresses through each case.                                                                                                                                                          |
 | L5 same file                                                                                                                                                           | H approves resolve A/B; C unsent descendant of A pulls BEFORE push -> H result present, frontier result+C, cursor/sibling advance; later push forms hub conflict, descendant parent known. Repeat approved revert and forget, no body resurrection.                                                                                                 |
-| L5 same file                                                                                                                                                           | Offline pending revert T, H accepts U, C restart/pull/push rejection -> frontier U only, no T descendants/revert report/repeated claim loop; lost accepted ACK repaired once only at resolver.                                                                                                                                                      |
+| L5 same file                                                                                                                                                           | Offline pending revert T, H accepts U, C restart/pull/push rejection -> frontier U only, no T descendants/revert report/repeated claim loop; lost accepted ACK repaired once only at revert submitter.                                                                                                                                              |
 | L5 same file                                                                                                                                                           | Forget vs offline edit/import/revert/late model/checkpoint/rebuild -> all purged after drain and permanent suppression retained; base+extension refusal/uncertain retry distinct statuses; repeated purge retains forget sync; forget_pending never reaches model/source. Summary renew/retry joint fixture keeps existing WP2 behavior.            |
 | L5 same file                                                                                                                                                           | A→H→B→H→A source page, B sole synthetic source/A colliding thread -> B watermark/text only; no A transcript read or transcript operation/checkpoint/FTS. Offline B exact 75s -> unavailable; revoke/forget during read/result -> payload purge and late discard.                                                                                    |
 | L5 same file                                                                                                                                                           | Run REAL compactor, offline third member cursor below produced F -> bootstrap+tail+bounded stale intent review. Floor equality, pin/expiry/protected history and post-checkpoint forget/rebuild preserve compact receipts/suppression.                                                                                                              |
@@ -910,20 +1085,32 @@ WP4 consumes stable space/bootstrap/sync status, non-wire authority/owner reader
 settings service and body-free change stream; it supplies live permits and public readSource,
 RPC/MCP/provider snapshot activation. #171 cloud input/resume requires WP4 adapter review,
 not WP3 edit. WP5 consumes established bootstrap/materialization and permanent suppression,
-never immutable-space rewrite. WP6 consumes resolver-local report guards/delivery, split forget
+never immutable-space rewrite. WP6 consumes resolve-holder/revert-submitter report guards/delivery, split forget
 status, accepted vs local processing, revert within 30 days and dedicated settings CAS.
 
 Remaining implementation risks: dual domain/hub ledger atomicity and hub-local precommits;
 partial administration across secret/SQL/settings; consistent staged checkpoint under forget;
-registry uncertain submission/ownership recovery; actual global tail admission vs samples;
-packaged SQLite feature support. None needs a new product decision. Reflection must scrutinize
-these frozen interfaces before parallel implementation; independent A and CI remain mandatory.
+registry uncertain submission/ownership recovery; exact checkpoint-delta sizing and compact-receipt
+1024-byte codec coverage; actual global tail admission vs samples;
+packaged SQLite feature support. None needs a new product decision. Repeat reflection must scrutinize
+these corrected frozen interfaces before parallel implementation; independent A and CI remain mandatory.
 
 This rewrite changes only 030 and the WP3 cycle/minimal relevant decision rows in 000.
 Manual relative-file/anchor review and two-file fmt/check are the authoring verifiers, not
 TypeScript or runtime proof. No PR creation, push, live server or provider state access.
-Other plans are read-only: the coordinator must amend their current port assumptions at the
-next owning phase; the Korean handoff lists exact affected lines.
+Other plans are read-only: coordinator amends these exact current-baseline assumptions in the
+owning phase. Signatures below are frozen future consumer seams, not baseline exports.
+`Permit` is the repeatable live Effect in §4, mapped to MemoryAccessError/MemoryServiceError.
+
+| Document:line -> consumer port                               | Replacement signature / behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Owning phase                                    |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| 040:182 -> MemoryService mutation                            | upsert(M.MemoryUpsertInput, Permit), forget(M.MemoryForgetInput, Permit) -> Effect<Store.StoredReceipt, MemoryServiceError>; revertResolution(M.MemoryRevertResolutionInput, Permit) -> Effect<M.MemoryRevertResult, MemoryServiceError>. Remove applyOperation(input,permit); map live auth denial into typed service errors after lock.                                                                                                                                                                        | WP4 consumes WP2/L1                             |
+| 040:792–799 -> public readSource                             | readSource(input: M.MemoryReadSourceInput, permit: Permit) -> Effect<M.MemorySourcePage, MemoryServiceError>; compose prepareSourceRead -> authority.readSource -> validateSourceOutcome (§4.2). Available maps page; unavailable maps source_unavailable; auth remains denial, no unavailable conversion.                                                                                                                                                                                                       | WP4 activates; L1 definitions/L4 authority      |
+| 040:639 -> MemorySyncService settings/status                 | getHubSettings(input: M.MemoryHubSettingsGetInput, permit: Permit) -> Effect<M.MemoryHubSettingsView, MemoryServiceError>; updateHubSettings(input: M.MemoryHubSettingsUpdateInput, permit: Permit) -> Effect<M.MemoryHubSettingsUpdateResult, MemoryServiceError>; syncStatus(input: M.MemorySyncStatusInput, permit: Permit) -> Effect<M.MemorySyncStatus, MemoryServiceError>. settings:write for settings, memory:read for status; dedicated CAS §5.3, storage assembled by readStorageStatus.               | L3 settings core/L4 wrappers; WP4 RPC/MCP       |
+| 040:206 / 050:23,327 -> MemorySyncService local readiness    | readLocalReadiness() -> Effect<{ memorySpaceId: Space \| null; bootstrap: "unbound" \| "staging" \| "ready" }, MemoryServiceError>; requireBootstrap(space: Space) -> Effect<void, MemoryServiceError>. Read persisted settings/bootstrap together, no network; absent/not ready -> bootstrap_required; bootstrapped offline remains pendingSync.                                                                                                                                                                | L4 produces; WP4 snapshot/WP5 import consumes   |
+| 050:74,472 -> MemoryService.resolveProjectKey                | resolveProjectKey(space: M.MemorySpaceId, project: M.ScopedProjectRef) -> Effect<M.MemoryProjectKey \| null, MemoryServiceError>; use readiness space + captured binding version, null -> scope_unmapped.                                                                                                                                                                                                                                                                                                        | WP5 correction; WP2 existing port               |
+| 060:810–824 -> MemoryService.forget/revertResolution/history | forget(input, Permit) -> Effect<Store.StoredReceipt, MemoryServiceError>; revertResolution(input, Permit) -> Effect<M.MemoryRevertResult, MemoryServiceError>; history(input: M.MemoryHistoryInput, permit: Permit) -> Effect<M.MemoryHistoryPage, MemoryServiceError>. Split base/extension receipts separately; history.revertResults owns pending/terminal/rejected/accepted status. Null-sequence refusal is terminal local settlement, no fabricated approval; visible compensation uses localAvailability. | L1/L4 persist; WP6 presentation                 |
+| 060:817 -> reconcileResolutionReportTx / report delivery     | reconcileResolutionReportTx({record: M.MemoryCompactReceipt, localEnvironmentId: Env}) -> InTx<{reportId: M.MemoryReportDelivery["reportId"] \| null; deliverable: boolean}>. Resolve owner = claim holder; accepted revert owner = revert operation origin, not original resolver. Same guard/key on ACK/pull/checkpoint; pending/rejected never success.                                                                                                                                                       | L1 guard/L4 reconciliation; WP6 report consumer |
 
 ## Superseded and folded rules
 
@@ -959,3 +1146,9 @@ IDs remain governed by 000 M1–M20, not by a restored historical appendix.
 | rev 7 audit cursor-stop + rev 8 M20         | §7.2, §9, §11: normal sequential braked upsert→forget replaces replica capacity refusal/drain barrier.         |
 | rev 10 R6 fairness                          | §7.2, §11: SQL order/caps/backoff/restart; healthy row behind failures/holds completes.                        |
 | rev 10 R7 hold release                      | §7.2, §11: only policy-version rescan; no per-item explicit rescan API.                                        |
+| rev 11a: R1 G-1 checkpoint reservation      | §4–5.1, §7.1, §9, §11: encoded combined state and retained old/new pages reserved atomically.                  |
+| rev 11a: R1 G-2 authoritative time          | §4, §4.3, §5.2, §6, §11: post-lock clock, immutable receipt approval, L1-0 and decider replacement.            |
+| rev 11a: R1 G-3 / A1 #3 forget priority     | §4.1, §7, §11: LIMIT-before selection priority, persisted retry and restart transport proof.                   |
+| rev 11a: A1 #1 / #2 ACK and retry           | §4–4.1, §7, §11: receipt/reference ACK, null-sequence refusal and sync/revert ownership retry.                 |
+| rev 11a: A1 #4 / #5 Tx and claim            | §4–4.1, §6, §11: Transaction discharge and pre-claim candidate attempt CAS.                                    |
+| rev 11a: A1 #6 / R1 relay clarification     | §6, §8, §12: precise phase handoffs/revert report owner and bounded M16 relay interpretation.                  |
