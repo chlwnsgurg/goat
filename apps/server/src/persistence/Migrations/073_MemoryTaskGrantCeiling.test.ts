@@ -42,7 +42,10 @@ it.effect(
       yield* runMigrations({ toMigrationInclusive: 72 });
       yield* insertTask;
       yield* insertDispatches;
-      assert.deepStrictEqual(yield* runMigrations(), [[73, "MemoryTaskGrantCeiling"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [73, "MemoryTaskGrantCeiling"],
+        [74, "MemoryImportLineage"],
+      ]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },
       ]);
@@ -129,6 +132,7 @@ it.effect(
         [
           { migration_id: 73, name: "SyntheticUpstream" },
           { migration_id: 74, name: "MemoryTaskGrantCeiling" },
+          { migration_id: 75, name: "MemoryImportLineage" },
         ],
       );
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [

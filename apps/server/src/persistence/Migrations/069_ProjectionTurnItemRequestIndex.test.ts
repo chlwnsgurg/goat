@@ -36,6 +36,7 @@ it.effect(
         [71, "MemoryHubSync"],
         [72, "MemorySearchCounters"],
         [73, "MemoryTaskGrantCeiling"],
+        [74, "MemoryImportLineage"],
       ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);

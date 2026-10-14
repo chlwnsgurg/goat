@@ -14,6 +14,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
@@ -34,9 +35,9 @@ const principal = (environmentId = hubEnv): M.MemoryHubPrincipal => ({
   credentialVersion: 1,
   scopes: ["memory:sync"],
 });
-const database = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-);
+const database = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(lineageMigration)),
+).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storeLayer = Store.layer.pipe(Layer.provideMerge(database));
 const core = Service.layer.pipe(
   Layer.provide(

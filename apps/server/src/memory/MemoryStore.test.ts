@@ -15,6 +15,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
@@ -110,7 +111,11 @@ const decision = (op = operation()): Store.MemoryDecision => ({
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
 const setup = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(searchMigration),
+  ),
 ).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
@@ -161,6 +166,7 @@ const checkpoint = () => {
     ],
     fences: [{ memorySpaceId: space, memoryId: memory, highestFencingToken: 0, activeLease: null }],
     suppressions: [],
+    importLineage: [],
     nextCursor: null,
     bootstrapComplete: true,
   });
@@ -2940,7 +2946,11 @@ describe("MemoryStore transient source relay", () => {
         const firstLayer = Store.layer.pipe(
           Layer.provideMerge(
             Layer.effectDiscard(
-              migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+              migration.pipe(
+                Effect.andThen(hubMigration),
+                Effect.andThen(lineageMigration),
+                Effect.andThen(searchMigration),
+              ),
             ).pipe(Layer.provideMerge(db)),
           ),
         );

@@ -1298,7 +1298,10 @@ export class MemoryStore extends Context.Service<
     readonly reconnectParked: (
       decision: MemoryDecision,
       expectedGeneration: number,
-    ) => Effect.Effect<StoredReceipt, MemoryStorageError | MemoryStoreConflict>;
+    ) => Effect.Effect<
+      StoredReceipt,
+      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError
+    >;
     readonly withReceivedCursor: <A, E, R>(
       input: {
         readonly memorySpaceId: M.MemorySpaceId;
@@ -1496,6 +1499,14 @@ export class MemoryStore extends Context.Service<
       space: M.MemorySpaceId,
       scope: M.MemoryScope,
     ) => Effect.Effect<MemoryUsage, MemoryStorageError>;
+    readonly readImportLineage: (
+      space: M.MemorySpaceId,
+      id: M.MemoryId,
+    ) => Effect.Effect<ReadonlyArray<M.MemoryImportLineageRecord>, MemoryStorageError>;
+    readonly unionImportLineageTx: (
+      records: ReadonlyArray<M.MemoryImportLineageRecord>,
+      admission: MemoryAdmissionContext,
+    ) => InTx<void, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
     readonly readSuppressions: (
       space: M.MemorySpaceId,
       id: M.MemoryId,
@@ -1650,6 +1661,7 @@ const decodeReport = Schema.decodeUnknownEffect(M.MemoryReportDelivery);
 const threadCodec = codec(M.ScopedThreadRef);
 const decodeCheckpoint = Schema.decodeUnknownEffect(M.MemoryHubCheckpointPage);
 const checkpointCodec = codec(M.MemoryHubCheckpointPage);
+const lineageCodec = codec(M.MemoryImportLineageRecord);
 const stagedCheckpointCodec = codec(
   Schema.Struct({
     page: M.MemoryHubCheckpointPage,
@@ -1743,6 +1755,33 @@ const metadataOf = (operation: M.MemoryOperation): typeof Metadata.Type => {
     return safe;
   }
   return metadata;
+};
+
+const lineageForRevision = (revision: M.MemoryRevision): readonly M.MemoryImportLineageRecord[] => {
+  const source = revision.provenance.importSource;
+  if (!source) return [];
+  const base = { memorySpaceId: revision.memorySpaceId, memoryId: revision.memoryId };
+  return [
+    ...[
+      {
+        environmentId: revision.provenance.environmentId,
+        sourceId: source.sourceId,
+        sourceItemKey: source.sourceItemKey,
+      },
+      ...source.sourceAliases,
+    ].map((sourceKey) => ({ ...base, kind: "sourceKey" as const, sourceKey })),
+    ...[source.contentFingerprint, ...source.acceptedContentFingerprints].map(
+      (contentFingerprint) => ({
+        ...base,
+        kind: "content" as const,
+        content: {
+          scope: revision.scope,
+          assertionKind: revision.assertionKind,
+          contentFingerprint,
+        },
+      }),
+    ),
+  ];
 };
 
 const importTime = (ms: number) => Effect.succeed(DateTime.formatIso(DateTime.makeUnsafe(ms)));
@@ -2819,12 +2858,19 @@ const make = Effect.gen(function* () {
         if (!reconnect && decision.identity) {
           const reservation =
             accepted && !tombstones.length && op.kind !== "forget"
-              ? yield* firstForgetReservation(op)
+              ? yield* reservationForRevisions(
+                  op,
+                  (yield* loadAggregate(op.memorySpaceId, op.memoryId)).revisions,
+                  false,
+                )
               : { bytes: M.MEMORY_PAYLOAD_MAX_UTF8_BYTES, keys: 0 };
           yield* stored(
             "identity",
             sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${op.memorySpaceId},${op.memoryId},${yield* identityCodec.encode(decision.identity)},${yield* fenceCodec.encode(decision.fence ?? { memorySpaceId: op.memorySpaceId, memoryId: op.memoryId, highestFencingToken: 0, activeLease: null })},${M.MEMORY_IDENTITY_CORE_MAX_BYTES + reservation.bytes},${reservation.keys}) ON CONFLICT(space,memory_id) DO UPDATE SET reserve_bytes=max(memory_identity_ledger.reserve_bytes,excluded.reserve_bytes),reserve_keys=max(memory_identity_ledger.reserve_keys,excluded.reserve_keys) WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=excluded.space AND t.memory_id=excluded.memory_id)`,
           );
+        }
+        if (accepted && !decision.pending && !tombstones.length && op.kind !== "forget") {
+          yield* unionImportLineageTx(lineageForRevision(op.revision), decision.admission);
         }
         if (accepted && op.kind === "forget") {
           const t = op.tombstone;
@@ -5012,6 +5058,7 @@ const make = Effect.gen(function* () {
             yield* putItem(item, heads, checkpointWatermark);
           }
         }
+        yield* persistImportLineageTx(pages.flatMap((page) => page.importLineage));
         for (const identity of pages.flatMap((page) => page.identities)) {
           const current = yield* loadAggregate(input.memorySpaceId, identity.memoryId);
           if (current.tombstone) continue;
@@ -5292,6 +5339,7 @@ const make = Effect.gen(function* () {
   const reservationForRevisions = Effect.fn("MemoryStore.reservationForRevisions")(function* (
     op: Pick<M.MemoryOperation, "memorySpaceId" | "memoryId" | "operationId">,
     revisions: MemoryAggregate["revisions"],
+    includeRevisionLineage = true,
   ) {
     const records = new Map<string, M.MemorySuppressionRecord>();
     for (const { revision, payload } of revisions) {
@@ -5312,7 +5360,21 @@ const make = Effect.gen(function* () {
     let bytes = 0;
     for (const record of records.values())
       bytes += new TextEncoder().encode(yield* suppressionCodec.encode(record)).length;
-    return { bytes: Math.max(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES, bytes), keys: records.size };
+    const lineage = new Map<string, M.MemoryImportLineageRecord>();
+    for (const record of [
+      ...(yield* readImportLineage(op.memorySpaceId, op.memoryId)),
+      ...(includeRevisionLineage
+        ? revisions.flatMap(({ revision }) => lineageForRevision(revision))
+        : []),
+    ])
+      lineage.set(M.memoryImportLineageRecordKey(record), record);
+    let lineageBytes = 0;
+    for (const record of lineage.values())
+      lineageBytes += new TextEncoder().encode(yield* lineageCodec.encode(record)).length + 64;
+    return {
+      bytes: Math.max(M.MEMORY_PAYLOAD_MAX_UTF8_BYTES, bytes) + lineageBytes,
+      keys: records.size + lineage.size,
+    };
   });
   const firstForgetReservation = Effect.fn("MemoryStore.firstForgetReservation")(function* (
     op: M.MemoryOperation,
@@ -5417,10 +5479,15 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=p.space AND i.memory_id=p.memory_id AND h.value=p.payload_ref)) AS history,
       (SELECT count(*) FROM memory_identity_ledger) AS ids,
       (SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipts,
-      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys) AS permanent,
+      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage) AS permanent,
       (SELECT coalesce(sum(coalesce(length(compact_blob),length(CAST(compact_json AS BLOB)))),0) FROM memory_compact_receipts)+
       (SELECT count(*)*${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} FROM memory_events e WHERE NOT EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=e.memory_space_id AND c.operation_id=e.operation_id))+
       (SELECT count(*)*${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipt_bytes`,
+    );
+    const lineage = yield* stored(
+      "usage-lineage",
+      sql<{ bytes: number }>`
+      SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM memory_import_lineage WHERE space=${space}`,
     );
     return {
       scopeItems: scoped[0]!.count,
@@ -5440,13 +5507,14 @@ const make = Effect.gen(function* () {
       lifetimeIds: identities[0]!.count,
       permanentBytes:
         identities[0]!.bytes +
+        lineage[0]!.bytes +
         keys[0]!.bytes +
         receipts[0]!.bytes +
         identities[0]!.reserved_receipts * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
       receipts: receipts[0]!.count + identities[0]!.reserved_receipts,
       liveBytes: payloads[0]!.live,
       historyBytes: payloads[0]!.history,
-      logicalBytes: payloads[0]!.all_bytes + log[0]!.bytes + keys[0]!.bytes,
+      logicalBytes: payloads[0]!.all_bytes + log[0]!.bytes + keys[0]!.bytes + lineage[0]!.bytes,
       keys: keys[0]!.count + identities[0]!.reserved_keys,
       workItems: work[0]!.count,
       workBytes: work[0]!.bytes,
@@ -5454,6 +5522,86 @@ const make = Effect.gen(function* () {
       logRows: log[0]!.count,
       logBytes: log[0]!.bytes,
     };
+  });
+  const readImportLineage = Effect.fn("MemoryStore.readImportLineage")(function* (
+    space: M.MemorySpaceId,
+    id: M.MemoryId,
+  ) {
+    const rows = yield* stored(
+      "lineage-read",
+      sql<{ record_json: string }>`
+      SELECT record_json FROM memory_import_lineage WHERE space=${space} AND memory_id=${id}
+      ORDER BY kind,key`,
+    );
+    return yield* Effect.forEach(rows, (row) => lineageCodec.decode(row.record_json, strict));
+  });
+  const persistImportLineageTx = Effect.fnUntraced(function* (
+    input: ReadonlyArray<M.MemoryImportLineageRecord>,
+  ) {
+    yield* Transaction;
+    const changed: M.MemoryImportLineageRecord[] = [];
+    for (const value of input) {
+      const json = yield* lineageCodec.encode(value);
+      const record = yield* lineageCodec.decode(json, strict);
+      const lookup = M.memoryImportLineageRecordKey({
+        ...record,
+        memoryId: M.MemoryId.make("00000000-0000-4000-8000-000000000000"),
+      });
+      const identity = yield* stored(
+        "lineage-identity",
+        sql`
+        SELECT 1 FROM memory_identity_ledger WHERE space=${record.memorySpaceId} AND memory_id=${record.memoryId}`,
+      );
+      if (!identity.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const inserted = yield* stored(
+        "lineage-union",
+        sql`
+        INSERT INTO memory_import_lineage(space,memory_id,kind,key,record_json)
+        VALUES (${record.memorySpaceId},${record.memoryId},${record.kind},${lookup},${json})
+        ON CONFLICT(space,memory_id,kind,key) DO NOTHING RETURNING memory_id`,
+      );
+      if (inserted.length) changed.push(record);
+    }
+    return changed;
+  });
+  const unionImportLineageTx: MemoryStore["Service"]["unionImportLineageTx"] = Effect.fn(
+    "MemoryStore.unionImportLineageTx",
+  )(function* (input, admission) {
+    if (admission.kind === "approvedReplica") {
+      yield* persistImportLineageTx(input);
+      return;
+    }
+    yield* withHubBudget(
+      Effect.gen(function* () {
+        const changed = yield* persistImportLineageTx(input);
+        for (const record of changed) {
+          const rows = yield* stored(
+            "lineage-count",
+            sql<{ count: number }>`
+          SELECT count(*) AS count FROM memory_import_lineage
+          WHERE space=${record.memorySpaceId} AND memory_id=${record.memoryId}`,
+          );
+          if (rows[0]!.count > M.MEMORY_IMPORT_LINEAGE_MAX_RECORDS_PER_MEMORY)
+            return yield* new MemoryCapacityError({
+              dimension: "import_lineage_records",
+              current: rows[0]!.count,
+              limit: M.MEMORY_IMPORT_LINEAGE_MAX_RECORDS_PER_MEMORY,
+            });
+        }
+        if (!changed.length) return;
+        const bytes = (yield* globalHubCounters()).find(
+          (row) => row.dimension === "import_lineage_bytes",
+        )?.value;
+        if (bytes === undefined)
+          return yield* new MemoryStorageError({ stage: "lineage-counter", cause: undefined });
+        if (bytes > M.MEMORY_IMPORT_LINEAGE_MAX_BYTES)
+          return yield* new MemoryCapacityError({
+            dimension: "import_lineage_bytes",
+            current: bytes,
+            limit: M.MEMORY_IMPORT_LINEAGE_MAX_BYTES,
+          });
+      }),
+    );
   });
   const readSuppressions = Effect.fn("MemoryStore.readSuppressions")(function* (
     space: M.MemorySpaceId,
@@ -5475,6 +5623,7 @@ const make = Effect.gen(function* () {
       (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) FROM memory_events)+
       (SELECT coalesce(sum(length(CAST(metadata_json AS BLOB))),0) FROM memory_inbox_pending)+
       (SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+
+      (SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage)+
       (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger) AS bytes`,
     );
     return rows[0]!.bytes;
@@ -7888,6 +8037,7 @@ const make = Effect.gen(function* () {
       identities: [],
       fences: [],
       suppressions: [],
+      importLineage: [],
       nextCursor: cursorFor(id, ordinal + 1),
       bootstrapComplete: false,
     });
@@ -7928,6 +8078,10 @@ const make = Effect.gen(function* () {
         )
       )
         return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+      all.importLineage = [
+        ...all.importLineage,
+        ...(yield* readImportLineage(space, current.identity.memoryId)),
+      ];
       all.identities = [...all.identities, current.identity];
       all.fences = [...all.fences, current.fence];
       if (current.item)
@@ -8011,6 +8165,7 @@ const make = Effect.gen(function* () {
       "identities",
       "fences",
       "suppressions",
+      "importLineage",
     ] as const;
     const pages: M.MemoryHubCheckpointPage[] = [];
     let page = blank(0);
@@ -9287,6 +9442,8 @@ const make = Effect.gen(function* () {
       ),
     persistCompactReceipt,
     prunePayloads,
+    readImportLineage,
+    unionImportLineageTx,
     readSuppressions,
     logicalBytes: logicalBytes(),
     counters,

@@ -56,6 +56,7 @@ describe("GOAT migration ids", () => {
         "MemoryHubSync",
         "MemorySearchCounters",
         "MemoryTaskGrantCeiling",
+        "MemoryImportLineage",
       ]);
       assert.isFalse(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* runMigrations(), [[61, "PullRequestReviewGuides"]]);
@@ -79,6 +80,7 @@ describe("GOAT migration ids", () => {
         [71, "MemoryHubSync"],
         [72, "MemorySearchCounters"],
         [73, "MemoryTaskGrantCeiling"],
+        [74, "MemoryImportLineage"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -86,7 +88,7 @@ describe("GOAT migration ids", () => {
   );
   it.effect("reconciles Memory by stable name after upstream claims its old ID", () =>
     Effect.gen(function* () {
-      assert.deepStrictEqual(migrationManifest.at(-1), [73, "MemoryTaskGrantCeiling"]);
+      assert.deepStrictEqual(migrationManifest.at(-1), [74, "MemoryImportLineage"]);
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`INSERT INTO memory_quota_counters VALUES ('fixture','live','user',7)`;
