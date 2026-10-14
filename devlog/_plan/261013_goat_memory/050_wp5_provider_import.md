@@ -5,17 +5,19 @@ source provenance. GOAT never changes those sources. Re-import observes stable s
 content changes and permanent forget suppression; every environment submits the same ordinary
 local intents to the configured hub. Imported text is untrusted inference, not instructions.
 
-- Date: 2026-10-14. Status: independent audit r1 **NO-GO** at `5726f6fd0` folded in this audit-fix r1; **READY_FOR_REAUDIT**, not B approval; prior reflection r2 ALIGNED and audit r2 GO-WITH-FIXES assessed the pre-WP3 plan, not this revision. WP5 implementation and runtime acceptance: **NOT RUN**.
+- Date: 2026-10-15. Status: independent re-audit r2 **NO-GO** at `8004d3ec9` folded in this audit-fix r2 (R2-1 High / R2-2 Medium); **READY_FOR_REAUDIT**, not B approval; prior reflection r2 ALIGNED and audit r2 GO-WITH-FIXES assessed the pre-WP3 plan, not this revision. WP5 implementation and runtime acceptance: **NOT RUN**.
 - Authoring branch: `goat/memory-wp5-provider-import`, worktree `goat-wp5-plan`, input HEAD `3cc957768`: prior WP5 plan `6a5a072a9` plus WP3 final `5f12fb1b8`. WP3 code is present; WP4 implementation is not present. WP3 #183 green is supplied coordinator evidence, not a fresh check in this task.
 - Dependency pins: [030](030_wp3_hub_sync.md) final decisions rev **11f/11g**, [000](000_plan.md) WP3 B integration 1–3, and the actual WP3 code at this input HEAD. [040](040_wp4_mcp_injection.md) is a read-only handoff snapshot; its owner is replanning in parallel. No origin/dev fetch or moving-head review is claimed here.
 - Authority: [000 decisions](000_plan.md#decisions-main-dispositions-of-m1-m20) M17/M19/M20,
   [shared names](000_plan.md#shared-names-all-phase-docs-must-use-these) and
   [enforcement limits](000_plan.md#enforcement-inventory). Research is evidence, not authority.
 
-Authoring scope: bounded planner audit-fix r1 on `5726f6fd0`, consuming
-`/tmp/goat-wp5-audit-r1.md` (A1–A6) and `/tmp/goat-wp5-reflection-r1.md`.
+Authoring scope: bounded planner audit-fix r2 on `8004d3ec9`, consuming
+`/tmp/goat-wp5-audit-r2.md` in full, plus audit-r1, auditfix-r1, reflection-r1 and replan-r1
+reports under `/tmp/goat-wp5-*.md`. R2 accepted A1/A4/A5/A6 and the acyclic construction/invocation
+split of A2; preserve those decisions, the five lanes and the lineage/protocol model.
 Only this document and the WP5 cycle record in 000 are edited and committed; no code,
-other worktree mutation, push or PR. Report: `/tmp/goat-wp5-auditfix-r1.md`.
+other worktree mutation, push or PR. Report: `/tmp/goat-wp5-auditfix-r2.md`.
 Verification is documentation consistency plus `git diff --check` / `git show --check`;
 no node_modules means fmt skipped. Runtime acceptance remains **NOT RUN** and requires exact-head
 macmini-cf focused evidence plus PR CI. Jun's 2026-10-14 decision is final: WP1–WP6
@@ -58,8 +60,9 @@ behavior. WP2 SQLite plus 030 hub admission supersede that storage/sync proposal
 Provider source references in §2 are pinned local **public source repositories**, read via
 `git show` without checkout or execution. Claude's corpus is a dated research account; no
 fresh Claude implementation or installed layout is claimed. No actual provider memory corpus,
-settings, credentials, transcripts or provider Git state was inspected or changed. The small
-Codex/Aside/wiki guidance lookup supplied no relevant WP5 implementation history.
+settings, credentials, transcripts or provider Git state was inspected or changed. Earlier
+guidance lookups are historical only; this audit-fix reads no provider memory corpus and
+relies only on the supplied reports and this tree’s source contracts.
 
 ## 2. Provider source and parser decisions
 
@@ -107,7 +110,7 @@ Path:line references below are the WP3-final input HEAD. These are current expor
 | Suppression / quota, implemented | readSuppressions(space,id): E<ReadonlyArray<M.MemorySuppressionRecord>,MemoryStorageError> (Store:1492); firstForgetReservation(operation) (:1481). Quota.withAdmission(input,commit) errors include MemoryStorageError, MemoryCapacityError and MemoryStoreConflict (:21–34); storage sample/growth (:44–53). | Extend lineage extraction/reserve, import session/receipt counters and indexed source/content lookup. Reuse metrics/FTS. |
 | Checkpoint, implemented | Compactor producer.prepareTx({authority,checkpointId,hubEnvironmentId}): Store.InTx<{checkpointId,checkpointSequence},MemoryHubServiceError> (Compactor:18–30); Store.installCheckpointPage (:4738), completeCheckpoint (:4829), snapshot producer (:7658), bound from counters (:8220). | L1 extends actual Store producer/install and accounting; Compactor consumes same Store/committed configuration, never a settings reload inside SQL. |
 | Wire import, existing staged contracts | C/memory.ts:1690 onward discover/preview/apply/status; staged WsMemoryImportRpcGroup in C/rpc.ts; dual scopes in C/clientRpcPermissions.ts. | Import DTOs stay unchanged. L1-0 extends checkpoint and hub compatibility (§5); L5 activates import RPC/capability after WP4 core. |
-| WP4 planned / WP5 new | WP4 importProvider({environmentId,input}) command, dual permissionAtom, core MCP. WP5 MemoryService.importProvider(input,permit): Effect.Effect<M.MemoryImportProviderResult,MemoryServiceError \| M.MemoryImportRpcError,ProviderMemoryImportRuntime>. | Public service addition must safely map Sync's broader Error channel; L1 owns facade, L4 coordinator. No client edits or MCP import tool. |
+| WP4 planned / WP5 new | WP4 importProvider({environmentId,input}) command, dual permissionAtom, core MCP. WP5 MemoryService.importProvider(input,permit): Effect.Effect<M.MemoryImportProviderResult,MemoryServiceError \| M.MemoryImportRpcError \| M.MemoryRpcError,ProviderMemoryImportRuntime>. | Public service addition must safely map Sync's broader Error channel; L1 owns facade, L4 coordinator. No client edits or MCP import tool. |
 
 WP3 re-anchor is complete at `3cc957768` / final `5f12fb1b8`. Before B merge the final WP4 implementation and reconcile its actual command/auth/composition with §5; that integration dependency does not require another product interview. Do not overwrite the parallel 040 plan.
 
@@ -154,17 +157,69 @@ omo reader: use argument vectors and no shell. Existing VcsProcess.run is the re
 `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, and `GIT_ALLOW_PROTOCOL=`;
 unset inherited Git config injection, proxy, askpass and credential-related variables.
 The current process runner sets extendEnv=true whenever input.env exists (S/processRunner.ts:279–299). A missing key is not removal, and undefined removal is not established by this API. L2 therefore owns a narrow read-only Git process adapter inside MemoryImportReader with **extendEnv=false / complete static safe environment**, an injected absolute Git executable and no shell. It must not enumerate or log the host environment to build its map. Do not modify shared processRunner/VcsProcess or copy credentials. If the platform cannot enforce non-inheritance, refuse typed source_unreadable. Use synthetic sentinel variables/fixture credentials only to assert no inheritance and no helper execution; never dump child environment values into logs or evidence. Reader fixtures own this proof.
-Before any repository Git command, bounded no-follow descriptor inspection permits only
-standalone repos with a real in-root `.git` directory. Reject gitfile, any commondir,
-external object alternates (including http-alternates), config include/includeIf, and Git
-metadata symlinks (ancestors/config/objects/refs/packed-refs/alternates). No external gitdir,
-linked worktree or shared object store support. Charge every visited entry/read byte against
-the same reader ceilings; unsupported config syntax, overflow or inability to prove the boundary
-fails closed before Git invocation. Parse config only to detect forbidden structure; never emit
-raw values or errors. Recheck metadata identity around commands; drift yields source_changed.
-Every invocation (including capability probes) passes `--no-replace-objects` or static
-`GIT_NO_REPLACE_OBJECTS=1`; fixed OIDs never resolve through replace refs. Tree symlink/gitlink
-rejection remains separate. No provider metadata is rewritten to make a source acceptable.
+**Execution boundary: GOAT-owned snapshot only (R2-2).** Never run Git against the
+provider `.git`, even for probes. The reader copies a bounded standalone in-root `.git`
+through no-follow descriptors into a private GOAT-owned GIT_DIR. Copy only HEAD,
+refs (exclude refs/replace), packed-refs and objects (loose objects plus pack files).
+Reject gitfile, any commondir, metadata/ancestor symlink and either
+objects/info/alternates or objects/info/http-alternates, even an in-root alternate.
+Perform these checks during descriptor-based copy, not a separate path check followed by
+unsafe reopen. Do not copy original config, hooks, index, logs, info, worktrees or modules;
+objects/info is inspected only for forbidden alternates, never copied. GOAT writes minimal
+config with only core.repositoryformatversion=0 and core.bare=true in a `[core]` section,
+with no include/includeIf or extensions. Unsupported object format/layout refuses
+unsupported_format; no source-config parser or include-detection dependency remains.
+
+The adapter must enforce ancestor-relative no-follow opens, with a held root/parent
+chain and identity revalidation; path lstat followed by path open is insufficient. Unsupported
+platform enforcement returns path_rejected. Every copied descriptor is checked before/after
+read and the ancestor chain revalidated through copy completion; identity/size/mtime drift,
+replacement or disappearance returns source_changed with no candidate bytes. Seal the snapshot
+before Git: close all writable handles; only this reader Scope can own it, and Git gets no
+provider-root path/working directory. After sealing, provider swaps cannot redirect Git reads.
+Every invocation uses `GIT_DIR=<snapshot>` and an empty GOAT-owned cwd, no work tree and no
+GIT_WORK_TREE; static environment and arguments contain no provider path. Every invocation
+(including capability probes) disables replacements via `--no-replace-objects` or static
+`GIT_NO_REPLACE_OBJECTS=1`. Excluding loose replace refs is not enough: packed replace refs
+are also ignored by this flag. Tree symlink/gitlink rejection remains separate.
+
+**Snapshot budgets and lifetime (L2 reader; L5 startup binding).** Use
+`join(ServerConfig.stateDir, "memory-import", "snapshots")`, never system TMPDIR.
+`S/config.ts:134–159` derives stateDir as baseDir/userdata (baseDir/dev for implicit dev),
+and derives settingsPath from that same stateDir; `S/serverSettings.ts:883` consumes it.
+L5 passes the configured stateDir explicitly to reader acquisition, with Scope supplied only
+at acquisition; returned reader methods and ImportRuntime.run remain R=never. Do not hardcode
+home/userdata or inspect live settings/DB to discover this path. Fixtures pass isolated stateDir.
+Snapshot root/children are server-owned mode 0700, files 0600; reject symlink ancestors/foreign
+entries instead of following them. Cleanup is confined to this dedicated directory and never
+traverses symlinks or removes anything in provider roots. No provider-side write, lock or temp.
+
+Freeze private L2 constants: at most **2** live snapshots per server/stateDir; each has at most
+**64 MiB (67,108,864 bytes)** total copied/generated file bytes and **4,096** total visited
+metadata entries (excluded entries count), with objects separately capped at **60 MiB
+(62,914,560 bytes)** / **3,584** visited entries (loose + pack, all scanned objects entries).
+Depth <=8 and relative metadata path <=512 UTF-8 bytes; remaining non-object metadata <=4 MiB.
+These are separate from source text limits below; no 256-KiB source-blob limit is imposed on
+pack files, but declared size is charged before copying and streaming stops at +1 byte.
+Reserve a full 64-MiB slot before directory creation under one L2 reader-scoped
+admission semaphore; total simultaneous reservation/on-disk bytes <=**128 MiB (134,217,728)**.
+No waiting queue or new worker: slot/byte/entry/depth overflow returns existing limit_exceeded
+before allocation/read beyond the bound. Count generated config too; no new wire issue enum.
+Invalid boundary → path_rejected; observed copy mutation → source_changed; unsupported Git/
+read failure → source_unreadable, all value-free. These stricter limits may refuse large repos.
+
+Register cleanup in an interruption-safe acquire/release before the first copied byte.
+Success, failure, interruption and Git timeout terminate/wait the owned process, close handles,
+then recursively remove only the owned snapshot and release its reservation. A failed removal
+must retain its slot/byte charge, mark reader unavailable (source_unreadable), and emit only a
+value-free cleanup-stage failure; never ignore failure and admit another leaking snapshot.
+Before activating import at server startup, L5 awaits reader cleanup of all previous snapshots
+in that stateDir, then initializes empty admission accounting. Cleanup is bounded by the same
+2-slot/128-MiB/entry ceilings; unexpected oversized/unsafe residue or deletion failure disables
+import until explicit operator repair, without blocking unrelated core services. StateDir must
+have one server owner; do not clean an active peer’s snapshots. No background worker/timer,
+persistent raw archive or resume-from-snapshot protocol. Crash residue is removed before the
+next import; successful finalizer/startup acceptance requires **zero snapshot residue**.
 Pass `-c credential.helper= -c core.askPass= -c protocol.allow=never` on every call;
 disable transport/credential helper execution through the injected process boundary as well.
 Use global `--no-lazy-fetch` when supported. Detect the Git version/capability using this same
@@ -179,7 +234,8 @@ Timeout/output truncation/absent objects return a bounded typed issue, never emp
 never serialize stderr or filesystem causes. Missing promisor blobs must not launch fetch or
 transport or modify the object database; §6 checks `.git/objects` as well as refs/index/config.
 
-Reader-local hard ceilings: 128 discovered roots, 512 visited entries per selected root
+Filesystem source-walk hard ceilings (Git metadata copy instead uses the separate §4.1
+entry/byte ceilings above): 128 discovered roots, 512 visited entries per selected root
 (including excluded entries), depth 8 and relative selector <=512 UTF-8 bytes; 256 KiB per
 file/blob; 8 MiB aggregate source bytes; 128 preview candidates; title <=256 Unicode code
 points. Omo tree output also has an 8-MiB cap independent of approved blobs. Codex's large
@@ -221,8 +277,10 @@ session per source, expiry bounded by MEMORY_DERIVED_CACHE_TTL_MS. Re-preview re
 bytes only, never historical item identity/accepted parent. The same snapshot's source session
 must span its 32-item chunks; concurrent callers use CAS. New session/source registrations
 still face cumulative metadata/source/live admission, so chunk/session splitting cannot reset
-M19. No persistent raw snapshot archive; staged bytes share
-MEMORY_CHECKPOINT_STAGING_MAX_BYTES and expire/purge on forget. Prefer re-read to disk caching.
+M19. No persistent raw snapshot archive; staged candidate bytes share
+MEMORY_CHECKPOINT_STAGING_MAX_BYTES and expire/purge on forget. The transient Git metadata/object
+snapshot instead has the separate §4.1 disk reservation and Scope/startup cleanup; it never
+survives as a reusable session cache. Prefer re-read to candidate disk caching.
 
 First validate batch `(space, environment, operationId)` and canonical selection digest
 including source/session/fingerprints/scopes/projects, **before source I/O**. Same digest returns
@@ -238,6 +296,8 @@ Detailed batch results expire under MEMORY_IMPORT_BATCH_RETENTION_MS; keep a bou
 operation-ID/digest reuse guard charged to existing receipt/permanent-metadata budgets. Retired
 batch exact retry/status returns a typed not_found through existing MemoryRpcError, never
 reruns import; changed digest still rejects. Source/item/suppression identity remains permanent.
+Completed replay and status use the L1 durable callbacks in §5 before any reader call;
+partial replay alone may read unfinished selectors after preflight closes its transaction.
 Prove the compact codec maximum (MEMORY_COMPACT_RECEIPT_MAX_BYTES), or amend with the owning
 contract phase before B; a fabricated expiry issue/action is not acceptable. Status reads only
 persisted receipt and internal sync status, no source, no resume. New/pending/hub rejected/local
@@ -479,7 +539,7 @@ first. No parser edits a shared service/contract and no integration lane rewrite
 | L2 read-only reader      | NEW S/memory/imports/MemoryImportReader.ts, MemoryImportReader.test.ts, MemoryImportFixtures.fixture.ts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Trusted root registration references, descriptor/Git snapshots, hard ceilings, read-only fault fixtures. Consumes L1 types/ports; shared synthetic fixture builder is owned here, not modified by parser lanes.                                                        |
 | L3 deterministic parsers | NEW S/memory/imports/CodexMemoryImporter.ts, CodexMemoryImporter.test.ts, ClaudeMemoryImporter.ts, ClaudeMemoryImporter.test.ts, OmoMemoryImporter.ts, OmoMemoryImporter.test.ts.                                                                                                                                                                                                                                                                                                                                                                                                      | Pure supported-profile parsers, routing/evidence exclusions, stable item keys and canonical candidates. No SQL/process/provider configuration.                                                                                                                         |
 | L4 coordinator           | NEW S/memory/imports/ProviderMemoryImport.ts, ProviderMemoryImport.test.ts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Four action orchestration, raw/title/output scans, profile/session/source-change fences, per-item selection and errors, dependency calls to L1 without direct SQL. L1 owns the new real-store MemoryImport.test.ts and imports this module for integrated cases.       |
-| L5 server activation     | MODIFY C/rpc.ts, rpc.test.ts; S/ws.ts, ws.test.ts; S/auth/RpcAuthorization.ts, RpcAuthorization.test.ts; S/environment/ServerEnvironment.ts, ServerEnvironment.test.ts; S/server.ts.                                                                                                                                                                                                                                                                                                                                                                                                   | Merge only the staged import group into WP4's live core group; one thin handler, dual-grant scope coverage/live permits and real capability; compose reader once with existing memory layer. No additional schema beyond L1-0; no client command/MCP tool/UI.          |
+| L5 server activation     | MODIFY C/rpc.ts, rpc.test.ts; S/ws.ts, ws.test.ts; S/auth/RpcAuthorization.ts, RpcAuthorization.test.ts; S/environment/ServerEnvironment.ts, ServerEnvironment.test.ts; S/server.ts.                                                                                                                                                                                                                                                                                                                                                                                                   | Merge only the staged import group into WP4's live core group; one thin handler, dual-grant scope coverage/live permits and real capability; compose reader once with existing memory layer; pass configured stateDir and await bounded snapshot startup cleanup before import activation. No additional schema beyond L1-0; no client command/MCP tool/UI.          |
 
 ### L1-0 — WP5-owned contract extension before implementation consumers
 
@@ -538,8 +598,43 @@ when invoked, via an explicit Effect environment; no lazy global registry or hid
 L1 owns these non-wire types in MemoryImportTypes; L4 implements the factory, L5 connects it:
 
 ```ts
-type ImportError = MemoryServiceError | M.MemoryImportRpcError;
+type ImportError = MemoryServiceError | M.MemoryImportRpcError | M.MemoryRpcError;
+// Existing MemoryRpcError carries not_found for absent/retired detailed receipts.
+type ImportAddress = {
+  memorySpaceId: M.MemorySpaceId;
+  environmentId: M.EnvironmentId;
+};
+type ImportSourceAddress = ImportAddress & { sourceId: M.MemoryImportSourceId };
+type ImportBatchAddress = ImportAddress & { operationId: M.MemoryOperationId };
+type ImportSlot = {
+  format: M.MemoryImportFormat;
+  rootSlot: string; // immutable trusted server slot ID, never caller path
+  selection: string | null; // bounded Claude directory/omo agent; null otherwise
+};
+type ImportRegistrationLookup = ImportAddress & (
+  { by: "source"; sourceId: M.MemoryImportSourceId } |
+  { by: "slot"; slot: ImportSlot }
+);
+type ImportBatchPreflight =
+  | { kind: "new" }
+  | { kind: "partial"; batch: ImportBatch; receipt: M.MemoryImportReceipt }
+  | { kind: "completed"; receipt: M.MemoryImportReceipt }
+  | { kind: "retired" };
 type ImportPorts = {
+  readRegistration: (input: ImportRegistrationLookup, permit: Permit) =>
+    Effect.Effect<ImportRegistration | undefined, MemoryServiceError, never>;
+  saveRegistration: (input: ImportAddress & {
+    next: ImportRegistration; expectedVersion: number | null;
+  }, permit: Permit) => Effect.Effect<ImportRegistration, MemoryServiceError, never>;
+  preflightBatch: (input: ImportBatchAddress & { selectionDigest: string }, permit: Permit) =>
+    Effect.Effect<ImportBatchPreflight, MemoryServiceError | M.MemoryImportRpcError, never>;
+  readReceipt: (input: ImportBatchAddress, permit: Permit) =>
+    Effect.Effect<M.MemoryImportReceipt, MemoryServiceError | M.MemoryRpcError, never>;
+  readItem: (input: ImportSourceAddress & { sourceItemKey: string }, permit: Permit) =>
+    Effect.Effect<ImportItem | undefined, MemoryServiceError, never>;
+  findMatch: (input: ImportAddress & {
+    source: M.MemorySourceKey; content: M.MemoryContentSuppression;
+  }, permit: Permit) => Effect.Effect<ImportMatch, MemoryServiceError, never>;
   binding: (input: M.MemoryProjectBindingGetInput, permit: Permit) =>
     Effect.Effect<M.MemoryProjectBinding, MemoryServiceError>;
   resolveProjectKey: (space: M.MemorySpaceId, project: M.ScopedProjectRef) =>
@@ -549,8 +644,12 @@ type ImportPorts = {
     Effect.Effect<M.MemoryImportItemResult, MemoryServiceError>;
   readiness: () => Effect.Effect<LocalImportReadiness, Error>;
   requireBootstrap: (space: M.MemorySpaceId) => Effect.Effect<void, Error>;
-  status: (input: M.MemorySyncStatusInput, permit: Permit) =>
+  syncStatus: (input: M.MemorySyncStatusInput, permit: Permit) =>
     Effect.Effect<M.MemorySyncStatus, Error>;
+};
+type ImportPrimitives = {
+  uuid: () => string;
+  now: () => Effect.Effect<number, never, never>;
 };
 type ImportRuntimeShape = {
   run: (input: M.MemoryImportProviderInput, permit: Permit) =>
@@ -558,20 +657,22 @@ type ImportRuntimeShape = {
 };
 // Context.Service<ProviderMemoryImportRuntime, ImportRuntimeShape>, owned by L1.
 makeProviderMemoryImport: (ports: ImportPorts, reader: MemoryImportReaderShape,
-  parsers: MemoryImportParsers) => ImportRuntimeShape;
+  parsers: MemoryImportParsers, primitives: ImportPrimitives) => ImportRuntimeShape;
 // Service facade public signature: R is deliberately explicit, not inferred away.
 importProvider: (input: M.MemoryImportProviderInput, permit: Permit) =>
   Effect.Effect<M.MemoryImportProviderResult, ImportError, ProviderMemoryImportRuntime>;
 ```
 
-Binding/status signatures above are the current service methods, not new instances.
+Binding/syncStatus signatures above are the current service methods, not new instances.
+The six durable callbacks are WP5 additions on that same L1 Service, not new services.
 `PreparedImportCommit` is L1's bounded candidate + registration/session CAS and
 parent-aware intent input, containing no source bytes/reader handle. `LocalImportReadiness`
 is exactly the current `{memorySpaceId: M.MemorySpaceId | null; bootstrap: "unbound" | "staging" | "ready"}`.
 The L1 facade yields ProviderMemoryImportRuntime then calls run; the factory closes over bound
 callbacks, so run has R=never. L5 acquires the existing Service and Sync once after their layers,
-binds binding/resolveProjectKey/commit to Service and readiness/requireBootstrap/status to Sync,
-constructs one runtime and provides its tag to import RPC handlers at their call boundary.
+binds binding/resolveProjectKey/commit and all six durable callbacks to that same Service
+(which closes over the existing Store), and readiness/requireBootstrap/syncStatus to the same Sync,
+passes UUID/clock primitives, constructs one runtime and provides its tag to import RPC handlers at their call boundary.
 Service's other callers and Sync.start need no import environment. No Layer dependency back-edge,
 mutable global registry, second Store/Service/Sync or second managed runtime is permitted.
 Known Sync failures map to safe import errors, unknown failures to value-free unavailable;
@@ -582,6 +683,59 @@ No network I/O or settings reload inside SQL; committed settings and existing Sy
 (WP3 rev 11f settings/SQL deadlock rule). L1-0 freezes this graph/signature before lane consumers.
 L5's real layer composition case must run discover/preview/apply/status through this facade,
 then existing Sync.start with worker milestones; a mock-coordinator facade test is insufficient.
+
+### L1-0 durable callback semantics (R2-1)
+
+All six signatures above have explicit R=never. Each Service callback runs permit **after
+lock** inside `store.transact(..., {requireOuter: true})`, validates the selected server
+identity/address, invokes only the narrow Store Tx ports, and discharges Store.Transaction.
+Store-only read/write errors stay narrow; Service adds MemoryAccessError without coercing it.
+No callback loads settings, invokes Sync/network/Reader, opens another connection or recursively
+calls importProvider. preflight completes and releases SQL before any source I/O. SQL-free
+committed binding/readiness checks and final item CAS remain as specified in §4.3.
+
+- readRegistration uses the unique `(space, environment, slot)` or sourceId lookup and returns
+  the persisted full registration **including active session and version**. saveRegistration
+  inserts only at expectedVersion=null/absent, or CAS-updates that version with version+1.
+  It preserves sourceId/slot/history and charges the bounded source/session metadata atomically.
+  Discover reads a known slot before generating a UUID; concurrent insert loser re-reads the
+  winner. Preview reads source, scans metadata outside SQL, then saves the new session/profile/
+  snapshot digest with captured version. CAS conflict is MemoryStoreConflict; re-read/re-preview,
+  never overwrite another preview or reset accepted charges. Sessions remain durable on restart.
+- preflightBatch reads batch/digest guard in the given address before source/session/reader
+  work: missing → new; same digest detailed receipt → partial (remaining selectors and frozen
+  IDs in ImportBatch) or completed; same digest compact-only guard → retired; **different
+  digest, including a retired guard → MemoryImportRpcError operation_id_reused**. It never
+  creates a receipt or advances counters. completed returns persisted IDs/outcomes directly;
+  retired maps to existing MemoryRpcError not_found without reapplication. Partial returns
+  only the stored unfinished selectors for source work. No current source availability is
+  needed for status or completed replay; current authorization is still checked.
+- readReceipt decodes the persisted MemoryImportReceipt for status, with no Reader/FS/Git
+  or resumption. Absent/retired details fail existing MemoryRpcError not_found. Runtime combines
+  it with syncStatus outside SQL to produce the existing status DTO; syncStatus is **not** an
+  import receipt reader. readItem/findMatch support preview/outcome and precommit preparation
+  only when needed; their results are advisory and commit rechecks under lock.
+
+Factory action mapping is closed over its declared arguments only: discover = Reader slots →
+readRegistration/saveRegistration; preview = readRegistration → Reader/parsers/scanner → optional
+readItem/findMatch → saveRegistration CAS; apply = preflightBatch → completed/retired return or
+readRegistration + Reader/parsers + optional item/match → commit; status = readReceipt + syncStatus.
+The factory receives explicit primitives as its fourth argument: `ImportPrimitives =
+{ uuid: () => string; now: () => Effect.Effect<number, never, never> }`, bound by L5 to server
+UUID/clock functions. Scanning/hashing are pure imported functions. No ambient Context, SQL
+in Reader, second runtime or in-memory Map for durable state.
+The existing explicit facade tag remains the only invocation environment.
+
+Preflight is not a reservation and does not eliminate races: commitImportItemTx re-reads batch
+and selection digest guard, registration/session version, unfinished selector and stable IDs
+inside the **same final item transaction** as receipt/session/intent/outbox/quota. A concurrent
+new batch winner fixes the digest; a loser must atomically fail operation_id_reused before
+mutation even if it performed source I/O after a valid earlier preflight. Store represents
+that race as existing MemoryStoreConflict `{code: "operation_id_reused"}` (MemoryStore.ts:36–41);
+L4 maps only that conflict after rollback to MemoryImportRpcError operation_id_reused. This
+keeps commit’s accepted MemoryServiceError channel and A1 auth identity unchanged. Exact competitors
+return the existing item result; no duplicate IDs/charges. Item-local Tx auth rollback remains
+A1’s contract. No intermediate session/batch save may replace this atomic final CAS.
 
 L1 migration creates `memory_import_lineage(space, memory_id, kind, key, record_json)` with
 primary key `(space, memory_id, kind, key)`, strict record codec and encoded byte accounting.
@@ -622,26 +776,17 @@ type InTx<A> = Effect.Effect<
   Store.MemoryStorageError | Store.MemoryStoreConflict | Store.MemoryCapacityError,
   Store.Transaction
 >;
-readImportRegistrationTx: (
-  space: M.MemorySpaceId,
-  environment: M.EnvironmentId,
-  source: M.MemoryImportSourceId,
-) => InTx<ImportRegistration | undefined>;
-writeImportRegistrationTx: (input: { next: ImportRegistration; expectedVersion: number | null }) =>
+readImportRegistrationTx: (input: ImportRegistrationLookup) =>
+  InTx<ImportRegistration | undefined>;
+writeImportRegistrationTx: (input: ImportAddress & { next: ImportRegistration; expectedVersion: number | null }) =>
   InTx<ImportRegistration>;
-readImportBatchTx: (
-  space: M.MemorySpaceId,
-  environment: M.EnvironmentId,
-  operation: M.MemoryOperationId,
-) => InTx<ImportBatch | undefined>;
-readImportItemTx: (
-  space: M.MemorySpaceId,
-  environment: M.EnvironmentId,
-  source: M.MemoryImportSourceId,
-  key: string,
-) => InTx<ImportItem | undefined>;
-findImportMatchTx: (input: {
-  memorySpaceId: M.MemorySpaceId;
+readImportBatchTx: (input: ImportBatchAddress) =>
+  InTx<ImportBatch | ImportRetiredBatchGuard | undefined>;
+readImportReceiptTx: (input: ImportBatchAddress) =>
+  InTx<M.MemoryImportReceipt | undefined>; // absent/retired mapped to not_found by Service
+readImportItemTx: (input: ImportSourceAddress & { sourceItemKey: string }) =>
+  InTx<ImportItem | undefined>;
+findImportMatchTx: (input: ImportAddress & {
   source: M.MemorySourceKey;
   content: M.MemoryContentSuppression;
 }) => InTx<ImportMatch>;
@@ -656,6 +801,8 @@ commitImportItemTx: (input: {
 
 ImportRegistration owns source/profile/locator and bounded active session/CAS version;
 ImportBatch owns request digest, immutable selected IDs, outcomes/remaining and counters;
+ImportRetiredBatchGuard is `{kind: "retired"; selectionDigest: string}` in the same batch row;
+ImportBatch is tagged `kind: "detailed"` and exposes selectionDigest for strict preflight;
 ImportItem owns stable scope/latest accepted hash/revision versus rejected observations;
 the permanent ledger, not this receipt codec, owns lifetime accepted aliases/content hashes;
 ImportMatch distinguishes source/content suppression, pending forget and live exact copy.
@@ -738,13 +885,13 @@ Additional re-anchor acceptance (all NOT RUN):
 | L4 coordinator tests | Raw secret header/title/item key/locator with otherwise safe body → whole-file value-free refusal; status/lost response retry performs no source I/O. Either live grant revoked during wait/lock → no receipt/provenance mutation. |
 | L5 activation tests | WP4 core remains available before import activation; after composition, dual-grant import RPC and actual capability round-trip. Descriptor advertises the confirmed hub version 1 only with configured ready routes, disabled hub omits it; no MCP import tool added. |
 
-Audit r1 acceptance additions (NOT RUN):
+Audit r1 / re-audit r2 acceptance additions (NOT RUN):
 
 | Finding / owner | Activation → observable proof |
 | --- | --- |
 | A1 L1 Store/Service + L4/L5 consumers | Inject MemoryAccessError from commitIntent after lock and provisional receipt/session/quota allocation. Entire current item Tx rolls back: receipt/session/intent/quota match pre-Tx snapshot; same auth denial reaches real RPC boundary, no import issue/result conversion. Prior independent commits survive. |
-| A2 L5 server/rpc integration | Actual Service→Hub→Sync→ImportRuntime composition executes all four actions, persists an applied item, retrieves status without source I/O and starts existing Sync. One Store/Service/Sync, no extra runtime, no acquisition cycle; Deferred/worker milestones prove startup. |
-| A3 L2 real synthetic Git repositories | gitfile, commondir, external alternates, config include/includeIf and metadata symlink reject before boundary-external reads (read spies). Change replace ref with fixed HEAD OID between reads: only original committed bytes or source_changed, never replacement bytes. Assert every invocation disables replacements; inventory/objects/config/refs unchanged by reader and no raw value/stderr logging. |
+| A2 / R2-1 L5 server/rpc + L1 real Store integration | Actual Service→Hub→Sync→ImportRuntime composition uses only factory-declared arguments and executes all four actions plus existing Sync.start. Recreate ImportRuntime over persisted Store, set source-read spy to fail: status and completed exact retry still return identical IDs/outcomes, no reader calls. Different digest (detailed and retired) returns operation_id_reused before any source I/O; partial exact retry reads only unfinished selectors. Discover across runtime restart retains sourceId; concurrent slot insertion returns winner. Preview session/version persists across recreation; concurrent stale CAS fails without replacing winner/counters. Final item CAS races and auth denial preserve atomic receipt/session/outbox/quota. One Store/Service/Sync, no extra runtime/acquisition cycle; static facade/factory types verify R=ImportRuntime/R=never; Deferred/worker milestones prove startup. |
+| A3 / R2-2 L2 real synthetic Git repositories + L5 startup | gitfile/commondir/alternates/http-alternates/metadata symlink reject during no-follow copy; provider config include/includeIf is never read/copied. At Deferred barrier after copy/seal and immediately before Git, swap original config to external include, objects to external alternate and metadata ancestor to external symlink, separately and combined. Instrument reader opens and actual child filesystem reads: boundary-external read count **0**, only original snapshot result or value-free refusal. An unsupported child read-spy/enforcement platform is NOT VERIFIED, never PASS. Swap descriptors/ancestors during copy → source_changed with no candidates. Loose/packed replace changes cannot affect fixed-OID bytes; all calls disable replacement/lazy fetch/transport. Exact limits/+1 cover object/metadata bytes/entries, depth, 2-slot/128-MiB admission under concurrency; no partial-success truncation. Success/failure/interruption/timeout finalizers wait child then leave **0 owned snapshots** (all drained requests: total 0); synthetic crash residue removed by fresh reader/startup before activation, repeated cycles plateau at 0. Inject cleanup failure/oversized or symlink residue: import unavailable, reservation retained, no new snapshot, unrelated core starts. Assert provider inventory/bytes unchanged by reader (fixture-controlled swaps accounted separately), no raw stderr/path logging. |
 | A5 L1 + coordinator | Fixed workload in §4 Requirement 7 on macmini-cf and same-SHA packaged off-host execution; raw CSV/JSON plus logs and unavailable fields retained. Source CI alone does not certify packaged growth. |
 
 Use Deferred barriers/persisted events and existing MemoryWorker.drain plus WP3 settlement/drain
@@ -784,8 +931,12 @@ privileged direct DB edits remain limits; tested service paths are the enforceme
 not a guarantee over arbitrary external writers. Root bypasses/profile changes require
 migration retaining suppression, not a downgrade of the read-only claim.
 
-Audit r1 at `5726f6fd0` returned NO-GO; this revision folds A1–A6 without claiming
-new architect alignment or independent approval. Reflection r1 is historical input.
+Audit r1 at `5726f6fd0` returned NO-GO; audit-fix r1 folded A1–A6. Independent re-audit r2
+at `8004d3ec9` accepted A1/A4/A5/A6 and A2’s acyclic assembly but returned NO-GO for durable
+factory ports and Git check/use enforcement. This revision folds R2-1/R2-2 only, preserving
+accepted decisions, without claiming new architect alignment or independent approval.
+Reflection r1 is historical input. Snapshot portability/read-spy support, cleanup failure and
+large-repo refusal remain implementation risks with the acceptance/owners above.
 Independent re-audit must assess this exact documentation commit before B. Before B record
 actual WP4 implementation SHA, the confirmed joint-release premise and L1-0 codec/accounting/
 assembly signatures. This 050 is the implementation plan; 000 records its WP5 cycle.
@@ -818,3 +969,4 @@ runtime closure, and does not rerun consultation or tests within this docs-only 
 | rev 9 — WP3-final P re-anchor r1 (3cc957768) | §1/§3 current exports/errors; §4 hub propagation, identity-aware suppression, resolve-independent lineage and trigger/checkpoint accounting; §5 separate 072 + reconciliation and release-gated protocol decision (superseded by rev 10 below); §6 macmini-cf acceptance; §7 predecessor follow-up requests. |
 | rev 10 — same-architect reflection r1 (bff448153), superseded | Retained independent 072, bounded accounting, WP4 A-lite/import/MCP separation, local verification rule and five-lane c-6 matrix. Its unresolved release choice is replaced by Jun’s confirmed joint-release/v1 decision in audit-fix r1. |
 | audit-fix r1 — A1–A6 on 5726f6fd0 | §2 full provenance; §4.1 Git boundary; requirement 7 fixed workload; §5 callback error, acyclic assembly and confirmed v1/append-only ordinals; §6 exact acceptance. Jun joint WP1–WP6 release replaces prior protocol choice. READY_FOR_REAUDIT, runtime NOT RUN. |
+| audit-fix r2 — R2-1/R2-2 on 8004d3ec9 | §4.1 GOAT-only snapshot execution, bounded stateDir disk lifecycle/startup cleanup; §5 L1-0 durable callback signatures and Tx discharge; §6 restart/CAS/preflight and concurrent-swap/cleanup acceptance. Existing A1/A4/A5/A6, acyclic facade and joint-release v1 retained. READY_FOR_REAUDIT only. |
