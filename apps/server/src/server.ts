@@ -547,7 +547,6 @@ export const layerMemoryHubStarted = Layer.effectDiscard(
     const applicationScope = yield* Scope.Scope;
     // Subscribe before readiness/read to retain a concurrent first enable.
     const changes = yield* settings.subscribeChanges;
-    yield* settings.ready;
     const readyPrincipal = Effect.gen(function* () {
       const hub = yield* configuration.read;
       if (!hub) return Option.none();
@@ -576,6 +575,9 @@ export const layerMemoryHubStarted = Layer.effectDiscard(
       Stream.runForEach((principal) =>
         compactor.start(principal).pipe(Effect.provideService(Scope.Scope, applicationScope)),
       ),
+      // Startup marks settings ready after building its dependencies. Await it
+      // in the scoped fiber so acquisition cannot deadlock that startup.
+      (run) => Effect.andThen(settings.ready, run),
       Effect.forkScoped,
     );
   }),

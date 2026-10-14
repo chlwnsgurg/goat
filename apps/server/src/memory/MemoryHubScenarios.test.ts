@@ -9,6 +9,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
+import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Settings from "../serverSettings.ts";
@@ -22,7 +25,7 @@ import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Hub from "./MemoryHubService.ts";
 import * as Compactor from "./MemoryCompactor.ts";
-import { layerMemoryHubServices, layerMemoryHubRoutes } from "../server.ts";
+import { layerMemoryHubServices, layerMemoryHubRoutes, layerMemoryHubStarted } from "../server.ts";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
@@ -176,7 +179,7 @@ const scenario = Effect.gen(function* () {
       },
       M.MemoryHubPushResult,
     );
-  return { run, post, call, configure, initialize, push, hubEnv };
+  return { run, post, call, configure, initialize, push, hubEnv, context };
 });
 
 describe("Memory hub assembled HTTP scenarios", () => {
@@ -495,5 +498,72 @@ describe("Memory hub assembled HTTP scenarios", () => {
         null,
       );
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+  it.effect(
+    "parks for settings readiness, starts once after enable and keeps timers in application Scope",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* scenario;
+        yield* s.initialize;
+        yield* s.configure("disabled");
+        const started = yield* Deferred.make<void>();
+        const prepared = yield* Deferred.make<void>();
+        let starts = 0;
+        const producer = Context.get(s.context, Compactor.MemoryHubCheckpointProducer);
+        const compactor = yield* s.run(
+          Compactor.make.pipe(
+            Effect.provideService(Compactor.MemoryHubCheckpointProducer, {
+              prepareTx: (input) =>
+                producer
+                  .prepareTx(input)
+                  .pipe(Effect.tap(() => Deferred.succeed(prepared, undefined))),
+            }),
+          ),
+        );
+        const observed = Compactor.MemoryCompactor.of({
+          ...compactor,
+          start: (principal) =>
+            compactor.start(principal).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  starts++;
+                }),
+              ),
+              Effect.tap(() => Deferred.succeed(started, undefined)),
+            ),
+        });
+        const applicationScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(applicationScope, Exit.void));
+        // Real file settings are not started yet. Layer acquisition must return;
+        // waiting for readiness here would deadlock ServerRuntimeStartup.start.
+        yield* Layer.buildWithScope(
+          layerMemoryHubStarted.pipe(
+            Layer.provide(Layer.succeed(Compactor.MemoryCompactor, observed)),
+            Layer.provide(Layer.succeedContext(s.context)),
+          ),
+          applicationScope,
+        );
+        assert.strictEqual(starts, 0);
+        yield* s.run(Settings.ServerSettingsService.use((settings) => settings.start));
+        yield* s.configure("hub");
+        yield* Deferred.await(started);
+        assert.strictEqual(starts, 1);
+        const retention = s.run(
+          Store.MemoryStore.use((store) => store.transact(store.readHubRetentionTx(space))),
+        );
+        const before = yield* retention;
+        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+        yield* Deferred.await(prepared);
+        // Read through the writer lock after prepare, so the observation follows commit.
+        const after = yield* retention;
+        assert.notStrictEqual(after.checkpointId, before.checkpointId);
+        yield* s.configure("disabled");
+        yield* s.configure("hub");
+        assert.strictEqual(starts, 1);
+        yield* Scope.close(applicationScope, Exit.void);
+        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+        yield* s.run(Hub.MemoryHubActivity.use((activity) => activity.notify));
+        assert.deepStrictEqual(yield* retention, after);
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
