@@ -2761,12 +2761,28 @@ describe("MemoryStore durable hub checkpoints", () => {
             .length,
           0,
         );
-        yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} WHERE space=${space}`;
+        const usage = yield* store.transact(store.readHubUsageTx(space));
+        yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - usage.requiredCheckpointBoundBytes} WHERE space=${space}`;
         const full = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
         const guards =
           yield* sql`SELECT * FROM memory_import_keys WHERE key_kind='hub_checkpoint_token'`;
         const capacity = yield* store
-          .transact(store.prepareHubProducerCheckpointTx(preparation))
+          .transact(
+            Effect.gen(function* () {
+              const staged = yield* store.prepareHubProducerCheckpointTx(preparation);
+              assert.strictEqual(
+                (yield* store.readHubUsageTx(space)).stagingBytes,
+                M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+              );
+              yield* store.publishCheckpointAndFloorTx({
+                memorySpaceId: space,
+                checkpointId: staged.checkpointId,
+                expectedFloor: 1,
+                nextFloor: 1,
+                now: 0,
+              });
+            }),
+          )
           .pipe(Effect.flip);
         assert.strictEqual(capacity._tag, "MemoryCapacityError");
         assert.deepStrictEqual(

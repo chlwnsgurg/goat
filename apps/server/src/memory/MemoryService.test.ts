@@ -1346,12 +1346,12 @@ it.effect(
         now: Clock.currentTimeMillis,
         reauthorize: Effect.void,
       };
-      for (let n = 0; n < 24; n++) {
+      for (let n = 0; n < 48; n++) {
         const upsert = {
           ...input(1500 + n),
           memoryId: n === 0 ? memoryId : M.MemoryId.make(id(1600 + n)),
           payload: {
-            text: n === 0 ? "small" : "synthetic bulk ".repeat(180),
+            text: n === 0 ? "small" : "synthetic bulk ".repeat(500),
             evidence: [],
             derivedFromMemoryRevisions: [],
           },
@@ -1454,6 +1454,10 @@ it.effect(
             assert.strictEqual(
               (yield* service.admitHubOperationTx({ authority, operation: forget })).outcome,
               "deleted",
+            );
+            assert.isAtMost(
+              (yield* store.readHubUsageTx(space)).stagingBytes,
+              M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
             );
             assert.strictEqual(
               (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:current-large'`)
