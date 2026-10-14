@@ -3013,14 +3013,20 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 ? currentMcp
                 : undefined,
             );
+            const hasMemoryTools = availability.read || availability.write || availability.source;
             const prepared =
-              memoryInput === undefined
+              memory === undefined && !hasMemoryTools
                 ? payload
                 : {
                     ...payload,
                     system: [
                       payload.system,
-                      `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+                      memory === undefined
+                        ? undefined
+                        : MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER,
+                      hasMemoryTools
+                        ? `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`
+                        : undefined,
                       memory,
                     ]
                       .filter((part) => part !== undefined)
@@ -3327,7 +3333,6 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               }
               const systemPrompt = [
                 orchestrationSystemPrompt,
-                MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER,
                 buildRuntimeInstructions({
                   harness: "OpenCode",
                   model: turnInput.modelSelection.model,

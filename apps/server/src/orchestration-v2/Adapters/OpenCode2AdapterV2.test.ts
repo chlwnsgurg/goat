@@ -497,7 +497,9 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       const sessions = yield* McpProviderSessions.McpProviderSessions;
       yield* Effect.addFinalizer(() => sessions.clear(threadId));
       const grants: ReadonlyArray<ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>> = [
+        [],
         ["memory:read", "memory:write", "orchestration:read"],
+        [],
         [],
         ["memory:read"],
         ["memory:read", "memory:write", "orchestration:read"],
@@ -529,8 +531,8 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           }),
           reply("mcp.add", null),
         );
-      for (let index = 0; index < 4; index++) {
-        if (!external || index === 0)
+      for (let index = 0; index < grants.length; index++) {
+        if ((!external && index !== 3) || index === 0)
           entries.push(
             out("session.instructions.entry.put", {
               sessionID: SESSION,
@@ -572,17 +574,22 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             Effect.succeed(grant.includes("memory:read") ? snapshot : undefined),
         });
         assert.equal((yield* Fiber.join(terminal))?.status, "completed");
-        assert.include(
-          systems.at(-1) ?? "",
-          `read=${!external && grant.includes("memory:read")}, write=${!external && grant.includes("memory:write")}, source=${!external && grant.includes("orchestration:read")}`,
-        );
+        if (!external && grant.includes("memory:read")) {
+          assert.include(
+            systems.at(-1) ?? "",
+            `read=true, write=${grant.includes("memory:write")}, source=${grant.includes("orchestration:read")}`,
+          );
+        } else assert.notInclude(systems.at(-1) ?? "", "GOAT memory tools:");
       }
       assert.deepEqual(values, [
+        "",
         memoryContextText(snapshot),
+        "",
         "",
         memoryContextText(snapshot),
         memoryContextText(snapshot),
       ]);
+      assert.equal(systems.length, external ? 1 : 5, "unchanged instructions need no put");
       yield* runtime.unloadThread!({ providerThread: thread });
     }).pipe(Effect.scoped),
   );

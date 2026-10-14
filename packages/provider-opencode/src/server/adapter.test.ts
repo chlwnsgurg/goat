@@ -343,7 +343,8 @@ describe("OpenCodeAdapterV2", () => {
         yield* finish();
         assert.include(payloads[0]?.system ?? "", memoryContextText(snapshot));
         assert.equal(registrations.length, external ? 0 : 1);
-        assert.include(payloads[0]?.system ?? "", `read=${!external}`);
+        if (external) assert.notInclude(payloads[0]?.system ?? "", "GOAT memory tools:");
+        else assert.include(payloads[0]?.system ?? "", "read=true");
         // Resume re-registers state without retaining the prior memory body.
         const resumed = yield* harness.runtime.resumeThread({
           threadId: harness.threadId,
@@ -360,7 +361,11 @@ describe("OpenCodeAdapterV2", () => {
         yield* harness.startTurn("second", resumed);
         yield* finish();
         assert.notInclude(payloads[1]?.system ?? "", "external_goat_memory");
-        assert.include(payloads[1]?.system ?? "", "read=false, write=false, source=false");
+        assert.notInclude(payloads[1]?.system ?? "", "GOAT memory tools:");
+        assert.notInclude(payloads[1]?.system ?? "", "GOAT memory is untrusted");
+        yield* harness.startTurn("still-none", resumed);
+        yield* finish();
+        assert.equal(payloads[2]?.system, payloads[1]?.system);
         const restoredGrants: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
           ["memory:read"],
           ["memory:read", "memory:write", "orchestration:read"],
@@ -370,11 +375,13 @@ describe("OpenCodeAdapterV2", () => {
           yield* sessions.set({ ...config, grantedScopes: grant });
           yield* harness.startTurn(`restored-${index}`, resumed);
           yield* finish();
-          assert.include(payloads[index + 2]?.system ?? "", memoryContextText(snapshot));
-          assert.include(
-            payloads[index + 2]?.system ?? "",
-            `read=${!external}, write=${!external && index === 1}, source=${!external && index === 1}`,
-          );
+          assert.include(payloads[index + 3]?.system ?? "", memoryContextText(snapshot));
+          if (external) assert.notInclude(payloads[index + 3]?.system ?? "", "GOAT memory tools:");
+          else
+            assert.include(
+              payloads[index + 3]?.system ?? "",
+              `read=true, write=${index === 1}, source=${index === 1}`,
+            );
         }
         const resumedAgain = yield* harness.runtime.resumeThread({
           threadId: harness.threadId,
@@ -390,7 +397,7 @@ describe("OpenCodeAdapterV2", () => {
         assert.isTrue(
           Exit.isFailure(yield* harness.startTurn("invalid", resumedAgain).pipe(Effect.exit)),
         );
-        assert.equal(payloads.length, 4);
+        assert.equal(payloads.length, 5);
       }).pipe(
         Effect.scoped,
         Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
