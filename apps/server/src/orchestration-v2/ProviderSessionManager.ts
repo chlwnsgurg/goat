@@ -1,3 +1,5 @@
+import * as AdapterInfrastructure from "../provider/ProviderOrchestrationAdapterInfrastructure.ts";
+import type { MemorySnapshotPolicy } from "../memory/MemorySnapshot.ts";
 import { AgentScope } from "@goat/shared/AgentScope";
 import * as KeyedLock from "@goat/shared/KeyedLock";
 import { resolveProjectSettings } from "@goat/shared/projectSettings";
@@ -171,6 +173,7 @@ export interface McpCredentialRotation {
 }
 
 export interface ProviderSessionManagerV2Shape {
+  readonly currentMemoryPolicy?: (threadId: ThreadId) => Effect.Effect<MemorySnapshotPolicy>;
   readonly prepareMcpSession?: (input: ProviderMemoryPrepareInput) => Effect.Effect<void>;
   readonly mcpCredentialRotations?: Stream.Stream<McpCredentialRotation>;
 
@@ -373,6 +376,7 @@ export const layerWithOptions = (
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const admission = yield* Effect.serviceOption(AdapterInfrastructure.ProviderMemoryAdmission);
       /**
        * Optional so the many focused tests that assemble this layer by hand do
        * not each need a settings stub; the production composition always
@@ -504,6 +508,51 @@ export const layerWithOptions = (
       };
       const isMcpCredentialReserved = (threadId: ThreadId, mcpCredentialId: string) =>
         (mcpCredentialReservations.get(mcpReservationKey(threadId, mcpCredentialId)) ?? 0) > 0;
+      const isCurrentAttachment = (
+        config: import("@goat/provider-core/server/mcpSession").McpProviderSessionConfig,
+      ) =>
+        Effect.gen(function* () {
+          const threadId = config.threadId;
+          const prepared = memoryPrepareInputs.get(threadId);
+          if (
+            !prepared ||
+            (yield* mcpSessions.read(threadId))?.providerSessionId !== config.providerSessionId
+          )
+            return false;
+          const attached =
+            isMcpCredentialReserved(threadId, config.providerSessionId) ||
+            Array.from((yield* Ref.get(sessions)).values()).some(
+              (entry) =>
+                entry.runtime.instanceId === prepared.providerInstanceId &&
+                entry.attachedThreadIds.has(threadId) &&
+                entry.mcpCredentialIdByThread.get(threadId) === config.providerSessionId,
+            );
+          if (!attached) return false;
+          const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
+          return (
+            Option.isSome(thread) &&
+            thread.value.deletedAt === null &&
+            thread.value.archivedAt === null &&
+            thread.value.providerInstanceId === prepared.providerInstanceId
+          );
+        });
+      const currentMemoryPolicy = (threadId: ThreadId) =>
+        Effect.gen(function* () {
+          const committed = Option.isSome(memoryPolicy)
+            ? yield* memoryPolicy.value.read
+            : undefined;
+          const denied = { grant: "none" as const, policyEpoch: committed?.epoch ?? 0 };
+          if (!committed?.policyReady || !committed.enableAgentMemoryAccess) return denied;
+          const config = yield* mcpSessions.read(threadId);
+          if (!config || !(yield* isCurrentAttachment(config))) return denied;
+          const policy = yield* (
+            mcpSessionRegistry.currentMemoryPolicy?.(config.providerSessionId) ??
+              Effect.succeed(undefined)
+          );
+          return policy?.policyEpoch === committed.epoch ? policy : denied;
+        });
+      if (Option.isSome(admission))
+        yield* admission.value.bind(currentMemoryPolicy, isCurrentAttachment);
       const mcpPrepareLock = yield* KeyedLock.make<ThreadId>();
       /**
        * Resolves (or mints) the thread's MCP credential and returns it with a
@@ -671,13 +720,15 @@ export const layerWithOptions = (
                       ]),
                     ),
                 );
-                yield* PubSub.publish(credentialRotations, {
+                const rotation = {
                   threadId,
                   providerInstanceId,
                   providerSessionId: credential.config.providerSessionId,
                   grantedScopes,
                   memoryPolicy: issuedPolicy,
-                });
+                };
+                if (Option.isSome(admission)) yield* admission.value.rotated(rotation);
+                else yield* PubSub.publish(credentialRotations, rotation);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
                 return { mcpCredentialId: credential.config.providerSessionId, issued: true };
               }),
@@ -2252,7 +2303,10 @@ export const layerWithOptions = (
       }
 
       return ProviderSessionManagerV2.of({
-        mcpCredentialRotations: Stream.fromPubSub(credentialRotations),
+        currentMemoryPolicy,
+        mcpCredentialRotations: Option.isSome(admission)
+          ? admission.value.rotations
+          : Stream.fromPubSub(credentialRotations),
         prepareMcpSession: (input) =>
           Effect.gen(function* () {
             const prepared = yield* prepareMcpSession(input);

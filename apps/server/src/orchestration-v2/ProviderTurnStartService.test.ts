@@ -1,3 +1,6 @@
+import * as Logger from "effect/Logger";
+import * as MemorySnapshot from "../memory/MemorySnapshot.ts";
+import type { MemoryTaskGrantCeiling } from "@goat/contracts";
 import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
@@ -189,6 +192,11 @@ function makeLocalCommandHarness(input: {
   readonly writeFailure?: unknown;
   /** Loads the thread and starts the run, then fails every later state read. */
   readonly failReadsAfterRunning?: boolean;
+  readonly memory?: {
+    readonly policy: () => Effect.Effect<MemorySnapshot.MemorySnapshotPolicy>;
+    readonly select: MemorySnapshot.MemorySnapshot["Service"]["forThread"];
+    readonly currentRun?: () => RunId | undefined;
+  };
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -513,6 +521,19 @@ function makeLocalCommandHarness(input: {
         Layer.mock(GitWorkflow.GitWorkflowService)({}),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadShell: () =>
+            Effect.succeed({
+              ...projection.thread,
+              activityRunStatus: "running" as const,
+              activeRunId:
+                input.memory?.currentRun === undefined
+                  ? runId
+                  : (input.memory.currentRun() ?? null),
+            } as NonNullable<
+              Effect.Success<
+                ReturnType<ProjectionStore.ProjectionStoreV2["Service"]["getThreadShell"]>
+              >
+            >),
           getTurnStartContext: () =>
             Effect.succeed({
               ...projection,
@@ -539,7 +560,13 @@ function makeLocalCommandHarness(input: {
               }),
             ),
         }),
-        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
+        ...(input.memory === undefined
+          ? []
+          : [Layer.mock(MemorySnapshot.MemorySnapshot)({ forThread: input.memory.select })]),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          open,
+          ...(input.memory === undefined ? {} : { currentMemoryPolicy: input.memory.policy }),
+        }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
@@ -873,3 +900,64 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+// Observe the closure installed by the real start service; authority is reread per send.
+effectIt.effect("refreshes each send, omits none and failures, and fences a moved run", () =>
+  Effect.gen(function* () {
+    let grant: MemoryTaskGrantCeiling = "read_write";
+    let fail = false;
+    let moved = false;
+    let selections = 0;
+    let moveDuringRead = false;
+    const diagnostics: Array<unknown> = [];
+    const logger = Logger.make(({ message }) => diagnostics.push(message));
+    const snapshot = { protocolVersion: 1, items: [], renderedText: "fixture frame" } as never;
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      failReadsAfterRunning: true,
+      memory: {
+        policy: () => Effect.sync(() => ({ grant, policyEpoch: 7 })),
+        currentRun: () => (moved ? undefined : RunId.make("run-native-account-command")),
+        select: (_threadId, policy, currentPolicy) =>
+          Effect.gen(function* () {
+            selections++;
+            expect(policy).toEqual(yield* currentPolicy);
+            if (fail)
+              return yield* new MemorySnapshot.MemorySnapshotError({
+                cause: "fixture read failure",
+              });
+            if (moveDuringRead) moved = true;
+            return snapshot;
+          }),
+      },
+    });
+    yield* harness.start;
+    const refresh = harness.startRootRun.mock.calls[0]![0].refreshMemoryContext;
+    expect(refresh).toBeDefined();
+    expect(selections).toBe(0);
+    expect(yield* refresh!()).toBe(snapshot);
+    expect(yield* refresh!()).toBe(snapshot);
+    expect(selections).toBe(2);
+    grant = "none";
+    expect(yield* refresh!()).toBeUndefined();
+    expect(selections).toBe(2);
+    grant = "read";
+    expect(yield* refresh!()).toBe(snapshot);
+    fail = true;
+    expect(yield* refresh!().pipe(Effect.provide(Logger.layer([logger])))).toBeUndefined();
+    expect(diagnostics).toEqual([
+      [
+        "Memory refresh unavailable",
+        { threadId: "thread-native-account-command", runId: "run-native-account-command" },
+      ],
+    ]);
+    expect(selections).toBe(4);
+    fail = false;
+    moveDuringRead = true;
+    expect(yield* refresh!()).toBeUndefined();
+    expect(selections).toBe(5);
+    moved = true;
+    expect(yield* refresh!()).toBeUndefined();
+    expect(selections).toBe(5);
+  }),
+);

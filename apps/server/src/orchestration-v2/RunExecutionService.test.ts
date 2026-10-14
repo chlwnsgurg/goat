@@ -893,6 +893,12 @@ it.effect(
     Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       const calls: Array<string> = [];
+      let refreshes = 0;
+      const refreshMemoryContext = () =>
+        Effect.sync(() => {
+          refreshes++;
+          return undefined;
+        });
       const attachment = ChatFileAttachment.make({
         type: "file",
         id: ChatAttachmentId.make("compact-file-12345678-1234-1234-1234-123456789abc"),
@@ -904,24 +910,46 @@ it.effect(
         { text: " /compact ", attachments: [], expected: "compact" },
         { text: "/compact", attachments: [attachment], expected: "prompt" },
         { text: "Continue the work", attachments: [], expected: "prompt" },
+        { text: "saved cloud prompt", attachments: [], expected: "observation", reattach: true },
       ];
       for (const [index, testCase] of cases.entries()) {
         const threadId = ThreadId.make(`thread:compact-routing:${index}`);
         const attemptId = RunAttemptId.make(`attempt:compact-routing:${index}`);
         yield* runExecution.startRootRun({
           commandId: CommandId.make(`command:compact-routing:${index}`),
+          refreshMemoryContext,
+          reattach: "reattach" in testCase,
           appThread: { id: threadId } as OrchestrationV2AppThread,
           providerSessionId: ProviderSessionId.make(`session:compact-routing:${index}`),
           session: {
             events: Stream.never,
-            startTurn: () =>
+            resumeTurn: (
+              input: Parameters<
+                NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeTurn"]>
+              >[0],
+            ) =>
               Effect.sync(() => {
-                calls.push("prompt");
+                assert.isUndefined(
+                  (input as unknown as { refreshMemoryContext?: unknown }).refreshMemoryContext,
+                );
+                calls.push("observation");
               }),
-            compactThread: () =>
-              Effect.sync(() => {
-                calls.push("compact");
-              }),
+            startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              input.refreshMemoryContext!().pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    calls.push("prompt");
+                  }),
+                ),
+              ),
+            compactThread: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+              input.refreshMemoryContext!().pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    calls.push("compact");
+                  }),
+                ),
+              ),
           } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
           run: {
             id: RunId.make(`run:compact-routing:${index}`),
@@ -963,6 +991,7 @@ it.effect(
           },
         });
       }
+      assert.equal(refreshes, 3);
       assert.deepEqual(
         calls,
         cases.map((testCase) => testCase.expected),

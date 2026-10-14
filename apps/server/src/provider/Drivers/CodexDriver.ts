@@ -1,3 +1,5 @@
+import * as AdapterInfrastructure from "../ProviderOrchestrationAdapterInfrastructure.ts";
+import * as Option from "effect/Option";
 /**
  * CodexDriver — first concrete `ProviderDriver` in the new per-instance model.
  *
@@ -197,6 +199,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
         ),
       );
 
+      const memoryAdmission = yield* Effect.serviceOption(
+        AdapterInfrastructure.ProviderMemoryAdmission,
+      );
       const orchestrationAdapter = yield* createCodexAdapterV2(
         {
           instanceId,
@@ -206,7 +211,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
           enabled,
           config,
         },
-        { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+        {
+          onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+          ...(Option.isNone(memoryAdmission)
+            ? {}
+            : {
+                mcpCredentialRotations: memoryAdmission.value.rotations,
+                currentMemoryPolicy: memoryAdmission.value.currentPolicy,
+              }),
+        },
       ).pipe(
         Effect.mapError(
           (cause) =>

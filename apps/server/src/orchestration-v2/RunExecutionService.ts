@@ -566,6 +566,7 @@ export function runMemoryPrepareInput(input: {
 }
 
 export interface RunExecutionServiceV2StartRootRunInput {
+  readonly refreshMemoryContext?: ProviderAdapter.ProviderAdapterV2TurnInput["refreshMemoryContext"];
   readonly cloudSource?: import("@goat/contracts").OrchestrationV2CloudTask["source"];
   readonly reattach?: boolean;
   readonly cloudLaunchSource?: ProviderAdapter.ProviderAdapterV2CloudLaunchSource;
@@ -1585,6 +1586,9 @@ export const layer: Layer.Layer<
             input.message.attachments.length === 0 &&
             input.message.text.trim().toLowerCase() === "/compact";
           const turnInput = {
+            ...(input.reattach === true || input.refreshMemoryContext === undefined
+              ? {}
+              : { refreshMemoryContext: input.refreshMemoryContext }),
             ...(input.cloudSource === undefined ? {} : { cloudSource: input.cloudSource }),
             ...(input.cloudLaunchSource === undefined
               ? {}
