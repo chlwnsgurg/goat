@@ -1563,6 +1563,57 @@ describe("authoritative resolution approvals", () => {
     rejects(M.MemoryHubEntry, { ...metadata, receipt: { ...accepted, outcome: "deleted" } });
     rejects(M.MemoryHubReceipt, { ...accepted, outcome: "rejected", failureCode: "fenced" });
   });
+  it("accepts optional metadata compact guards and rejects inconsistent receipt identity or approval", () => {
+    const compact = {
+      memorySpaceId: id(),
+      originEnvironmentId: "fixture",
+      operationKind: "resolve",
+      receipt: accepted,
+      revisionId: id(4),
+      resolutionId: id(7),
+      revertsResolutionId: null,
+      attemptId: id(3),
+      fencingToken: 1,
+      reportGuard: {
+        reportId: "a".repeat(64),
+        resolvingEnvironmentId: "fixture",
+        resolutionId: id(7),
+        outcome: "resolved",
+      },
+    };
+    round(M.MemoryHubEntry, { ...metadata, compactReceipt: compact });
+    round(M.MemoryHubEntry, metadata);
+    for (const change of [
+      { operationId: id(9) },
+      { memoryId: id(9) },
+      { operationDigest: "b".repeat(64) },
+      { outcome: "conflicted" },
+      { hubSequence: 2 },
+      {
+        resolutionApproval: {
+          ...approval,
+          appliedAtUtc: "2026-10-15T00:00:00.000Z",
+          revertDeadlineUtc: "2026-11-14T00:00:00.000Z",
+        },
+      },
+    ])
+      rejects(M.MemoryHubEntry, {
+        ...metadata,
+        compactReceipt: { ...compact, receipt: { ...accepted, ...change } },
+      });
+    rejects(M.MemoryHubEntry, {
+      ...metadata,
+      compactReceipt: {
+        ...compact,
+        operationKind: "revert",
+        attemptId: null,
+        fencingToken: null,
+        revertsResolutionId: id(7),
+        reportGuard: { ...compact.reportGuard, outcome: "reverted" },
+      },
+    });
+    rejects(M.MemoryHubEntry, { ...metadata, compactReceipt: { ...compact, resolutionId: id(9) } });
+  });
   it("requires exactly thirty days only at the approval boundary", () => {
     round(M.MemoryResolutionApproval, approval);
     rejects(M.MemoryResolutionApproval, {
