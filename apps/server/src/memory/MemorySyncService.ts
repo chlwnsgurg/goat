@@ -452,6 +452,9 @@ const make = Effect.gen(function* () {
     });
     const execute = Effect.gen(function* () {
       yield* ensureEpoch(r.settings.memoryHubVersion);
+      // Approval metadata alone cannot justify creating replacement bytes.
+      if (!row.submission && (row.approval || row.reconcileRequired))
+        return yield* new M.MemoryHubError({ code: "invalid_output" });
       // Reconcile durable bytes before inspecting the new frontier or generating another result.
       if (row.submission) {
         if ((yield* reconcile()) !== "uncertain") return;

@@ -4001,3 +4001,69 @@ it.effect("resolution rearm passes 100 protected tickets to reach the next held 
     );
   }),
 );
+
+it.effect("approval metadata without saved bytes never regenerates a resolution", () =>
+  Effect.gen(function* () {
+    const released = yield* Deferred.make<void>();
+    let generated = 0;
+    const client = peer({
+      release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Effect.sync(() => {
+          generated++;
+        }).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const memoryId = yield* conflict();
+        const store = yield* Store.MemoryStore;
+        const aggregate = yield* store.loadAggregate(space, memoryId);
+        const ticket: M.MemoryResolutionLease = {
+          memorySpaceId: space,
+          memoryId,
+          conflictId: aggregate.conflicts[0]!.conflictId,
+          conflictHeadSet: aggregate.heads,
+          attemptId: M.MemoryOperationId.make(id(50000)),
+          holderEnvironmentId: local,
+          fencingToken: 1,
+          claimedAtHubTime: timestamp,
+          expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+          attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          frozenDefaultModelSelection: selection,
+        };
+        yield* store.persistResolutionTicket(ticket);
+        const approval: M.MemoryHubReceipt = {
+          operationId: M.MemoryOperationId.make(id(50001)),
+          memoryId,
+          operationDigest: "a".repeat(64),
+          outcome: "accepted",
+          hubSequence: 1,
+          resolutionApproval: {
+            resolutionId: M.MemoryResolutionId.make(id(50002)),
+            appliedAtUtc: timestamp,
+            revertDeadlineUtc: "1970-01-31T00:00:00.000Z",
+          },
+        };
+        const sql = yield* SqlClient.SqlClient;
+        // L1 deliberately protects this legacy metadata shape; the coordinator must preserve it too.
+        yield* sql`UPDATE memory_outbox SET ticket_json=json_set(ticket_json,'$.state','approved','$.approval',json(${encode(approval)}),'$.reconcileRequired',json('true')) WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        yield* Deferred.await(released);
+        yield* sync.shutdown;
+        assert.strictEqual(generated, 0);
+        const rows = yield* store.readRecoverableResolutionTickets({
+          memorySpaceId: space,
+          now: 30000,
+          limit: 100,
+        });
+        assert.strictEqual(rows.length, 1);
+        assert.deepStrictEqual(rows[0]!.approval, approval);
+        assert.strictEqual(rows[0]!.submission, null);
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
+);
