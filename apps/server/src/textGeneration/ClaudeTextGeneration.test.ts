@@ -1,3 +1,4 @@
+import { MemoryGenerationRunnerError } from "@goat/provider-core/server/memoryGenerationRunner";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
@@ -23,7 +24,7 @@ import {
 import * as TextGeneration from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "@goat/provider-core/server/textGenerationUtils";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
-import { verifyClaudeMemoryHooks } from "./ClaudeMemoryIsolation.ts";
+import { ClaudeMemoryRegistryQuery, verifyClaudeMemoryHooks } from "./ClaudeMemoryIsolation.ts";
 import { writeFakeCli } from "@goat/provider-testing/fakeCli";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -54,6 +55,10 @@ function makeFakeClaudeBinary(dir: string) {
   });
 }
 
+const registryOutput = (key: string, settings: string, type = "REG_SZ") =>
+  `\n${key.replace("HKLM", "HKEY_LOCAL_MACHINE").replace("HKCU", "HKEY_CURRENT_USER")}\n    Settings    ${type}    ${settings}\n`;
+const emptyRegistryQuery = (key: string) => Effect.succeed(registryOutput(key, "{}"));
+
 function withFakeClaudeEnv<A, E, R>(
   input: {
     memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
@@ -64,6 +69,8 @@ function withFakeClaudeEnv<A, E, R>(
     subscription?: boolean;
     oauthToken?: boolean;
     wsl?: boolean;
+    platform?: NodeJS.Platform;
+    registryQuery?: (key: string) => Effect.Effect<string, MemoryGenerationRunnerError>;
     expectNoSpawn?: boolean;
     expectSpawn?: boolean;
     directApi?: boolean;
@@ -256,13 +263,16 @@ function withFakeClaudeEnv<A, E, R>(
               ? Effect.succeed(input.managedDropin ?? "{}")
               : fs.readFileString(file, encoding),
       }),
-      Effect.provideService(HostProcess.Platform, "linux"),
+      Effect.provideService(HostProcess.Platform, input.platform ?? "linux"),
     );
     const result = yield* effectFn(textGeneration);
     if (input.expectNoSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(false);
     if (input.expectSpawn) expect(yield* fs.exists(`${tempDir}/spawned`)).toBe(true);
     return result;
-  }).pipe(Effect.scoped);
+  }).pipe(
+    Effect.provideService(ClaudeMemoryRegistryQuery, input.registryQuery ?? emptyRegistryQuery),
+    Effect.scoped,
+  );
 }
 
 const memorySelection = M.MemoryModelSelection.make({
@@ -460,6 +470,7 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
       const path = yield* Path.Path;
       const inspected: string[] = [];
       yield* verifyClaudeMemoryHooks("generateMemorySummary", {}).pipe(
+        Effect.provideService(ClaudeMemoryRegistryQuery, emptyRegistryQuery),
         Effect.provideService(HostProcess.Platform, platform),
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
@@ -492,6 +503,7 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const failure = yield* Effect.flip(
           verifyClaudeMemoryHooks("generateMemorySummary", environment).pipe(
+            Effect.provideService(ClaudeMemoryRegistryQuery, emptyRegistryQuery),
             Effect.provideService(HostProcess.Platform, platform),
             Effect.provideService(FileSystem.FileSystem, {
               ...fs,
@@ -501,6 +513,109 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         );
         expect(failure.cause).toMatchObject({ code: "unavailable" });
       }),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      ["win32", "wsl"].flatMap((host) =>
+        [
+          "HKLM hook",
+          "HKCU hook",
+          "query failure",
+          "interop unavailable",
+          "invalid JSON",
+          "invalid type",
+          "invalid framing",
+        ].map((scenario) => ({ operation, host, scenario })),
+      ),
+    ),
+  )("$operation refuses $host registry $scenario before spawn", ({ operation, host, scenario }) =>
+    withFakeClaudeEnv(
+      {
+        platform: host === "win32" ? "win32" : "linux",
+        wsl: host === "wsl",
+        memoryRunnerContext: memoryContext,
+        expectNoSpawn: true,
+        output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+        registryQuery: (key) => {
+          if (scenario === "query failure" || scenario === "interop unavailable")
+            return Effect.fail(new MemoryGenerationRunnerError({ code: "unavailable" }));
+          if (scenario === "invalid framing") return Effect.succeed("unexpected response");
+          if (scenario === "invalid JSON") return Effect.succeed(registryOutput(key, "{invalid"));
+          if (scenario === "invalid type")
+            return Effect.succeed(registryOutput(key, "{}", "REG_BINARY"));
+          const hooks = key.startsWith(scenario.startsWith("HKLM") ? "HKLM" : "HKCU");
+          return Effect.succeed(
+            registryOutput(key, JSON.stringify(hooks ? { hooks: { SessionStart: [] } } : {})),
+          );
+        },
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const failure = yield* Effect.flip(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(failure.cause).toMatchObject({ code: "unavailable" });
+        }),
+    ),
+  );
+
+  it.effect.each(
+    memoryOperations.flatMap((operation) => ["win32", "wsl"].map((host) => ({ operation, host }))),
+  )("$operation spawns with hook-free $host registry policy", ({ operation, host }) =>
+    withFakeClaudeEnv(
+      {
+        platform: host === "win32" ? "win32" : "linux",
+        wsl: host === "wsl",
+        memoryRunnerContext: memoryContext,
+        expectSpawn: true,
+        output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const result =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(result.result.text).toBe(memoryOutput.text);
+        }),
+    ),
+  );
+
+  it.effect.each([
+    { platform: "win32", environment: {} },
+    { platform: "linux", environment: { WSL_DISTRO_NAME: "synthetic-wsl" } },
+  ] as const)("checks registry policy precedence on $platform", ({ platform, environment }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      for (const settings of [
+        "{}",
+        '{"wslInheritsWindowsSettings":true}',
+        '{"model":"synthetic"}',
+      ]) {
+        const inspected: string[] = [];
+        yield* verifyClaudeMemoryHooks("generateMemorySummary", environment).pipe(
+          Effect.provideService(HostProcess.Platform, platform),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(false),
+          }),
+          Effect.provideService(ClaudeMemoryRegistryQuery, (key, env) => {
+            expect(env).toBe(environment);
+            inspected.push(key);
+            return Effect.succeed(
+              registryOutput(key, key.startsWith("HKLM") ? settings : "{}", "REG_EXPAND_SZ"),
+            );
+          }),
+        );
+        expect(inspected).toEqual([
+          "HKLM\\SOFTWARE\\Policies\\ClaudeCode",
+          ...(settings.includes('"model"') ? [] : ["HKCU\\SOFTWARE\\Policies\\ClaudeCode"]),
+        ]);
+      }
+    }),
   );
 
   it.effect.each(memoryOperations)("runs %s with tools hooks and MCP disabled", (operation) =>

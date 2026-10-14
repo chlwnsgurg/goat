@@ -259,6 +259,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* () {
       if (TextGenerationOperations.isMemoryOperation(operation))
         yield* verifyClaudeMemoryHooks(operation, claudeEnvironment).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
           Effect.provideService(HostProcess.Platform, platform),
