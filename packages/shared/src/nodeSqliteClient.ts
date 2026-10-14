@@ -539,14 +539,25 @@ if (major < 3 || (major === 3 && minor < 51)) throw new Error("SQLite " + versio
 db.exec("PRAGMA checkpoint_fullfsync = ON;");
 const frames = db.prepare("PRAGMA wal_checkpoint(NOOP)");
 const checkpoint = db.prepare("PRAGMA wal_checkpoint(PASSIVE)");
-const finish = () => {
+// Another connection can hold a lock that even NOOP needs (SQLITE_BUSY, such as
+// an exclusive-mode writer). Skip that round: the next request checks again.
+const unlessBusy = (run) => {
+  try {
+    run();
+  } catch (error) {
+    if (!error || (error.errcode & 0xff) !== 5) throw error;
+  }
+};
+const finish = () => unlessBusy(() => {
   const { log, checkpointed } = frames.get();
   if (log >= workerData.frames && checkpointed < log) checkpoint.get();
-};
+});
 let idle;
 parentPort.on("message", (request) => {
-  const { log, checkpointed } = frames.get();
-  if (log - checkpointed >= workerData.frames) checkpoint.get();
+  unlessBusy(() => {
+    const { log, checkpointed } = frames.get();
+    if (log - checkpointed >= workerData.frames) checkpoint.get();
+  });
   clearTimeout(idle);
   idle = setTimeout(finish, workerData.idleMs);
   parentPort.postMessage(request);
