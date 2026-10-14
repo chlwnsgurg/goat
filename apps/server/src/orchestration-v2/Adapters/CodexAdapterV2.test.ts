@@ -2997,7 +2997,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             modelSelection: CODEX_TEST_MODEL_SELECTION,
             hasGoatMcp: true,
             memoryContext: snapshot,
-            memoryTools: { read: true, write: false, source: true },
           });
           const context = { ...params.additionalContext };
           if (outcome === "revoked") delete context.goat_memory;

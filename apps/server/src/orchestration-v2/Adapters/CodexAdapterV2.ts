@@ -725,7 +725,6 @@ export function buildCodexTurnStartParams(input: {
   readonly omitServiceTier?: boolean;
   readonly memoryContext?: ProviderAdapter.ProviderAdapterV2TurnInput["memoryContext"];
   readonly clearMemoryContext?: boolean;
-  readonly memoryTools?: McpProviderSession.MemoryToolAvailability;
   /** What the thread's MCP Apps want the agent to know (`ui/update-model-context`). */
   readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
 }) {
@@ -768,7 +767,6 @@ export function buildCodexTurnStartParams(input: {
             {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
-              ...(input.memoryTools ? { memory: input.memoryTools } : {}),
             },
           )
         : undefined;
@@ -6593,7 +6591,6 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               codexInput,
               memoryContext: validatedMemory,
               clearMemoryContext,
-              memoryTools: McpProviderSession.memoryToolAvailability(mcpSession),
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasGoatMcp: mcpSession !== undefined,

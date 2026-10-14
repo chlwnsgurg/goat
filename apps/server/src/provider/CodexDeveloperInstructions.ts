@@ -1,5 +1,4 @@
 import { MEMORY_DATA_BOUNDARY_REMINDER } from "@goat/provider-core/server/memoryContext";
-import type { MemoryToolAvailability } from "@goat/provider-core/server/mcpSession";
 import type { ProviderInteractionMode } from "@goat/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructions } from "@goat/provider-core/server/runtimeInstructions";
@@ -16,7 +15,6 @@ The \`goat\` MCP server also exposes \`device_*\` tools for iOS Simulators and A
 export interface GoatToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
-  readonly memory?: MemoryToolAvailability;
 }
 
 const normalizeAvailability = (
@@ -37,11 +35,6 @@ const toolInstructions = (availability: boolean | GoatToolAvailability): string 
     tools.browser ? GOAT_BROWSER_TOOL_INSTRUCTIONS : "",
     tools.device ? GOAT_DEVICE_TOOL_INSTRUCTIONS : "",
     MEMORY_DATA_BOUNDARY_REMINDER,
-    tools.memory?.read ? "GOAT memory read tools are available." : "",
-    tools.memory?.write ? "GOAT memory write tools are available." : "",
-    tools.memory?.source
-      ? "GOAT memory source reads are available when the source owner permits them."
-      : "",
   ]
     .filter(Boolean)
     .join("\n\n");
