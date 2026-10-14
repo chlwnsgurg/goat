@@ -367,6 +367,12 @@ const make = Effect.gen(function* () {
                 replay.receipt.forgetExpansion?.requestDigest !== decision.operationDigest)
             )
               return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+            const promote =
+              decision.admission.kind === "approvedReplica" &&
+              "hubSequence" in decision.receipt &&
+              decision.receipt.hubSequence !== null &&
+              (!("hubSequence" in replay.receipt) || replay.receipt.hubSequence === null);
+            if (promote) return yield* store.apply(decision);
             return replay;
           }
           const aggregate = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);

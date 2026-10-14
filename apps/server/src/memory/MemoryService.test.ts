@@ -424,6 +424,17 @@ it.effect(
         (yield* store.receipt(space, reference.operationId))?.receipt,
         receipt,
       );
+      const sql = yield* SqlClient.SqlClient;
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_events WHERE operation_id=${reference.operationId}`)
+          .length,
+        1,
+      );
+      assert.isTrue(
+        (yield* store.loadAggregate(space, memoryId)).item?.localAvailability.reasons.includes(
+          "scanner_pending",
+        ),
+      );
       assert.isFalse((yield* service.settleHubAcknowledgement(args)).incorporated);
       const operation = yield* store.readOperation(space, reference.operationId);
       assert.isDefined(operation);
@@ -492,6 +503,33 @@ it.effect(
       assert.strictEqual((yield* store.pendingForgetIntents(10))[0]?.submissionState, "rejected");
       yield* service.settleHubAcknowledgement(args);
       assert.deepStrictEqual(yield* store.receipt(space, operationId), original);
+      const op = yield* store.readOperation(space, operationId);
+      const accepted: M.MemoryHubReceipt = {
+        operationId,
+        memoryId,
+        operationDigest: original.operationDigest,
+        outcome: "deleted",
+        hubSequence: 1,
+      };
+      yield* service.receiveHubPage({
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        expectedSequence: 0,
+        reauthorize: Effect.void,
+        page: {
+          entries: [{ kind: "operation", operation: op!, receipt: accepted, hubSequence: 1 }],
+          throughSequence: 1,
+          highWatermark: 1,
+          hasMore: false,
+        },
+      });
+      assert.deepStrictEqual(yield* store.pendingForgetIntents(10), []);
+      assert.deepStrictEqual((yield* store.receipt(space, operationId))?.receipt, accepted);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_events WHERE operation_id=${operationId}`).length,
+        1,
+      );
     }).pipe(Effect.provide(live)),
 );
 
@@ -663,3 +701,120 @@ describe("MemoryService source outcome fencing", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+it.effect("rejects an empty pull that skips canonical sequences and leaves the cursor intact", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const store = yield* Store.MemoryStore;
+    const args = {
+      memorySpaceId: space,
+      hubEnvironmentId: environmentId,
+      localEnvironmentId: environmentId,
+      expectedSequence: 0,
+      reauthorize: Effect.void,
+      page: { entries: [], throughSequence: 100, highWatermark: 100, hasMore: false },
+    };
+    assert.strictEqual(
+      (yield* service.receiveHubPage(args).pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    assert.strictEqual(yield* store.readCursor(space, environmentId), 0);
+    assert.deepStrictEqual(
+      yield* service.receiveHubPage({ ...args, page: { ...args.page, throughSequence: 0 } }),
+      [],
+    );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["accepted", "rejected"] as const)(
+  "settles lost revert ACK by %s pull without resending or retaining a refused body",
+  (outcome) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.upsert(input(), Effect.void);
+      const original = (yield* store.loadAggregate(space, memoryId)).revisions[0]!;
+      const second = { ...input(4), expectedHeads: [original.revision.revisionId] };
+      yield* service.upsert(second, Effect.void);
+      const current = yield* store.loadAggregate(space, memoryId);
+      const result = current.revisions.find((r) => r.revision.operationId === second.operationId)!;
+      const resolutionId = M.MemoryResolutionId.make(id(90));
+      const selection: M.MemoryModelSelection = {
+        instanceId: M.ProviderInstanceId.make("fixture"),
+        model: "fixture",
+      };
+      const inputIds = [original.revision.revisionId, M.MemoryRevisionId.make(id(91))].sort();
+      const resolution: M.MemoryResolution = {
+        resolutionId,
+        memorySpaceId: space,
+        memoryId,
+        inputRevisionIds: inputIds,
+        inputPayloadRefs: inputIds,
+        judgmentRef: resolutionId,
+        requestedModelSelection: selection,
+        effectiveProvider: M.ProviderDriverKind.make("codex"),
+        effectiveModel: "fixture",
+        resolvingEnvironmentId: environmentId,
+        fencingToken: 1,
+        resultRevisionId: result.revision.revisionId,
+        appliedAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+        revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-10-15T00:00:00.000Z"),
+      };
+      yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${resolutionId},${memoryId},${yield* encodeRevisionIds(inputIds)},${yield* encodeRevisionIds(inputIds)},${resolutionId},${yield* encodeSelectionJson(selection)},'{}',${environmentId},1,${result.revision.revisionId},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${yield* encodeResolution(resolution)})`;
+      assert.deepStrictEqual((yield* store.loadAggregate(space, memoryId)).resolutions, [
+        resolution,
+      ]);
+      yield* TestClock.setTime(Date.parse("2030-01-01T00:00:00.000Z"));
+      const staged = yield* service.revertResolution(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(6)),
+          resolutionId,
+          restoredRevisionId: original.revision.revisionId,
+          expectedHeads: [result.revision.revisionId],
+        },
+        Effect.void,
+      );
+      assert.strictEqual(staged.status, "pending");
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_revert_intents`).length, 1);
+      const operationId = M.MemoryOperationId.make(id(6));
+      const workId = `revert:${space}:${operationId}`;
+      const op = yield* store.readWorkOperation(workId);
+      assert.isDefined(op);
+      const receipt: M.MemoryHubReceipt = {
+        operationId,
+        memoryId,
+        operationDigest: memoryOperationDigest(op!),
+        outcome,
+        hubSequence: 1,
+        ...(outcome === "rejected" ? { failureCode: "revert_expired" as const } : {}),
+      };
+      const entry: M.MemoryHubEntry =
+        outcome === "rejected"
+          ? { kind: "metadata", operationKind: "revert", memoryId, receipt, hubSequence: 1 }
+          : { kind: "operation", operation: op!, receipt, hubSequence: 1 };
+      const settled = yield* service.receiveHubPage({
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        expectedSequence: 0,
+        reauthorize: Effect.void,
+        page: { entries: [entry], throughSequence: 1, highWatermark: 1, hasMore: false },
+      });
+      assert.strictEqual(settled[0]?.intent, outcome === "rejected" ? "rejected" : "completed");
+      assert.strictEqual(
+        (yield* store.readWork(workId))?.status,
+        outcome === "rejected" ? "failed" : "completed",
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_revert_intents`).length, 0);
+      assert.strictEqual(yield* store.readCursor(space, environmentId), 1);
+      if (op?.kind === "revert" && outcome === "rejected")
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${op.revision.payloadRef}`)
+            .length,
+          0,
+        );
+    }).pipe(Effect.provide(live)),
+);

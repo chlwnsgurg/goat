@@ -2241,7 +2241,7 @@ const make = Effect.gen(function* () {
         }
         const eventMetadata = yield* stored("metadata-codec", metadataCodec.encode(metadataOf(op)));
         const eventReceipt = yield* stored("receipt-codec", receiptCodec.encode(outcome));
-        if (!reconnect)
+        if (!reconnect && !old)
           yield* stored(
             "event",
             sql<{
@@ -2422,7 +2422,7 @@ const make = Effect.gen(function* () {
           });
         for (const signal of decision.signals ?? [])
           yield* emit({ ...signal, projectionWatermark: watermark });
-        return old ?? { operationDigest: decision.operationDigest, receipt: outcome };
+        return { operationDigest: decision.operationDigest, receipt: outcome };
       }),
     );
   });

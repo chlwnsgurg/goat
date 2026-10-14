@@ -634,7 +634,15 @@ describe("MemoryStore", () => {
         resolutionId: M.MemoryResolutionId.make(id(10)),
         attemptId: M.MemoryOperationId.make(id(11)),
         fencingToken: Number.MAX_SAFE_INTEGER,
-        receipt: { ...base.receipt, hubSequence: Number.MAX_SAFE_INTEGER },
+        receipt: {
+          ...base.receipt,
+          hubSequence: Number.MAX_SAFE_INTEGER,
+          resolutionApproval: {
+            resolutionId: M.MemoryResolutionId.make(id(10)),
+            appliedAtUtc: now,
+            revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-11-13T00:00:00.000Z"),
+          },
+        },
         reportGuard: {
           reportId: "b".repeat(64),
           resolvingEnvironmentId: env,

@@ -1340,13 +1340,17 @@ const make = Effect.gen(function* () {
       yield* apply(entry.operation, Store.approvedReplica, Effect.void, entry.receipt);
     else yield* store.settleMetadataEntryTx({ memorySpaceId: input.memorySpaceId, entry });
     const workId = input.workId ?? `sync:${input.memorySpaceId}:${entry.receipt.operationId}`;
-    const work = yield* store.readWork(workId);
+    const work =
+      (yield* store.readWork(workId)) ??
+      (input.workId
+        ? undefined
+        : yield* store.readWork(`revert:${input.memorySpaceId}:${entry.receipt.operationId}`));
     if (
       work &&
       "operationId" in work.metadata &&
       work.metadata.operationId === entry.receipt.operationId
     )
-      yield* store.acknowledgeOutbox(workId, entry.receipt);
+      yield* store.acknowledgeOutbox(work.id, entry.receipt);
     return {
       receipt: entry.receipt,
       incorporated,
@@ -1371,7 +1375,7 @@ const make = Effect.gen(function* () {
       previous = entry.hubSequence;
     }
     if (
-      (page.entries.length > 0 && previous !== page.throughSequence) ||
+      (previous !== page.throughSequence) ||
       page.throughSequence < input.expectedSequence
     )
       return yield* new Store.MemoryStoreConflict({ code: "invalid_cursor" });
