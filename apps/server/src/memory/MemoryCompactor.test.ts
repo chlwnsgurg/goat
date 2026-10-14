@@ -253,7 +253,7 @@ describe("MemoryCompactor", () => {
     Effect.gen(function* () {
       yield* seed;
       const compactor = yield* Compactor.MemoryCompactor;
-      const initial = yield* compactor.compact(principal());
+      yield* compactor.compact(principal());
       const hub = yield* Hub.MemoryHubService;
       const joined = yield* hub.join(
         { protocolVersion: 1, memorySpaceId: space, environmentId: hubEnv },
@@ -264,6 +264,9 @@ describe("MemoryCompactor", () => {
         principal(),
       );
       yield* push();
+      // Admission prepaid the changed snapshot. Consume that slot first; another
+      // publication while the old token pins its pages needs additional space.
+      const initial = yield* compactor.compact(principal());
       const sql = yield* SqlClient.SqlClient;
       yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} WHERE space=${space}`;
       const beforeRetention = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
@@ -306,7 +309,7 @@ describe("MemoryCompactor", () => {
           count: number;
         }>`SELECT count(DISTINCT checkpoint_id) AS count FROM memory_inbox_pending WHERE reason='hub_snapshot'`)[0]!
           .count,
-        1,
+        2,
       );
     }).pipe(Effect.provide(live)),
   );
