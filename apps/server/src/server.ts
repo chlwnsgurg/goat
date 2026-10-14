@@ -673,11 +673,13 @@ export const layerMemorySyncStarted = Layer.effectDiscard(
   }),
 ).pipe(Layer.provideMerge(MemorySync.layer));
 
+/** Shared production runtime composition, including the single committed policy adapter. */
+export const layerMemorySyncRuntime = MemorySyncRuntimeLive.layer.pipe(
+  Layer.provideMerge(MemoryOwnerSourceReadPolicyBinding.layer),
+);
 const layerMemorySync = layerMemorySyncStarted.pipe(
   Layer.provide(layerMemorySourceReadBinding),
-  Layer.provideMerge(
-    MemorySyncRuntimeLive.layer.pipe(Layer.provide(MemoryOwnerSourceReadPolicyBinding.layer)),
-  ),
+  Layer.provideMerge(layerMemorySyncRuntime),
   Layer.provide(layerMemoryHub),
   Layer.provide(layerTextGeneration),
   Layer.provide(ServerEnvironment.layerIdentity),

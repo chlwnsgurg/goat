@@ -23,7 +23,6 @@ import * as Worker from "./memory/MemoryWorker.ts";
 import * as Maintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as RuntimeIdentity from "./runtimeIdentity.ts";
 import * as OrchestrationRuntime from "./orchestration-v2/runtimeLayer.ts";
-import * as Runtime from "./memory/MemorySyncRuntimeLive.ts";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
@@ -40,6 +39,7 @@ import * as Service from "./memory/MemoryService.ts";
 import * as Hub from "./memory/MemoryHubService.ts";
 import * as Client from "./memory/MemoryHubClient.ts";
 import {
+  layerMemorySyncRuntime,
   layerMemoryHubServices,
   layerMemoryHubRoutes,
   layerMemorySourceReadService,
@@ -120,7 +120,7 @@ const environment = (home: string) =>
             }),
         });
       }),
-    ).pipe(Layer.provideMerge(Runtime.layer.pipe(Layer.provideMerge(PolicyBinding.layer))));
+    ).pipe(Layer.provideMerge(layerMemorySyncRuntime));
     let owningRun = true;
     let memoryEnabled = true;
     const context = yield* Layer.buildWithMemoMap(
