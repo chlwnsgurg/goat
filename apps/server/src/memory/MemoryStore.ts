@@ -2874,8 +2874,7 @@ const make = Effect.gen(function* () {
         if (
           accepted &&
           decision.admission.kind !== "localIntent" &&
-          !decision.pending &&
-          !tombstones.length &&
+          (decision.admission.kind === "approvedReplica" || (!decision.pending && !tombstones.length)) &&
           op.kind !== "forget"
         ) {
           yield* unionImportLineageTx(lineageForRevision(op.revision), decision.admission);
