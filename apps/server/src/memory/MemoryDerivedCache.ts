@@ -1,7 +1,7 @@
 import { MEMORY_DERIVED_CACHE_MAX_BYTES, MEMORY_DERIVED_CACHE_TTL_MS } from "@goat/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 
@@ -21,7 +21,7 @@ export class MemoryDerivedCache extends Context.Service<
 const make = Effect.sync(() => {
   const entries = new Map<
     symbol,
-    { bytes: number; release: Effect.Effect<void>; timer: Fiber.Fiber<void, never> | undefined }
+    { bytes: number; release: Effect.Effect<void>; lifecycle: Scope.Closeable }
   >();
   let bytes = 0;
   // Removal precedes release, so an owner can safely unregister during cleanup.
@@ -35,20 +35,28 @@ const make = Effect.sync(() => {
       return entry;
     });
   const discard = Effect.fnUntraced(function* (id: symbol) {
-    const entry = yield* remove(id);
+    const entry = entries.get(id);
     if (!entry) return;
-    if (entry.timer) yield* Fiber.interrupt(entry.timer);
-    yield* entry.release;
+    yield* Scope.close(entry.lifecycle, Exit.void);
   }, Effect.uninterruptible);
   const retain = Effect.fnUntraced(function* (input: {
     bytes: number;
     release: Effect.Effect<void>;
   }) {
     const scope = yield* Scope.Scope;
+    // Closing a registration detaches its cleanup from the long-lived caller.
+    const lifecycle = yield* Scope.fork(scope);
     const id = Symbol();
-    const entry = { ...input, timer: undefined as Fiber.Fiber<void, never> | undefined };
+    const entry = { ...input, lifecycle };
     entries.set(id, entry);
     bytes += input.bytes;
+    yield* Scope.addFinalizer(
+      lifecycle,
+      Effect.gen(function* () {
+        const removed = yield* remove(id);
+        if (removed) yield* removed.release;
+      }).pipe(Effect.uninterruptible),
+    );
     for (;;) {
       if (bytes <= MEMORY_DERIVED_CACHE_MAX_BYTES) break;
       const oldest = entries.keys().next().value;
@@ -56,19 +64,14 @@ const make = Effect.sync(() => {
       yield* discard(oldest);
     }
     if (entries.has(id)) {
-      entry.timer = yield* Effect.sleep(MEMORY_DERIVED_CACHE_TTL_MS).pipe(
-        Effect.andThen(
-          Effect.gen(function* () {
-            const expired = yield* remove(id);
-            if (expired) yield* expired.release;
-          }).pipe(Effect.uninterruptible),
-        ),
+      // forkIn skips interrupting its own fiber when expiry closes this scope.
+      yield* Effect.sleep(MEMORY_DERIVED_CACHE_TTL_MS).pipe(
+        Effect.andThen(discard(id)),
         Effect.interruptible,
-        Effect.forkIn(scope),
+        Effect.forkIn(lifecycle),
       );
     }
     const unregister = discard(id);
-    yield* Scope.addFinalizer(scope, unregister);
     return unregister;
   }, Effect.uninterruptible);
   return MemoryDerivedCache.of({
