@@ -13,6 +13,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   MemoryOwnerSourceReadPolicy,
+  MEMORY_HUB_MAX_MEMBERS,
   type MemoryHubDisableInput,
   type MemoryHubDisableResult,
   MemoryOwnerSourceReadPolicyUpdateInput,
@@ -475,6 +476,18 @@ const makeOwnerPolicyPublication = Effect.gen(function* () {
   };
 });
 
+// Retire acknowledged pairs only after retaining every fence in the monotone epoch.
+// Active enrollments without a removal are valid; pending barriers must survive.
+const normalizeOwnerPolicy = (policy: MemoryOwnerSourceReadPolicy) => ({
+  ...policy,
+  ownerPolicyEpoch: policy.removals.reduce(
+    (epoch, removal) =>
+      removal.state === "acknowledged" ? Math.max(epoch, removal.ack.revokedThroughEpoch) : epoch,
+    policy.ownerPolicyEpoch,
+  ),
+  removals: policy.removals.filter((removal) => removal.state === "pending"),
+});
+
 const transitionOwnerPolicy = (
   current: MemoryOwnerSourceReadCommitted,
   input: MemoryOwnerSourceReadPolicyUpdateInput,
@@ -485,15 +498,12 @@ const transitionOwnerPolicy = (
     const value = yield* decodeOwnerUpdate(input).pipe(Effect.mapError(ownerInvalid));
     if (value.expectedVersion !== current.version)
       return yield* new MemoryRpcError({ code: "revision_changed" });
-    const previous = current.policy;
+    const previous = normalizeOwnerPolicy(current.policy);
     const wanted = new Set(value.allowedRequesterEnvironmentIds);
     const enrollments: MemoryOwnerEnrollment[] = [];
     const removals: MemoryOwnerRemoval[] = [...previous.removals];
     let epoch = previous.ownerPolicyEpoch;
-    const advance = (floor = epoch) => {
-      epoch = Math.max(epoch, floor) + 1;
-      return epoch;
-    };
+    const advance = () => ++epoch;
     for (const enrollment of previous.enrollments) {
       // Space changes never carry an enrollment into another pair implicitly.
       if (
@@ -515,20 +525,34 @@ const transitionOwnerPolicy = (
         else removals[index] = removal;
       }
     }
+    let enrolling = false;
     for (const requesterEnvironmentId of wanted) {
       if (enrollments.some((e) => e.requesterEnvironmentId === requesterEnvironmentId)) continue;
       if (space === null) return yield* new MemoryRpcError({ code: "bootstrap_required" });
       const pair = { memorySpaceId: space, ownerEnvironmentId: owner, requesterEnvironmentId };
       const removal = removals.find((r) => ownerPairKey(r) === ownerPairKey(pair));
-      const ownerPolicyEpoch = advance(
-        removal?.state === "acknowledged" ? removal.ack.revokedThroughEpoch : epoch,
-      );
+      enrolling = true;
+      const ownerPolicyEpoch = advance();
       enrollments.push(
         removal?.state === "pending"
           ? { ...pair, ownerPolicyEpoch, state: "pending", removalEpoch: removal.removalEpoch }
           : { ...pair, ownerPolicyEpoch, state: "active" },
       );
     }
+    // Reserve a removal slot for every committed enrollment, including pending ones.
+    // Revocation only moves an existing pair into removals and cannot grow this union.
+    const reserved = new Set([...removals, ...enrollments].map(ownerPairKey)).size;
+    if (enrolling && reserved > MEMORY_HUB_MAX_MEMBERS)
+      return yield* new MemoryRpcError({
+        code: "capacity_exceeded",
+        capacity: {
+          code: "capacity_exceeded",
+          dimension: "members",
+          current: reserved,
+          limit: MEMORY_HUB_MAX_MEMBERS,
+          reclaimable: 0,
+        },
+      });
     const policy = yield* decodeOwnerPolicy({
       allowedRequesterEnvironmentIds: [
         ...new Set(
@@ -552,8 +576,9 @@ const acknowledgeOwnerPolicy = (
       (r) => r.state === "pending" && matchesMemorySourceReadRevokeAck(r, value),
     );
     if (!match) return current;
-    let epoch = Math.max(current.policy.ownerPolicyEpoch, value.revokedThroughEpoch);
-    const enrollments = current.policy.enrollments.map((e): MemoryOwnerEnrollment => {
+    const previous = normalizeOwnerPolicy(current.policy);
+    let epoch = Math.max(previous.ownerPolicyEpoch, value.revokedThroughEpoch);
+    const enrollments = previous.enrollments.map((e): MemoryOwnerEnrollment => {
       if (e.state !== "pending" || ownerPairKey(e) !== ownerPairKey(match)) return e;
       return {
         memorySpaceId: e.memorySpaceId,
@@ -564,7 +589,7 @@ const acknowledgeOwnerPolicy = (
       };
     });
     const policy = yield* decodeOwnerPolicy({
-      ...current.policy,
+      ...previous,
       ownerPolicyEpoch: epoch,
       allowedRequesterEnvironmentIds: [
         ...new Set(
@@ -572,9 +597,7 @@ const acknowledgeOwnerPolicy = (
         ),
       ],
       enrollments,
-      removals: current.policy.removals.map((r) =>
-        r === match ? { ...r, state: "acknowledged", ack: value } : r,
-      ),
+      removals: previous.removals.filter((r) => r !== match),
     }).pipe(Effect.mapError(ownerInvalid));
     return { policy, version: current.version + 1 };
   });
