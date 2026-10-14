@@ -2869,3 +2869,101 @@ it.effect(
       );
     }),
 );
+
+it.effect.each(["bootstrap", "tail"] as const)(
+  "durable %s retry survives coordinator restart and resets only after successful pull",
+  (phase) =>
+    Effect.gen(function* () {
+      let pulls = 0;
+      let unavailable = true;
+      const client = peer({
+        join: () =>
+          Effect.succeed({
+            protocolVersion: 1,
+            memorySpaceId: space,
+            hubEnvironmentId: remote,
+            checkpointSequence: 0,
+            retentionFloor: 0,
+            snapshotToken: "durable-stage",
+            causalBoundary: { checkpointSequence: 0, boundaryId: "durable-boundary" },
+          }),
+        pull: (_c, input) =>
+          Effect.gen(function* () {
+            pulls++;
+            if (unavailable) return yield* new M.MemoryHubError({ code: "unavailable" });
+            return {
+              highWatermark: 0,
+              throughSequence: 0,
+              hasMore: false,
+              entries: [],
+              ...(input.snapshotToken
+                ? {
+                    checkpoint: {
+                      memorySpaceId: space,
+                      checkpointSequence: 0,
+                      retentionFloor: 0,
+                      causalBoundary: { checkpointSequence: 0, boundaryId: "durable-boundary" },
+                      pageOrdinal: 0,
+                      items: [],
+                      revisions: [],
+                      tombstones: [],
+                      conflicts: [],
+                      resolutions: [],
+                      compactReceipts: [],
+                      identities: [],
+                      fences: [],
+                      suppressions: [],
+                      nextCursor: null,
+                      bootstrapComplete: true,
+                    },
+                  }
+                : {}),
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          if (phase === "tail") yield* ready;
+          const store = yield* Store.MemoryStore;
+          const key = { memorySpaceId: space, hubEnvironmentId: remote };
+          const sync = yield* Sync.MemorySyncService;
+          assert.strictEqual((yield* Effect.result(sync.syncOnce))._tag, "Failure");
+          assert.strictEqual(pulls, 1);
+          const retry = yield* store.readPullRetry(key);
+          assert.deepStrictEqual(retry, {
+            version: 1,
+            attempts: 1,
+            nextAttemptAt: 1000,
+            failureCode: "unavailable",
+            holdClass: null,
+          });
+          const stage = yield* store.readBootstrap(key);
+          if (phase === "bootstrap") assert.strictEqual(stage.snapshotToken, "durable-stage");
+          yield* sync.shutdown;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              assert.strictEqual(pulls, 1);
+              assert.deepStrictEqual(yield* store.readBootstrap(key), stage);
+              yield* TestClock.adjust("999 millis");
+              yield* restarted.syncOnce;
+              assert.strictEqual(pulls, 1);
+              unavailable = false;
+              yield* TestClock.adjust("1 millis");
+              yield* restarted.syncOnce;
+              assert.strictEqual(pulls, phase === "bootstrap" ? 4 : 3);
+              assert.deepStrictEqual(yield* store.readPullRetry(key), {
+                version: 2,
+                attempts: 0,
+                nextAttemptAt: 0,
+                failureCode: null,
+                holdClass: null,
+              });
+              assert.strictEqual((yield* store.readBootstrap(key)).state, "ready");
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);

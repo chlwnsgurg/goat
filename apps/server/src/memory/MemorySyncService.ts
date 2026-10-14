@@ -144,7 +144,9 @@ const holdClass = (e: Error): Store.MemoryHoldClass =>
         ? "protocol"
         : "availability";
 const transient = (e: Error) =>
-  e._tag === "MemoryHubError" && ["unavailable", "storage_failed"].includes(e.code);
+  e._tag === "MemoryStorageError" ||
+  (e._tag === "MemoryHubError" &&
+    ["unavailable", "storage_failed", "cursor_expired"].includes(e.code));
 
 const make = Effect.gen(function* () {
   const store = yield* Store.MemoryStore;
@@ -986,6 +988,51 @@ const make = Effect.gen(function* () {
     }
     return false;
   });
+  const synchronizePull = Effect.fnUntraced(function* (
+    r: Route,
+    budget: { pages: number; entries: number },
+  ) {
+    const key = { memorySpaceId: r.space!, hubEnvironmentId: r.hubId };
+    const retry = yield* store.readPullRetry(key);
+    if (retry.nextAttemptAt > (yield* Clock.currentTimeMillis)) return false;
+    const result = yield* Effect.result(
+      Effect.gen(function* () {
+        const complete = yield* bootstrap(r, budget);
+        if (complete && budget.pages < 10) yield* pullTail(r, budget);
+        return complete;
+      }),
+    );
+    yield* ensureEpoch(r.settings.memoryHubVersion);
+    if (result._tag === "Failure") {
+      const error = result.failure;
+      const now = yield* Clock.currentTimeMillis;
+      yield* store.transact(
+        store.writePullRetryTx({
+          ...key,
+          expectedVersion: retry.version,
+          retry: {
+            attempts: Math.min(2147483647, retry.attempts + 1),
+            nextAttemptAt: transient(error)
+              ? now + Math.min(30000, 1000 * 2 ** Math.min(retry.attempts, 5))
+              : Number.MAX_SAFE_INTEGER,
+            failureCode: failureCode(error),
+            holdClass: transient(error) ? null : holdClass(error),
+          },
+        }),
+      );
+      return yield* error;
+    }
+    if (retry.attempts !== 0 || retry.failureCode !== null) {
+      yield* store.transact(
+        store.writePullRetryTx({
+          ...key,
+          expectedVersion: retry.version,
+          retry: { attempts: 0, nextAttemptAt: 0, failureCode: null, holdClass: null },
+        }),
+      );
+    }
+    return result.success;
+  });
   const relayMutex = yield* Semaphore.make(1);
   let lastRelayRequest: M.MemorySourceReadRequestId | null = null;
   // Rotate the bounded collected page after the last attempted request. Read time leaves
@@ -1171,8 +1218,7 @@ const make = Effect.gen(function* () {
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
       const budget = { pages: 0, entries: 0 };
-      if (!(yield* bootstrap(r, budget)) || budget.pages >= 10) return;
-      yield* pullTail(r, budget);
+      if (!(yield* synchronizePull(r, budget)) || budget.pages >= 10) return;
       for (const entry of executions.values()) {
         if (entry.fiber && (yield* Effect.result(eligibility(entry.ticket)))._tag === "Failure")
           yield* Fiber.interrupt(entry.fiber);
@@ -1198,7 +1244,7 @@ const make = Effect.gen(function* () {
         });
       }
       yield* push(r);
-      yield* pullTail(r, budget);
+      yield* synchronizePull(r, budget);
       yield* sweep;
       yield* ensureEpoch(r.settings.memoryHubVersion);
       lastSuccess = { epoch: r.settings.memoryHubVersion, at: iso(yield* Clock.currentTimeMillis) };
