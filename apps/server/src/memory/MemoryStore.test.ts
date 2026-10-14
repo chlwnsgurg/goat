@@ -1798,6 +1798,48 @@ it.effect(
 );
 
 it.effect(
+  "reserves combined checkpoint bytes at equality and rolls back overflow and failed transactions",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const reserved = yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 1,
+          publishedPinnedDeltaBytes: 1,
+        }),
+      );
+      assert.strictEqual(reserved.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
+      const overflow = yield* store
+        .transact(
+          store.reserveHubCheckpointTx({
+            memorySpaceId: space,
+            checkpointDeltaBytes: 1,
+            publishedPinnedDeltaBytes: 0,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(overflow._tag, "MemoryCapacityError");
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* store.reserveHubCheckpointTx({
+              memorySpaceId: space,
+              checkpointDeltaBytes: -10,
+              publishedPinnedDeltaBytes: 0,
+            });
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.exit);
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).stagingBytes,
+        M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
   "recovers the full frozen claim, ignores a changed default, and retires only the matching generation",
   () =>
     Effect.gen(function* () {
