@@ -2,6 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
@@ -42,6 +44,11 @@ const input = (n = 3): M.MemoryUpsertInput => ({
   payload: { text: "synthetic memory", evidence: [], derivedFromMemoryRevisions: [] },
   baseBoundary: null,
 });
+const encodeResolution = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolution));
+const encodeSelectionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryModelSelection));
+const encodeRevisionIds = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Array(M.MemoryRevisionId)),
+);
 const denied = Effect.fail(new Service.MemoryAccessError({ code: "identity_mismatch" }));
 describe("MemoryService", () => {
   it.effect("replays unchanged input with the original timestamp and receipt", () =>
@@ -287,3 +294,180 @@ describe("memory project bindings", () => {
     }).pipe(Effect.provide(live)),
   );
 });
+
+it.effect(
+  "promotes a local root on ACK without advancing the cursor, then settles pull atomically once",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const initial = yield* service.upsert(input(), Effect.void);
+      const workId = `sync:${space}:${input().operationId}`;
+      const reference = {
+        operationId: input().operationId,
+        operationDigest: initial.operationDigest,
+      };
+      const receipt: M.MemoryHubReceipt = {
+        operationId: reference.operationId,
+        memoryId,
+        operationDigest: reference.operationDigest,
+        outcome: "accepted",
+        hubSequence: 7,
+      };
+      const args = {
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        workId,
+        operation: reference,
+        receipt,
+        reauthorize: Effect.void,
+      };
+      const ack = yield* service.settleHubAcknowledgement(args);
+      assert.isTrue(ack.incorporated);
+      assert.strictEqual(yield* store.readCursor(space, environmentId), 0);
+      assert.deepStrictEqual(
+        (yield* store.receipt(space, reference.operationId))?.receipt,
+        receipt,
+      );
+      assert.isFalse((yield* service.settleHubAcknowledgement(args)).incorporated);
+      const operation = yield* store.readOperation(space, reference.operationId);
+      assert.isDefined(operation);
+      const page: M.MemoryHubPullResult = {
+        highWatermark: 7,
+        throughSequence: 7,
+        hasMore: false,
+        entries: [{ kind: "operation", operation: operation!, receipt, hubSequence: 7 }],
+      };
+      const pullArgs = {
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        expectedSequence: 0,
+        page,
+        reauthorize: Effect.void,
+      };
+      assert.strictEqual((yield* service.receiveHubPage(pullArgs)).length, 1);
+      assert.strictEqual(yield* store.readCursor(space, environmentId), 7);
+      assert.deepStrictEqual(yield* service.receiveHubPage(pullArgs), []);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "settles a null-sequence forget refusal without canonical promotion, reports or cursor movement",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.upsert(input(), Effect.void);
+      const operationId = M.MemoryOperationId.make(id(4));
+      const original = yield* service.forget(
+        { memorySpaceId: space, memoryId, operationId, expectedHeads: [] },
+        Effect.void,
+      );
+      const receipt: M.MemoryHubReceipt = {
+        operationId,
+        memoryId,
+        operationDigest: original.operationDigest,
+        outcome: "rejected",
+        hubSequence: null,
+        failureCode: "capacity_exceeded",
+        capacity: {
+          code: "capacity_exceeded",
+          dimension: "permanent_metadata",
+          current: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
+          limit: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
+          reclaimable: 0,
+        },
+      };
+      const args = {
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        workId: `sync:${space}:${operationId}`,
+        operation: { operationId, operationDigest: original.operationDigest },
+        receipt,
+        reauthorize: Effect.void,
+      };
+      assert.isFalse((yield* service.settleHubAcknowledgement(args)).incorporated);
+      assert.deepStrictEqual(yield* store.receipt(space, operationId), original);
+      assert.strictEqual(yield* store.readCursor(space, environmentId), 0);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_report_outbox`).length, 0);
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
+      assert.strictEqual((yield* store.pendingForgetIntents(10))[0]?.submissionState, "rejected");
+      yield* service.settleHubAcknowledgement(args);
+      assert.deepStrictEqual(yield* store.receipt(space, operationId), original);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "reads legacy non-thirty-day resolutions and stages offline revert despite a fast device clock",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.upsert(input(), Effect.void);
+      const original = (yield* store.loadAggregate(space, memoryId)).revisions[0]!;
+      const second = { ...input(4), expectedHeads: [original.revision.revisionId] };
+      yield* service.upsert(second, Effect.void);
+      const current = yield* store.loadAggregate(space, memoryId);
+      const result = current.revisions.find((r) => r.revision.operationId === second.operationId)!;
+      const resolutionId = M.MemoryResolutionId.make(id(90));
+      const selection: M.MemoryModelSelection = {
+        instanceId: M.ProviderInstanceId.make("fixture"),
+        model: "fixture",
+      };
+      const inputIds = [original.revision.revisionId, M.MemoryRevisionId.make(id(91))].sort();
+      const resolution: M.MemoryResolution = {
+        resolutionId,
+        memorySpaceId: space,
+        memoryId,
+        inputRevisionIds: inputIds,
+        inputPayloadRefs: inputIds,
+        judgmentRef: resolutionId,
+        requestedModelSelection: selection,
+        effectiveProvider: M.ProviderDriverKind.make("codex"),
+        effectiveModel: "fixture",
+        resolvingEnvironmentId: environmentId,
+        fencingToken: 1,
+        resultRevisionId: result.revision.revisionId,
+        appliedAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+        revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-10-15T00:00:00.000Z"),
+      };
+      yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${resolutionId},${memoryId},${yield* encodeRevisionIds(inputIds)},${yield* encodeRevisionIds(inputIds)},${resolutionId},${yield* encodeSelectionJson(selection)},'{}',${environmentId},1,${result.revision.revisionId},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${yield* encodeResolution(resolution)})`;
+      assert.deepStrictEqual((yield* store.loadAggregate(space, memoryId)).resolutions, [
+        resolution,
+      ]);
+      yield* TestClock.setTime(Date.parse("2030-01-01T00:00:00.000Z"));
+      const staged = yield* service.revertResolution(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(6)),
+          resolutionId,
+          restoredRevisionId: original.revision.revisionId,
+          expectedHeads: [result.revision.revisionId],
+        },
+        Effect.void,
+      );
+      assert.strictEqual(staged.status, "pending");
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_revert_intents`).length, 1);
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(7)),
+          expectedHeads: [],
+        },
+        Effect.void,
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND memory_id=${memoryId}`)
+          .length,
+        0,
+      );
+    }).pipe(Effect.provide(live)),
+);

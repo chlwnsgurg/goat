@@ -11,6 +11,10 @@ import { memoryOperationDigest } from "./MemoryDecider.ts";
 export class MemoryQuotaService extends Context.Service<
   MemoryQuotaService,
   {
+    readonly readStorageStatus: (input: {
+      memorySpaceId: M.MemorySpaceId;
+      environmentId: M.EnvironmentId;
+    }) => Effect.Effect<M.MemoryStorageStatus, Store.MemoryStorageError>;
     readonly withAdmission: <A, E, R>(
       input: {
         readonly operation: M.MemoryOperation;
@@ -46,6 +50,7 @@ const payloadJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const suppressionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemorySuppressionRecord));
 const capacityDimensionDecode = Schema.decodeUnknownEffect(M.MemoryCapacityDimension);
 const sampleDecode = Schema.decodeUnknownEffect(M.MemoryStorageSample);
+const storageStatusDecode = Schema.decodeUnknownEffect(M.MemoryStorageStatus);
 const growthDecode = Schema.decodeUnknownEffect(M.MemoryStorageGrowth);
 const utf8 = (text: string) => new TextEncoder().encode(text).length;
 const sourceKeyJson = Schema.encodeEffect(Schema.fromJsonString(M.MemorySourceKey));
@@ -624,6 +629,96 @@ const make = Effect.gen(function* () {
       ? previous
       : { current: previous.current, deltas: storageDeltas(previous.current, [], true) };
   });
-  return MemoryQuotaService.of({ withAdmission, commit, readStorageGrowth, recordStorageSample });
+  const readStorageStatus: MemoryQuotaService["Service"]["readStorageStatus"] = Effect.fn(
+    "MemoryQuotaService.readStorageStatus",
+  )(function* (input) {
+    return yield* store
+      .transact(
+        Effect.gen(function* () {
+          const growth = yield* readStorageGrowth(input.environmentId);
+          const fts = yield* store.ftsState(input.environmentId);
+          const retention = yield* store.readHubRetentionTx(input.memorySpaceId);
+          const counters = yield* store.counters(input.memorySpaceId);
+          const limits: Partial<Record<M.MemoryCapacityDimension, number>> = {
+            space_live_items: M.MEMORY_SPACE_MAX_LIVE_ITEMS,
+            live_payload_bytes: M.MEMORY_LIVE_MAX_PAYLOAD_BYTES,
+            history: M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES,
+            permanent_metadata: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
+            lifetime_ids: M.MEMORY_MAX_LIFETIME_IDS,
+            receipts: M.MEMORY_DEDUP_MAX_RECEIPTS,
+            log_tail_rows: M.MEMORY_LOG_MAX_TAIL_ROWS,
+            log_tail_bytes: M.MEMORY_LOG_MAX_TAIL_BYTES,
+            work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,
+            work_bytes: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
+            checkpoint_staging: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
+          };
+          const quotas: M.MemoryStorageQuota[] = [];
+          for (const dimension of M.MemoryCapacityDimension.literals) {
+            const limit = limits[dimension];
+            if (!limit) continue;
+            const current = counters
+              .filter((c) => c.dimension === dimension)
+              .reduce((sum, c) => sum + c.value, 0);
+            quotas.push({
+              dimension,
+              current,
+              limit,
+              reclaimable: 0,
+              reserved: 0,
+              warning: current >= limit ? "full" : current >= limit * 0.9 ? "warning" : "normal",
+              blockedReasons: current >= limit ? ["capacity_exceeded"] : [],
+            });
+          }
+          const sample = growth.current;
+          const iso = (time: number | null) =>
+            time === null ? null : DateTime.formatIso(DateTime.makeUnsafe(time));
+          return yield* storageStatusDecode(
+            {
+              quotas,
+              tables: sample?.tables ?? [],
+              measuredAtUtc: sample?.measuredAtUtc ?? null,
+              dbFileBytes: sample?.dbFileBytes ?? null,
+              walBytes: sample?.walBytes ?? null,
+              freelistBytes: sample?.freelistBytes ?? null,
+              freelistRatio:
+                sample?.dbFileBytes && sample.freelistBytes !== null
+                  ? sample.freelistBytes / sample.dbFileBytes
+                  : null,
+              retentionFloor: retention.retentionFloor,
+              checkpointSequence: retention.checkpointSequence,
+              compaction: retention.compaction,
+              ftsAdmission: {
+                state: fts.state,
+                changedAtUtc: iso(fts.changedAt),
+                lastMeasuredAtUtc: iso(fts.measuredAt),
+                allocatedBytes: fts.allocatedBytes,
+                measurementStatus: fts.measurementStatus,
+              },
+              growth,
+              warnings: [
+                ...new Set([
+                  ...retention.compaction.blockedReasons,
+                  ...(fts.state === "braked" ? ["fts_braked" as const] : []),
+                ]),
+              ],
+            },
+            { onExcessProperty: "error" },
+          ).pipe(Effect.mapError(storageError));
+        }),
+      )
+      .pipe(
+        Effect.catchTags({
+          MemoryStoreConflict: (cause) =>
+            Effect.fail(new Store.MemoryStorageError({ stage: "storage-status", cause })),
+        }),
+      );
+  });
+  return MemoryQuotaService.of({
+    readStorageStatus,
+    withAdmission,
+    commit,
+    readStorageGrowth,
+    recordStorageSample,
+  });
 });
 export const layer = Layer.effect(MemoryQuotaService, make);
