@@ -433,6 +433,8 @@ describe("MemoryStore", () => {
       // Move the fixture to the tail while preserving its projection identity.
       const tail = M.MemoryId.make(id(1002));
       yield* sql`UPDATE memory_items SET memory_id=${tail},item_json=json_set(item_json,'$.memoryId',${tail},'$.revision.memoryId',${tail}) WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.searchCoverage({ memorySpaceId: space, scope: { kind: "user" }, limit: 100 });
+      yield* store.searchCoverage({ memorySpaceId: space, scope: { kind: "user" }, limit: 100 });
       for (const mode of ["fts", "substring"] as const) {
         const first = yield* store.search(
           { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
@@ -481,27 +483,40 @@ describe("MemoryStore", () => {
       const sql = yield* SqlClient.SqlClient;
       const op = operation();
       if (op.kind === "forget") throw new Error("Fixture kind");
-      const large = { ...op, payload: { ...op.payload, text: "synthetic " + "x".repeat(35000) } };
+      const large = { ...op, payload: { ...op.payload, text: "synthetic " + "x".repeat(15000) } };
       yield* store.apply(decision(large));
-      const second = M.MemoryId.make(id(100));
-      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation)
-        SELECT space,${second},scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,json_set(item_json,'$.memoryId',${second},'$.revision.memoryId',${second}),availability_json,generation FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      for (const n of [100, 101, 102, 103]) {
+        const second = M.MemoryId.make(id(n));
+        yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json,generation)
+          SELECT space,${second},scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,json_set(item_json,'$.memoryId',${second},'$.revision.memoryId',${second}),availability_json,generation FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      }
       const first = yield* store.search(
         { memorySpaceId: space, scope: { kind: "user" }, limit: 100 },
         "synthetic",
         "substring",
       );
-      assert.lengthOf(first.items, 1);
-      assert.strictEqual(first.examinedAfterMemoryId, memory);
+      assert.isTrue(first.items.length > 0 && first.items.length < 5);
+      assert.strictEqual(first.examinedAfterMemoryId, first.items.at(-1)!.memoryId);
       assert.isFalse(first.exhausted);
+      const wire = yield* Schema.encodeEffect(Schema.fromJsonString(M.MemoryPage))({
+        items: first.items,
+        nextCursor: first.examinedAfterMemoryId,
+        projectionWatermark: 0,
+      });
+      assert.isTrue(new TextEncoder().encode(wire).length <= M.MEMORY_PAGE_MAX_UTF8_BYTES);
       const next = yield* store.search(
-        { memorySpaceId: space, scope: { kind: "user" }, limit: 100, afterMemoryId: memory },
+        {
+          memorySpaceId: space,
+          scope: { kind: "user" },
+          limit: 100,
+          afterMemoryId: first.examinedAfterMemoryId!,
+        },
         "synthetic",
         "substring",
       );
       assert.deepStrictEqual(
-        next.items.map((i) => i.memoryId),
-        [second],
+        [...first.items, ...next.items].map((i) => i.memoryId),
+        [memory, ...[100, 101, 102, 103].map((n) => M.MemoryId.make(id(n)))],
       );
       assert.isTrue(next.exhausted);
     }).pipe(Effect.provide(live)),

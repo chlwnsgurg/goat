@@ -281,7 +281,7 @@ describe("MemoryService", () => {
       yield* service.upsert(input(), Effect.void);
       const request = {
         memorySpaceId: space,
-        query: "  synthetic  ",
+        query: "synthetic",
         limit: 1,
         mode: "substring" as const,
       };

@@ -246,3 +246,46 @@ it.effect("bounds excluded candidates to ten pages and follows the unfiltered ro
     );
   }).pipe(Effect.provide(f.live));
 });
+it.effect("skips whole oversized facts and packs Unicode within both native-frame limits", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const snapshot = yield* Snapshot.MemorySnapshot;
+    const service = yield* Service.MemoryService;
+    yield* project;
+    for (let n = 2; n < 10; n++) {
+      const value = input(n);
+      yield* service.upsert(
+        { ...value, payload: { ...value.payload, text: "synthetic word ".repeat(650) } },
+        Effect.void,
+      );
+    }
+    const value = input(10);
+    const text = "🙂".repeat(1000) + "synthetic word ".repeat(180);
+    yield* service.upsert({ ...value, payload: { ...value.payload, text } }, Effect.void);
+    yield* service.upsert(input(11), Effect.void);
+    const selected = yield* snapshot.forThread(threadId, f.policy(), f.currentPolicy);
+    assert.isDefined(selected);
+    assert.deepStrictEqual(
+      selected!.items.map((i) => i.memoryId),
+      [id(10), id(11)],
+    );
+    assert.strictEqual(selected!.items[0]!.text, text);
+    const framed = Renderer.memoryContextText(selected);
+    assert.isTrue(Array.from(framed).length <= M.MEMORY_CONTEXT_MAX_CHARS);
+    assert.isTrue(new TextEncoder().encode(framed).length <= M.MEMORY_CONTEXT_MAX_UTF8_BYTES);
+    const store = yield* Store.MemoryStore;
+    const binding = yield* store.getProjectBinding(space, { environmentId, projectId });
+    yield* store.putProjectBinding(
+      {
+        memorySpaceId: space,
+        project: { environmentId, projectId },
+        projectKey: { kind: "explicit", sharedProjectId: "changed" },
+        repositoryKey: null,
+        version: (binding?.version ?? 0) + 1,
+      },
+      binding?.version ?? null,
+      1,
+    );
+    assert.isUndefined(yield* snapshot.revalidate(selected!, { threadId, runId }, f.currentPolicy));
+  }).pipe(Effect.provide(f.live));
+});
