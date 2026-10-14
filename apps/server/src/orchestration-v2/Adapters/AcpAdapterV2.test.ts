@@ -3112,8 +3112,9 @@ describe("AcpAdapterV2", () => {
       const address = server.address();
       if (address === null || typeof address === "string")
         return yield* Effect.die("No fixture port");
-      const instanceId = ProviderInstanceId.make(`acp-bridge-${transition}`);
-      const threadId = ThreadId.make(`acp-bridge-${transition}`);
+      const fixtureId = transition.replaceAll(" ", "-");
+      const instanceId = ProviderInstanceId.make(`acp-bridge-${fixtureId}`);
+      const threadId = ThreadId.make(`acp-bridge-${fixtureId}`);
       const sessions = yield* McpProviderSessions.McpProviderSessions;
       const config = (credential: "A" | "B", targetThreadId = threadId) => ({
         environmentId: EnvironmentId.make("bridge-fixture"),
@@ -3186,7 +3187,7 @@ describe("AcpAdapterV2", () => {
       const modelSelection = { instanceId, model: "default" } as const;
       const runtime = yield* adapter.openSession({
         threadId,
-        providerSessionId: ProviderSessionId.make(`bridge-${transition}`),
+        providerSessionId: ProviderSessionId.make(`bridge-${fixtureId}`),
         modelSelection,
         runtimePolicy,
       });
