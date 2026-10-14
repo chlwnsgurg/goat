@@ -2904,9 +2904,10 @@ it.effect(
               assert.isAtMost(count(), baseline + 6);
               yield* sync.shutdown;
               yield* Fiber.await(run);
-              assert.isAtMost(count(), baseline);
             }).pipe(Effect.provide(control)),
           );
+          assert.strictEqual(appScope!.state._tag, "Closed");
+          assert.strictEqual(count(), 0);
         }).pipe(Effect.provide(fixture(client, model))),
       );
     }),
@@ -3442,6 +3443,110 @@ it.effect(
             }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
           );
         }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);
+
+it.effect(
+  "settings model change rearms availability pull hold while authorization push hold stays parked",
+  () =>
+    Effect.gen(function* () {
+      const resumed = yield* Deferred.make<void>();
+      let watch = false;
+      const client = peer({
+        pull: (_c, input) =>
+          Effect.gen(function* () {
+            if (watch) yield* Deferred.succeed(resumed, undefined);
+            return {
+              highWatermark: input.afterSequence,
+              throughSequence: input.afterSequence,
+              hasMore: false,
+              entries: [],
+            };
+          }),
+        push: () => Effect.fail(new M.MemoryHubUnauthorizedError({})),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          const settings = yield* Settings.ServerSettingsService;
+          yield* sync.start;
+          yield* enqueue(9900);
+          yield* sync.syncOnce;
+          assert.strictEqual((yield* store.readWorkHold("sync:9900"))?.holdClass, "authorization");
+          const key = { memorySpaceId: space, hubEnvironmentId: remote };
+          yield* store.transact(
+            store.writePullRetryTx({
+              ...key,
+              expectedVersion: 0,
+              retry: {
+                attempts: 1,
+                nextAttemptAt: Number.MAX_SAFE_INTEGER,
+                failureCode: "route_unavailable",
+                holdClass: "availability",
+              },
+            }),
+          );
+          watch = true;
+          yield* settings.updateSettings({
+            defaultModelSelection: { instanceId: M.ProviderInstanceId.make("Q"), model: "Q" },
+          });
+          yield* Deferred.await(resumed);
+          yield* sync.syncOnce;
+          assert.strictEqual((yield* store.readPullRetry(key)).holdClass, null);
+          assert.strictEqual((yield* store.readWorkHold("sync:9900"))?.holdClass, "authorization");
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client, undefined, false, true))),
+      );
+    }),
+);
+
+it.effect(
+  "automatic pull retry wakes at its durable due time instead of waiting for the periodic cycle",
+  () =>
+    Effect.gen(function* () {
+      const retried = yield* Deferred.make<void>();
+      let pulls = 0;
+      const client = peer({
+        pull: (_c, input) =>
+          Effect.gen(function* () {
+            pulls++;
+            if (pulls === 1) return yield* new M.MemoryHubError({ code: "unavailable" });
+            yield* Deferred.succeed(retried, undefined);
+            return {
+              highWatermark: input.afterSequence,
+              throughSequence: input.afterSequence,
+              hasMore: false,
+              entries: [],
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const sync = yield* Sync.MemorySyncService;
+          const store = yield* Store.MemoryStore;
+          yield* sync.start;
+          assert.strictEqual(pulls, 1);
+          assert.strictEqual(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .nextAttemptAt,
+            1000,
+          );
+          yield* TestClock.adjust("999 millis");
+          assert.strictEqual(pulls, 1);
+          yield* TestClock.adjust("1 millis");
+          yield* Deferred.await(retried);
+          yield* sync.syncOnce;
+          assert.strictEqual(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .attempts,
+            0,
+          );
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client))),
       );
     }),
 );

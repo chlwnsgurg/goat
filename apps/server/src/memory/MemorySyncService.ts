@@ -179,6 +179,8 @@ const make = Effect.gen(function* () {
   const owner = uuid();
   let stopped = false;
   let started = false;
+  let pullRetryChanged = yield* Deferred.make<void>();
+  const wakePullRetry = Effect.suspend(() => Deferred.succeed(pullRetryChanged, undefined));
   let reservations = 0;
   let lastSuccess: { epoch: number; at: string } | null = null;
   let lastFailure: { epoch: number; code: M.MemoryFailureCode } | undefined;
@@ -1140,6 +1142,7 @@ const make = Effect.gen(function* () {
           },
         }),
       );
+      yield* wakePullRetry;
       return yield* error;
     }
     if (retry.attempts !== 0 || retry.failureCode !== null) {
@@ -1358,6 +1361,7 @@ const make = Effect.gen(function* () {
         pending.resolutionAfter = "";
         continue;
       }
+      yield* wakePullRetry;
       pending.syncDone ||= page.sync.length < 100;
       pending.resolutionDone ||= page.resolution.length < 100;
       pending.syncAfter = page.sync.at(-1) ?? pending.syncAfter;
@@ -1542,9 +1546,31 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.ignore, Effect.forkIn(scope)),
       );
     background.push(
-      yield* Effect.forever(Effect.sleep("30 seconds").pipe(Effect.andThen(guardedSync))).pipe(
-        Effect.forkIn(scope),
-      ),
+      yield* Effect.gen(function* () {
+        while (!stopped) {
+          const signal = pullRetryChanged;
+          const r = yield* route().pipe(Effect.orElseSucceed(() => null));
+          const now = yield* Clock.currentTimeMillis;
+          const retry = r?.space
+            ? yield* store
+                .readPullRetry({
+                  memorySpaceId: r.space,
+                  hubEnvironmentId: r.hubId,
+                })
+                .pipe(Effect.orElseSucceed(() => null))
+            : null;
+          const delay =
+            retry && retry.nextAttemptAt > now && retry.nextAttemptAt !== Number.MAX_SAFE_INTEGER
+              ? Math.min(30000, retry.nextAttemptAt - now)
+              : 30000;
+          const elapsed = yield* Effect.raceFirst(
+            Effect.sleep(delay).pipe(Effect.as(true)),
+            Deferred.await(signal).pipe(Effect.as(false)),
+          );
+          if (elapsed) yield* guardedSync;
+          else if (signal === pullRetryChanged) pullRetryChanged = yield* Deferred.make<void>();
+        }
+      }).pipe(Effect.forkIn(scope)),
     );
     yield* guardedSync;
   });
