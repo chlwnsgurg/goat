@@ -12,6 +12,9 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
+import * as PubSub from "effect/PubSub";
+import * as Stream from "effect/Stream";
+import * as Statement from "effect/sql/Statement";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -28,12 +31,7 @@ import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
 import * as Hub from "./MemoryHubService.ts";
 import * as Compactor from "./MemoryCompactor.ts";
-import {
-  layerMemoryHubServices,
-  layerMemoryHubRoutes,
-  layerMemoryHubStarted,
-  makeMemoryHubCompactorStore,
-} from "../server.ts";
+import { layerMemoryHubServices, layerMemoryHubRoutes, layerMemoryHubStarted } from "../server.ts";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
@@ -68,129 +66,337 @@ const operation = (
 
 // r2 can reuse the actual HTTP/core fixture when L4's H/A/B drivers are integrated.
 // No SyncService double, transcript reader or alternate admission path is installed.
-const scenario = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-memory-hub-scenario-" });
-  const settings = Settings.layer.pipe(
-    Layer.provideMerge(Secrets.layer),
-    Layer.provideMerge(Sqlite.layerMemory),
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
-  );
-  const core = Service.layer.pipe(
-    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
-    Layer.provideMerge(Environment.layerIdentity),
-    Layer.provide(
-      Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
-        resolve: () => Effect.succeed(null),
-      }),
-    ),
-  );
-  const services = layerMemoryHubServices.pipe(
-    Layer.provideMerge(core),
-    Layer.provideMerge(settings),
-  );
-  const routes = layerMemoryHubRoutes.pipe(
-    HttpRouter.provideRequest(services),
-    Layer.provideMerge(services),
-  );
-  const app = Environment.layer.pipe(
-    Layer.provideMerge(routes),
-    Layer.provideMerge(NodeServices.layer),
-  );
-  const memoMap = yield* Layer.makeMemoMap;
-  const scope = yield* Scope.Scope;
-  const context = yield* Layer.buildWithMemoMap(
-    app.pipe(Layer.provideMerge(HttpRouter.layer)),
-    memoMap,
-    scope,
-  );
-  const http = yield* Effect.acquireRelease(
-    Effect.sync(() => HttpRouter.toWebHandler(app, { memoMap, disableLogger: true })),
-    (http) => Effect.promise(() => http.dispose()),
-  );
-  const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideContext(effect, context);
-  const hubEnv = yield* run(
-    Environment.ServerEnvironmentIdentity.use((identity) => identity.getEnvironmentId),
-  );
-  const post = (path: string, body: unknown, credential: string | null = hubCredential) =>
-    Effect.promise(() =>
-      http.handler(
-        new Request(`https://hub.invalid${path}`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
-          },
-          body: JSON.stringify(body),
+const makeScenario = (fileSystem?: FileSystem.FileSystem) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-memory-hub-scenario-" });
+    const settings = Settings.layer.pipe(
+      Layer.provideMerge(Secrets.layer),
+      Layer.provideMerge(Sqlite.layerMemory),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+    );
+    const core = Service.layer.pipe(
+      Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
+      Layer.provideMerge(Environment.layerIdentity),
+      Layer.provide(
+        Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+          resolve: () => Effect.succeed(null),
         }),
-        Context.empty(),
       ),
     );
-  const call = <A, I>(
-    path: string,
-    body: unknown,
-    schema: Schema.Codec<A, I>,
-    credential = hubCredential,
-  ) =>
-    Effect.gen(function* () {
-      const response = yield* post(path, body, credential);
-      assert.strictEqual(response.status, 200);
-      assert.strictEqual(response.headers.get("cache-control"), "no-store");
-      return yield* Schema.decodeUnknownEffect(schema)(
-        yield* Effect.promise(() => response.json()),
+    const services = layerMemoryHubServices.pipe(
+      Layer.provideMerge(core),
+      Layer.provideMerge(settings),
+    );
+    const routes = layerMemoryHubRoutes.pipe(
+      HttpRouter.provideRequest(services),
+      Layer.provideMerge(services),
+    );
+    const app = Environment.layer.pipe(
+      Layer.provideMerge(routes),
+      Layer.provideMerge(
+        fileSystem === undefined
+          ? NodeServices.layer
+          : Layer.merge(NodeServices.layer, Layer.succeed(FileSystem.FileSystem, fileSystem)),
+      ),
+    );
+    const memoMap = yield* Layer.makeMemoMap;
+    const scope = yield* Scope.Scope;
+    const context = yield* Layer.buildWithMemoMap(
+      app.pipe(Layer.provideMerge(HttpRouter.layer)),
+      memoMap,
+      scope,
+    );
+    const http = yield* Effect.acquireRelease(
+      Effect.sync(() => HttpRouter.toWebHandler(app, { memoMap, disableLogger: true })),
+      (http) => Effect.promise(() => http.dispose()),
+    );
+    const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideContext(effect, context);
+    const hubEnv = yield* run(
+      Environment.ServerEnvironmentIdentity.use((identity) => identity.getEnvironmentId),
+    );
+    const post = (path: string, body: unknown, credential: string | null = hubCredential) =>
+      Effect.promise(() =>
+        http.handler(
+          new Request(`https://hub.invalid${path}`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
+            },
+            body: JSON.stringify(body),
+          }),
+          Context.empty(),
+        ),
+      );
+    const call = <A, I>(
+      path: string,
+      body: unknown,
+      schema: Schema.Codec<A, I>,
+      credential = hubCredential,
+    ) =>
+      Effect.gen(function* () {
+        const response = yield* post(path, body, credential);
+        assert.strictEqual(response.status, 200);
+        assert.strictEqual(response.headers.get("cache-control"), "no-store");
+        return yield* Schema.decodeUnknownEffect(schema)(
+          yield* Effect.promise(() => response.json()),
+        );
+      });
+    const configure = (mode: "hub" | "disabled") =>
+      run(
+        Effect.gen(function* () {
+          const service = yield* Settings.ServerSettingsService;
+          const transitions = yield* Settings.MemoryHubSettingsTransitions;
+          const current = yield* service.getSettings;
+          return yield* transitions.applyMemoryHubTransition(
+            {
+              requestId: M.MemoryOperationId.make(id(900 + current.memoryHubVersion)),
+              expectedVersion: current.memoryHubVersion,
+              settings: mode === "hub" ? { mode, memorySpaceId: space } : { mode },
+            },
+            Effect.void,
+          );
+        }),
+      );
+    const initialize = Effect.gen(function* () {
+      yield* configure("hub");
+      yield* run(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const crypto = yield* Crypto.Crypto;
+          const digest = Hex.encode(
+            yield* crypto.digest("SHA-256", new TextEncoder().encode(hubCredential)),
+          );
+          yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${hubEnv},${digest},1,'active',0)`;
+          const compactor = yield* Compactor.MemoryCompactor;
+          yield* compactor.compact({
+            memorySpaceId: space,
+            environmentId: hubEnv,
+            credentialVersion: 1,
+            scopes: ["memory:sync"],
+          });
+        }),
       );
     });
-  const configure = (mode: "hub" | "disabled") =>
-    run(
-      Effect.gen(function* () {
-        const service = yield* Settings.ServerSettingsService;
-        const transitions = yield* Settings.MemoryHubSettingsTransitions;
-        const current = yield* service.getSettings;
-        return yield* transitions.applyMemoryHubTransition(
-          {
-            requestId: M.MemoryOperationId.make(id(900 + current.memoryHubVersion)),
-            expectedVersion: current.memoryHubVersion,
-            settings: mode === "hub" ? { mode, memorySpaceId: space } : { mode },
-          },
-          Effect.void,
-        );
-      }),
-    );
-  const initialize = Effect.gen(function* () {
-    yield* configure("hub");
-    yield* run(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const crypto = yield* Crypto.Crypto;
-        const digest = Hex.encode(
-          yield* crypto.digest("SHA-256", new TextEncoder().encode(hubCredential)),
-        );
-        yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${hubEnv},${digest},1,'active',0)`;
-        const compactor = yield* Compactor.MemoryCompactor;
-        yield* compactor.compact({
+    const push = (operations: readonly M.MemoryOperation[]) =>
+      call(
+        M.MEMORY_HUB_PATHS.push,
+        {
+          protocolVersion: 1,
           memorySpaceId: space,
           environmentId: hubEnv,
-          credentialVersion: 1,
-          scopes: ["memory:sync"],
-        });
-      }),
-    );
+          operations,
+        },
+        M.MemoryHubPushResult,
+      );
+    return { run, post, call, configure, initialize, push, hubEnv, context, memoMap };
   });
-  const push = (operations: readonly M.MemoryOperation[]) =>
-    call(
-      M.MEMORY_HUB_PATHS.push,
-      {
-        protocolVersion: 1,
-        memorySpaceId: space,
-        environmentId: hubEnv,
-        operations,
-      },
-      M.MemoryHubPushResult,
-    );
-  return { run, post, call, configure, initialize, push, hubEnv, context, memoMap };
+
+const scenario = makeScenario();
+
+// Keep the actual cache lookup pending before it acquires the same SQLite
+// connection. Synthetic watch events avoid depending on native fs.watch timing.
+const pendingReloadScenario = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const events = yield* PubSub.unbounded<FileSystem.WatchEvent>();
+  const watching = yield* Deferred.make<void>();
+  const eventSeen = yield* Deferred.make<void>();
+  const historyRequested = yield* Deferred.make<void>();
+  const releaseHistory = yield* Deferred.make<void>();
+  let holdHistory = false;
+  const controlledFs = FileSystem.FileSystem.of({
+    ...fs,
+    watch: () =>
+      Stream.unwrap(
+        PubSub.subscribe(events).pipe(
+          Effect.tap(() => Deferred.succeed(watching, undefined)),
+          Effect.map((subscription) => Stream.fromSubscription(subscription)),
+        ),
+      ).pipe(Stream.tap(() => Deferred.succeed(eventSeen, undefined))),
+  });
+  const transformer: Statement.Transformer = (statement) =>
+    Effect.gen(function* () {
+      if (holdHistory && statement.compile()[0].includes("FROM provider_session_runtime")) {
+        yield* Deferred.succeed(historyRequested, undefined);
+        yield* Deferred.await(releaseHistory);
+      }
+      return statement;
+    });
+  const s = yield* makeScenario(controlledFs).pipe(
+    Effect.provideService(Statement.CurrentTransformer, transformer),
+  );
+  yield* s.initialize;
+  const settings = Context.get(s.context, Settings.ServerSettingsService);
+  yield* settings.start.pipe(Effect.provideService(Statement.CurrentTransformer, transformer));
+  yield* Deferred.await(watching);
+  const config = Context.get(s.context, ServerConfig.ServerConfig);
+  const before = yield* settings.getSettings;
+  const reload = (
+    memoryHub: M.MemoryHubSettings = before.memoryHub,
+    version = before.memoryHubVersion,
+  ) =>
+    Effect.gen(function* () {
+      holdHistory = true;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({
+          ...before,
+          memoryHub,
+          memoryHubVersion: version,
+        }),
+      );
+      yield* PubSub.publish(events, { _tag: "Update" as const, path: config.settingsPath });
+      yield* Deferred.await(eventSeen);
+      yield* TestClock.adjust(100);
+      yield* Deferred.await(historyRequested);
+    });
+  const finishReload = Effect.gen(function* () {
+    holdHistory = false;
+    yield* Deferred.succeed(releaseHistory, undefined);
+    yield* settings.getSettings;
+  });
+  return { ...s, reload, finishReload, before };
 });
 
 describe("Memory hub assembled HTTP scenarios", () => {
+  it.effect.each(["join", "push admission", "capacity rollback", "compactor sweep"] as const)(
+    "completes %s while provider-history reload is pending",
+    (lane) =>
+      Effect.gen(function* () {
+        const s = yield* pendingReloadScenario;
+        const store = Context.get(s.context, Store.MemoryStore);
+        const hub = Context.get(s.context, Hub.MemoryHubService);
+        const principal: M.MemoryHubPrincipal = {
+          memorySpaceId: space,
+          environmentId: s.hubEnv,
+          credentialVersion: 1,
+          scopes: ["memory:sync"],
+        };
+        if (lane === "capacity rollback") {
+          yield* s.run(
+            store.transact(
+              Effect.gen(function* () {
+                const usage = yield* store.readHubUsageTx(space);
+                yield* store.reserveHubCheckpointTx({
+                  memorySpaceId: space,
+                  checkpointDeltaBytes: 0,
+                  publishedPinnedDeltaBytes:
+                    M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES -
+                    usage.requiredCheckpointBoundBytes -
+                    usage.publishedPinnedBytes,
+                });
+              }),
+            ),
+          );
+        }
+        yield* s.reload();
+        // The lookup remains gated until each real service transaction returns.
+        if (lane === "join") {
+          const joined = yield* s.run(
+            hub.join(
+              {
+                protocolVersion: 1,
+                memorySpaceId: space,
+                environmentId: s.hubEnv,
+              },
+              principal,
+            ),
+          );
+          assert.strictEqual(joined.memorySpaceId, space);
+          assert.isNotEmpty(joined.snapshotToken);
+        } else if (lane === "compactor sweep") {
+          yield* s.run(Compactor.MemoryCompactor.use((compactor) => compactor.compact(principal)));
+          const retention = yield* s.run(store.transact(store.readHubRetentionTx(space)));
+          assert.isNotNull(retention.checkpointId);
+        } else {
+          const result = yield* s.run(
+            hub.push(
+              {
+                protocolVersion: 1,
+                memorySpaceId: space,
+                environmentId: s.hubEnv,
+                operations: [operation(20, s.hubEnv)],
+              },
+              principal,
+            ),
+          );
+          const receipt = result.receipts[0]!;
+          if (lane === "capacity rollback") {
+            assert.strictEqual(receipt.failureCode, "capacity_exceeded");
+            assert.isNull(receipt.hubSequence);
+            assert.isUndefined((yield* s.run(store.loadAggregate(space, memoryId))).identity);
+          } else {
+            assert.strictEqual(receipt.outcome, "accepted");
+            assert.strictEqual(receipt.hubSequence, 1);
+          }
+        }
+        yield* s.finishReload;
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("observes external disable before provider-history SQL finishes", () =>
+    Effect.gen(function* () {
+      const s = yield* pendingReloadScenario;
+      yield* s.reload({ mode: "disabled" }, s.before.memoryHubVersion + 1);
+      const snapshot = yield* s.run(
+        Settings.MemoryHubCommittedSettings.use((settings) => settings.read),
+      );
+      assert.deepStrictEqual(snapshot, {
+        settings: { mode: "disabled" },
+        version: s.before.memoryHubVersion + 1,
+      });
+      const store = Context.get(s.context, Store.MemoryStore);
+      const configuration = Context.get(s.context, Hub.MemoryHubConfiguration);
+      assert.isNull(yield* s.run(store.transact(configuration.read)));
+      yield* s.finishReload;
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("fences transactions begun immediately after disable commit", () =>
+    Effect.gen(function* () {
+      const s = yield* scenario;
+      yield* s.initialize;
+      const enabledVersion = (yield* s.run(
+        Settings.MemoryHubCommittedSettings.use((settings) => settings.read),
+      )).version;
+      yield* s.configure("disabled");
+      const store = Context.get(s.context, Store.MemoryStore);
+      const configuration = Context.get(s.context, Hub.MemoryHubConfiguration);
+      const view = yield* s.run(
+        store.transact(Settings.MemoryHubCommittedSettings.use((settings) => settings.read)),
+      );
+      assert.deepStrictEqual(view, { settings: { mode: "disabled" }, version: enabledVersion + 1 });
+      assert.strictEqual(
+        view.version,
+        (yield* s.run(Settings.ServerSettingsService.use((settings) => settings.getSettings)))
+          .memoryHubVersion,
+      );
+      assert.isNull(yield* s.run(store.transact(configuration.read)));
+      const result = yield* s
+        .run(
+          Hub.MemoryHubService.use((hub) =>
+            hub.join(
+              {
+                protocolVersion: 1,
+                memorySpaceId: space,
+                environmentId: s.hubEnv,
+              },
+              {
+                memorySpaceId: space,
+                environmentId: s.hubEnv,
+                credentialVersion: 1,
+                scopes: ["memory:sync"],
+              },
+            ),
+          ),
+        )
+        .pipe(Effect.result);
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") assert.strictEqual(result.failure._tag, "MemoryHubError");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "joins a real checkpoint, pushes a fork, claims and applies one canonical resolution",
     () =>
@@ -632,7 +838,7 @@ describe("Memory hub assembled HTTP scenarios", () => {
       const prepared = yield* Deferred.make<void>();
       const timerReady = yield* Deferred.make<void>();
       const releaseTimer = yield* Deferred.make<void>();
-      const store = yield* s.run(makeMemoryHubCompactorStore);
+      const store = Context.get(s.context, Store.MemoryStore);
       const retentionReads = new WeakSet<object>();
       const observedStore = Store.MemoryStore.of({
         ...store,

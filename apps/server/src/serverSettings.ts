@@ -272,6 +272,12 @@ export class MemoryHubSettingsTransitions extends Context.Service<
   }
 >()("goat/serverSettings/MemoryHubSettingsTransitions") {}
 
+/** Current committed hub epoch. SQL transactions must use this instead of the full cache. */
+export class MemoryHubCommittedSettings extends Context.Service<
+  MemoryHubCommittedSettings,
+  { readonly read: Effect.Effect<MemoryHubSettingsView> }
+>()("goat/serverSettings/MemoryHubCommittedSettings") {}
+
 const HubSettingsLock = Context.Reference<boolean>("goat/serverSettings/HubSettingsLock", {
   defaultValue: () => false,
 });
@@ -493,11 +499,20 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
       ),
       withSettingsSnapshot: (use) =>
         writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
+      committedHubSettings: {
+        read: Ref.get(currentSettingsRef).pipe(
+          Effect.map((current) => ({
+            settings: current.memoryHub,
+            version: current.memoryHubVersion,
+          })),
+        ),
+      },
       streamChanges: Stream.empty,
       subscribeChanges: Effect.succeed(Stream.empty),
     } satisfies ServerSettingsService["Service"] &
       MemoryHubSettingsTransitions["Service"] & {
         adminSettings: MemoryHubAdminSettings["Service"];
+        committedHubSettings: MemoryHubCommittedSettings["Service"];
       };
   });
 
@@ -537,6 +552,15 @@ const ServerSettingsJson = fromLenientJson(
   }),
 );
 const decodeServerSettingsJsonExit = Schema.decodeUnknownExit(ServerSettingsJson);
+// Decode only the authorization epoch: provider migrations/history are unrelated.
+const decodeCommittedHubJson = Schema.decodeUnknownExit(
+  fromLenientJson(
+    Schema.Struct({
+      memoryHub: ServerSettings.fields.memoryHub,
+      memoryHubVersion: ServerSettings.fields.memoryHubVersion,
+    }),
+  ),
+);
 /**
  * The retired `providers.<kind>` map, read without its old schemas. Before
  * `providerInstances` existed each built-in driver had one blob there; it
@@ -847,6 +871,12 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const writeSemaphore = yield* Semaphore.make(1);
   const hubMarkerRef = yield* Ref.make<HubTransitionMarker | null>(null);
+  const committedHubRef = yield* Ref.make<MemoryHubSettingsView>({
+    settings: DEFAULT_SERVER_SETTINGS.memoryHub,
+    version: DEFAULT_SERVER_SETTINGS.memoryHubVersion,
+  });
+  const publishCommittedHub = (settings: Pick<ServerSettings, "memoryHub" | "memoryHubVersion">) =>
+    Ref.set(committedHubRef, { settings: settings.memoryHub, version: settings.memoryHubVersion });
   const cacheKey = "settings" as const;
   const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
   const startedRef = yield* Ref.make(false);
@@ -879,6 +909,14 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  const refreshCommittedHub = Effect.gen(function* () {
+    const decoded = (yield* readConfigExists)
+      ? decodeCommittedHubJson(yield* readRawConfig)
+      : Exit.succeed(DEFAULT_SERVER_SETTINGS);
+    // A malformed hub epoch cannot keep granting the last enabled configuration.
+    yield* publishCommittedHub(Exit.isSuccess(decoded) ? decoded.value : DEFAULT_SERVER_SETTINGS);
+  });
+
   const writeSettingsAtomically = Effect.fnUntraced(
     function* (settings: ServerSettings, transition?: HubTransitionMarker) {
       const marker = transition ?? (yield* Ref.get(hubMarkerRef));
@@ -893,7 +931,16 @@ const make = Effect.gen(function* () {
         filePath: settingsPath,
         contents: `${sparseSettingsJson}\n`,
       }).pipe(
-        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          // Publish immediately after the rename, before atomicWrite's asynchronous
+          // temp cleanup. No cancellation may split durable commit from its Ref epoch.
+          rename: (from, to) =>
+            fs.rename(from, to).pipe(
+              Effect.tap(() => publishCommittedHub(settings)),
+              Effect.uninterruptible,
+            ),
+        }),
         Effect.provideService(Path.Path, pathService),
       );
     },
@@ -941,6 +988,7 @@ const make = Effect.gen(function* () {
     });
 
   const loadSettingsFromDisk = Effect.gen(function* () {
+    yield* refreshCommittedHub;
     let settings = DEFAULT_SERVER_SETTINGS;
     let legacyProviders: Readonly<Record<string, unknown>> | undefined;
     let legacySourceControl: Parameters<typeof migrateLegacySourceControlSettings>[1] = {};
@@ -1362,6 +1410,7 @@ const make = Effect.gen(function* () {
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
+      yield* refreshCommittedHub;
       yield* Cache.invalidate(settingsCache, cacheKey);
       const settings = yield* getSettingsFromCache;
       yield* emitChange(settings);
@@ -1451,11 +1500,13 @@ const make = Effect.gen(function* () {
       return yield* Deferred.await(startedDeferred);
     }
 
-    const startup = Effect.gen(function* () {
-      yield* startWatcher;
-      yield* Cache.invalidate(settingsCache, cacheKey);
-      yield* getSettingsFromCache;
-    });
+    const startup = writeSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        yield* startWatcher;
+        yield* Cache.invalidate(settingsCache, cacheKey);
+        yield* getSettingsFromCache;
+      }),
+    );
 
     const startupExit = yield* Effect.exit(startup);
     if (startupExit._tag === "Failure") {
@@ -1496,6 +1547,7 @@ const make = Effect.gen(function* () {
       Ref.get(hubMarkerRef),
       applyHubLocked,
     ),
+    committedHubSettings: { read: Ref.get(committedHubRef) },
     withSettingsSnapshot,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
@@ -1506,15 +1558,22 @@ const make = Effect.gen(function* () {
       );
     },
   } satisfies ServerSettingsService["Service"] &
-    MemoryHubSettingsTransitions["Service"] & { adminSettings: MemoryHubAdminSettings["Service"] };
+    MemoryHubSettingsTransitions["Service"] & {
+      adminSettings: MemoryHubAdminSettings["Service"];
+      committedHubSettings: MemoryHubCommittedSettings["Service"];
+    };
 });
 
 const settingsLayers = (
   service: ServerSettingsService["Service"] &
-    MemoryHubSettingsTransitions["Service"] & { adminSettings: MemoryHubAdminSettings["Service"] },
+    MemoryHubSettingsTransitions["Service"] & {
+      adminSettings: MemoryHubAdminSettings["Service"];
+      committedHubSettings: MemoryHubCommittedSettings["Service"];
+    },
 ) =>
   Layer.mergeAll(
     Layer.succeed(ServerSettingsService, service),
+    Layer.succeed(MemoryHubCommittedSettings, service.committedHubSettings),
     Layer.succeed(MemoryHubAdminSettings, service.adminSettings),
     Layer.succeed(MemoryHubSettingsTransitions, {
       applyMemoryHubTransition: service.applyMemoryHubTransition,

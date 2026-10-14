@@ -2622,3 +2622,86 @@ it.effect(
       Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
     ),
 );
+
+it.effect(
+  "publishes the committed hub epoch before atomic-write cleanup releases the settings lock",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cleanupEntered = yield* Deferred.make<void>();
+      const releaseCleanup = yield* Deferred.make<void>();
+      let holdCleanup = false;
+      const controlledFs = FileSystem.FileSystem.of({
+        ...fs,
+        remove: (path, options) =>
+          Effect.gen(function* () {
+            if (holdCleanup && path.includes("settings.json.")) {
+              holdCleanup = false;
+              yield* Deferred.succeed(cleanupEntered, undefined);
+              yield* Deferred.await(releaseCleanup);
+            }
+            yield* fs.remove(path, options);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const transitions = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+        const snapshot = yield* ServerSettingsModule.MemoryHubCommittedSettings;
+        const sql = yield* SqlClient.SqlClient;
+        const config = yield* ServerConfig.ServerConfig;
+        yield* service.start;
+        yield* service.ready;
+        assert.deepStrictEqual(yield* snapshot.read, {
+          settings: { mode: "disabled" },
+          version: 0,
+        });
+        const hub: MemoryHubSettings = {
+          mode: "hub",
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+        };
+        holdCleanup = true;
+        const writer = yield* transitions
+          .applyMemoryHubTransition(
+            {
+              requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000086"),
+              expectedVersion: 0,
+              settings: hub,
+            },
+            Effect.void,
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(cleanupEntered);
+        const persisted = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepStrictEqual(persisted.memoryHub, hub);
+        assert.strictEqual(persisted.memoryHubVersion, 1);
+        // Cleanup is still gated and the write semaphore is held. SQL reads must
+        // see the rename's epoch without waiting for either of those resources.
+        assert.deepStrictEqual(yield* sql.withTransaction(snapshot.read), {
+          settings: hub,
+          version: 1,
+        });
+        yield* Deferred.succeed(releaseCleanup, undefined);
+        yield* Fiber.join(writer);
+        yield* service.updateSettings({ standingInstructions: "synthetic snapshot preservation" });
+        assert.deepStrictEqual(yield* snapshot.read, { settings: hub, version: 1 });
+        yield* transitions.applyMemoryHubTransition(
+          {
+            requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000087"),
+            expectedVersion: 1,
+            settings: { mode: "disabled" },
+          },
+          Effect.void,
+        );
+        assert.deepStrictEqual(yield* sql.withTransaction(snapshot.read), {
+          settings: { mode: "disabled" },
+          version: 2,
+        });
+        assert.strictEqual((yield* service.getSettings).memoryHubVersion, 2);
+      }).pipe(
+        Effect.provide(layerServerSettingsWithSecrets()),
+        Effect.provideService(FileSystem.FileSystem, controlledFs),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
