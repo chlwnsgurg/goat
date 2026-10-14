@@ -36,6 +36,7 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -568,13 +569,33 @@ export const layerMemoryHubStarted = Layer.effectDiscard(
     // One start in this application scope, after migrations, settings and the
     // published initial membership checkpoint. Disabled startup has no sweep.
     yield* Stream.concat(Stream.succeed(undefined), changes).pipe(
-      Stream.mapEffect(() => readyPrincipal),
-      Stream.filter(Option.isSome),
-      Stream.map((principal) => principal.value),
-      Stream.take(1),
-      Stream.runForEach((principal) =>
-        compactor.start(principal).pipe(Effect.provideService(Scope.Scope, applicationScope)),
+      Stream.mapEffect(() =>
+        Effect.gen(function* () {
+          const principal = yield* readyPrincipal;
+          if (Option.isNone(principal)) return false;
+          const startScope = yield* Scope.fork(applicationScope);
+          yield* compactor.start(principal.value).pipe(
+            Effect.provideService(Scope.Scope, startScope),
+            // Release subscriptions from a failed sweep; a successful start
+            // keeps its child scope until the application closes.
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit) ? Scope.close(startScope, exit) : Effect.void,
+            ),
+          );
+          return true;
+        }).pipe(
+          // Readiness and the initial sweep can race with disable. Keep the
+          // settings subscription alive and retry on the next transition.
+          Effect.catch((error) =>
+            Effect.logWarning("Memory compactor startup deferred", { errorTag: error._tag }).pipe(
+              Effect.as(false),
+            ),
+          ),
+        ),
       ),
+      Stream.filter((started) => started),
+      Stream.take(1),
+      Stream.runDrain,
       // Startup marks settings ready after building its dependencies. Await it
       // in the scoped fiber so acquisition cannot deadlock that startup.
       (run) => Effect.andThen(settings.ready, run),

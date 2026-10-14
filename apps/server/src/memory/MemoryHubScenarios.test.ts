@@ -550,71 +550,161 @@ describe("Memory hub assembled HTTP scenarios", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect(
-    "parks for settings readiness, starts once after enable and keeps timers in application Scope",
-    () =>
-      Effect.gen(function* () {
-        const s = yield* scenario;
-        yield* s.initialize;
-        yield* s.configure("disabled");
-        const started = yield* Deferred.make<void>();
-        const prepared = yield* Deferred.make<void>();
-        let starts = 0;
-        const producer = Context.get(s.context, Compactor.MemoryHubCheckpointProducer);
-        const compactor = yield* s.run(
-          Compactor.make.pipe(
-            Effect.provideService(Compactor.MemoryHubCheckpointProducer, {
-              prepareTx: (input) =>
-                producer
-                  .prepareTx(input)
-                  .pipe(Effect.tap(() => Deferred.succeed(prepared, undefined))),
+  it.effect("keeps waiting after readiness failure and starts once", () =>
+    Effect.gen(function* () {
+      const s = yield* scenario;
+      yield* s.initialize;
+      const judged = yield* Deferred.make<void>();
+      const releaseRead = yield* Deferred.make<void>();
+      const retried = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      const configuration = Context.get(s.context, Hub.MemoryHubConfiguration);
+      const compactor = Context.get(s.context, Compactor.MemoryCompactor);
+      let reads = 0;
+      let starts = 0;
+      const applicationScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(applicationScope, Exit.void));
+      yield* Layer.buildWithScope(
+        layerMemoryHubStarted.pipe(
+          Layer.provide(
+            Layer.succeed(Hub.MemoryHubConfiguration, {
+              read: Effect.gen(function* () {
+                reads++;
+                if (reads === 1) {
+                  yield* Deferred.succeed(judged, undefined);
+                  yield* Deferred.await(releaseRead);
+                  return yield* new M.MemoryHubError({ code: "storage_failed" });
+                }
+                const hub = yield* configuration.read;
+                yield* Deferred.succeed(retried, undefined);
+                return hub;
+              }),
             }),
           ),
-        );
-        const observed = Compactor.MemoryCompactor.of({
-          ...compactor,
-          start: (principal) =>
-            compactor.start(principal).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  starts++;
-                }),
-              ),
-              Effect.tap(() => Deferred.succeed(started, undefined)),
-            ),
-        });
-        const applicationScope = yield* Scope.make();
-        yield* Effect.addFinalizer(() => Scope.close(applicationScope, Exit.void));
-        // Real file settings are not started yet. Layer acquisition must return;
-        // waiting for readiness here would deadlock ServerRuntimeStartup.start.
-        yield* Layer.buildWithScope(
-          layerMemoryHubStarted.pipe(
-            Layer.provide(Layer.succeed(Compactor.MemoryCompactor, observed)),
-            Layer.provide(Layer.succeedContext(s.context)),
+          Layer.provide(
+            Layer.succeed(Compactor.MemoryCompactor, {
+              ...compactor,
+              start: (principal) =>
+                compactor.start(principal).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      starts++;
+                    }),
+                  ),
+                  Effect.tap(() => Deferred.succeed(started, undefined)),
+                ),
+            }),
           ),
-          applicationScope,
-        );
-        assert.strictEqual(starts, 0);
-        yield* s.run(Settings.ServerSettingsService.use((settings) => settings.start));
-        yield* s.configure("hub");
-        yield* Deferred.await(started);
-        assert.strictEqual(starts, 1);
-        const retention = s.run(
-          Store.MemoryStore.use((store) => store.transact(store.readHubRetentionTx(space))),
-        );
-        const before = yield* retention;
-        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
-        yield* Deferred.await(prepared);
-        // Read through the writer lock after prepare, so the observation follows commit.
-        const after = yield* retention;
-        assert.notStrictEqual(after.checkpointId, before.checkpointId);
-        yield* s.configure("disabled");
-        yield* s.configure("hub");
-        assert.strictEqual(starts, 1);
-        yield* Scope.close(applicationScope, Exit.void);
-        yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
-        yield* s.run(Hub.MemoryHubActivity.use((activity) => activity.notify));
-        assert.deepStrictEqual(yield* retention, after);
-      }).pipe(Effect.provide(NodeServices.layer)),
+          Layer.provide(Layer.succeedContext(s.context)),
+        ),
+        applicationScope,
+      );
+      yield* s.run(Settings.ServerSettingsService.use((settings) => settings.start));
+      yield* Deferred.await(judged);
+      yield* s.configure("disabled");
+      yield* Deferred.succeed(releaseRead, undefined);
+      yield* Deferred.await(retried);
+      assert.strictEqual(starts, 0);
+      yield* s.configure("hub");
+      yield* Deferred.await(started);
+      assert.strictEqual(starts, 1);
+      yield* Scope.close(applicationScope, Exit.void);
+      yield* s.configure("disabled");
+      yield* s.configure("hub");
+      assert.strictEqual(starts, 1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("retries a disabled initial sweep, starts once and stops with application Scope", () =>
+    Effect.gen(function* () {
+      const s = yield* scenario;
+      yield* s.initialize;
+      yield* s.configure("disabled");
+      const judged = yield* Deferred.make<void>();
+      const releaseStart = yield* Deferred.make<void>();
+      const failed = yield* Deferred.make<string>();
+      const started = yield* Deferred.make<void>();
+      const prepared = yield* Deferred.make<void>();
+      let starts = 0;
+      let attempts = 0;
+      const producer = Context.get(s.context, Compactor.MemoryHubCheckpointProducer);
+      const compactor = yield* s.run(
+        Compactor.make.pipe(
+          Effect.provideService(Compactor.MemoryHubCheckpointProducer, {
+            prepareTx: (input) =>
+              producer
+                .prepareTx(input)
+                .pipe(Effect.tap(() => Deferred.succeed(prepared, undefined))),
+          }),
+        ),
+      );
+      const observed = Compactor.MemoryCompactor.of({
+        ...compactor,
+        start: (principal) =>
+          Effect.gen(function* () {
+            attempts++;
+            if (attempts === 1) {
+              // The assembled readiness check has succeeded; disable before
+              // the real compactor subscribes and runs its initial sweep.
+              yield* Deferred.succeed(judged, undefined);
+              yield* Deferred.await(releaseStart);
+            }
+            yield* compactor
+              .start(principal)
+              .pipe(
+                Effect.tapError((error) =>
+                  Deferred.succeed(failed, "code" in error ? error.code : error._tag),
+                ),
+              );
+          }).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                starts++;
+              }),
+            ),
+            Effect.tap(() => Deferred.succeed(started, undefined)),
+          ),
+      });
+      const applicationScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(applicationScope, Exit.void));
+      // Real file settings are not started yet. Layer acquisition must return;
+      // waiting for readiness here would deadlock ServerRuntimeStartup.start.
+      yield* Layer.buildWithScope(
+        layerMemoryHubStarted.pipe(
+          Layer.provide(Layer.succeed(Compactor.MemoryCompactor, observed)),
+          Layer.provide(Layer.succeedContext(s.context)),
+        ),
+        applicationScope,
+      );
+      assert.strictEqual(starts, 0);
+      yield* s.run(Settings.ServerSettingsService.use((settings) => settings.start));
+      yield* s.configure("hub");
+      yield* Deferred.await(judged);
+      yield* s.configure("disabled");
+      yield* Deferred.succeed(releaseStart, undefined);
+      assert.strictEqual(yield* Deferred.await(failed), "hub_disabled");
+      assert.strictEqual(starts, 0);
+      yield* s.configure("hub");
+      yield* Deferred.await(started);
+      assert.strictEqual(attempts, 2);
+      assert.strictEqual(starts, 1);
+      const retention = s.run(
+        Store.MemoryStore.use((store) => store.transact(store.readHubRetentionTx(space))),
+      );
+      const before = yield* retention;
+      yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+      yield* Deferred.await(prepared);
+      // Read through the writer lock after prepare, so the observation follows commit.
+      const after = yield* retention;
+      assert.notStrictEqual(after.checkpointId, before.checkpointId);
+      yield* s.configure("disabled");
+      yield* s.configure("hub");
+      assert.strictEqual(starts, 1);
+      assert.strictEqual(attempts, 2);
+      yield* Scope.close(applicationScope, Exit.void);
+      yield* TestClock.adjust(M.MEMORY_CHECKPOINT_INTERVAL_MS);
+      yield* s.run(Hub.MemoryHubActivity.use((activity) => activity.notify));
+      assert.deepStrictEqual(yield* retention, after);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
