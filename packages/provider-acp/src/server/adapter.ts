@@ -1498,6 +1498,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     threadId === null
       ? Effect.succeed(acpMcpContext(undefined, self))
       : mcpSessions.read(threadId).pipe(Effect.map((session) => acpMcpContext(session, self)));
+  // Claims belong to native conversations, not runtime attachments. Unknown resumed
+  // IDs stay silent until this adapter advertises tools; replacement IDs start empty.
+  const memoryToolClaims = new Set<string>();
   const driver = flavor.driver;
   const continuationRequests = options.continuationRequests;
   const postSettleContinuationEnabled =
@@ -7240,12 +7243,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   ? config
                   : undefined,
               );
+              const hasMemoryTools = availability.read || availability.write || availability.source;
+              const announceMemoryTools =
+                hasMemoryTools || memoryToolClaims.has(requestedSessionId);
+              if (hasMemoryTools) memoryToolClaims.add(requestedSessionId);
+              else memoryToolClaims.delete(requestedSessionId);
               return [
                 ...promptParts!.prompt,
-                {
-                  type: "text" as const,
-                  text: `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
-                },
+                ...(announceMemoryTools
+                  ? [
+                      {
+                        type: "text" as const,
+                        text: `GOAT memory tools: read=${availability.read}, write=${availability.write}, source=${availability.source}. Unavailable or denied tools must not be claimed.`,
+                      },
+                    ]
+                  : []),
                 ...(memory === undefined ? [] : [{ type: "text" as const, text: memory }]),
               ];
             }).pipe(Effect.tapError(() => finalizeTurn(context, "failed")));

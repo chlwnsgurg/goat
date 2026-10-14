@@ -257,7 +257,9 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
         Effect.succeed(!attached || scopes.includes("memory:read") ? snapshot : undefined),
     });
     const transitions: ReadonlyArray<ReadonlyArray<M.AuthEnvironmentScope>> = [
+      [],
       ["memory:read", "memory:write", "orchestration:read"],
+      [],
       [],
       ["memory:read"],
       ["memory:read", "memory:write", "orchestration:read"],
@@ -282,12 +284,13 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
       assert.equal(memory.length, !attached || grant.includes("memory:read") ? 1 : 0);
       if (memory.length) assert.equal(memory[0]?.text, memoryContextText(snapshot));
       const availability = prompt.find((part) => part.text?.startsWith("GOAT memory tools:"))?.text;
-      assert.include(availability ?? "", `read=${attached && grant.includes("memory:read")}`);
-      assert.include(availability ?? "", `write=${attached && grant.includes("memory:write")}`);
-      assert.include(
-        availability ?? "",
-        `source=${attached && grant.includes("orchestration:read")}`,
-      );
+      if (attached && (grant.includes("memory:read") || index === 2)) {
+        assert.include(availability ?? "", `read=${grant.includes("memory:read")}`);
+        assert.include(availability ?? "", `write=${grant.includes("memory:write")}`);
+        assert.include(availability ?? "", `source=${grant.includes("orchestration:read")}`);
+      } else {
+        assert.isUndefined(availability);
+      }
       if (attached) {
         assert.isDefined(connect);
         assert.isDefined(message);
@@ -355,6 +358,32 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
           ),
         );
       }
+    }
+    if (attached) {
+      scopes = [];
+      yield* sessions.set(config(scopes));
+      const replacement = yield* runtime.rollbackThread({
+        providerThread: thread,
+        providerThreadTurns: [],
+        target: {
+          type: "thread_start",
+          checkpointId: M.CheckpointId.make("memory-rollback"),
+          appRunOrdinal: 0,
+        },
+      });
+      assert.notEqual(
+        replacement.providerThread.nativeThreadRef?.nativeId,
+        thread.nativeThreadRef?.nativeId,
+      );
+      thread = replacement.providerThread;
+      yield* runtime.startTurn(input(7));
+      yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runDrain,
+      );
+      assert.isUndefined(
+        prompts.at(-1)?.find((part) => part.text?.startsWith("GOAT memory tools:")),
+      );
     }
     const before = prompts.length;
     const tampered = {

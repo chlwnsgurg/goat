@@ -3297,9 +3297,9 @@ describe("AcpAdapterV2", () => {
             assert.include(Cause.pretty(result.cause), "GOAT MCP is unavailable");
         }
         assert.equal(requests.length, beforeAdmission, "removed B must receive no HTTP requests");
-        assert.include(
-          prompts.at(-1)?.find((part) => part.text?.startsWith("GOAT memory tools:"))?.text ?? "",
-          "read=false",
+        // No prompt advertised tools on this native ID; bridge calls are not claims.
+        assert.isUndefined(
+          prompts.at(-1)?.find((part) => part.text?.startsWith("GOAT memory tools:")),
         );
       }
     }).pipe(Effect.provide(layerTest), Effect.scoped),
