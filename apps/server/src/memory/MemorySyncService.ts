@@ -330,6 +330,29 @@ const make = Effect.gen(function* () {
       );
       yield* Deferred.succeed(ready, undefined);
     }).pipe(Effect.uninterruptible);
+  let discoveryEpoch: number | null = null;
+  let discoveryFailure: Store.MemoryStorageError | null = null;
+  // The cycle mutex serializes discovery with sync. Presence only registers a real probe;
+  // it is never a successful observation or permission to rearm persisted work.
+  const discoverRecoveries = (r: Route) =>
+    Effect.gen(function* () {
+      if (!started || !r.connection || !r.space || discoveryEpoch === r.settings.memoryHubVersion)
+        return;
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      discoveryEpoch = r.settings.memoryHubVersion;
+      discoveryFailure = null;
+      const classes = yield* store.readPersistedHoldClasses({
+        memorySpaceId: r.space,
+        hubEnvironmentId: r.hubId,
+      });
+      yield* ensureEpoch(r.settings.memoryHubVersion);
+      for (const c of classes) yield* scheduleRecovery(r, c);
+    }).pipe(
+      Effect.catch((error) => {
+        if (error._tag === "MemoryStorageError") discoveryFailure = error;
+        return noteFailure(r.settings.memoryHubVersion, error);
+      }),
+    );
   const callPull = (r: Route, i: M.MemoryHubPullInput) =>
     r.connection ? client.pull(r.connection, i) : hub.pull(i, r.principal!);
   const release = (r: Route, ticket: M.MemoryResolutionLease) => {
@@ -708,7 +731,10 @@ const make = Effect.gen(function* () {
                 });
               }),
             );
-            if (held) row = held;
+            if (held) {
+              row = held;
+              yield* scheduleRecovery(r, permanentClass);
+            }
             return;
           }
           const failed = yield* store.transact(
@@ -1041,7 +1067,10 @@ const make = Effect.gen(function* () {
                 holdClass: holdClass(attempt.failure),
               }),
             );
-            if (held) continue;
+            if (held) {
+              yield* scheduleRecovery(r, holdClass(attempt.failure));
+              continue;
+            }
           }
           const knownExpiry =
             code === "claim_busy"
@@ -1527,6 +1556,9 @@ const make = Effect.gen(function* () {
         if (entry.epoch !== r.settings.memoryHubVersion && entry.fiber)
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
+      yield* discoverRecoveries(r);
+      if (discoveryEpoch === r.settings.memoryHubVersion && discoveryFailure)
+        yield* noteFailure(r.settings.memoryHubVersion, discoveryFailure);
       yield* rearmPage(r);
       const budget = { pages: 0, entries: 0 };
       if (!(yield* synchronizePull(r, budget)) || budget.pages >= 10) return;

@@ -5011,6 +5011,7 @@ it.effect.each(["bootstrap", "exchange"] as const)(
             )).items.find((i) => i.memoryId === hOp.memoryId);
             if (fromH?.status !== "active") throw new Error("H write missing from A replica");
             assert.strictEqual(fromH.payload.text, "synthetic fact 98001");
+            const before = yield* store.readCursor(allocated, local);
             const aMemory = M.MemoryId.make(id(98005));
             yield* aService.upsert(
               {
@@ -5026,7 +5027,6 @@ it.effect.each(["bootstrap", "exchange"] as const)(
               Effect.void,
             );
             yield* aSync.syncOnce;
-            const before = yield* store.readCursor(allocated, local);
             yield* sync.syncOnce;
             assert.isAbove(yield* store.readCursor(allocated, local), before);
             const received = (yield* service.list(
@@ -5305,4 +5305,245 @@ it.effect("a real permanent pull failure recovers in the same epoch through pref
       }).pipe(Effect.provide(fixture(client))),
     );
   }),
+);
+
+it.effect("persisted push-only protocol hold is probed after coordinator restart", () =>
+  Effect.gen(function* () {
+    let healthy = false;
+    let pushes = 0;
+    let probes = 0;
+    const resumed = yield* Deferred.make<void>();
+    const client = peer({
+      preflight: () =>
+        Effect.sync(() => {
+          probes++;
+          return recoveredDescriptor;
+        }),
+      push: (_c, input) =>
+        Effect.gen(function* () {
+          pushes++;
+          if (!healthy) return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
+          const sent = input.operations[0]!;
+          assert.strictEqual(sent.kind, "upsert");
+          if (sent.kind !== "upsert") throw new Error("expected upsert");
+          assert.strictEqual(sent.payload.text, "synthetic fact 98200");
+          yield* Deferred.succeed(resumed, undefined);
+          return {
+            receipts: input.operations.map((op) => ({
+              operationId: op.operationId,
+              memoryId: op.memoryId,
+              operationDigest: memoryOperationDigest(op),
+              hubSequence: 1,
+              outcome: "accepted" as const,
+            })),
+          };
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* enqueue(98200);
+        const store = yield* Store.MemoryStore;
+        const first = yield* Sync.MemorySyncService;
+        yield* first.start;
+        assert.strictEqual(pushes, 1);
+        assert.strictEqual((yield* store.readWorkHold("sync:98200"))?.holdClass, "protocol");
+        assert.isNull(
+          (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+            .holdClass,
+        );
+        yield* first.shutdown;
+        healthy = true;
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const restarted = yield* Sync.MemorySyncService;
+            yield* restarted.start;
+            yield* restarted.syncOnce;
+            assert.strictEqual(pushes, 1, "healthy pull cannot release a persisted push hold");
+            yield* TestClock.adjust(29999);
+            assert.strictEqual(probes, 0);
+            yield* TestClock.adjust(1);
+            assert.strictEqual(probes, 1, "fresh coordinator discovers the non-pull class");
+            yield* Deferred.await(resumed);
+            yield* restarted.syncOnce;
+            assert.strictEqual(pushes, 2);
+            assert.isNull((yield* store.readWorkHold("sync:98200"))?.holdClass);
+            const sql = yield* SqlClient.SqlClient;
+            assert.deepStrictEqual(
+              yield* sql`SELECT status FROM memory_outbox WHERE id='sync:98200'`,
+              [{ status: "completed" }],
+            );
+            yield* restarted.shutdown;
+          }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+        );
+      }).pipe(Effect.provide(fixture(client))),
+    );
+  }),
+);
+
+it.effect("hold discovery runs once per committed epoch, not per manual or periodic sync", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      const store = yield* Store.MemoryStore;
+      const second = yield* Deferred.make<void>();
+      const reads: { memorySpaceId: M.MemorySpaceId; hubEnvironmentId: M.EnvironmentId }[] = [];
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.start;
+          yield* sync.start;
+          yield* sync.syncOnce;
+          yield* TestClock.adjust(30000);
+          assert.strictEqual(reads.length, 1);
+          yield* changeHub(1, { ...member, secretName: "memory-hub-fixture-next" });
+          yield* Deferred.await(second);
+          yield* sync.syncOnce;
+          yield* sync.syncOnce;
+          assert.deepStrictEqual(reads, [
+            { memorySpaceId: space, hubEnvironmentId: remote },
+            { memorySpaceId: space, hubEnvironmentId: remote },
+          ]);
+          yield* sync.shutdown;
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(
+                Layer.succeed(Store.MemoryStore, {
+                  ...store,
+                  readPersistedHoldClasses: (input) =>
+                    Effect.gen(function* () {
+                      reads.push(input);
+                      const result = yield* store.readPersistedHoldClasses(input);
+                      if (reads.length === 2) yield* Deferred.succeed(second, undefined);
+                      return result;
+                    }),
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(fixture(peer(), undefined, false, true))),
+  ),
+);
+
+it.effect("typed hold discovery failure leaves healthy sync available", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      yield* enqueue(98210);
+      const store = yield* Store.MemoryStore;
+      let reads = 0;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.start;
+          const status = yield* sync.syncStatus({}, Effect.void);
+          assert.strictEqual(status.failureCode, "storage_failed");
+          yield* sync.syncOnce;
+          assert.strictEqual(reads, 1);
+          const sql = yield* SqlClient.SqlClient;
+          assert.deepStrictEqual(
+            yield* sql`SELECT status FROM memory_outbox WHERE id='sync:98210'`,
+            [{ status: "completed" }],
+          );
+          yield* sync.shutdown;
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(
+                Layer.succeed(Store.MemoryStore, {
+                  ...store,
+                  readPersistedHoldClasses: () =>
+                    Effect.suspend(() => {
+                      reads++;
+                      return Effect.fail(
+                        new Store.MemoryStorageError({
+                          stage: "persisted-hold-discovery",
+                          cause: "synthetic storage failure",
+                        }),
+                      );
+                    }),
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(fixture())),
+  ),
+);
+
+it.effect.each(["claim", "paired"] as const)(
+  "new %s identity hold registers a descriptor probe without restart",
+  (stage) =>
+    Effect.gen(function* () {
+      let probes = 0;
+      let attempts = 0;
+      let availabilityChecks = 0;
+      const held = yield* Deferred.make<void>();
+      const resumed = yield* Deferred.make<void>();
+      const refuse = Effect.gen(function* () {
+        attempts++;
+        if (attempts === 2) {
+          yield* Deferred.succeed(resumed, undefined);
+          return yield* Effect.never;
+        }
+        return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+      });
+      const client = peer({
+        preflight: () =>
+          Effect.sync(() => {
+            probes++;
+            return recoveredDescriptor;
+          }),
+        ...(stage === "claim" ? { claim: () => refuse } : {}),
+        release: () => Deferred.succeed(held, undefined).pipe(Effect.as({ released: true })),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const base = yield* Sync.MemorySyncRuntime;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sync = yield* Sync.MemorySyncService;
+              const sql = yield* SqlClient.SqlClient;
+              yield* sync.start;
+              if (stage === "paired") yield* Deferred.await(held);
+              assert.strictEqual(attempts, 1);
+              const heldRows = yield* sql`SELECT id FROM memory_outbox WHERE hold_class='identity'`;
+              assert.strictEqual(heldRows.length, stage === "claim" ? 1 : 2);
+              yield* TestClock.adjust(29999);
+              assert.strictEqual(probes, 0);
+              yield* TestClock.adjust(1);
+              assert.strictEqual(probes, 1);
+              yield* Deferred.await(resumed);
+              assert.strictEqual(attempts, 2);
+              yield* sync.shutdown;
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(
+                    Layer.succeed(Sync.MemorySyncRuntime, {
+                      ...base,
+                      ...(stage === "paired"
+                        ? {
+                            available: () =>
+                              Effect.suspend(() => {
+                                availabilityChecks++;
+                                return availabilityChecks % 2 === 1 ? Effect.void : refuse;
+                              }),
+                          }
+                        : {}),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
 );
