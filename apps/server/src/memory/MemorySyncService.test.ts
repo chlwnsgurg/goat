@@ -4056,3 +4056,116 @@ it.effect("approval metadata without saved bytes never regenerates a resolution"
     );
   }),
 );
+
+it.effect.each(["canonical receipt", "saved approval"] as const)(
+  "recovered %s rejection preserves retry backoff",
+  (source) =>
+    Effect.gen(function* () {
+      const submitted = yield* Deferred.make<void>();
+      const retired = yield* Deferred.make<void>();
+      const holdRelease = yield* Deferred.make<void>();
+      let saved: M.MemoryHubApplyResolutionInput | undefined;
+      let recovering = false;
+      let generated = 0;
+      let applies = 0;
+      const client = peer({
+        applyResolution: (_c, input) =>
+          Effect.gen(function* () {
+            saved = input;
+            applies++;
+            yield* Deferred.succeed(submitted, undefined);
+            return yield* new M.MemoryHubError({ code: "unavailable" });
+          }),
+        release: () =>
+          Effect.gen(function* () {
+            if (recovering) {
+              yield* Deferred.succeed(retired, undefined);
+              yield* Deferred.await(holdRelease);
+            }
+            return { released: true };
+          }),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.sync(() => {
+            generated++;
+            return {
+              result: {
+                text: "synthetic canonical rejection",
+                assertionKind: "inference" as const,
+                evidence: [],
+                judgment: "combine synthetic facts",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: local,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const memory = yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          yield* Deferred.await(submitted);
+          yield* sync.shutdown;
+          const store = yield* Store.MemoryStore;
+          const original = (yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 30000,
+            limit: 100,
+          }))[0]!;
+          assert.deepStrictEqual(original.submission, saved);
+          const op = saved!.operation;
+          const receipt: M.MemoryHubReceipt = {
+            operationId: op.operationId,
+            memoryId: memory,
+            operationDigest: memoryOperationDigest(op),
+            outcome: "rejected",
+            hubSequence: null,
+            failureCode: "conflict_changed",
+          };
+          const sql = yield* SqlClient.SqlClient;
+          // Controlled canonical receipt seam; actual Store/Service reconciliation is unchanged.
+          if (source === "canonical receipt")
+            yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES(${space},'hubReceipt',${op.operationId},${memory},${encode({ receipt })})`;
+          else
+            yield* sql`UPDATE memory_outbox SET ticket_json=json_set(ticket_json,'$.approval',json(${encode(receipt)})) WHERE id=${`resolve:${space}:${original.ticket.attemptId}`}`;
+          recovering = true;
+          yield* TestClock.adjust("30 seconds");
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              yield* Deferred.await(retired);
+              const due = yield* store.readDueClaimCandidates(100, 30000, space);
+              assert.strictEqual(generated, 1);
+              assert.strictEqual(applies, 1);
+              const rows = yield* sql<{
+                status: string;
+                next_attempt_at: number;
+              }>`SELECT status,next_attempt_at FROM memory_outbox WHERE kind='claim' AND memory_id=${memory}`;
+
+              yield* Deferred.succeed(holdRelease, undefined);
+              yield* restarted.shutdown;
+              assert.strictEqual(due.length, 0, "recovered rejection must retain 30s budget");
+              assert.deepStrictEqual(rows, [{ status: "retry", next_attempt_at: 60000 }]);
+              assert.strictEqual(
+                (yield* store.readDueClaimCandidates(100, 59999, space)).length,
+                0,
+              );
+              assert.strictEqual(
+                (yield* store.readDueClaimCandidates(100, 60000, space)).length,
+                1,
+              );
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);

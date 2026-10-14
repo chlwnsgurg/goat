@@ -441,12 +441,10 @@ const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const result = yield* store.transact(
         Effect.gen(function* () {
-          const candidate = rejection
-            ? yield* store.findClaimCandidate({
-                memorySpaceId: row.ticket.memorySpaceId,
-                attemptId: row.ticket.attemptId,
-              })
-            : null;
+          const candidate = yield* store.findClaimCandidate({
+            memorySpaceId: row.ticket.memorySpaceId,
+            attemptId: row.ticket.attemptId,
+          });
           const reconciled = yield* service.reconcileResolutionSubmission({
             ownership: ownership(row),
             now,
