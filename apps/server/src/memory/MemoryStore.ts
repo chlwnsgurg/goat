@@ -6240,25 +6240,31 @@ const make = Effect.gen(function* () {
           }>`SELECT ticket_json FROM memory_outbox WHERE id=${row.id}`,
         );
         if (!tickets[0]?.ticket_json) continue;
-        const ticket = yield* decodeTicketRow(tickets[0].ticket_json);
+        // Rearm is scheduling-only. Decode persisted metadata without reading uncertain
+        // submission bodies; retain that metadata and digest byte-for-byte in the next row.
+        const ticket = yield* stored(
+          "held-ticket-metadata",
+          storedTicketRowCodec.decode(tickets[0].ticket_json, strict),
+        );
         if (
           ticket.state === "terminal" ||
           ticket.approval ||
           (ticket.ownedUntil !== null && ticket.ownedUntil > input.now)
         )
           continue;
-        const next = yield* writeTicket(
-          { memorySpaceId: input.memorySpaceId, attemptId: ticket.ticket.attemptId },
-          {
-            ...ticket,
-            version: ticket.version + 1,
-            owner: null,
-            ownedUntil: null,
-            nextAttemptAt: input.now,
-          },
-          ticket.version,
+        const next = {
+          ...ticket,
+          version: ticket.version + 1,
+          owner: null,
+          ownedUntil: null,
+          nextAttemptAt: input.now,
+        };
+        const advanced = yield* stored(
+          "held-ticket-rearm",
+          sql`UPDATE memory_outbox SET ticket_json=${yield* storedTicketRowCodec.encode(next)},sync_version=${next.version},next_attempt_at=${input.now}
+          WHERE id=${row.id} AND sync_version=${ticket.version} RETURNING id`,
         );
-        if (!next) continue;
+        if (!advanced.length) continue;
       }
       const updated = yield* stored(
         "resolution-hold-rearm",

@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
 import * as SqlClient from "effect/sql/SqlClient";
 import memory from "./070_Memory.ts";
 import hub from "./071_MemoryHubSync.ts";
@@ -262,7 +263,9 @@ it.effect("keeps retry accounting separate from canonical snapshot dependencies"
     const before = yield* inventory();
     yield* hub;
     const after = yield* inventory();
-    yield* Effect.log("R13_SCHEMA_INVENTORY", { before, after });
+    yield* Effect.log("R13_SCHEMA_INVENTORY", { before, after }).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
     const triggers = yield* sql<{
       name: string;
     }>`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memory_sync_cursors' ORDER BY name`;
