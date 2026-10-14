@@ -948,9 +948,10 @@ const make = Effect.gen(function* () {
           });
         }
       } else {
-        yield* Ref.set(hubMarkerRef, decoded.value._memoryHubTransition ?? null);
+        const { _memoryHubTransition: marker, ...publicSettings } = decoded.value;
+        yield* Ref.set(hubMarkerRef, marker ?? null);
         settings = {
-          ...decoded.value,
+          ...publicSettings,
           defaultTheme: normalizeThemePreference(decoded.value.defaultTheme),
         };
       }

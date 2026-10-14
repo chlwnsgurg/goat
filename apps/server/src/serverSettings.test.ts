@@ -2467,6 +2467,8 @@ it.effect(
       // New settings service, same real filesystem/secret/SQLite dependencies.
       const restarted = yield* Effect.gen(function* () {
         const recovered = yield* ServerSettingsModule.MemoryHubAdminSettings;
+        const publicService = yield* ServerSettingsModule.ServerSettingsService;
+        assert.isFalse(Object.hasOwn(yield* publicService.getSettings, "_memoryHubTransition"));
         return yield* recovered.withLock(recovered.apply(record, Effect.void));
       }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
       assert.deepStrictEqual(restarted, result);
