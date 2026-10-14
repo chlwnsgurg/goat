@@ -3581,6 +3581,12 @@ it.effect(
       let generated = 0;
       let applies = 0;
       const client = peer({
+        release: () =>
+          Effect.gen(function* () {
+            // Release runs after the outer reconciliation transaction has committed.
+            if (deliver) yield* Deferred.succeed(recoveryObserved, undefined);
+            return { released: true };
+          }),
         applyResolution: (_c, input) =>
           Effect.gen(function* () {
             saved = input;
@@ -3659,34 +3665,13 @@ it.effect(
           assert.deepStrictEqual(ticket.submission, saved);
           deliver = true;
           yield* TestClock.adjust("30 seconds");
-          const service = yield* Service.MemoryService;
           yield* Effect.scoped(
             Effect.gen(function* () {
               const restarted = yield* Sync.MemorySyncService;
               yield* restarted.syncOnce;
               yield* Deferred.await(recoveryObserved);
               yield* restarted.shutdown;
-            }).pipe(
-              Effect.provide(
-                Layer.fresh(Sync.layer).pipe(
-                  Layer.provide(
-                    Layer.succeed(Service.MemoryService, {
-                      ...service,
-                      reconcileResolutionSubmission: (input) =>
-                        service
-                          .reconcileResolutionSubmission(input)
-                          .pipe(
-                            Effect.tap((result) =>
-                              result?.outcome === "admitted"
-                                ? Deferred.succeed(recoveryObserved, undefined)
-                                : Effect.void,
-                            ),
-                          ),
-                    }),
-                  ),
-                ),
-              ),
-            ),
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
           );
           assert.strictEqual(generated, 1);
           assert.strictEqual(applies, 1);

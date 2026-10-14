@@ -257,8 +257,8 @@ const make = Effect.gen(function* () {
   };
   const noteFailure = Effect.fn("MemorySyncService.noteFailure")(
     function* (epoch: number, error: Error) {
-      const s = yield* readSettings;
-      if (!stopped && s.memoryHubVersion === epoch) {
+      const s = yield* committedSettings.read;
+      if (!stopped && s.version === epoch) {
         resetStatus(epoch);
         lastFailure = { epoch, code: failureCode(error) };
       }
@@ -1447,7 +1447,7 @@ const make = Effect.gen(function* () {
             else pendingSync = true;
             return cycle;
           }
-          const epoch = (yield* readSettings).memoryHubVersion;
+          const epoch = (yield* committedSettings.read).version;
           resetStatus(epoch);
           // Disabled/empty cycles can finish before fork returns. Publish the tracked
           // fiber before releasing its start gate so its finalizer cannot be overwritten.
@@ -1502,11 +1502,9 @@ const make = Effect.gen(function* () {
         ...[...executions.values()].flatMap((e) => (e.fiber ? [e.fiber] : [])),
       ]);
       cycle = null;
-      const s = yield* readSettings.pipe(Effect.catch(() => Effect.succeed(null)));
-      if (s) {
-        settingsEpoch = s.memoryHubVersion;
-        resetStatus(s.memoryHubVersion);
-      }
+      const s = yield* committedSettings.read;
+      settingsEpoch = s.version;
+      resetStatus(s.version);
       cancelling = false;
     }),
   );
@@ -1554,9 +1552,10 @@ const make = Effect.gen(function* () {
       background.push(
         yield* Stream.runForEach(runtime.rearmEvents, (event) =>
           Effect.gen(function* () {
-            const r = yield* route();
-            if (!r?.space || r.space !== event.memorySpaceId || stopped) return;
-            enqueueRearm(r.settings.memoryHubVersion, r.space, [event.holdClass]);
+            const view = yield* committedSettings.read;
+            const space = view.settings.mode === "disabled" ? null : view.settings.memorySpaceId;
+            if (!space || space !== event.memorySpaceId || stopped) return;
+            enqueueRearm(view.version, space, [event.holdClass]);
             yield* requestCycle(syncCycle, false, false);
           }),
         ).pipe(Effect.ignore, Effect.forkIn(scope)),
