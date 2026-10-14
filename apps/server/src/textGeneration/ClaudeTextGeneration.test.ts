@@ -406,7 +406,12 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
           directApi: true,
           expectNoSpawn: true,
           memoryRunnerContext: memoryContext,
-          output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+          output: JSON.stringify({
+            structured_output:
+              operation === "resolveMemoryConflict"
+                ? { ...memoryOutput, judgment: "Synthetic" }
+                : memoryOutput,
+          }),
         },
         (generation) =>
           Effect.gen(function* () {
@@ -447,7 +452,12 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         ...scenario,
         expectSpawn: true,
         memoryRunnerContext: memoryContext,
-        output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic" }
+              : memoryOutput,
+        }),
       },
       (generation) =>
         Effect.gen(function* () {
@@ -536,7 +546,12 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         wsl: host === "wsl",
         memoryRunnerContext: memoryContext,
         expectNoSpawn: true,
-        output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic" }
+              : memoryOutput,
+        }),
         registryQuery: (key) => {
           if (scenario === "query failure" || scenario === "interop unavailable")
             return Effect.fail(new MemoryGenerationRunnerError({ code: "unavailable" }));
@@ -571,7 +586,12 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
         wsl: host === "wsl",
         memoryRunnerContext: memoryContext,
         expectSpawn: true,
-        output: JSON.stringify({ structured_output: { ...memoryOutput, judgment: "Synthetic" } }),
+        output: JSON.stringify({
+          structured_output:
+            operation === "resolveMemoryConflict"
+              ? { ...memoryOutput, judgment: "Synthetic" }
+              : memoryOutput,
+        }),
       },
       (generation) =>
         Effect.gen(function* () {
