@@ -4758,6 +4758,81 @@ it.effect("discarding expired bootstrap preserves staged bodies adopted by canon
         .length,
       1,
     );
-    assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "active");
+    const canonical = yield* store.loadAggregate(space, memory);
+    assert.strictEqual(canonical.item?.status, "blocked");
+    assert.include(canonical.item!.localAvailability.reasons, "scanner_pending");
+    assert.include(canonical.heads, M.MemoryRevisionId.make(id(13)));
   }).pipe(Effect.provide(live)),
+);
+
+it.effect.each(["recoverable", "running", "submitting", "approved", "finalizing"] as const)(
+  "current frontier recovery preserves ticket state and ownership: %s",
+  (state) =>
+    Effect.gen(function* () {
+      const { store, sql, ticket, ownership, submission } = yield* seedSubmission;
+      if (state === "submitting" || state === "approved" || state === "finalizing") {
+        yield* store.transact(
+          store.persistResolutionSubmissionTx({
+            ownership,
+            submission,
+            digest: memoryOperationDigest(submission.operation),
+          }),
+        );
+      }
+      if (submission.operation.kind !== "resolve") throw new Error("fixture");
+      const current = yield* sql<{
+        ticket_json: string;
+      }>`SELECT ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      const saved = JSON.parse(current[0]!.ticket_json);
+      saved.state = state;
+      if (state === "approved" || state === "finalizing")
+        saved.approval = {
+          operationId: submission.operation.operationId,
+          memoryId: memory,
+          operationDigest: memoryOperationDigest(submission.operation),
+          outcome: "accepted",
+          hubSequence: 1,
+          resolutionApproval: {
+            resolutionId: submission.operation.resolution.resolutionId,
+            appliedAtUtc: now,
+            revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+          },
+        };
+      yield* sql`UPDATE memory_outbox SET ticket_json=${JSON.stringify(saved)} WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      yield* store.recoverClaimCandidates(0);
+      const rows = yield* sql<{
+        status: string;
+        ticket_json: string;
+        sync_version: number;
+      }>`SELECT status,ticket_json,sync_version FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.strictEqual(rows[0]!.status, "pending");
+      assert.deepStrictEqual(JSON.parse(rows[0]!.ticket_json), saved);
+      assert.strictEqual(rows[0]!.sync_version, saved.version);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "orphan recovery cancels outbox and ticket in the same transaction and rolls back together",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ticket } = yield* seedSubmission;
+      yield* sql`DELETE FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      yield* store
+        .transact(store.recoverClaimCandidates(0).pipe(Effect.andThen(Effect.fail("rollback"))))
+        .pipe(Effect.flip);
+      const before = yield* sql<{
+        status: string;
+        ticket_json: string;
+      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.strictEqual(before[0]!.status, "pending");
+      assert.strictEqual(JSON.parse(before[0]!.ticket_json).owner, "fixture");
+      yield* store.recoverClaimCandidates(0);
+      const after = yield* sql<{
+        status: string;
+        ticket_json: string;
+      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.strictEqual(after[0]!.status, "cancelled");
+      assert.strictEqual(JSON.parse(after[0]!.ticket_json).state, "terminal");
+      assert.isNull(JSON.parse(after[0]!.ticket_json).owner);
+    }).pipe(Effect.provide(live)),
 );
