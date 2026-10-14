@@ -5510,7 +5510,7 @@ it.effect("a same-class failure during preflight supersedes the observed recover
         yield* TestClock.adjust(1);
         assert.strictEqual(probes, 2, "one retained scheduler probes the new generation");
         yield* sync.syncOnce;
-        assert.strictEqual(pushes, 3);
+        assert.strictEqual(pushes, 4, "each of the two held operations gets its own ACK");
         for (const n of [98200, 98201]) {
           assert.isNull((yield* store.readWorkHold(`sync:${n}`))?.holdClass);
           assert.strictEqual((yield* store.readWork(`sync:${n}`))?.status, "completed");
