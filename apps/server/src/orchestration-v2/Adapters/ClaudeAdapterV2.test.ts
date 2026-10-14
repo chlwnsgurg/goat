@@ -3610,15 +3610,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               makeResultFrame({ uuid: "successful-steer-result", result: "done" }),
             );
           }
-          assert.equal(yield* Queue.size(harness.terminalReceipts), 1);
-          const terminal = yield* Queue.take(harness.terminalReceipts);
-          assert.equal(terminal.status, failure === "prior-success" ? "completed" : "interrupted");
-          // Terminal cleared the active turn; the next ordinary prompt is admitted.
+          // The SDK processing acknowledgement precedes event-stream delivery.
+          // A new ordinary admission proves the active turn was cleared, and
+          // fails immediately on the old poisoned-steer path.
           yield* harness.runtime.startTurn({
             ...base,
             attemptId: RunAttemptId.make("after-rejected-steer"),
           });
           assert.equal(harness.offeredMessages.length, failure === "prior-success" ? 3 : 2);
+          const terminal = yield* Queue.take(harness.terminalReceipts);
+          assert.equal(terminal.status, failure === "prior-success" ? "completed" : "interrupted");
         }),
       ).pipe(Effect.provide(layerAdapterTest)),
   );
