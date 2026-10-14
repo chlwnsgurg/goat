@@ -419,18 +419,9 @@ export const makeAdministrator = Effect.gen(function* () {
         const outgoing =
           request.action === "provisionMember" || request.action === "rotateMemberCredential";
         if (!record || record.stage === "prepared") {
-          // An activated request must finish its settings CAS before another admin
-          // can change membership. A full bounded page is conservatively blocked.
-          const pending = yield* tx(
-            permit,
-            store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS),
-          );
-          if (
-            pending.length === M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS ||
-            pending.some(
-              (other) => other.requestId !== request.requestId && other.stage === "activated",
-            )
-          )
+          // Ready/prepared backlog must not hide an unfinished settings CAS.
+          const activated = yield* tx(permit, store.readActivatedHubAdminTx());
+          if (activated && activated.requestId !== request.requestId)
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           const view = yield* settings.read;
           if (view.version !== request.expectedVersion)
@@ -525,19 +516,23 @@ export const makeAdministrator = Effect.gen(function* () {
             if (
               !original ||
               (original.stage !== "ready" && original.stage !== "acknowledged") ||
-              (original.action.action !== "provisionMember" &&
-                original.action.action !== "rotateMemberCredential")
+              ("action" in original
+                ? original.action.action !== "provisionMember" &&
+                  original.action.action !== "rotateMemberCredential"
+                : original.memberVersion === null)
             )
               return yield* new Store.MemoryStoreConflict({ code: "not_found" });
-            yield* permit;
-            if (original.secretName) yield* secrets.remove(original.secretName);
-            yield* tx(
-              permit,
-              store.writeHubAdminTx({
-                record: { ...original, stage: "acknowledged" },
-                expectedStage: "ready",
-              }),
-            );
+            if (original.stage === "ready" && "action" in original) {
+              yield* permit;
+              if (original.secretName) yield* secrets.remove(original.secretName);
+              yield* tx(
+                permit,
+                store.writeHubAdminTx({
+                  record: { ...original, stage: "acknowledged" },
+                  expectedStage: "ready",
+                }),
+              );
+            }
           }
           // The settings helper owns version/CAS, request-id replay and initial hub
           // bootstrap. It receives only a persisted action and private secret name.

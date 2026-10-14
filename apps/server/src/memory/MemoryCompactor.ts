@@ -14,7 +14,7 @@ import {
   type MemoryHubServiceError,
 } from "./MemoryHubService.ts";
 
-/** L1 supplies staging without issuing, retiring or replacing member bootstrap handles. */
+/** Staging leaves member bootstrap handles and credentials unchanged. */
 export class MemoryHubCheckpointProducer extends Context.Service<
   MemoryHubCheckpointProducer,
   {
@@ -177,4 +177,11 @@ export const make = Effect.gen(function* () {
   return MemoryCompactor.of({ compact, compactIfNeeded, start });
 });
 
-export const layer = Layer.effect(MemoryCompactor, make);
+const producerLayer = Layer.effect(
+  MemoryHubCheckpointProducer,
+  Effect.map(Store.MemoryStore, (store) =>
+    MemoryHubCheckpointProducer.of({ prepareTx: store.prepareHubProducerCheckpointTx }),
+  ),
+);
+
+export const layer = Layer.effect(MemoryCompactor, make).pipe(Layer.provideMerge(producerLayer));

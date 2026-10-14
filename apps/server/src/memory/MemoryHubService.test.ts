@@ -56,24 +56,8 @@ const core = Service.layer.pipe(
 const configuration = Layer.succeed(Hub.MemoryHubConfiguration, {
   read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: hubEnv }),
 });
-// Legacy Store adapter exercises unrelated L2 behavior until L1 provides producer staging.
-// It does not prove same-principal bootstrap token preservation.
-const legacyProducerLayer = Layer.effect(
-  Compactor.MemoryHubCheckpointProducer,
-  Effect.gen(function* () {
-    const store = yield* Store.MemoryStore;
-    return Compactor.MemoryHubCheckpointProducer.of({
-      prepareTx: (input) =>
-        store.prepareHubCheckpointTx({
-          ...input,
-          snapshotToken: `producer-${input.checkpointId}`,
-        }),
-    });
-  }),
-).pipe(Layer.provide(storeLayer));
 const live = Layer.merge(Hub.layer, Compactor.layer).pipe(
   Layer.provideMerge(core),
-  Layer.provideMerge(legacyProducerLayer),
   Layer.provideMerge(Hub.activityLayer),
   Layer.provide(configuration),
 );
@@ -698,6 +682,7 @@ describe("MemoryHubAdministrator", () => {
       assert.strictEqual((yield* Ref.get(view)).version, 1);
       // A distinct request cannot replay another request's expectedVersion + 1.
       const original = (yield* store.transact(store.readHubAdminTx(provision.requestId)))!;
+      if (!("action" in original)) throw new Error("expected uncompact admin fixture");
       assert.strictEqual(
         (yield* backend
           .apply({ ...original, requestId: blocked.requestId }, Effect.void)
@@ -706,6 +691,101 @@ describe("MemoryHubAdministrator", () => {
       );
       yield* restarted.update({ ...blocked, expectedVersion: 1 }, Effect.void);
       assert.strictEqual((yield* Ref.get(view)).version, 2);
+    }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect("ready backlog permits new work but cannot hide an activated settings recovery", () =>
+    Effect.gen(function* () {
+      const { admin, backend, failApply, view } = yield* adminFixture;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* store.transact(
+        Effect.gen(function* () {
+          for (let n = 0; n <= M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS; n++) {
+            const requestId = M.MemoryOperationId.make(id(2000 + n));
+            const record: Store.AdminRecord = {
+              requestId,
+              requestDigest: "d".repeat(64),
+              expectedVersion: 0,
+              action: {
+                requestId,
+                expectedVersion: 0,
+                action: "configure",
+                settings: { mode: "disabled" },
+              },
+              stage: "prepared",
+              secretName: null,
+              memberVersion: null,
+              result: null,
+            };
+            yield* store.writeHubAdminTx({ record, expectedStage: null });
+            yield* store.writeHubAdminTx({
+              record: { ...record, stage: "activated" },
+              expectedStage: "prepared",
+            });
+            const ready: Store.AdminRecord = {
+              ...record,
+              stage: "ready",
+              result: { view: { settings: { mode: "disabled" }, version: 1 } },
+            };
+            yield* store.writeHubAdminTx({ record: ready, expectedStage: "activated" });
+            if (n === 0)
+              yield* store.writeHubAdminTx({
+                record: { ...ready, stage: "acknowledged" },
+                expectedStage: "ready",
+              });
+          }
+        }),
+      );
+      assert.strictEqual(
+        (yield* admin.pending(Effect.void)).length,
+        M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS,
+      );
+      assert.strictEqual((yield* admin.update(provision, Effect.void)).view.version, 1);
+      const recovery: M.MemoryHubSettingsUpdateInput = {
+        ...provision,
+        requestId: M.MemoryOperationId.make(id(4000)),
+        expectedVersion: 1,
+        environmentId: M.EnvironmentId.make("backlog-recovery"),
+      };
+      yield* Ref.set(failApply, true);
+      yield* admin.update(recovery, Effect.void).pipe(Effect.flip);
+      assert.isFalse(
+        (yield* admin.pending(Effect.void)).some((r) => r.requestId === recovery.requestId),
+      );
+      assert.strictEqual(
+        (yield* store.transact(store.readActivatedHubAdminTx()))!.requestId,
+        recovery.requestId,
+      );
+      const later: M.MemoryHubSettingsUpdateInput = {
+        ...recovery,
+        requestId: M.MemoryOperationId.make(id(4001)),
+        environmentId: M.EnvironmentId.make("after-backlog-recovery"),
+      };
+      const records = yield* sql`SELECT * FROM memory_outbox WHERE kind='admin' ORDER BY id`;
+      const members =
+        yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`;
+      yield* Ref.set(failApply, false);
+      assert.strictEqual(
+        (yield* admin.update(later, Effect.void).pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_outbox WHERE kind='admin' ORDER BY id`,
+        records,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`,
+        members,
+      );
+      const restarted = yield* Hub.makeAdministrator.pipe(
+        Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+      );
+      assert.strictEqual((yield* restarted.update(recovery, Effect.void)).view.version, 2);
+      assert.strictEqual(
+        (yield* restarted.update({ ...later, expectedVersion: 2 }, Effect.void)).view.version,
+        3,
+      );
+      assert.strictEqual((yield* Ref.get(view)).version, 3);
     }).pipe(Effect.provide(adminDependencies)),
   );
   it.effect("request-id CAS replay recovers a settings commit before ready persistence", () =>
@@ -768,6 +848,57 @@ describe("MemoryHubAdministrator", () => {
         1,
       );
     }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect(
+    "acknowledged replay survives terminal compaction without restoring action or secret",
+    () =>
+      Effect.gen(function* () {
+        const { admin, backend, view } = yield* adminFixture;
+        yield* admin.update(provision, Effect.void);
+        const acknowledge: M.MemoryHubSettingsUpdateInput = {
+          requestId: M.MemoryOperationId.make(id(420)),
+          expectedVersion: 1,
+          action: "acknowledgeCredential",
+          credentialRequestId: provision.requestId,
+        };
+        yield* admin.update(acknowledge, Effect.void);
+        yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);
+        const store = yield* Store.MemoryStore;
+        yield* store.transact(
+          store.purgeHubTransientTx({
+            memorySpaceId: space,
+            now: yield* Clock.currentTimeMillis,
+            limit: M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS,
+          }),
+        );
+        const replay = (yield* store.transact(store.readHubAdminTx(provision.requestId)))!;
+        assert.strictEqual(replay.stage, "acknowledged");
+        assert.isFalse("action" in replay);
+        const restarted = yield* Hub.makeAdministrator.pipe(
+          Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+        );
+        assert.isNull((yield* restarted.update(provision, Effect.void)).credential);
+        assert.isNull(
+          (yield* restarted.update(
+            { ...acknowledge, requestId: M.MemoryOperationId.make(id(421)), expectedVersion: 2 },
+            Effect.void,
+          )).credential,
+        );
+        assert.strictEqual((yield* Ref.get(view)).version, 3);
+        assert.isNull((yield* restarted.update(acknowledge, Effect.void)).credential);
+        const sql = yield* SqlClient.SqlClient;
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_outbox WHERE id=${`admin:${provision.requestId}`}`)
+            .length,
+          0,
+        );
+        assert.deepStrictEqual(
+          yield* store.transact(store.readHubAdminTx(provision.requestId)),
+          replay,
+        );
+        const secrets = yield* Secrets.ServerSecretStore;
+        assert.isTrue(Option.isNone(yield* secrets.get(replay.secretName!)));
+      }).pipe(Effect.provide(adminDependencies)),
   );
   it.effect("denied owner permission creates neither secret nor member/admin record", () =>
     Effect.gen(function* () {

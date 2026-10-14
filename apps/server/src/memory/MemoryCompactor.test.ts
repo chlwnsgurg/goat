@@ -51,24 +51,8 @@ const core = Service.layer.pipe(
     }),
   ),
 );
-// Legacy Store adapter exercises unrelated L2 behavior until L1 provides producer staging.
-// It does not prove same-principal bootstrap token preservation.
-const legacyProducerLayer = Layer.effect(
-  Compactor.MemoryHubCheckpointProducer,
-  Effect.gen(function* () {
-    const store = yield* Store.MemoryStore;
-    return Compactor.MemoryHubCheckpointProducer.of({
-      prepareTx: (input) =>
-        store.prepareHubCheckpointTx({
-          ...input,
-          snapshotToken: `producer-${input.checkpointId}`,
-        }),
-    });
-  }),
-).pipe(Layer.provide(storeLayer));
 const live = Layer.merge(Hub.layer, Compactor.layer).pipe(
   Layer.provideMerge(core),
-  Layer.provideMerge(legacyProducerLayer),
   Layer.provideMerge(Hub.activityLayer),
   Layer.provide(
     Layer.succeed(Hub.MemoryHubConfiguration, {
@@ -172,17 +156,146 @@ describe("MemoryCompactor", () => {
       assert.strictEqual((yield* compactor.compact(principal())).retentionFloor, 1);
     }).pipe(Effect.provide(live)),
   );
+  it.effect(
+    "same-hub producer preserves joined pages, token guard and floor until immutable TTL",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const compactor = yield* Compactor.MemoryCompactor;
+        const hub = yield* Hub.MemoryHubService;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* push();
+        const initial = yield* compactor.compact(principal());
+        assert.strictEqual(initial.retentionFloor, 1);
+        const joined = yield* hub.join(
+          { protocolVersion: 1, memorySpaceId: space, environmentId: hubEnv },
+          principal(),
+        );
+        const readPages = Effect.gen(function* () {
+          const pages: M.MemoryHubCheckpointPage[] = [];
+          let cursor: string | null = null;
+          do {
+            const result: M.MemoryHubPullResult = yield* hub.pull(
+              {
+                ...pull(0),
+                snapshotToken: joined.snapshotToken,
+                ...(cursor === null ? {} : { cursor }),
+              },
+              principal(),
+            );
+            const page = result.checkpoint!;
+            pages.push(page);
+            cursor = page.nextCursor;
+          } while (cursor !== null);
+          return pages;
+        });
+        const beforePages = yield* readPages;
+        assert.strictEqual(beforePages[0]!.checkpointSequence, 1);
+        assert.strictEqual(beforePages[0]!.items[0]!.memoryId, memoryId);
+        const guards = yield* sql<{
+          record_json: string;
+        }>`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`;
+        assert.strictEqual(guards.length, 1);
+        const guard = JSON.parse(guards[0]!.record_json);
+        assert.strictEqual(guard.retired, false);
+        assert.strictEqual(guard.handle.firstIssuedAt, 0);
+        assert.strictEqual(guard.handle.expiresAt, M.MEMORY_CHECKPOINT_TOKEN_TTL_MS);
+        assert.strictEqual(guard.handle.credentialVersion, 1);
+        const handles =
+          yield* sql`SELECT handles_json FROM memory_hub_retention WHERE space=${space}`;
+        const members =
+          yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`;
+        const next = operation(11);
+        if (next.kind !== "upsert") throw new Error("expected upsert fixture");
+        assert.strictEqual(
+          (yield* push({
+            ...next,
+            expectedHeads: [M.MemoryRevisionId.make(id(110))],
+            revision: { ...next.revision, parents: [M.MemoryRevisionId.make(id(110))] },
+          })).receipts[0]!.outcome,
+          "accepted",
+        );
+        for (const advance of [0, M.MEMORY_CHECKPOINT_TOKEN_TTL_MS - 1]) {
+          yield* TestClock.adjust(advance);
+          const published = yield* compactor.compact(principal());
+          assert.strictEqual(published.checkpointSequence, 2);
+          assert.notStrictEqual(published.checkpointId, initial.checkpointId);
+          assert.strictEqual(published.retentionFloor, initial.retentionFloor);
+          assert.deepStrictEqual(yield* readPages, beforePages);
+          assert.deepStrictEqual(
+            yield* sql`SELECT record_json FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`,
+            guards,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT handles_json FROM memory_hub_retention WHERE space=${space}`,
+            handles,
+          );
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`,
+            members,
+          );
+        }
+        yield* TestClock.adjust(1);
+        const expired = yield* hub
+          .pull({ ...pull(0), snapshotToken: joined.snapshotToken }, principal())
+          .pipe(Effect.flip);
+        assert.strictEqual(expired._tag, "MemoryHubError");
+        if (expired._tag === "MemoryHubError") assert.strictEqual(expired.code, "cursor_expired");
+        assert.strictEqual((yield* compactor.compact(principal())).retentionFloor, 2);
+        assert.strictEqual(
+          (yield* store.transact(store.readHubRetentionTx(space))).retentionFloor,
+          2,
+        );
+      }).pipe(Effect.provide(live)),
+  );
   it.effect("a failed staging reservation keeps the old publication and floor intact", () =>
     Effect.gen(function* () {
       yield* seed;
       const compactor = yield* Compactor.MemoryCompactor;
       const initial = yield* compactor.compact(principal());
+      const hub = yield* Hub.MemoryHubService;
+      const joined = yield* hub.join(
+        { protocolVersion: 1, memorySpaceId: space, environmentId: hubEnv },
+        principal(),
+      );
+      const beforePage = yield* hub.pull(
+        { ...pull(0), snapshotToken: joined.snapshotToken },
+        principal(),
+      );
       yield* push();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} WHERE space=${space}`;
+      const beforeRetention = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
+      const beforeSnapshots =
+        yield* sql`SELECT * FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' ORDER BY pending_key`;
+      const beforeGuards =
+        yield* sql`SELECT * FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`;
+      const beforeMembers =
+        yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`;
       assert.strictEqual(
         (yield* compactor.compact(principal()).pipe(Effect.flip))._tag,
         "MemoryCapacityError",
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`,
+        beforeRetention,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot' ORDER BY pending_key`,
+        beforeSnapshots,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`,
+        beforeGuards,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`,
+        beforeMembers,
+      );
+      assert.deepStrictEqual(
+        yield* hub.pull({ ...pull(0), snapshotToken: joined.snapshotToken }, principal()),
+        beforePage,
       );
       const store = yield* Store.MemoryStore;
       const retained = yield* store.transact(store.readHubRetentionTx(space));
