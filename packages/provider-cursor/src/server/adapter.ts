@@ -2246,6 +2246,19 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             // MCP send overrides replace the ambient servers loaded when the agent opens.
             const sdkRun = yield* agent.session.send({
               message,
+              prepareMessage: () =>
+                Effect.gen(function* () {
+                  const mcpServers = cursorMcpServers(yield* mcpSessions.read(turnInput.threadId));
+                  return yield* resolveUserMessage(turnInput, mcpServers);
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new CursorAgentSdk.CursorAgentSdkRunnerError({
+                        method: "run.prepareMessage",
+                        cause,
+                      }),
+                  ),
+                ),
               options: {
                 model: cursorSdkModelSelection(turnInput.modelSelection),
                 mode: turnInput.runtimePolicy.interactionMode === "plan" ? "plan" : "agent",
