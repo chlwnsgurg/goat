@@ -19,7 +19,6 @@ export type HubFailure =
 
 // Interface-only seam while L2 is built in parallel. Its runtime key and signatures
 // must match L2's implementation; application composition provides that single service.
-// @effect-diagnostics-next-line deterministicKeys:off -- This interface seam intentionally uses the parallel L2 service runtime key.
 export class MemoryHubService extends Context.Service<
   MemoryHubService,
   {

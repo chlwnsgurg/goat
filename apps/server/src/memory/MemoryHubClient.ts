@@ -12,6 +12,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Secrets from "../auth/ServerSecretStore.ts";
+import { memoryOperationDigest } from "./MemoryDecider.ts";
 import * as Settings from "../serverSettings.ts";
 
 export type HubConnection = Extract<M.MemoryHubSettings, { mode: "member" }> & {
@@ -145,8 +146,13 @@ const make = Effect.gen(function* () {
     if (response.status === 426)
       return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
     if (response.status === 413) return yield* new M.MemoryHubError({ code: "payload_too_large" });
-    if (response.status === 429 || response.status >= 500)
+    if (response.status === 429 || response.status >= 500) {
+      const parsed = yield* Effect.result(
+        readJson(response).pipe(Effect.flatMap(decodeDomainError)),
+      );
+      if (parsed._tag === "Success") return yield* parsed.success;
       return yield* new M.MemoryHubError({ code: "unavailable" });
+    }
     const raw = yield* readJson(response);
     if (response.status < 200 || response.status >= 300) {
       const error = yield* decodeDomainError(raw).pipe(
@@ -205,6 +211,7 @@ const make = Effect.gen(function* () {
     path: string,
     inputSchema: Schema.Codec<I, IE>,
     outputSchema: Schema.Codec<O, OE>,
+    validate: (connection: HubConnection, input: I, output: O) => boolean = () => true,
   ) => {
     const encode = Schema.encodeEffect(Schema.fromJsonString(inputSchema));
     const decode = Schema.decodeUnknownEffect(outputSchema);
@@ -235,6 +242,8 @@ const make = Effect.gen(function* () {
             Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
           );
           yield* ensureEpoch(connection);
+          if (!validate(connection, input, output))
+            return yield* new M.MemoryHubError({ code: "invalid_output" });
           return output;
         }),
       );
@@ -242,15 +251,46 @@ const make = Effect.gen(function* () {
 
   return MemoryHubClient.of({
     preflight: (connection) => bounded(preflightOnce(connection)),
-    join: call(M.MEMORY_HUB_PATHS.join, M.MemoryHubJoinInput, M.MemoryHubJoinResult),
-    push: call(M.MEMORY_HUB_PATHS.push, M.MemoryHubPushInput, M.MemoryHubPushResult),
-    pull: call(M.MEMORY_HUB_PATHS.pull, M.MemoryHubPullInput, M.MemoryHubPullResult),
+    join: call(
+      M.MEMORY_HUB_PATHS.join,
+      M.MemoryHubJoinInput,
+      M.MemoryHubJoinResult,
+      (c, _i, o) =>
+        o.hubEnvironmentId === c.hubEnvironmentId &&
+        (c.memorySpaceId === null || o.memorySpaceId === c.memorySpaceId),
+    ),
+    push: call(
+      M.MEMORY_HUB_PATHS.push,
+      M.MemoryHubPushInput,
+      M.MemoryHubPushResult,
+      (_c, i, o) =>
+        o.receipts.length === i.operations.length &&
+        o.receipts.every((r, index) => {
+          const operation = i.operations[index];
+          return (
+            operation !== undefined &&
+            r.operationId === operation.operationId &&
+            r.operationDigest === memoryOperationDigest(operation)
+          );
+        }),
+    ),
+    pull: call(
+      M.MEMORY_HUB_PATHS.pull,
+      M.MemoryHubPullInput,
+      M.MemoryHubPullResult,
+      (_c, i, o) =>
+        (i.highWatermark === undefined || i.highWatermark === o.highWatermark) &&
+        (o.checkpoint === undefined || o.checkpoint.memorySpaceId === i.memorySpaceId),
+    ),
     claim: call(M.MEMORY_HUB_PATHS.claim, M.MemoryHubClaimInput, M.MemoryResolutionLease),
     renew: call(M.MEMORY_HUB_PATHS.renew, M.MemoryHubRenewInput, M.MemoryResolutionLease),
     applyResolution: call(
       M.MEMORY_HUB_PATHS.applyResolution,
       M.MemoryHubApplyResolutionInput,
       M.MemoryHubReceipt,
+      (_c, i, o) =>
+        o.operationId === i.operation.operationId &&
+        o.operationDigest === memoryOperationDigest(i.operation),
     ),
     release: call(M.MEMORY_HUB_PATHS.release, M.MemoryHubReleaseInput, M.MemoryHubReleaseResult),
     sourceReadRequest: call(
