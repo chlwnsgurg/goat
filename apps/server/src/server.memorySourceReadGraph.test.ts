@@ -65,6 +65,7 @@ const environment = (home: string) =>
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
     const memo = yield* Layer.makeMemoMap;
     const settings = Settings.layer.pipe(
+      Layer.provide(Environment.layerIdentity),
       Layer.provideMerge(Secrets.layer),
       Layer.provideMerge(Sqlite.layerConfig),
       Layer.provideMerge(Config.layerTest(home, home)),
@@ -121,6 +122,7 @@ const environment = (home: string) =>
       }),
     ).pipe(Layer.provideMerge(Runtime.layer.pipe(Layer.provideMerge(PolicyBinding.layer))));
     let owningRun = true;
+    let memoryEnabled = true;
     const context = yield* Layer.buildWithMemoMap(
       McpHttp.layerMemoryToolkit.pipe(
         Layer.provideMerge(
@@ -134,7 +136,15 @@ const environment = (home: string) =>
         Layer.provide(OrchestrationRuntime.layerEventSink),
         Layer.provide(RuntimeIdentity.layer),
         Layer.provideMerge(observed),
-        Layer.provide(Layer.mock(Generation.TextGeneration)({})),
+        Layer.provide(
+          Layer.succeed(Generation.TextGeneration, {
+            generateCommitMessage: () => Effect.die("unexpected fixture provider call"),
+            generatePrContent: () => Effect.die("unexpected fixture provider call"),
+            generateBranchName: () => Effect.die("unexpected fixture provider call"),
+            generateThreadTitle: () => Effect.die("unexpected fixture provider call"),
+            generateReviewGuide: () => Effect.die("unexpected fixture provider call"),
+          }),
+        ),
         Layer.provide(
           Layer.mock(Registry.ProviderInstanceRegistry)({
             getInstance: () => Effect.succeed(undefined),
@@ -157,6 +167,16 @@ const environment = (home: string) =>
       scope,
     );
     const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideContext(effect, context);
+    yield* run(
+      Settings.ServerSettingsService.use((s) =>
+        s.updateSettings({
+          defaultModelSelection: {
+            instanceId: M.ProviderInstanceId.make("fixture"),
+            model: "fixture",
+          },
+        }),
+      ),
+    );
     const identity = yield* run(
       Environment.ServerEnvironmentIdentity.use((s) => s.getEnvironmentId),
     );
@@ -251,7 +271,10 @@ const environment = (home: string) =>
               grantedScopes: scopes,
               capabilities: new Set(["memory"]),
               memoryPolicy: policy,
-              readCurrentPolicy: () => Effect.succeed(policy),
+              readCurrentPolicy: () =>
+                Effect.sync(() =>
+                  memoryEnabled ? policy : { grant: "none" as const, policyEpoch: 2 },
+                ),
               isLiveCaller: Effect.sync(() => owningRun),
             });
             const invocation = yield* registry.resolve(
@@ -261,6 +284,9 @@ const environment = (home: string) =>
             return invocation;
           }),
         ),
+      setMemoryEnabled: (value: boolean) => {
+        memoryEnabled = value;
+      },
       setOwningRun: (value: boolean) => {
         owningRun = value;
       },
@@ -530,6 +556,16 @@ it.effect(
       c.a.setOwningRun(false);
       yield* c.a.releaseResult();
       assert.isTrue((yield* Fiber.join(inFlight)).result.isError === true);
+      c.a.setOwningRun(true);
+      yield* c.a.begin;
+      const grantRevoked = yield* c.a
+        .run(McpFixture.call("memory_read_source", c.input, invocation))
+        .pipe(Effect.forkScoped);
+      yield* c.a.request();
+      yield* c.owner.sync.syncOnce;
+      c.a.setMemoryEnabled(false);
+      yield* c.a.releaseResult();
+      assert.isTrue((yield* Fiber.join(grantRevoked)).result.isError === true);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
@@ -558,6 +594,10 @@ it.effect(
       assert.deepStrictEqual(barrier.policy.allowedRequesterEnvironmentIds, []);
       yield* Deferred.succeed(gate, undefined);
       yield* Fiber.join(ownerCycle);
+      // Ref removal blocks owner bytes immediately; terminal denial is committed
+      // by the hub revoke Tx before releasing the requester result gate.
+      assert.strictEqual((yield* c.owner.run(c.owner.policy.read)).policy.removals.length, 1);
+      yield* c.owner.sync.syncOnce;
       yield* c.a.releaseResult();
       assert.deepStrictEqual(yield* Fiber.join(requester), {
         kind: "denied",
@@ -636,4 +676,45 @@ it.effect(
       yield* assertPersisted(restarted, settled.policy);
       yield* restarted.sync.shutdown;
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  [
+    new M.ServerSettingsError({
+      settingsPath: "<fixture>",
+      operation: "write-file",
+      cause: new Error("synthetic persistence failure"),
+    }),
+    "storage_failed",
+  ],
+  [new M.MemoryRpcError({ code: "fenced" }), "fenced"],
+] as const)("policy binding exposes only safe acknowledgement failure %#", ([failure, code]) =>
+  Effect.gen(function* () {
+    const port = yield* Owner.MemoryOwnerSourceReadPolicyPort;
+    const error = yield* port
+      .recordRevokeAck({
+        memorySpaceId: M.MemorySpaceId.make(id(1)),
+        ownerEnvironmentId: M.EnvironmentId.make("owner"),
+        requesterEnvironmentId: M.EnvironmentId.make("requester"),
+        removalEpoch: 1,
+        revokedThroughEpoch: 1,
+      })
+      .pipe(Effect.flip);
+    assert.strictEqual(error._tag, "MemoryAccessError");
+    assert.strictEqual(error.code, code);
+    assert.isFalse("cause" in error);
+    assert.isFalse("settingsPath" in error);
+  }).pipe(
+    Effect.provide(
+      PolicyBinding.layer.pipe(
+        Layer.provide(
+          Layer.succeed(Settings.MemoryOwnerSourceReadCommittedPolicy, {
+            read: Effect.succeed({ version: 0, policy: M.DEFAULT_MEMORY_OWNER_SOURCE_READ_POLICY }),
+            changes: Effect.succeed(Stream.empty),
+            recordRevokeAck: () => Effect.fail(failure),
+          }),
+        ),
+      ),
+    ),
+  ),
 );
