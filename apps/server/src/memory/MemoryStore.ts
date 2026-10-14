@@ -4250,22 +4250,39 @@ const make = Effect.gen(function* () {
   ) {
     yield* transact(
       Effect.gen(function* () {
-        // Rowid cursors bound discovery and orphan cleanup independently; one active
-        // resolver must never prevent discovering another memory's conflict.
-        const sweep = Effect.fnUntraced(function* (dimension: string) {
-          const rows = yield* stored(
-            "claim-sweep-cursor",
-            sql<{
-              value: number;
-            }>`SELECT value FROM memory_quota_counters WHERE space='_claim_recovery' AND dimension=${dimension} AND scope_key=''`,
-          );
-          return rows[0]?.value ?? 0;
-        });
+        // Each sweep freezes its tail for a cycle, so continuously appended rows
+        // cannot postpone revisiting an older frontier or orphan forever.
         const advance = (dimension: string, value: number) =>
           stored(
             "claim-sweep-advance",
             sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_claim_recovery',${dimension},'',${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`,
           );
+        const sweep = Effect.fnUntraced(function* (
+          dimension: string,
+          table: "memory_items" | "memory_outbox",
+        ) {
+          const rows = yield* stored(
+            "claim-sweep-cursor",
+            sql<{
+              dimension: string;
+              value: number;
+            }>`SELECT dimension,value FROM memory_quota_counters WHERE space='_claim_recovery' AND dimension IN (${dimension},${`${dimension}_upper`}) AND scope_key=''`,
+          );
+          let after = rows.find((r) => r.dimension === dimension)?.value ?? 0;
+          let upper = rows.find((r) => r.dimension === `${dimension}_upper`)?.value ?? 0;
+          if (after >= upper) {
+            after = 0;
+            const tail = yield* stored(
+              "claim-sweep-upper",
+              sql.unsafe<{ rowid: number }>(
+                `SELECT rowid FROM ${table} ORDER BY rowid DESC LIMIT 1`,
+              ),
+            );
+            upper = tail[0]?.rowid ?? 0;
+            yield* advance(`${dimension}_upper`, upper);
+          }
+          return { after, upper };
+        });
         const cancel = Effect.fnUntraced(function* (id: string) {
           yield* clearTerminalSubmission(id);
           yield* stored(
@@ -4273,27 +4290,17 @@ const make = Effect.gen(function* () {
             sql`UPDATE memory_outbox SET status='cancelled',claimed_by=NULL,claimed_until=NULL,terminal_at=${now},sync_version=sync_version+CASE WHEN kind='claim' THEN 1 ELSE 0 END WHERE id=${id}`,
           );
         });
-        const after = yield* sweep("frontier");
-        let rows = yield* stored(
+        const frontier = yield* sweep("frontier", "memory_items");
+        const rows = yield* stored(
           "claim-frontiers",
           sql<{
             rowid: number;
             space: string;
             memory_id: string;
             item_json: string;
-          }>`SELECT rowid,space,memory_id,item_json FROM memory_items WHERE rowid>${after} ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
+          }>`SELECT rowid,space,memory_id,item_json FROM memory_items WHERE rowid>${frontier.after} AND rowid<=${frontier.upper} ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
         );
-        if (!rows.length && after > 0)
-          rows = yield* stored(
-            "claim-frontiers-wrap",
-            sql<{
-              rowid: number;
-              space: string;
-              memory_id: string;
-              item_json: string;
-            }>`SELECT rowid,space,memory_id,item_json FROM memory_items ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
-          );
-        yield* advance("frontier", rows.at(-1)?.rowid ?? 0);
+        yield* advance("frontier", rows.at(-1)?.rowid ?? frontier.upper);
         for (const row of rows) {
           const item = yield* projectionCodec.decode(row.item_json, strict);
           const unusable = item.localAvailability.reasons.some((r) =>
@@ -4311,7 +4318,7 @@ const make = Effect.gen(function* () {
             !(yield* readPending(item.memorySpaceId, item.memoryId));
           const work = yield* stored(
             "claim-frontier-work",
-            sql<WorkRow>`SELECT * FROM memory_outbox WHERE space=${row.space} AND memory_id=${row.memory_id} AND kind IN ('claim','resolve') AND status NOT IN ('completed','cancelled','failed')`,
+            sql<WorkRow>`SELECT * FROM memory_outbox WHERE space=${row.space} AND memory_id=${row.memory_id} AND kind IN ('claim','resolve') AND status NOT IN ('completed','cancelled','failed') ORDER BY id LIMIT ${M.MEMORY_WORK_MAX_PENDING_ITEMS}`,
           );
           for (const candidate of yield* workRows(work)) {
             const heads =
@@ -4366,16 +4373,16 @@ const make = Effect.gen(function* () {
             claimedUntil: null,
           });
         }
-        const orphanAfter = yield* sweep("orphan");
+        const orphan = yield* sweep("orphan", "memory_outbox");
         const work = yield* stored(
           "claim-gone",
           sql<{
             rowid: number;
             id: string;
             gone: number;
-          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphanAfter} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
+          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphan.after} AND o.rowid<=${orphan.upper} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
         );
-        yield* advance("orphan", work.at(-1)?.rowid ?? 0);
+        yield* advance("orphan", work.at(-1)?.rowid ?? orphan.upper);
         for (const row of work)
           if (row.gone) {
             const candidate = yield* readWork(row.id);

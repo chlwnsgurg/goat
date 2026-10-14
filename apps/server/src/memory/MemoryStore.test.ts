@@ -5770,3 +5770,40 @@ it.effect("checkpoint completion CAS failure rolls back final page and canonical
     assert.isDefined((yield* store.loadAggregate(space, memory)).item);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("recovery closes a frozen cycle despite continuous frontier and orphan tails", () =>
+  Effect.gen(function* () {
+    const { store } = yield* seedResolutionConflict;
+    const sql = yield* SqlClient.SqlClient;
+    const item = (yield* store.loadAggregate(space, memory)).item;
+    if (item?.status !== "quarantined") throw new Error("fixture");
+    const appendItems = Effect.fnUntraced(function* (start: number, count: number) {
+      for (let n = start; n < start + count; n++) {
+        const other = M.MemoryId.make(id(2000 + n));
+        const copy = { ...item, memoryId: other, conflict: { ...item.conflict, memoryId: other } };
+        yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) SELECT space,${other},scope_json,scope_key,heads_json,status,projection_watermark,${JSON.stringify(copy)},availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      }
+    });
+    yield* appendItems(0, 205);
+    yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) SELECT 'early-orphan',space,${id(1900)},kind,'pending',metadata_json,0 FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim' LIMIT 1`;
+    for (let n = 0; n < 205; n++) yield* store.enqueueWork(backgroundWork(`tail:${n}`));
+    yield* store.recoverClaimCandidates(0);
+    yield* sql`DELETE FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim'`;
+    yield* sql`UPDATE memory_outbox SET status='pending',terminal_at=NULL WHERE id='early-orphan'`;
+    for (let round = 1; round <= 8; round++) {
+      yield* appendItems(205 + (round - 1) * 100, 100);
+      for (let n = 0; n < 100; n++) yield* store.enqueueWork(backgroundWork(`tail:${round}:${n}`));
+      yield* store.recoverClaimCandidates(round);
+    }
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_outbox WHERE space=${space} AND memory_id=${memory} AND kind='claim' AND status='pending'`)
+        .length,
+      1,
+    );
+    assert.strictEqual(
+      (yield* sql<{ status: string }>`SELECT status FROM memory_outbox WHERE id='early-orphan'`)[0]!
+        .status,
+      "cancelled",
+    );
+  }).pipe(Effect.provide(live)),
+);
