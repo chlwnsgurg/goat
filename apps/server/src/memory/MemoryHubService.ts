@@ -437,9 +437,6 @@ export const makeAdministrator = Effect.gen(function* () {
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
         }
         if (!record) {
-          const view = yield* settings.read;
-          if (view.version !== request.expectedVersion)
-            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           let action: Store.PersistedAdminAction;
           if (request.action === "installCredential") {
             const { credential: _credential, ...safe } = request;

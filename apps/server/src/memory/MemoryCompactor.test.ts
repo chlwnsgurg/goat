@@ -5,6 +5,8 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
+import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
 import * as Ref from "effect/Ref";
 import * as Layer from "effect/Layer";
