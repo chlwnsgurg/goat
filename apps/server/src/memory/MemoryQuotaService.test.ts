@@ -807,3 +807,36 @@ describe("MemoryQuotaService", () => {
     }).pipe(Effect.provide(services)),
   );
 });
+
+describe("MemoryQuotaService hub storage status", () => {
+  it.effect("exposes hub logical usage and reservation without inventing a physical sample", () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${env},${"a".repeat(64)},1,'active',0)`;
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: 100,
+          publishedPinnedDeltaBytes: 20,
+        }),
+      );
+      const status = yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: env });
+      assert.strictEqual(
+        status.tables.filter((table) => table.table.startsWith("memory_hub_")).length,
+        5,
+      );
+      const members = status.tables.find((table) => table.table === "memory_hub_members")!;
+      assert.strictEqual(members.rowCount, 1);
+      assert.strictEqual(members.logicalBytes > 64, true);
+      assert.strictEqual(members.allocationStatus, "unavailable");
+      assert.strictEqual(members.allocatedBytes, null);
+      assert.strictEqual(status.dbFileBytes, null);
+      assert.strictEqual(status.measuredAtUtc, null);
+      const staging = status.quotas.find((quota) => quota.dimension === "checkpoint_staging")!;
+      assert.strictEqual(staging.current, 120);
+      assert.strictEqual(staging.reserved, 100);
+    }).pipe(Effect.provide(services)),
+  );
+});

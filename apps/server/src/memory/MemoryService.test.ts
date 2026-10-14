@@ -4,7 +4,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Clock from "effect/Clock";
-import { memoryOperationDigest } from "./MemoryDecider.ts";
+import { scanMemoryValue } from "./MemorySecretScanner.ts";
+import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
@@ -564,3 +565,101 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+describe("MemoryService source outcome fencing", () => {
+  it.effect("rechecks evidence, permission and generation after source output arrives", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sourceThread = {
+        environmentId: M.EnvironmentId.make("synthetic-owner"),
+        threadId: M.ThreadId.make("synthetic-thread"),
+      };
+      const watermark = {
+        fromEventId: M.EventId.make("synthetic-from"),
+        toEventId: M.EventId.make("synthetic-to"),
+        throughSequence: 8,
+      };
+      const messageId = M.MessageId.make("synthetic-message");
+      const op: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "upsert",
+        memorySpaceId: space,
+        memoryId,
+        operationId: M.MemoryOperationId.make(id(500)),
+        originEnvironmentId: environmentId,
+        expectedHeads: [],
+        revision: {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(500)),
+          revisionId: M.MemoryRevisionId.make(id(501)),
+          payloadRef: M.MemoryRevisionId.make(id(501)),
+          parents: [],
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          createdAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+          provenance: { environmentId, sourceThread, sourceWatermark: watermark },
+        },
+        payload: {
+          text: "synthetic linked summary",
+          evidence: [{ origin: "thread", sourceThread, watermark, messageIds: [messageId] }],
+          derivedFromMemoryRevisions: [],
+        },
+      };
+      const aggregate = yield* store.loadAggregate(space, memoryId);
+      yield* store.apply(
+        decideMemoryOperation(aggregate, op, Store.localIntent, scanMemoryValue(op)),
+      );
+      const read = {
+        memorySpaceId: space,
+        memoryId,
+        sourceThread,
+        messageIds: [messageId],
+        limit: 10,
+      };
+      const request = yield* service.prepareSourceRead(read, Effect.void);
+      const outcome: M.MemorySourceReadOutcome = {
+        kind: "available",
+        page: {
+          sourceThread,
+          watermark,
+          messages: [{ messageId, text: "synthetic original" }],
+          nextCursor: null,
+        },
+      };
+      assert.deepStrictEqual(
+        yield* service.validateSourceOutcome({ request, outcome }, Effect.void),
+        outcome,
+      );
+      assert.strictEqual(
+        (yield* service.validateSourceOutcome({ request, outcome }, denied).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
+      const wrong = {
+        ...outcome,
+        page: { ...outcome.page, sourceThread: { ...sourceThread, environmentId } },
+      };
+      const mismatch = yield* service
+        .validateSourceOutcome({ request, outcome: wrong }, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(mismatch._tag, "MemoryStoreConflict");
+      if (mismatch._tag === "MemoryStoreConflict")
+        assert.strictEqual(mismatch.code, "source_invalidated");
+      yield* service.forget(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(502)),
+          expectedHeads: [M.MemoryRevisionId.make(id(501))],
+        },
+        Effect.void,
+      );
+      const forgotten = yield* service
+        .validateSourceOutcome({ request, outcome }, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(forgotten._tag, "MemoryStoreConflict");
+      if (forgotten._tag === "MemoryStoreConflict") assert.strictEqual(forgotten.code, "forgotten");
+    }).pipe(Effect.provide(live)),
+  );
+});

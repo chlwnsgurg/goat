@@ -116,6 +116,8 @@ const make = Effect.gen(function* () {
         const op = input.operation;
         if (input.admission.kind === "hubAdmission") {
           if (yield* store.readHubReceiptTx(op.memorySpaceId, op.operationId)) return yield* commit;
+          // Local canonical data is already accounted for; append still performs hub ledger admission.
+          if (yield* store.receipt(op.memorySpaceId, op.operationId)) return yield* commit;
         } else if (yield* store.receipt(op.memorySpaceId, op.operationId)) return yield* commit;
         const current = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
         const scope =
@@ -645,6 +647,7 @@ const make = Effect.gen(function* () {
           const fts = yield* store.ftsState(input.environmentId);
           const retention = yield* store.readHubRetentionTx(input.memorySpaceId);
           const counters = yield* store.counters(input.memorySpaceId);
+          const hub = yield* store.readHubUsageTx(input.memorySpaceId);
           const limits: Partial<Record<M.MemoryCapacityDimension, number>> = {
             space_live_items: M.MEMORY_SPACE_MAX_LIVE_ITEMS,
             live_payload_bytes: M.MEMORY_LIVE_MAX_PAYLOAD_BYTES,
@@ -662,15 +665,25 @@ const make = Effect.gen(function* () {
           for (const dimension of M.MemoryCapacityDimension.literals) {
             const limit = limits[dimension];
             if (!limit) continue;
-            const current = counters
+            const counter = counters
               .filter((c) => c.dimension === dimension)
               .reduce((sum, c) => sum + c.value, 0);
+            const current =
+              dimension === "checkpoint_staging"
+                ? hub.stagingBytes
+                : dimension === "log_tail_rows"
+                  ? counter + hub.tailRows
+                  : dimension === "log_tail_bytes"
+                    ? counter + hub.tailBytes
+                    : dimension === "permanent_metadata"
+                      ? counter + hub.permanentMetadataBytes
+                      : counter;
             quotas.push({
               dimension,
               current,
               limit,
               reclaimable: 0,
-              reserved: 0,
+              reserved: dimension === "checkpoint_staging" ? hub.checkpointBytes : 0,
               warning: current >= limit ? "full" : current >= limit * 0.9 ? "warning" : "normal",
               blockedReasons: current >= limit ? ["capacity_exceeded"] : [],
             });
@@ -681,7 +694,21 @@ const make = Effect.gen(function* () {
           return yield* storageStatusDecode(
             {
               quotas,
-              tables: sample?.tables ?? [],
+              tables: [
+                ...(sample?.tables ?? []).filter(
+                  (table) => !hub.tables.some((h) => h.table === table.table),
+                ),
+                ...hub.tables.map((table) => {
+                  const measured = sample?.tables.find((t) => t.table === table.table);
+                  return measured
+                    ? {
+                        ...table,
+                        allocatedBytes: measured.allocatedBytes,
+                        allocationStatus: measured.allocationStatus,
+                      }
+                    : table;
+                }),
+              ],
               measuredAtUtc: sample?.measuredAtUtc ?? null,
               dbFileBytes: sample?.dbFileBytes ?? null,
               walBytes: sample?.walBytes ?? null,

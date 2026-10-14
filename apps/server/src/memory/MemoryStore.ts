@@ -5408,7 +5408,7 @@ const make = Effect.gen(function* () {
     );
     if (!old && count[0]!.count >= M.MEMORY_HUB_MAX_MEMBERS)
       return yield* new MemoryCapacityError({
-        dimension: "hub_members",
+        dimension: "members",
         limit: M.MEMORY_HUB_MAX_MEMBERS,
       });
     const next: HubMember = {
@@ -5465,7 +5465,7 @@ const make = Effect.gen(function* () {
         );
     yield* stored(
       "hub-member-relay-delete",
-      sql`DELETE FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND (requester=${input.environmentId} OR owner=${input.environmentId})`,
+      sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${input.memorySpaceId} AND (requester=${input.environmentId} OR owner=${input.environmentId})`,
     );
     yield* writeHubAdminTx({
       record: { ...record, stage: "activated", memberVersion: next.credentialVersion },
@@ -5606,7 +5606,7 @@ const make = Effect.gen(function* () {
     const limit = Math.max(0, Math.min(input.limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS));
     const rows = yield* stored(
       "relay-sweep",
-      sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND (deadline<=${input.now} OR state='expired' OR (${input.memoryId ?? null} IS NOT NULL AND memory_id=${input.memoryId ?? null})) ORDER BY deadline,request_id LIMIT ${limit + 1}`,
+      sql<RelayRow>`SELECT request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,response_digest,payload_ref FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND (deadline<=${input.now} OR (${input.memoryId ?? null} IS NOT NULL AND memory_id=${input.memoryId ?? null})) ORDER BY deadline,request_id LIMIT ${limit + 1}`,
     );
     for (const row of rows.slice(0, limit)) {
       yield* eraseRelayPayload(input.memorySpaceId, row);
@@ -5615,7 +5615,38 @@ const make = Effect.gen(function* () {
         sql`DELETE FROM memory_hub_source_reads WHERE space=${input.memorySpaceId} AND request_id=${row.request_id}`,
       );
     }
-    return { removedRows: Math.min(rows.length, limit), cleanupPending: rows.length > limit };
+    const retention = yield* readHubRetentionTx(input.memorySpaceId);
+    const handles = (yield* handlesFor(input.memorySpaceId)).filter((h) => h.expiresAt > input.now);
+    const keep = [
+      ...new Set([
+        ...(retention.checkpointId ? [snapshotId(retention.checkpointId)] : []),
+        ...handles.map((h) => snapshotId(h.checkpointId)),
+      ]),
+    ];
+    const remaining = Math.max(0, limit - Math.min(rows.length, limit));
+    const pages = yield* stored(
+      "hub-transient-snapshots",
+      sql<{
+        pending_key: string;
+        bytes: number;
+      }>`SELECT pending_key,length(CAST(metadata_json AS BLOB)) AS bytes FROM memory_inbox_pending WHERE space=${input.memorySpaceId} AND reason='hub_snapshot' AND checkpoint_id NOT IN (SELECT value FROM json_each(${yield* stringArrayCodec.encode(keep)})) ORDER BY pending_key LIMIT ${remaining + 1}`,
+    );
+    let released = 0;
+    for (const page of pages.slice(0, remaining)) {
+      yield* stored(
+        "hub-transient-snapshot-delete",
+        sql`DELETE FROM memory_inbox_pending WHERE space=${input.memorySpaceId} AND pending_key=${page.pending_key}`,
+      );
+      released += page.bytes;
+    }
+    yield* stored(
+      "hub-transient-pin-release",
+      sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode(handles)},published_pinned_bytes=max(0,published_pinned_bytes-${released}) WHERE space=${input.memorySpaceId}`,
+    );
+    return {
+      removedRows: Math.min(rows.length, limit) + Math.min(pages.length, remaining),
+      cleanupPending: rows.length > limit || pages.length > remaining,
+    };
   });
   const requestHubSourceReadTx: MemoryStore["Service"]["requestHubSourceReadTx"] = Effect.fn(
     "MemoryStore.requestHubSourceReadTx",
@@ -5678,8 +5709,12 @@ const make = Effect.gen(function* () {
       (counts[0]!.member ?? 0) >= M.MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT
     )
       return yield* new MemoryCapacityError({
-        dimension: "source_read_requests",
-        limit: M.MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT,
+        dimension:
+          counts[0]!.total >= M.MEMORY_SOURCE_READ_MAX_PER_HUB ? "relay_hub" : "relay_environment",
+        limit:
+          counts[0]!.total >= M.MEMORY_SOURCE_READ_MAX_PER_HUB
+            ? M.MEMORY_SOURCE_READ_MAX_PER_HUB
+            : M.MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT,
       });
     yield* stored(
       "relay-request",
@@ -5904,6 +5939,7 @@ const make = Effect.gen(function* () {
         : emptyCompaction,
     };
   });
+  const stringArrayCodec = codec(Schema.Array(Schema.String));
   const handleCodec = codec(Schema.Array(HubCheckpointHandleSchema));
   const handlesFor = Effect.fnUntraced(function* (space: M.MemorySpaceId) {
     const rows = yield* stored(
@@ -6332,11 +6368,55 @@ const make = Effect.gen(function* () {
     );
     const row = rows[0]!;
     const usage = yield* usageForHub(space);
+    const specifications = [
+      ["memory_hub_operations", "length(CAST(entry_json AS BLOB))"],
+      [
+        "memory_hub_members",
+        "length(CAST(space AS BLOB))+length(CAST(environment AS BLOB))+length(CAST(credential_digest AS BLOB))+length(CAST(credential_version AS TEXT))+length(CAST(status AS BLOB))+coalesce(length(CAST(joined_at AS TEXT)),0)",
+      ],
+      [
+        "memory_hub_leases",
+        "length(CAST(space AS BLOB))+length(CAST(memory_id AS BLOB))+length(CAST(highest_token AS TEXT))+coalesce(length(CAST(lease_json AS BLOB)),0)",
+      ],
+      [
+        "memory_hub_source_reads",
+        "length(CAST(locator_json AS BLOB))+length(CAST(request_digest AS BLOB))+coalesce(length(CAST(response_digest AS BLOB)),0)",
+      ],
+      [
+        "memory_hub_retention",
+        "coalesce(length(CAST(boundary_json AS BLOB)),0)+length(CAST(handles_json AS BLOB))+coalesce(length(CAST(compaction_json AS BLOB)),0)",
+      ],
+    ] as const;
+    const tables: M.MemoryStorageTableUsage[] = [];
+    for (const [table, expression] of specifications) {
+      // Both identifiers and expressions come only from the closed internal inventory above.
+      const counts = yield* stored(
+        "hub-table-logical",
+        sql.unsafe<{ rows: number; bytes: number }>(
+          `SELECT count(*) AS rows,coalesce(sum(${expression}),0) AS bytes FROM ${table} WHERE space=?`,
+          [space],
+        ),
+      );
+      tables.push({
+        table,
+        rowCount: counts[0]!.rows,
+        logicalBytes: counts[0]!.bytes,
+        allocatedBytes: null,
+        allocationStatus: "unavailable",
+      });
+    }
     return {
-      tables: [],
+      tables,
       tailRows: row.tail_rows,
       tailBytes: row.tail_bytes,
-      permanentMetadataBytes: row.metadata_bytes,
+      permanentMetadataBytes: tables
+        .filter(
+          (table) =>
+            table.table === "memory_hub_members" ||
+            table.table === "memory_hub_leases" ||
+            table.table === "memory_hub_retention",
+        )
+        .reduce((sum, table) => sum + table.logicalBytes, 0),
       activeMembers: row.members,
       stagingBytes: (row.checkpoint_bytes ?? 0) + (row.pinned_bytes ?? 0),
       checkpointBytes: row.checkpoint_bytes ?? 0,
@@ -6390,8 +6470,13 @@ const make = Effect.gen(function* () {
         return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
       return old;
     }
+    const aggregate = yield* loadAggregate(op.memorySpaceId, op.memoryId);
+    const reservedDelete =
+      op.kind === "forget" &&
+      aggregate.identity !== undefined &&
+      (!aggregate.tombstone || aggregate.tombstone.deleteOperationId === op.operationId);
     const counts = yield* readHubUsageTx(op.memorySpaceId);
-    if (counts.tailRows >= M.MEMORY_LOG_MAX_TAIL_ROWS)
+    if (!reservedDelete && counts.tailRows >= M.MEMORY_LOG_MAX_TAIL_ROWS)
       return yield* new MemoryCapacityError({
         dimension: "log_tail_rows",
         limit: M.MEMORY_LOG_MAX_TAIL_ROWS,
@@ -6431,7 +6516,10 @@ const make = Effect.gen(function* () {
           }
         : { kind: "operation", hubSequence, receipt, operation: op };
     const json = yield* stored("hub-entry-codec", hubEntryCodec.encode(entry));
-    if (counts.tailBytes + new TextEncoder().encode(json).length > M.MEMORY_LOG_MAX_TAIL_BYTES)
+    if (
+      !reservedDelete &&
+      counts.tailBytes + new TextEncoder().encode(json).length > M.MEMORY_LOG_MAX_TAIL_BYTES
+    )
       return yield* new MemoryCapacityError({
         dimension: "log_tail_bytes",
         limit: M.MEMORY_LOG_MAX_TAIL_BYTES,
@@ -6740,6 +6828,7 @@ const make = Effect.gen(function* () {
       if (guard.reportId !== reportId)
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
       const deliverable = guard.resolvingEnvironmentId === input.localEnvironmentId;
+      if (!deliverable) return { reportId, deliverable };
       yield* stored(
         "report-reconcile",
         sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,attempt_id,resolving_environment_id,outcome,state,created_at) VALUES (${reportId},${record.memorySpaceId},${record.receipt.memoryId},${record.receipt.operationId},${guard.resolutionId},${record.attemptId},${guard.resolvingEnvironmentId},${guard.outcome},'pending',${record.receipt.resolutionApproval ? Date.parse(record.receipt.resolutionApproval.appliedAtUtc) : 0}) ON CONFLICT(report_id) DO NOTHING`,
