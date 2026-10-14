@@ -2629,9 +2629,14 @@ const make = Effect.gen(function* () {
                 ? hostFailure(launched.failure)
                 : isOrchestratorMcpFailure(launched.failure)
                   ? launched.failure
-                  : failure(
-                      "orchestration_error",
-                      "Remote dispatch failed before task registration.",
+                  : Object.defineProperty(
+                      failure(
+                        "orchestration_error",
+                        "Remote dispatch failed before task registration.",
+                      ),
+                      // Keep diagnostics out of both the wire schema and JSON serialization.
+                      "cause",
+                      { value: launched.failure, configurable: true, writable: true },
                     );
             const failedTask = refreshed.subagents.find((task) => task.id === taskId);
             if (failedTask?.remote === undefined || failedTask.runId === null)
