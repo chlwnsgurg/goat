@@ -1532,6 +1532,22 @@ it.effect("periodic renewal failure preserves the renewed expiry retry floor", (
         });
         assert.strictEqual(renews, 2);
         assert.strictEqual(tickets[0]?.nextAttemptAt, 180000);
+        assert.strictEqual(tickets[0]?.ticket.expiresAtHubTime, "1970-01-01T00:03:00.000Z");
+        const reopened = yield* Effect.service(Store.MemoryStore).pipe(Effect.provide(Store.layer));
+        const recovered = yield* reopened.readRecoverableResolutionTickets({
+          memorySpaceId: space,
+          now: 180000,
+          limit: 100,
+        });
+        assert.strictEqual(recovered[0]?.ticket.expiresAtHubTime, "1970-01-01T00:03:00.000Z");
+        assert.strictEqual(
+          (yield* reopened.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 179999,
+            limit: 100,
+          })).length,
+          0,
+        );
         assert.strictEqual(yield* sync.activeResolutions, 0);
       }).pipe(Effect.provide(fixture(client, model))),
     );
@@ -2034,4 +2050,342 @@ it.effect("settings finalization bounds a blocked matching release before freein
       }).pipe(Effect.provide(fixture(client, model, false, true))),
     );
   }),
+);
+
+it.effect("current space enters generation behind 100 old-space candidates and tickets", () =>
+  Effect.gen(function* () {
+    const oldSpace = M.MemorySpaceId.make(id(9900));
+    const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
+    const model = realGeneration({
+      resolveMemoryConflict: (i) => Deferred.succeed(entered, i).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const store = yield* Store.MemoryStore;
+        for (let n = 1; n <= 100; n++) {
+          const memoryId = yield* conflict(n, oldSpace);
+          const snapshot = yield* store.readResolutionSnapshot(oldSpace, memoryId);
+          yield* store.persistResolutionTicket({
+            memorySpaceId: oldSpace,
+            memoryId,
+            conflictId: M.MemoryConflictId.make(id(10000 + n)),
+            holderEnvironmentId: local,
+            attemptId: M.MemoryOperationId.make(id(11000 + n)),
+            conflictHeadSet: snapshot.heads,
+            frozenDefaultModelSelection: selection,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          });
+        }
+        yield* store.recoverClaimCandidates(0);
+        const memory = yield* conflict(101);
+        yield* store.recoverClaimCandidates(0);
+        assert.strictEqual((yield* store.readDueClaimCandidates(100, 0, oldSpace)).length, 100);
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        assert.strictEqual((yield* Deferred.await(entered)).memoryId, memory);
+        assert.strictEqual(
+          (yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: oldSpace,
+            now: 0,
+            limit: 100,
+          })).length,
+          100,
+        );
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(peer(), model))),
+    );
+  }),
+);
+
+it.effect("recovery discovers a new conflict while an unrelated ticket is running", () =>
+  Effect.gen(function* () {
+    const first = yield* Deferred.make<void>();
+    const second = yield* Deferred.make<void>();
+    let executions = 0;
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Effect.gen(function* () {
+          executions++;
+          yield* Deferred.succeed(executions === 1 ? first : second, undefined);
+          return yield* Effect.never;
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* conflict();
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.syncOnce;
+        yield* Deferred.await(first);
+        yield* conflict(2);
+        yield* sync.syncOnce;
+        yield* Deferred.await(second);
+        assert.strictEqual(yield* sync.activeResolutions, 2);
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(peer(), model))),
+    );
+  }),
+);
+
+it.effect.each([0, 80])("eligibility uses bounded ports with %s historical revisions", (history) =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const renewed = yield* Deferred.make<void>();
+    let renews = 0;
+    let issued: M.MemoryResolutionLease | undefined;
+    const client = peer({
+      claim: (_c, { protocolVersion: _p, ...claim }) =>
+        Effect.sync(() => {
+          issued = {
+            ...claim,
+            fencingToken: 1,
+            claimedAtHubTime: timestamp,
+            expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+            attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+          };
+          return issued;
+        }),
+      renew: () =>
+        Effect.gen(function* () {
+          renews++;
+          const ticket = issued!;
+          if (renews === 2) yield* Deferred.succeed(renewed, undefined);
+          return ticket;
+        }),
+    });
+    const model = realGeneration({
+      resolveMemoryConflict: () =>
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const store = yield* Store.MemoryStore;
+        const memory = M.MemoryId.make(id(28000));
+        let parent: M.MemoryRevisionId | undefined;
+        for (let n = 0; n <= history; n++) {
+          const op = operation(29000 + n, memory);
+          if (op.kind !== "upsert") throw new Error("fixture");
+          yield* commit({
+            ...op,
+            expectedHeads: parent ? [parent] : [],
+            revision: { ...op.revision, parents: parent ? [parent] : [] },
+          });
+          parent = op.revision.revisionId;
+        }
+        for (let n = 0; n < 2; n++) {
+          const op = operation(30000 + n, memory);
+          if (op.kind !== "upsert") throw new Error("fixture");
+          yield* commit({
+            ...op,
+            expectedHeads: [parent!],
+            revision: { ...op.revision, parents: [parent!] },
+          });
+        }
+        let aggregates = 0;
+        let snapshots = 0;
+        let heads = 0;
+        const observed = Store.MemoryStore.of({
+          ...store,
+          loadAggregate: (...args) => {
+            aggregates++;
+            return store.loadAggregate(...args);
+          },
+          readResolutionSnapshot: (...args) => {
+            snapshots++;
+            return store.readResolutionSnapshot(...args);
+          },
+          readResolutionHeads: (input) => {
+            heads++;
+            return store.readResolutionHeads(input);
+          },
+        });
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const sync = yield* Sync.MemorySyncService;
+            yield* sync.syncOnce;
+            yield* Deferred.await(entered);
+            assert.strictEqual(heads, 1);
+            const before = snapshots;
+            yield* TestClock.adjust("30 seconds");
+            yield* Deferred.await(renewed);
+            yield* sync.syncOnce;
+            assert.strictEqual(aggregates, 0);
+            assert.strictEqual(heads, 1);
+            assert.strictEqual(snapshots - before, 2);
+            yield* sync.shutdown;
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(Sync.layer).pipe(
+                Layer.provide(Layer.succeed(Store.MemoryStore, observed)),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture(client, model))),
+    );
+  }),
+);
+
+it.effect(
+  "published bootstrap commits 100 exact intents then advances and replays identical retry",
+  () =>
+    Effect.gen(function* () {
+      let observedStore: Store.MemoryStore["Service"] | undefined;
+      const sent: M.MemoryOperation[] = [];
+      let failed = false;
+      let nextSequence = 2;
+      const client = peer({
+        join: () =>
+          Effect.succeed({
+            protocolVersion: 1,
+            memorySpaceId: space,
+            hubEnvironmentId: remote,
+            checkpointSequence: 0,
+            retentionFloor: 0,
+            snapshotToken: "intent-snapshot",
+            causalBoundary: { checkpointSequence: 0, boundaryId: "intent-boundary" },
+          }),
+        pull: (_c, input) =>
+          Effect.succeed(
+            input.snapshotToken
+              ? {
+                  highWatermark: 0,
+                  throughSequence: 0,
+                  hasMore: false,
+                  entries: [],
+                  checkpoint: {
+                    memorySpaceId: space,
+                    checkpointSequence: 0,
+                    retentionFloor: 0,
+                    causalBoundary: { checkpointSequence: 0, boundaryId: "intent-boundary" },
+                    pageOrdinal: 0,
+                    items: [],
+                    revisions: [],
+                    tombstones: [],
+                    conflicts: [],
+                    resolutions: [],
+                    compactReceipts: [],
+                    identities: [],
+                    fences: [],
+                    suppressions: [],
+                    nextCursor: null,
+                    bootstrapComplete: true,
+                  },
+                }
+              : {
+                  highWatermark: Math.max(1, input.afterSequence),
+                  throughSequence: Math.max(1, input.afterSequence),
+                  hasMore: false,
+                  entries: input.afterSequence === 0 ? tailEntries(0, 1) : [],
+                },
+          ),
+        push: (_c, input) =>
+          Effect.gen(function* () {
+            assert.isAtLeast(yield* observedStore!.readCursor(space, remote).pipe(Effect.orDie), 1);
+            sent.push(...input.operations);
+            if (!failed) {
+              failed = true;
+              return yield* new M.MemoryHubError({ code: "unavailable" });
+            }
+            return {
+              receipts: input.operations.map((op) => ({
+                operationId: op.operationId,
+                memoryId: op.memoryId,
+                operationDigest: memoryOperationDigest(op),
+                hubSequence: nextSequence++,
+                outcome: "accepted" as const,
+              })),
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* Store.MemoryStore;
+          observedStore = store;
+          for (let n = 0; n < 101; n++)
+            yield* store.putLocalIntent({
+              intentId: `exact-${String(n).padStart(3, "0")}`,
+              memoryId: M.MemoryId.make(id(31000 + n)),
+              environmentId: local,
+              scope: { kind: "user" },
+              provenance: { environmentId: local },
+              assertionKind: "inference",
+              createdAtUtc: timestamp,
+              payload: {
+                text: `synthetic local ${n}`,
+                evidence: [],
+                derivedFromMemoryRevisions: [],
+              },
+            });
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          assert.strictEqual((yield* store.listMaterializableIntents(local, 100)).length, 1);
+          assert.strictEqual(sent.length, 100);
+          yield* sync.syncOnce;
+          assert.strictEqual((yield* store.listMaterializableIntents(local, 100)).length, 0);
+          assert.strictEqual(sent.length, 101);
+          yield* TestClock.adjust("1 second");
+          yield* sync.syncOnce;
+          assert.strictEqual(sent.length, 102);
+          assert.deepStrictEqual(sent[101], sent[0]);
+          assert.strictEqual(memoryOperationDigest(sent[101]!), memoryOperationDigest(sent[0]!));
+          assert.strictEqual(
+            (yield* store.readOperation(space, sent[0]!.operationId))?.operationId,
+            sent[0]!.operationId,
+          );
+          yield* sync.shutdown;
+        }).pipe(Effect.provide(fixture(client))),
+      );
+    }),
+);
+
+it.effect("intent binding is rechecked inside commit and rejects a changed space", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      const store = yield* Store.MemoryStore;
+      yield* store.putLocalIntent({
+        intentId: "space-fence",
+        memoryId: M.MemoryId.make(id(32000)),
+        environmentId: local,
+        scope: { kind: "user" },
+        provenance: { environmentId: local },
+        assertionKind: "inference",
+        createdAtUtc: timestamp,
+        payload: { text: "synthetic fenced", evidence: [], derivedFromMemoryRevisions: [] },
+      });
+      const base = yield* Sync.MemorySyncRuntime;
+      const adapter = Sync.MemorySyncRuntime.of({
+        ...base,
+        readIntentBinding: Effect.succeed({
+          memorySpaceId: M.MemorySpaceId.make(id(32001)),
+          coordinatorEpoch: 1,
+          enabled: true,
+        }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          const result = yield* Effect.result(sync.syncOnce);
+          assert.strictEqual(result._tag, "Failure");
+          if (result._tag === "Failure" && "code" in result.failure)
+            assert.strictEqual(result.failure.code, "fenced");
+          assert.strictEqual((yield* store.listMaterializableIntents(local, 100)).length, 1);
+          assert.strictEqual((yield* store.readEligibleOutbox(space, 0, 100)).length, 0);
+          yield* sync.shutdown;
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(fixture())),
+  ),
 );

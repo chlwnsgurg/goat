@@ -344,8 +344,17 @@ const make = Effect.gen(function* () {
           selectionKey(current.frozenDefaultModelSelection)
       )
         return yield* new M.MemoryHubError({ code: "fenced" });
+      const persisted = yield* store.transact(
+        store.renewResolutionTicketTx({
+          ownership: ownership(row),
+          now: yield* Clock.currentTimeMillis,
+          expectedExpiresAtHubTime: current.expiresAtHubTime,
+          renewedLease: renewed,
+        }),
+      );
+      if (!persisted) return yield* new M.MemoryHubError({ code: "fenced" });
       currentLease = renewed;
-      row = { ...row, ticket: renewed };
+      row = persisted;
       const slot = executions.get(renewed.memoryId);
       if (slot) slot.ticket = renewed;
     });
@@ -521,7 +530,24 @@ const make = Effect.gen(function* () {
         ? client.applyResolution(r.connection, row.submission!)
         : hub.applyResolution(row.submission!, r.principal!);
       if (receipt.outcome === "rejected" || receipt.hubSequence === null) {
-        yield* transition("terminal", receipt);
+        const candidate = yield* store.findClaimCandidate({
+          memorySpaceId: row.ticket.memorySpaceId,
+          attemptId: row.ticket.attemptId,
+        });
+        if (receipt.outcome !== "rejected" || candidate?.metadata.kind !== "claim")
+          return yield* new M.MemoryHubError({ code: "invalid_output" });
+        const retired = yield* store.transact(
+          store.retireRejectedSubmissionTx({
+            ownership: ownership(row),
+            candidateId: candidate.id,
+            expectedGeneration: candidate.metadata.generation ?? 0,
+            rejection: receipt,
+            now: yield* Clock.currentTimeMillis,
+            nextAttemptAt: (yield* Clock.currentTimeMillis) + 30000,
+          }),
+        );
+        if (!retired) return yield* new M.MemoryHubError({ code: "fenced" });
+        row = retired;
         return;
       }
       yield* transition("approved", receipt);
@@ -678,6 +704,8 @@ const make = Effect.gen(function* () {
           conflictHeads: metadata.sortedHeads,
         };
         let reserved = false;
+        const prepared: { value: Effect.Success<ReturnType<typeof store.prepareClaimAttemptTx>> } =
+          { value: null };
         const attempt = yield* Effect.result(
           Effect.gen(function* () {
             let frozen = yield* store.transact(store.prepareClaimAttemptTx(prepare));
@@ -702,6 +730,7 @@ const make = Effect.gen(function* () {
               );
             }
             if (!frozen) return;
+            prepared.value = frozen;
             if (!(yield* store.claimCandidate(work.id, r.settings.memoryHubVersion, now))) return;
             reservations++;
             reserved = true;
@@ -747,6 +776,24 @@ const make = Effect.gen(function* () {
           yield* ensureEpoch(r.settings.memoryHubVersion);
           yield* noteFailure(r.settings.memoryHubVersion, attempt.failure);
           const code = failureCode(attempt.failure);
+          // Only explicit Hub refusal is proof; transport/storage uncertainty preserves the attempt.
+          if (
+            prepared.value &&
+            attempt.failure._tag === "MemoryHubError" &&
+            ["conflict_changed", "lease_expired", "lease_required"].includes(code)
+          ) {
+            const retired = yield* store.transact(
+              store.retireFrozenClaimTx({
+                memorySpaceId: r.space,
+                candidateId: work.id,
+                expectedGeneration: prepared.value.generation,
+                attemptId: prepared.value.claim.attemptId,
+                frozenHeads: prepared.value.claim.conflictHeadSet,
+                nextAttemptAt: now + 30000,
+              }),
+            );
+            if (retired) continue;
+          }
           const knownExpiry =
             code === "claim_busy"
               ? (yield* store.readResolutionSnapshot(r.space, work.memoryId!)).fence?.activeLease
