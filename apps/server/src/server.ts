@@ -3,6 +3,10 @@ import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
 import * as MemoryMaintenance from "./memory/MemoryFtsMaintenance.ts";
 import * as MemoryWorker from "./memory/MemoryWorker.ts";
+import * as MemoryHub from "./memory/MemoryHubService.ts";
+import * as MemoryCompactor from "./memory/MemoryCompactor.ts";
+import * as MemoryHubAuth from "./memory/MemoryHubAuth.ts";
+import * as MemoryHubHttp from "./memory/MemoryHubHttp.ts";
 import * as RuntimeAdmission from "./runtimeAdmission.ts";
 import * as RuntimeDrain from "./runtimeDrain.ts";
 import * as RuntimeControl from "./runtimeControl.ts";
@@ -27,15 +31,17 @@ import * as NodeHttp from "node:http";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi, type RepositoryIdentity } from "@goat/contracts";
+import { EnvironmentHttpApi, MemoryHubError, type RepositoryIdentity } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Schedule from "effect/Schedule";
+import * as Scope from "effect/Scope";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
@@ -470,7 +476,152 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
   Layer.provide(GoatProjectFileLoader.layer),
 );
 
-const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
+const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
+const layerMemoryService = MemoryService.layer.pipe(
+  Layer.provideMerge(layerMemoryQuota),
+  Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(layerRepositoryIdentityResolver),
+  Layer.provide(layerPersistence),
+);
+const layerMemoryWorker = MemoryWorker.layer.pipe(
+  Layer.provideMerge(layerMemoryService),
+  Layer.provide(MemoryMaintenance.layer.pipe(Layer.provide(layerMemoryQuota))),
+  Layer.provide(RuntimeLayer.layerEventSink),
+  Layer.provide(layerTextGeneration),
+  Layer.provide(RuntimeIdentity.layer),
+);
+const layerMemoryStarted = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const worker = yield* MemoryWorker.MemoryWorker;
+    yield* worker.start();
+  }),
+).pipe(Layer.provideMerge(layerMemoryWorker));
+
+// These layers are also used by the real-store HTTP scenarios. Dependencies are
+// supplied by the application, so WP2 and the hub share one core and settings owner.
+export const layerMemoryHubServices = Layer.mergeAll(
+  MemoryHub.layer,
+  MemoryHub.administratorLayer,
+  MemoryCompactor.layer,
+  MemoryHubAuth.layer,
+).pipe(
+  Layer.provideMerge(MemoryHub.activityLayer),
+  Layer.provideMerge(
+    Layer.effect(
+      MemoryHub.MemoryHubConfiguration,
+      Effect.gen(function* () {
+        const settings = yield* ServerSettings.MemoryHubCommittedSettings;
+        const identity = yield* ServerEnvironment.ServerEnvironmentIdentity;
+        const hubEnvironmentId = yield* identity.getEnvironmentId;
+        return MemoryHub.MemoryHubConfiguration.of({
+          read: settings.read.pipe(
+            Effect.map(({ settings: memoryHub }) =>
+              memoryHub.mode === "hub" && memoryHub.memorySpaceId !== null
+                ? { memorySpaceId: memoryHub.memorySpaceId, hubEnvironmentId }
+                : null,
+            ),
+          ),
+        });
+      }),
+    ),
+  ),
+);
+
+// L3's interface tag has the L2 runtime key. Supply the actual instance, without
+// constructing another service or introducing a per-request runtime.
+const layerMemoryHubHttpService = Layer.effect(
+  MemoryHubHttp.MemoryHubService,
+  MemoryHub.MemoryHubService,
+);
+export const layerMemoryHubRoutes = MemoryHubHttp.layer.pipe(
+  HttpRouter.provideRequest(layerMemoryHubHttpService),
+  Layer.provide(layerMemoryHubHttpService),
+);
+
+export const layerMemoryHubStarted = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const configuration = yield* MemoryHub.MemoryHubConfiguration;
+    const store = yield* MemoryStore.MemoryStore;
+    const compactor = yield* MemoryCompactor.MemoryCompactor;
+    const applicationScope = yield* Scope.Scope;
+    // Subscribe before readiness/read to retain a concurrent first enable.
+    const changes = yield* settings.subscribeChanges;
+    const readyPrincipal = Effect.gen(function* () {
+      const hub = yield* configuration.read;
+      if (!hub) return Option.none();
+      return yield* store.transact(
+        Effect.gen(function* () {
+          const member = yield* store.readHubMember(hub.memorySpaceId, hub.hubEnvironmentId);
+          const retention = yield* store.readHubRetentionTx(hub.memorySpaceId);
+          if (!member || member.status !== "active" || retention.checkpointId === null)
+            return yield* new MemoryHubError({ code: "bootstrap_required" });
+          return Option.some({
+            memorySpaceId: hub.memorySpaceId,
+            environmentId: hub.hubEnvironmentId,
+            credentialVersion: member.credentialVersion,
+            scopes: ["memory:sync"] as const,
+          });
+        }),
+      );
+    });
+    // One start in this application scope, after migrations, settings and the
+    // published initial membership checkpoint. Disabled startup has no sweep.
+    yield* Stream.concat(Stream.succeed(undefined), changes).pipe(
+      Stream.mapEffect(() =>
+        Effect.gen(function* () {
+          const principal = yield* readyPrincipal;
+          if (Option.isNone(principal)) return false;
+          const startScope = yield* Scope.fork(applicationScope);
+          yield* compactor.start(principal.value).pipe(
+            Effect.provideService(Scope.Scope, startScope),
+            // Release subscriptions from a failed sweep; a successful start
+            // keeps its child scope until the application closes.
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit) ? Scope.close(startScope, exit) : Effect.void,
+            ),
+          );
+          return true;
+        }).pipe(
+          // Readiness and the initial sweep can race with disable. Keep the
+          // settings subscription alive and retry on the next transition.
+          Effect.catch((error) =>
+            Effect.logWarning("Memory compactor startup deferred", { errorTag: error._tag }).pipe(
+              Effect.as(false),
+            ),
+          ),
+        ),
+      ),
+      Stream.filter((started) => started),
+      Stream.take(1),
+      Stream.runDrain,
+      // Startup marks settings ready after building its dependencies. Await it
+      // in the scoped fiber so acquisition cannot deadlock that startup.
+      (run) => Effect.andThen(settings.ready, run),
+      Effect.forkScoped,
+    );
+  }),
+);
+
+const layerMemoryHub = layerMemoryHubStarted.pipe(
+  Layer.provideMerge(layerMemoryHubServices),
+  Layer.provideMerge(layerMemoryService),
+  Layer.provideMerge(layerServerSettings),
+  Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(ServerSecretStore.layer),
+);
+const layerRegisteredMemoryHub = layerMemoryHubRoutes.pipe(
+  HttpRouter.provideRequest(layerMemoryHub),
+  Layer.provideMerge(layerMemoryHub),
+);
+// L4 r2 adds SyncService/Client and the committed owner reader to this shared
+// application context; it must reuse layerMemoryService and the settings owner.
+
+const layerServerEnvironment = ServerEnvironment.layer.pipe(
+  Layer.provide(layerRegisteredMemoryHub),
+  Layer.provide(layerServerSettings),
+  Layer.provide(ServerSecretStore.layer),
+);
 
 const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerPersistence),
@@ -585,22 +736,6 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
-const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
-const layerMemoryService = MemoryService.layer.pipe(Layer.provideMerge(layerMemoryQuota));
-const layerMemoryWorker = MemoryWorker.layer.pipe(
-  Layer.provideMerge(layerMemoryService),
-  Layer.provide(MemoryMaintenance.layer.pipe(Layer.provide(layerMemoryQuota))),
-  Layer.provide(RuntimeLayer.layerEventSink),
-  Layer.provide(layerTextGeneration),
-  Layer.provide(RuntimeIdentity.layer),
-);
-const layerMemoryStarted = Layer.effectDiscard(
-  Effect.gen(function* () {
-    const worker = yield* MemoryWorker.MemoryWorker;
-    yield* worker.start();
-  }),
-).pipe(Layer.provideMerge(layerMemoryWorker));
-
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerMemoryStarted,
   AgentAwarenessRelay.layer,
@@ -639,6 +774,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // for the normal (on-delete) path.
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
+  // The same hub layer backs routes, descriptors and future L4 application consumers.
+  Layer.provideMerge(layerMemoryHub),
   // GOAT bot and channel input sit on top of orchestration and are shared by WS and MCP.
   // Same EventSink layer reference as orchestration, so memoization shares one instance.
   // Remote channel workers reach other machines through the same SshRemoteDispatch layer
@@ -1199,14 +1336,15 @@ const layerMakeServer = Layer.unwrap(
       // The connect routes and the startup/shutdown link work share one instance.
       Layer.provide(CloudLink.layer),
       Layer.provideMerge(layerRuntimeServices),
-      Layer.provideMerge(
-        McpSessionRegistry.layer.pipe(
-          Layer.provide(ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer))),
-        ),
-      ),
+      Layer.provideMerge(McpSessionRegistry.layer.pipe(Layer.provide(layerServerEnvironment))),
       Layer.provide(layerActivation),
       Layer.provideMerge(RelayTracing.layerServerRelayBroker),
       Layer.provideMerge(layerHttpServer),
+      Layer.provide(
+        HttpRouter.layer.pipe(
+          Layer.provide(Layer.succeed(HttpRouter.RouterConfig, HTTP_ROUTER_CONFIG)),
+        ),
+      ),
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),
       // PR reads, Git operations, and WebSocket discovery share one process limiter.
