@@ -391,6 +391,8 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         subject: "repository-failure",
       });
       const websocket = yield* sessions.issueWebSocketToken(issued.sessionId);
+      // This repository rejects getById; live reauthorization still reads only the committed Ref.
+      expect(yield* sessions.readActiveScopes(issued.sessionId)).toEqual(AuthStandardClientScopes);
 
       const sessionError = yield* Effect.flip(sessions.verify(issued.token));
       const websocketError = yield* Effect.flip(sessions.verifyWebSocketToken(websocket.token));
@@ -856,3 +858,35 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
     }).pipe(Effect.provide(Layer.mergeAll(layerSessionStore(), SqlitePersistence.layerMemory))),
   );
 });
+
+it.effect("reads live scopes without a token and fences replacement, revocation and expiry", () =>
+  Effect.gen(function* () {
+    const store = yield* SessionStore.SessionStore;
+    const first = yield* store.issue({
+      subject: "memory-client",
+      method: "bearer-access-token",
+      scopes: ["memory:read", "memory:write"],
+    });
+    expect(yield* store.readActiveScopes(first.sessionId)).toEqual(["memory:read", "memory:write"]);
+    const second = yield* store.issue({
+      subject: "memory-client",
+      method: "bearer-access-token",
+      scopes: ["memory:read"],
+      replaceSessionId: first.sessionId,
+      ttl: Duration.seconds(1),
+    });
+    expect((yield* store.readActiveScopes(first.sessionId).pipe(Effect.flip))._tag).toBe(
+      "UnknownSessionTokenError",
+    );
+    expect(yield* store.readActiveScopes(second.sessionId)).toEqual(["memory:read"]);
+    yield* TestClock.adjust(Duration.seconds(1));
+    expect((yield* store.readActiveScopes(second.sessionId).pipe(Effect.flip))._tag).toBe(
+      "SessionTokenExpiredError",
+    );
+    const third = yield* store.issue({ scopes: ["memory:write"] });
+    yield* store.revoke(third.sessionId);
+    expect((yield* store.readActiveScopes(third.sessionId).pipe(Effect.flip))._tag).toBe(
+      "UnknownSessionTokenError",
+    );
+  }).pipe(Effect.provide(layerSessionStore().pipe(Layer.provideMerge(NodeServices.layer)))),
+);

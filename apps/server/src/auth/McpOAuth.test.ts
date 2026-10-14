@@ -118,7 +118,7 @@ const postJson = (path: string, body: unknown, cookie?: string) =>
 const decide = (
   handler: Handler,
   authorization: Record<string, string>,
-  decision: Record<string, string>,
+  decision: Record<string, unknown>,
   cookie?: string,
 ) =>
   handler(postJson("/oauth/mcp/decision", { authorization, decision }, cookie)).pipe(
@@ -514,11 +514,18 @@ it.live("one-click approves only access the browser session holds the scopes for
         });
       const details = (cookie: string) =>
         handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
-          Effect.flatMap(json<{ csrfToken?: string; oneClickAccess?: ReadonlyArray<string> }>),
+          Effect.flatMap(
+            json<{
+              csrfToken?: string;
+              oneClickAccess?: ReadonlyArray<string>;
+              oneClickMemoryScopes?: ReadonlyArray<string>;
+            }>,
+          ),
         );
 
       const admin = yield* browserCookie([...AuthAdministrativeScopes]);
       const adminDetails = yield* details(admin);
+      expect(adminDetails.oneClickMemoryScopes).toEqual(["memory:read", "memory:write"]);
       expect(adminDetails.csrfToken).toEqual(expect.any(String));
       expect(adminDetails.oneClickAccess).toEqual([
         "read-only",
@@ -530,7 +537,12 @@ it.live("one-click approves only access the browser session holds the scopes for
       const oneClick = yield* decide(
         handler,
         params,
-        { _tag: "browser-session", access: "auto", csrfToken: adminDetails.csrfToken! },
+        {
+          _tag: "browser-session",
+          access: "auto",
+          memoryScopes: ["memory:read"],
+          csrfToken: adminDetails.csrfToken!,
+        },
         admin,
       );
       expect(new URL(oneClick.redirectTo!).searchParams.get("code")).toEqual(expect.any(String));
@@ -550,6 +562,20 @@ it.live("one-click approves only access the browser session holds the scopes for
       // A session that can read but not operate threads may approve read-only access only.
       const reader = yield* browserCookie(["access:write", "orchestration:read"]);
       const readerDetails = yield* details(reader);
+      expect(readerDetails.oneClickMemoryScopes).toEqual([]);
+      const memoryTooBroad = yield* decide(
+        handler,
+        params,
+        {
+          _tag: "browser-session",
+          access: "read-only",
+          csrfToken: readerDetails.csrfToken!,
+          memoryScopes: ["memory:read"],
+        },
+        reader,
+      );
+      expect(memoryTooBroad.status).toBe(400);
+      expect(memoryTooBroad.redirectTo).toBeUndefined();
       expect(readerDetails.csrfToken).toEqual(expect.any(String));
       // The page shows the pairing-code field for anything above read only.
       expect(readerDetails.oneClickAccess).toEqual(["read-only"]);
@@ -621,4 +647,88 @@ it.effect("grants approvals only to issued clients with operate and approve, and
       sessions.find((session) => session.sessionId === approver.sessionId)?.lastConnectedAt,
     ).not.toBeNull();
   }).pipe(Effect.provide(layerEnvironmentAuth.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.live.each([
+  { memoryScopes: [] },
+  { memoryScopes: ["memory:read"] },
+  { memoryScopes: ["memory:write"] },
+  { memoryScopes: ["memory:read", "memory:write"] },
+] as const)(
+  "carries only explicitly selected memory scopes through OAuth: $memoryScopes",
+  ({ memoryScopes }) =>
+    withRoutes((handler, auth) =>
+      Effect.gen(function* () {
+        const params = authorizeParams(yield* registeredClientId(handler));
+        const pairing = yield* auth.issuePairingCredential({
+          scopes: [...AuthAdministrativeScopes],
+        });
+        const approved = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "auto",
+          code: pairing.credential,
+          ...(memoryScopes.length === 0 ? {} : { memoryScopes }),
+        });
+        expect(approved.status).toBe(200);
+        const code = new URL(approved.redirectTo!).searchParams.get("code")!;
+        const response = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "authorization_code",
+              client_id: params.client_id,
+              redirect_uri: params.redirect_uri,
+              code,
+              code_verifier: verifier,
+              resource: params.resource,
+              scope: "memory:read memory:write",
+            }),
+          ),
+        );
+        const token = yield* json<{ access_token: string; scope: string }>(response);
+        expect(response.status).toBe(200);
+        expect(token.scope.split(" ").filter((scope) => scope.startsWith("memory:"))).toEqual([
+          ...memoryScopes,
+        ]);
+        const client = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${token.access_token}` } }),
+          ),
+        );
+        expect(client.grantedScopes?.filter((scope) => scope.startsWith("memory:"))).toEqual([
+          ...memoryScopes,
+        ]);
+        expect(client.access).toBe("auto");
+        yield* client.reauthorize!([...memoryScopes]);
+        for (const scope of ["memory:read", "memory:write"] as const) {
+          if (!memoryScopes.some((selected) => selected === scope)) {
+            const error = yield* client.reauthorize!([scope]).pipe(Effect.flip);
+            expect(error.requiredScope).toBe(scope);
+          }
+        }
+        yield* auth.revokeSession(client.sessionId);
+        expect((yield* client.reauthorize!([...memoryScopes]).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }),
+    ),
+);
+
+it.live("pairing approval cannot add memory scopes absent from the code", () =>
+  withRoutes((handler, auth) =>
+    Effect.gen(function* () {
+      const params = authorizeParams(yield* registeredClientId(handler));
+      const pairing = yield* auth.issuePairingCredential({
+        scopes: ["orchestration:read", "orchestration:operate"],
+      });
+      const denied = yield* decide(handler, params, {
+        _tag: "pairing-code",
+        access: "auto",
+        code: pairing.credential,
+        memoryScopes: ["memory:read"],
+      });
+      expect(denied.status).toBe(400);
+      expect(denied.redirectTo).toBeUndefined();
+    }),
+  ),
 );

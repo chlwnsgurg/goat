@@ -5,6 +5,7 @@ import {
   AuthOrchestrationApproveScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  EnvironmentAuthorizationError,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   AuthStandardClientScopes,
@@ -79,7 +80,8 @@ export interface IssuedBearerSession {
  * access the user approved; the HTTP API and WebSocket reject them so an agent
  * token cannot reach the full RPC surface around that cap.
  *
- * A read-only grant holds `orchestration:read` alone. Any other grant also
+ * Access grants thread scopes; memory scopes are added only from an explicit selection.
+ * Read-only access never raises the runtime-mode ceiling. Any other access also
  * holds `orchestration:operate` and carries its runtime-mode ceiling. A
  * full-access client may also change environment preferences and clone
  * repositories, so it holds the scopes those need over RPC. Approving a grant
@@ -90,17 +92,22 @@ const MCP_CLIENT_SESSION_TTL = Duration.days(30);
 
 export const mcpClientScopes = (
   access: AuthMcpClientAccess,
-): ReadonlyArray<AuthEnvironmentScope> =>
-  access === "read-only"
-    ? [AuthOrchestrationReadScope]
-    : access === "full-access"
-      ? [
-          AuthOrchestrationReadScope,
-          AuthOrchestrationOperateScope,
-          AuthSettingsWriteScope,
-          AuthSourceControlWriteScope,
-        ]
-      : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+  memoryScopes: ReadonlyArray<"memory:read" | "memory:write"> = [],
+): ReadonlyArray<AuthEnvironmentScope> => [
+  ...new Set([
+    ...memoryScopes,
+    ...(access === "read-only"
+      ? [AuthOrchestrationReadScope]
+      : access === "full-access"
+        ? [
+            AuthOrchestrationReadScope,
+            AuthOrchestrationOperateScope,
+            AuthSettingsWriteScope,
+            AuthSourceControlWriteScope,
+          ]
+        : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope]),
+  ]),
+];
 
 export interface McpClientSession {
   readonly sessionId: AuthSessionId;
@@ -108,6 +115,10 @@ export interface McpClientSession {
   readonly access: AuthMcpClientAccess;
   /** Holds `orchestration:approve` next to write access; OAuth sign-ins never do. */
   readonly approvals: boolean;
+  readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope>;
+  readonly reauthorize?: (
+    required: ReadonlyArray<AuthEnvironmentScope>,
+  ) => Effect.Effect<void, EnvironmentAuthorizationError>;
 }
 
 export interface AuthenticatedSession {
@@ -573,6 +584,7 @@ export class EnvironmentAuth extends Context.Service<
     readonly issueMcpClientSession: (input: {
       readonly label: string;
       readonly access: AuthMcpClientAccess;
+      readonly memoryScopes?: ReadonlyArray<"memory:read" | "memory:write">;
       readonly client: AuthClientMetadata;
     }) => Effect.Effect<
       { readonly token: string; readonly expiresAt: DateTime.DateTime },
@@ -587,6 +599,7 @@ export class EnvironmentAuth extends Context.Service<
     readonly consumeMcpApprovalCode: (
       code: string,
       access: AuthMcpClientAccess,
+      memoryScopes?: ReadonlyArray<"memory:read" | "memory:write">,
     ) => Effect.Effect<void, ServerAuthMcpApprovalCodeError | ServerAuthInternalError>;
     /** A browser cookie session only; a bearer header never counts as one. */
     readonly authenticateBrowserSession: (
@@ -1302,6 +1315,28 @@ export const make = Effect.gen(function* () {
                 access: session.scopes.includes(AuthOrchestrationOperateScope)
                   ? (session.runtimeModeCeiling ?? "approval-required")
                   : "read-only",
+                grantedScopes: session.scopes,
+                reauthorize: (required) =>
+                  sessions.readActiveScopes(session.sessionId).pipe(
+                    Effect.mapError(
+                      () =>
+                        new EnvironmentAuthorizationError({
+                          message: "The MCP session is no longer active.",
+                          requiredScope: required[0] ?? "memory:read",
+                        }),
+                    ),
+                    Effect.flatMap((scopes) =>
+                      required.every((scope) => scopes.includes(scope))
+                        ? Effect.void
+                        : Effect.fail(
+                            new EnvironmentAuthorizationError({
+                              message: "The MCP session does not grant the required scope.",
+                              requiredScope:
+                                required.find((scope) => !scopes.includes(scope)) ?? "memory:read",
+                            }),
+                          ),
+                    ),
+                  ),
                 approvals:
                   session.scopes.includes(AuthOrchestrationOperateScope) &&
                   session.scopes.includes(AuthOrchestrationApproveScope),
@@ -1322,7 +1357,7 @@ export const make = Effect.gen(function* () {
       .issue({
         subject: MCP_CLIENT_SUBJECT,
         method: "bearer-access-token",
-        scopes: mcpClientScopes(input.access),
+        scopes: mcpClientScopes(input.access, input.memoryScopes),
         ttl: MCP_CLIENT_SESSION_TTL,
         ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
         client: { ...input.client, label: input.label, deviceType: "bot" },
@@ -1352,6 +1387,7 @@ export const make = Effect.gen(function* () {
   const consumeMcpApprovalCode: EnvironmentAuth["Service"]["consumeMcpApprovalCode"] = (
     code,
     access,
+    memoryScopes,
   ) =>
     // No proof key: a code bound to a T3 Connect client's key fails without being spent.
     resolveBootstrapGrant(code.trim()).pipe(
@@ -1364,7 +1400,7 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((grant) =>
         grant.method !== "one-time-token" && grant.method !== "reusable-dev-token"
           ? Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" }))
-          : mcpClientScopes(access).every((scope) => grant.scopes.includes(scope))
+          : mcpClientScopes(access, memoryScopes).every((scope) => grant.scopes.includes(scope))
             ? Effect.void
             : Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "insufficient_scope" })),
       ),
