@@ -5289,3 +5289,76 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
     );
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("renewed ticket expiry persists only for the same owned lease and CAS version", () =>
+  Effect.gen(function* () {
+    const { store, ticket, key, ownership } = yield* seedSubmission;
+    const renewedLease = { ...ticket, expiresAtHubTime: "1970-01-01T00:02:00.000Z" };
+    const input = {
+      ownership,
+      now: 1,
+      expectedExpiresAtHubTime: ticket.expiresAtHubTime,
+      renewedLease,
+    };
+    assert.strictEqual(
+      (yield* store
+        .transact(
+          store.renewResolutionTicketTx({
+            ...input,
+            renewedLease: { ...renewedLease, fencingToken: ticket.fencingToken + 1 },
+          }),
+        )
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    assert.strictEqual(
+      (yield* store
+        .transact(
+          store.renewResolutionTicketTx({
+            ...input,
+            renewedLease: {
+              ...renewedLease,
+              frozenDefaultModelSelection: {
+                ...ticket.frozenDefaultModelSelection,
+                model: "other",
+              },
+            },
+          }),
+        )
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
+    yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* store.renewResolutionTicketTx(input);
+          return yield* Effect.fail("rollback");
+        }),
+      )
+      .pipe(Effect.exit);
+    const next = yield* store.transact(store.renewResolutionTicketTx(input));
+    assert.strictEqual(next?.ticket.expiresAtHubTime, renewedLease.expiresAtHubTime);
+    assert.isNull(yield* store.transact(store.renewResolutionTicketTx(input)));
+    const fresh = yield* Effect.service(Store.MemoryStore).pipe(
+      Effect.provide(Layer.fresh(Store.layer)),
+    );
+    const recovery = (yield* fresh.readRecoverableResolutionTickets({
+      memorySpaceId: space,
+      now: 101,
+      limit: 100,
+    }))[0]!;
+    assert.strictEqual(recovery.ticket.expiresAtHubTime, renewedLease.expiresAtHubTime);
+    assert.strictEqual(recovery.ticket.attemptDeadlineHubTime, ticket.attemptDeadlineHubTime);
+    assert.strictEqual(recovery.ticket.fencingToken, ticket.fencingToken);
+    assert.isNull(
+      yield* fresh.transact(
+        fresh.renewResolutionTicketTx({
+          ...input,
+          ownership: { ...ownership, version: next!.version },
+          now: 101,
+        }),
+      ),
+    );
+    assert.strictEqual(key.attemptId, recovery.ticket.attemptId);
+  }).pipe(Effect.provide(live)),
+);

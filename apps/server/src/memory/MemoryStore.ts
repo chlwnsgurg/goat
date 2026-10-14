@@ -903,6 +903,12 @@ export class MemoryStore extends Context.Service<
       approval?: M.MemoryHubReceipt;
       retireClaim?: { expectedGeneration: number; attemptId: string };
     }) => InTx<TicketRow | null>;
+    readonly renewResolutionTicketTx: (input: {
+      ownership: TicketOwner;
+      now: number;
+      expectedExpiresAtHubTime: M.MemoryResolutionLease["expiresAtHubTime"];
+      renewedLease: M.MemoryResolutionLease;
+    }) => InTx<TicketRow | null>;
     readonly failResolutionTicketTx: (input: {
       ownership: TicketOwner;
       now: number;
@@ -5928,6 +5934,40 @@ const make = Effect.gen(function* () {
       }
       return updated;
     });
+  const renewResolutionTicketTx: MemoryStore["Service"]["renewResolutionTicketTx"] = Effect.fn(
+    "MemoryStore.renewResolutionTicketTx",
+  )(function* (input) {
+    yield* Transaction;
+    const row = yield* ownedTicket(input.ownership, input.now);
+    if (
+      !row ||
+      row.state === "terminal" ||
+      row.ticket.expiresAtHubTime !== input.expectedExpiresAtHubTime
+    )
+      return null;
+    const renewed = yield* stored("renewed-ticket-codec", decodeTicket(input.renewedLease, strict));
+    const old = row.ticket;
+    if (
+      renewed.memorySpaceId !== old.memorySpaceId ||
+      renewed.memoryId !== old.memoryId ||
+      renewed.conflictId !== old.conflictId ||
+      renewed.attemptId !== old.attemptId ||
+      renewed.holderEnvironmentId !== old.holderEnvironmentId ||
+      renewed.fencingToken !== old.fencingToken ||
+      renewed.claimedAtHubTime !== old.claimedAtHubTime ||
+      renewed.attemptDeadlineHubTime !== old.attemptDeadlineHubTime ||
+      !sameHeadSet(renewed.conflictHeadSet, old.conflictHeadSet) ||
+      (yield* selectionCodec.encode(renewed.frozenDefaultModelSelection)) !==
+        (yield* selectionCodec.encode(old.frozenDefaultModelSelection)) ||
+      Date.parse(renewed.expiresAtHubTime) < Date.parse(old.expiresAtHubTime)
+    )
+      return yield* new MemoryStoreConflict({ code: "fenced" });
+    return yield* writeTicket(
+      input.ownership,
+      { ...row, ticket: renewed, version: row.version + 1 },
+      row.version,
+    );
+  });
   const failResolutionTicketTx: MemoryStore["Service"]["failResolutionTicketTx"] = Effect.fn(
     "MemoryStore.failResolutionTicketTx",
   )(function* (input) {
@@ -8484,6 +8524,7 @@ const make = Effect.gen(function* () {
     acquireResolutionTicketTx,
     transitionResolutionTicketTx,
     persistResolutionSubmissionTx,
+    renewResolutionTicketTx,
     failResolutionTicketTx,
     holdClaimCandidateTx,
     rearmResolutionHoldsTx,
