@@ -3135,7 +3135,7 @@ const make = Effect.gen(function* () {
   const readWork = Effect.fn("MemoryStore.readWork")(function* (id: string) {
     const rows = yield* stored(
       "read-work",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id} AND admin_json IS NULL`,
     );
     return (yield* workRows(rows))[0];
   });
@@ -3314,7 +3314,7 @@ const make = Effect.gen(function* () {
           "ack-work",
           sql<
             WorkRow & { completed_receipt_json: string | null }
-          >`SELECT * FROM memory_outbox WHERE id=${id}`,
+          >`SELECT * FROM memory_outbox WHERE id=${id} AND kind IN ('sync','revert_intent')`,
         );
         const work = (yield* workRows(rows))[0];
         if (
@@ -4496,13 +4496,18 @@ const make = Effect.gen(function* () {
           "claim-gone",
           sql<{
             rowid: number;
-            id: string;
+            id: string | null;
             gone: number;
-          }>`SELECT o.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone FROM memory_outbox o WHERE o.rowid>${orphan.after} AND o.rowid<=${orphan.upper} ORDER BY o.rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}`,
+          }>`WITH page AS MATERIALIZED (
+            SELECT rowid FROM memory_outbox WHERE rowid>${orphan.after} AND rowid<=${orphan.upper}
+            ORDER BY rowid LIMIT ${M.MEMORY_PAGE_MAX_ITEMS}
+          ) SELECT page.rowid,o.id,NOT EXISTS(SELECT 1 FROM memory_items i WHERE i.space=o.space AND i.memory_id=o.memory_id) AS gone
+          FROM page LEFT JOIN memory_outbox o ON o.rowid=page.rowid AND o.kind IN ('claim','resolve')
+          ORDER BY page.rowid`,
         );
         yield* advance("orphan", work.at(-1)?.rowid ?? orphan.upper);
         for (const row of work)
-          if (row.gone) {
+          if (row.id !== null && row.gone) {
             const candidate = yield* readWork(row.id);
             if (
               candidate &&
@@ -5607,7 +5612,7 @@ const make = Effect.gen(function* () {
   const readWorkOperation = Effect.fn("MemoryStore.readWorkOperation")(function* (id: string) {
     const rows = yield* stored(
       "work-operation",
-      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id}`,
+      sql<WorkRow>`SELECT * FROM memory_outbox WHERE id=${id} AND kind IN ('sync','resolve','revert_intent')`,
     );
     const work = (yield* workRows(rows))[0];
     return work && "protocolVersion" in work.metadata
