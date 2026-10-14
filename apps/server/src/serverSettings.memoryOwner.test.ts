@@ -157,7 +157,13 @@ it.effect("removing a pending reenrollment keeps the revocation closed after its
     yield* update(admin, 2, [requester]);
     yield* update(admin, 3, []);
     const r = removed.policy.removals[0]!;
-    const settled = yield* policy.recordRevokeAck({ ...r, revokedThroughEpoch: r.removalEpoch });
+    const settled = yield* policy.recordRevokeAck({
+      memorySpaceId: r.memorySpaceId,
+      ownerEnvironmentId: r.ownerEnvironmentId,
+      requesterEnvironmentId: r.requesterEnvironmentId,
+      removalEpoch: r.removalEpoch,
+      revokedThroughEpoch: r.removalEpoch,
+    });
     expect(settled.policy.allowedRequesterEnvironmentIds).toEqual([]);
     expect(settled.policy.enrollments).toEqual([]);
   }).pipe(Effect.provide(fixture())),
