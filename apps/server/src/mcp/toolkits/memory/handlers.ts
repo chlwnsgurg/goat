@@ -10,6 +10,7 @@ import { MemoryToolkit } from "./tools.ts";
 
 const isMemoryError = Schema.is(M.MemoryRpcError);
 const isCapacityDimension = Schema.is(M.MemoryCapacityDimension);
+const isCapacity = Schema.is(M.MemoryCapacityExceeded);
 const isFailureCode = Schema.is(M.MemoryFailureCode);
 
 /** Only safe typed fields cross MCP; optional fields are absent, never undefined. */
@@ -17,6 +18,13 @@ export const memoryError = (error: unknown): M.MemoryRpcError => {
   if (isMemoryError(error)) return error;
   if (typeof error !== "object" || error === null)
     return new M.MemoryRpcError({ code: "storage_failed" });
+  if (
+    "_tag" in error &&
+    (error._tag === "MemoryHubForbiddenError" || error._tag === "MemoryHubUnauthorizedError")
+  )
+    return new M.MemoryRpcError({ code: "unavailable" });
+  if ("capacity" in error && isCapacity(error.capacity))
+    return new M.MemoryRpcError({ code: "capacity_exceeded", capacity: error.capacity });
   if ("_tag" in error && error._tag === "SchemaError")
     return new M.MemoryRpcError({ code: "invalid_output" });
   if (
@@ -28,17 +36,18 @@ export const memoryError = (error: unknown): M.MemoryRpcError => {
     typeof error.current === "number" &&
     "limit" in error &&
     typeof error.limit === "number"
-  )
-    return new M.MemoryRpcError({
-      code: "capacity_exceeded",
-      capacity: {
-        code: "capacity_exceeded",
-        dimension: error.dimension,
-        current: error.current,
-        limit: error.limit,
-        reclaimable: 0,
-      },
-    });
+  ) {
+    const capacity = {
+      code: "capacity_exceeded" as const,
+      dimension: error.dimension,
+      current: error.current,
+      limit: error.limit,
+      reclaimable: 0,
+    };
+    return isCapacity(capacity)
+      ? new M.MemoryRpcError({ code: "capacity_exceeded", capacity })
+      : new M.MemoryRpcError({ code: "storage_failed" });
+  }
   if ("code" in error && isFailureCode(error.code) && error.code !== "capacity_exceeded")
     return new M.MemoryRpcError({ code: error.code });
   return new M.MemoryRpcError({ code: "storage_failed" });

@@ -1,6 +1,14 @@
 import { expect, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { McpServer } from "effect/ai";
+import * as Sync from "../../../memory/MemorySyncService.ts";
+import * as McpHttpServer from "../../McpHttpServer.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 import * as MemoryService from "../../../memory/MemoryService.ts";
@@ -178,4 +186,73 @@ it.effect("strict contract decoding rejects extra keys before persisting a raw M
       )).items,
     ).toHaveLength(0);
   }).pipe(Effect.provide(Fixture.layer)),
+);
+
+it.effect(
+  "revocation while a toolkit mutation waits for the real Store transaction prevents persistence",
+  () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const locked = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let authorized = true;
+      const observed = Layer.effect(
+        MemoryService.MemoryService,
+        Effect.gen(function* () {
+          const delegate = yield* MemoryService.MemoryService;
+          return MemoryService.MemoryService.of({
+            ...delegate,
+            upsert: (input, permit) =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(delegate.upsert(input, permit)),
+              ),
+          });
+        }),
+      ).pipe(Layer.provideMerge(Fixture.core));
+      const toolkit = McpHttpServer.layerMemoryToolkit.pipe(
+        Layer.provideMerge(observed),
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+        Layer.provide(Layer.mock(Sync.MemorySyncService)({})),
+        Layer.provide(NodeServices.layer),
+      );
+      yield* Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const holder = yield* store
+          .transact(
+            Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          )
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(locked);
+        const invocation = {
+          ...Fixture.scope(),
+          reauthorize: () =>
+            Effect.suspend(() =>
+              authorized
+                ? Effect.void
+                : Effect.fail(
+                    new M.EnvironmentAuthorizationError({
+                      message: "Revoked.",
+                      requiredScope: "memory:write",
+                    }),
+                  ),
+            ),
+        };
+        const pending = yield* Fixture.call("memory_upsert", Fixture.upsert(), invocation).pipe(
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(entered);
+        authorized = false;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(holder);
+        expect((yield* Fiber.join(pending)).body).toMatchObject({ code: "unavailable" });
+        const service = yield* MemoryService.MemoryService;
+        expect(
+          (yield* service.list(
+            { memorySpaceId: Fixture.space, includeQuarantined: false, limit: 20 },
+            Effect.void,
+          )).items,
+        ).toHaveLength(0);
+      }).pipe(Effect.provide(toolkit));
+    }).pipe(Effect.scoped),
 );

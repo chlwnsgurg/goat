@@ -1,3 +1,5 @@
+import * as MemoryToolkitFixture from "../mcp/toolkits/memory/handlers.testkit.ts";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthAdministrativeScopes,
@@ -125,6 +127,44 @@ const decide = (
     Effect.flatMap((response) =>
       json<{ redirectTo?: string; message?: string }>(response).pipe(
         Effect.map((payload) => ({ status: response.status, ...payload })),
+      ),
+    ),
+  );
+
+const withAuthenticatedMemoryTools = (
+  auth: EnvironmentAuth.EnvironmentAuth["Service"],
+  token: string,
+) =>
+  Effect.gen(function* () {
+    const authenticator = yield* McpHttpServer.McpClientAuthenticator;
+    const invocation = yield* authenticator.authenticate(
+      HttpServerRequest.fromWeb(at("/mcp", { headers: { authorization: `Bearer ${token}` } })),
+    );
+    expect(invocation).toBeDefined();
+    const list = yield* MemoryToolkitFixture.call(
+      "memory_list",
+      { memorySpaceId: MemoryToolkitFixture.space, includeQuarantined: false },
+      invocation!,
+    );
+    const write = yield* MemoryToolkitFixture.call(
+      "memory_upsert",
+      MemoryToolkitFixture.upsert(),
+      invocation!,
+    );
+    return { list, write };
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        MemoryToolkitFixture.layer,
+        McpOAuth.layerMcpClientAuthenticator.pipe(
+          Layer.provide(Layer.succeed(EnvironmentAuth.EnvironmentAuth, auth)),
+          Layer.provide(
+            Layer.succeed(ServerEnvironment.ServerEnvironment, {
+              getEnvironmentId: Effect.succeed(MemoryToolkitFixture.scope().environmentId),
+              getDescriptor: Effect.die("unused"),
+            }),
+          ),
+        ),
       ),
     ),
   );
@@ -699,6 +739,13 @@ it.live.each([
           ...memoryScopes,
         ]);
         expect(client.access).toBe("auto");
+        const tools = yield* withAuthenticatedMemoryTools(auth, token.access_token);
+        expect(tools.list.result.isError === true).toBe(
+          !memoryScopes.some((scope) => scope === "memory:read"),
+        );
+        expect(tools.write.result.isError === true).toBe(
+          !memoryScopes.some((scope) => scope === "memory:write"),
+        );
         yield* client.reauthorize!([...memoryScopes]);
         for (const scope of ["memory:read", "memory:write"] as const) {
           if (!memoryScopes.some((selected) => selected === scope)) {
