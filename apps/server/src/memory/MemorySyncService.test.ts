@@ -3559,3 +3559,121 @@ it.effect(
       );
     }),
 );
+
+it.effect(
+  "lost resolve response followed by canonical pull reconciles changed heads without regeneration",
+  () =>
+    Effect.gen(function* () {
+      const submitted = yield* Deferred.make<void>();
+      let saved: M.MemoryHubApplyResolutionInput | undefined;
+      let deliver = false;
+      let generated = 0;
+      let applies = 0;
+      const client = peer({
+        applyResolution: (_c, input) =>
+          Effect.gen(function* () {
+            saved = input;
+            applies++;
+            yield* Deferred.succeed(submitted, undefined);
+            return yield* new M.MemoryHubError({ code: "unavailable" });
+          }),
+        pull: (_c, input) =>
+          Effect.sync(() => {
+            if (!deliver || !saved || input.afterSequence >= 1)
+              return {
+                highWatermark: input.afterSequence,
+                throughSequence: input.afterSequence,
+                hasMore: false,
+                entries: [],
+              };
+            const op = saved.operation;
+            if (op.kind !== "resolve") throw new Error("fixture");
+            const receipt: M.MemoryHubReceipt = {
+              operationId: op.operationId,
+              memoryId: op.memoryId,
+              operationDigest: memoryOperationDigest(op),
+              outcome: "accepted",
+              hubSequence: 1,
+              resolutionApproval: {
+                resolutionId: op.resolution.resolutionId,
+                appliedAtUtc: op.resolution.appliedAtUtc,
+                revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+              },
+            };
+            return {
+              highWatermark: 1,
+              throughSequence: 1,
+              hasMore: false,
+              entries: [{ kind: "operation" as const, operation: op, receipt, hubSequence: 1 }],
+            };
+          }),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.sync(() => {
+            generated++;
+            return {
+              result: {
+                text: "synthetic reconcile result",
+                assertionKind: "inference" as const,
+                evidence: [],
+                judgment: "combine synthetic facts",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: local,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          const memoryId = yield* conflict();
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          yield* Deferred.await(submitted);
+          yield* sync.shutdown;
+          const store = yield* Store.MemoryStore;
+          const ticket = (yield* store.readRecoverableResolutionTickets({
+            memorySpaceId: space,
+            now: 30000,
+            limit: 100,
+          }))[0]!;
+          assert.deepStrictEqual(ticket.submission, saved);
+          deliver = true;
+          yield* TestClock.adjust("30 seconds");
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.syncOnce;
+              yield* restarted.shutdown;
+            }).pipe(Effect.provide(Layer.fresh(Sync.layer))),
+          );
+          assert.strictEqual(generated, 1);
+          assert.strictEqual(applies, 1);
+          const aggregate = yield* store.loadAggregate(space, memoryId);
+          const resolved = saved!.operation;
+          if (resolved.kind !== "resolve") throw new Error("fixture");
+          assert.deepStrictEqual(aggregate.heads, [resolved.revision.revisionId]);
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            status: string;
+            submission_digest: string | null;
+          }>`SELECT status,submission_digest FROM memory_outbox WHERE kind='resolve' AND memory_id=${memoryId}`;
+          assert.deepStrictEqual(rows, [{ status: "completed", submission_digest: null }]);
+          assert.strictEqual(
+            (yield* store.readRecoverableResolutionTickets({
+              memorySpaceId: space,
+              now: 30000,
+              limit: 100,
+            })).length,
+            0,
+          );
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);

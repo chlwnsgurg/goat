@@ -432,30 +432,24 @@ const make = Effect.gen(function* () {
       const slot = executions.get(renewed.memoryId);
       if (slot) slot.ticket = renewed;
     });
-    const settle = Effect.fnUntraced(function* (receipt: M.MemoryHubReceipt) {
-      if (!row.submission) return yield* new M.MemoryHubError({ code: "invalid_output" });
-      const operation = row.submission.operation;
-      const candidate = yield* store.findClaimCandidate({
-        memorySpaceId: row.ticket.memorySpaceId,
-        attemptId: row.ticket.attemptId,
+    const reconcile = Effect.fnUntraced(function* (rejection?: M.MemoryHubReceipt) {
+      const result = yield* service.reconcileResolutionSubmission({
+        ownership: ownership(row),
+        now: yield* Clock.currentTimeMillis,
+        hubEnvironmentId: r.hubId,
+        localEnvironmentId: local,
+        reauthorize: ensureEpoch(r.settings.memoryHubVersion),
+        ...(rejection ? { rejection } : {}),
       });
-      yield* ensureEpoch(r.settings.memoryHubVersion);
-      yield* store.transact(
-        service.settleHubEntryTx({
-          memorySpaceId: row.ticket.memorySpaceId,
-          hubEnvironmentId: r.hubId,
-          localEnvironmentId: local,
-          entry: { kind: "operation", hubSequence: receipt.hubSequence!, operation, receipt },
-        }),
-      );
-      yield* transition("terminal");
-      if (candidate) yield* store.completeClaimCandidate(candidate.id);
+      if (!result) return yield* new M.MemoryHubError({ code: "fenced" });
+      row = result.row;
+      return result.outcome;
     });
     const execute = Effect.gen(function* () {
       yield* ensureEpoch(r.settings.memoryHubVersion);
-      if (row.approval) {
-        yield* settle(row.approval);
-        return;
+      // Reconcile durable bytes before inspecting the new frontier or generating another result.
+      if (row.submission) {
+        if ((yield* reconcile()) !== "uncertain") return;
       }
       if (!row.submission) {
         yield* transition("running");
@@ -613,28 +607,14 @@ const make = Effect.gen(function* () {
         ? client.applyResolution(r.connection, row.submission!)
         : hub.applyResolution(row.submission!, r.principal!);
       if (receipt.outcome === "rejected" || receipt.hubSequence === null) {
-        const candidate = yield* store.findClaimCandidate({
-          memorySpaceId: row.ticket.memorySpaceId,
-          attemptId: row.ticket.attemptId,
-        });
-        if (receipt.outcome !== "rejected" || candidate?.metadata.kind !== "claim")
+        if (receipt.outcome !== "rejected")
           return yield* new M.MemoryHubError({ code: "invalid_output" });
-        const retired = yield* store.transact(
-          store.retireRejectedSubmissionTx({
-            ownership: ownership(row),
-            candidateId: candidate.id,
-            expectedGeneration: candidate.metadata.generation ?? 0,
-            rejection: receipt,
-            now: yield* Clock.currentTimeMillis,
-            nextAttemptAt: (yield* Clock.currentTimeMillis) + 30000,
-          }),
-        );
-        if (!retired) return yield* new M.MemoryHubError({ code: "fenced" });
-        row = retired;
+        if ((yield* reconcile(receipt)) === "uncertain")
+          return yield* new M.MemoryHubError({ code: "invalid_output" });
         return;
       }
       yield* transition("approved", receipt);
-      yield* settle(receipt);
+      yield* reconcile();
     });
     yield* execute.pipe(
       Effect.tapError((error) =>
