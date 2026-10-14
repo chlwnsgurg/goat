@@ -299,7 +299,7 @@ it.effect.each([
       if (drift === "wrong watermark")
         yield* sql`UPDATE orchestration_events SET event_id=${id(99)}`;
       if (drift === "forgotten")
-        yield* sql`UPDATE memory_items SET availability_json=json_set(availability_json,'$.exposure','forgotten') WHERE space=${space}`;
+        yield* sql`INSERT INTO memory_pending_forget_intents(space,memory_id,operation_id,requested_at_utc,attempts,last_failure_code,submission_state) VALUES (${space},${memory},${id(99)},'1970-01-01T00:00:00.000Z',0,NULL,'unsubmitted')`;
       if (drift === "secret")
         yield* sql`UPDATE orchestration_events SET payload_json=${encodeMessage({ ...message, text: "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----" })}`;
       if (drift === "oversize")

@@ -13,6 +13,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Secrets from "../auth/ServerSecretStore.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
+import { sourceReadInput, sourceReadLocatorDigest } from "./MemoryOwnerSourceReader.ts";
 import * as Settings from "../serverSettings.ts";
 
 export type HubConnection = Extract<M.MemoryHubSettings, { mode: "member" }> & {
@@ -301,6 +302,12 @@ const make = Effect.gen(function* () {
       M.MEMORY_HUB_PATHS.sourceReadRequest,
       M.MemoryHubSourceReadRequestInput,
       M.MemoryHubSourceReadRequestResult,
+      (_connection, input, output) =>
+        output.request.requestId === input.requestId &&
+        output.request.memorySpaceId === input.memorySpaceId &&
+        output.request.stamp !== undefined &&
+        output.request.stamp.locatorDigest === sourceReadLocatorDigest(input) &&
+        sourceReadLocatorDigest(sourceReadInput(output.request)) === sourceReadLocatorDigest(input),
     ),
     collectSourceReads: call(
       M.MEMORY_HUB_PATHS.sourceReadCollect,
@@ -311,6 +318,14 @@ const make = Effect.gen(function* () {
       M.MEMORY_HUB_PATHS.sourceReadRespond,
       M.MemoryHubSourceReadRespondInput,
       M.MemoryHubSourceReadRespondResult,
+      (_connection, input, output) =>
+        input.kind === "revoke"
+          ? output.kind === "revoke" &&
+            output.ack.memorySpaceId === input.memorySpaceId &&
+            output.ack.requesterEnvironmentId === input.requesterEnvironmentId &&
+            output.ack.removalEpoch === input.ownerPolicyEpoch &&
+            output.ack.revokedThroughEpoch >= input.ownerPolicyEpoch
+          : output.kind === "normal",
     ),
     resultSourceRead: call(
       M.MEMORY_HUB_PATHS.sourceReadResult,

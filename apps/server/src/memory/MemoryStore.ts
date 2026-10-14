@@ -9163,7 +9163,9 @@ const make = Effect.gen(function* () {
       withHubBudget(requestHubSourceReadTx(authority, input)),
     collectHubSourceReadsTx,
     respondHubSourceReadTx: (authority, input) =>
-      withHubBudget(respondHubSourceReadTx(authority, input)),
+      input.kind === "revoke"
+        ? respondHubSourceReadTx(authority, input)
+        : withHubBudget(respondHubSourceReadTx(authority, input)),
     resultHubSourceReadTx,
     readHubAdminTx,
     writeHubAdminTx: (input) => withHubBudget(writeHubAdminTx(input)),

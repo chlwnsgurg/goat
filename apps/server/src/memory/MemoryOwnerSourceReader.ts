@@ -192,7 +192,8 @@ const make = Effect.gen(function* () {
         AND json_extract(e.payload_json,'$.role') IN ('user','assistant')
         AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='message.updated' AND json_extract(n.payload_json,'$.id')=json_extract(e.payload_json,'$.id') AND n.sequence>e.sequence)
         AND (json_extract(e.payload_json,'$.runId') IS NULL AND json_extract(e.payload_json,'$.role')='user' OR
-          (SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') ORDER BY r.sequence DESC LIMIT 1)='completed')
+          (SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence<=${request.sourceWatermark.throughSequence} ORDER BY r.sequence DESC LIMIT 1)='completed')
+        AND NOT EXISTS (SELECT 1 FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') AND r.sequence>${request.sourceWatermark.throughSequence})
         ORDER BY e.sequence LIMIT 101`);
         if (
           rows.length !== request.messageIds.length ||
@@ -225,7 +226,9 @@ const make = Effect.gen(function* () {
         };
         if (scanMemoryValue(outcome).kind !== "allowed")
           return { kind: "unavailable" as const, code: "secret_detected" as const };
-        const checked = yield* query(decodeOutcome(outcome, strict));
+        const checked = yield* decodeOutcome(outcome, strict).pipe(
+          Effect.mapError(() => new Store.MemoryStoreConflict({ code: "payload_too_large" })),
+        );
         yield* query(encodeOutcome(checked));
         const after = yield* service.prepareSourceRead(input, fence);
         if (
