@@ -282,6 +282,7 @@ export class MemoryHubAdminSettings extends Context.Service<
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
     readonly read: Effect.Effect<MemoryHubSettingsView, MemoryHubError>;
+    readonly readPreviousHubRequestId: Effect.Effect<MemoryOperationId | null, MemoryHubError>;
     readonly readPreviousHubSpace: Effect.Effect<MemorySpaceId | null, MemoryHubError>;
     readonly apply: (
       record: MemoryStore.AdminRecord,
@@ -307,6 +308,7 @@ const hubAdministrationSettings = (
     Effect.map((current) => ({ settings: current.memoryHub, version: current.memoryHubVersion })),
     Effect.mapError(() => new MemoryHubError({ code: "storage_failed" })),
   ),
+  readPreviousHubRequestId: Effect.map(marker, (saved) => saved?.requestId ?? null),
   readPreviousHubSpace: read.pipe(
     Effect.flatMap((current) =>
       current.memoryHub.mode === "hub" && current.memoryHub.memorySpaceId !== null

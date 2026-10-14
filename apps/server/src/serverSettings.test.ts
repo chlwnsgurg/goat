@@ -2465,11 +2465,13 @@ it.effect(
       };
       const result = yield* admin.withLock(admin.apply(record, Effect.void));
       assert.strictEqual(result.view.version, 1);
+      assert.strictEqual(yield* admin.readPreviousHubRequestId, record.requestId);
       // New settings service, same real filesystem/secret/SQLite dependencies.
       const restarted = yield* Effect.gen(function* () {
         const recovered = yield* ServerSettingsModule.MemoryHubAdminSettings;
         const publicService = yield* ServerSettingsModule.ServerSettingsService;
         assert.isFalse(Object.hasOwn(yield* publicService.getSettings, "_memoryHubTransition"));
+        assert.strictEqual(yield* recovered.readPreviousHubRequestId, record.requestId);
         return yield* recovered.withLock(recovered.apply(record, Effect.void));
       }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
       assert.deepStrictEqual(restarted, result);

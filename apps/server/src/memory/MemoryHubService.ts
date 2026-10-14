@@ -360,6 +360,7 @@ export const layer = Layer.effect(MemoryHubService, make);
 
 export type MemoryHubAdministrationError = MemoryHubServiceError | Secrets.SecretStoreError;
 type AdminPermit = Effect.Effect<void, M.MemoryHubForbiddenError>;
+const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
 type SafeAdminResult = Omit<M.MemoryHubSettingsUpdateResult, "credential">;
 
 /** L3 binds the existing settings admin lock and dedicated idempotent settings CAS. */
@@ -368,6 +369,7 @@ export class MemoryHubAdminSettings extends Context.Service<
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
     readonly read: Effect.Effect<M.MemoryHubSettingsView, M.MemoryHubError>;
+    readonly readPreviousHubRequestId: Effect.Effect<M.MemoryOperationId | null, M.MemoryHubError>;
     readonly readPreviousHubSpace: Effect.Effect<M.MemorySpaceId | null, M.MemoryHubError>;
     readonly apply: (
       record: Store.AdminRecord,
@@ -400,6 +402,19 @@ export const makeAdministrator = Effect.gen(function* () {
   const decode = Schema.decodeUnknownEffect(M.MemoryHubSettingsUpdateInput);
   const tx = <A, E, R>(permit: AdminPermit, effect: Effect.Effect<A, E, R>) =>
     store.transact(Effect.andThen(permit, effect));
+  // Null result is the terminal refusal, not a successful settings receipt. The
+  // acknowledged stage removes it from pending work and retains replay evidence.
+  const retireTx = (record: Store.AdminRecord) =>
+    Effect.gen(function* () {
+      const ready = yield* store.writeHubAdminTx({
+        record: { ...record, stage: "ready", result: null },
+        expectedStage: "activated",
+      });
+      return yield* store.writeHubAdminTx({
+        record: { ...ready, stage: "acknowledged" },
+        expectedStage: "ready",
+      });
+    });
   const update: MemoryHubAdministrator["Service"]["update"] = Effect.fn(
     "MemoryHubAdministrator.update",
   )(function* (input, permit) {
@@ -476,18 +491,99 @@ export const makeAdministrator = Effect.gen(function* () {
           )
             return yield* new Store.MemoryStoreConflict({ code: "not_found" });
         }
+        let superseded: Store.AdminRecord | undefined;
         const outgoing =
           request.action === "provisionMember" || request.action === "rotateMemberCredential";
         if (!record || record.stage === "prepared") {
-          // Ready/prepared backlog must not hide an unfinished settings CAS.
-          const activated = yield* tx(permit, store.readActivatedHubAdminTx());
-          if (activated && activated.requestId !== request.requestId)
-            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           const view = yield* settings.read;
           if (view.version !== request.expectedVersion)
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          const activated = yield* tx(permit, store.readActivatedHubAdminTx());
+          if (activated && activated.requestId !== request.requestId) {
+            // A fresh owner configure is the explicit superseding CAS. Never retire
+            // credential operations or a configure that can still apply its revision.
+            if (
+              request.action !== "configure" ||
+              activated.action.action !== "configure" ||
+              (activated.expectedVersion === view.version &&
+                !(
+                  activated.action.settings.mode === "hub" &&
+                  activated.action.settings.memorySpaceId === null
+                ))
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            const result = yield* settings.apply(activated, permit).pipe(
+              Effect.catchTags({
+                MemoryHubError: (error) =>
+                  error.code === "revision_changed" ||
+                  (error.code === "bootstrap_required" &&
+                    activated.action.action === "configure" &&
+                    activated.action.settings.mode === "hub" &&
+                    activated.action.settings.memorySpaceId === null)
+                    ? Effect.succeed(null)
+                    : Effect.fail(error),
+              }),
+            );
+            if (result === null) superseded = activated;
+            else
+              yield* tx(
+                permit,
+                store.writeHubAdminTx({
+                  record: { ...activated, stage: "ready", result },
+                  expectedStage: "activated",
+                }),
+              );
+            // A successful marker replay may have advanced the view; the caller
+            // must still own the exact revision of its replacement request.
+            if ((yield* settings.read).version !== request.expectedVersion)
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }
+          if (request.action === "configure") {
+            // Pre-consumer null-space intents cannot bootstrap. Preserve their
+            // immutable payload while retiring through the existing forward CAS.
+            const pending = yield* store.readPendingHubAdmins(M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS);
+            for (const legacy of pending) {
+              if (
+                legacy.requestId === request.requestId ||
+                legacy.stage !== "prepared" ||
+                legacy.action.action !== "configure" ||
+                legacy.action.settings.mode !== "hub" ||
+                legacy.action.settings.memorySpaceId !== null
+              )
+                continue;
+              yield* tx(
+                permit,
+                Effect.gen(function* () {
+                  const next = yield* store.writeHubAdminTx({
+                    record: { ...legacy, stage: "activated" },
+                    expectedStage: "prepared",
+                  });
+                  yield* retireTx(next);
+                }),
+              );
+            }
+          }
         }
         if (!record) {
+          let previousSpace = yield* settings.readPreviousHubSpace;
+          if (previousSpace === null) {
+            const previousId = yield* settings.readPreviousHubRequestId;
+            const previous =
+              previousId === null ? undefined : yield* tx(permit, store.readHubAdminTx(previousId));
+            // A disable marker points at its durable administration receipt. The
+            // private reference carries a binding, not credential bytes.
+            const saved = previous?.secretName?.match(/^memory-hub-internal-(.+)$/)?.[1];
+            if (saved)
+              previousSpace = yield* decodeMemorySpaceId(saved).pipe(
+                Effect.mapError(() => new M.MemoryHubError({ code: "storage_failed" })),
+              );
+          }
+          if (
+            previousSpace === null &&
+            superseded?.action.action === "configure" &&
+            superseded.action.settings.mode === "hub"
+          )
+            previousSpace = superseded.action.settings.memorySpaceId;
           let action: Store.PersistedAdminAction;
           if (request.action === "installCredential") {
             const { credential: _credential, ...safe } = request;
@@ -495,7 +591,6 @@ export const makeAdministrator = Effect.gen(function* () {
               return yield* new M.MemoryHubError({ code: "invalid_output" });
             action = safe;
           } else if (request.action === "configure" && request.settings.mode === "hub") {
-            const previousSpace = yield* settings.readPreviousHubSpace;
             // Persist the resolved action before SQL activation. The digest still identifies
             // the original wire request, so a retry never chooses another space.
             const hash = NodeCrypto.createHash("sha256")
@@ -514,30 +609,39 @@ export const makeAdministrator = Effect.gen(function* () {
           const internalSpace =
             action.action === "configure" && action.settings.mode === "hub"
               ? action.settings.memorySpaceId
-              : null;
+              : action.action === "configure"
+                ? previousSpace
+                : null;
           record = yield* tx(
             permit,
-            store.writeHubAdminTx({
-              record: {
-                requestId: request.requestId,
-                requestDigest: digest,
-                expectedVersion: request.expectedVersion,
-                action,
-                stage: "prepared",
-                memberVersion: null,
-                result: null,
-                secretName:
-                  internalSpace !== null
-                    ? `memory-hub-internal-${internalSpace}`
-                    : outgoing || request.action === "installCredential"
-                      ? `memory-hub-${request.action === "installCredential" ? "installed" : "outgoing"}-${request.requestId}`
-                      : null,
-              },
-              expectedStage: null,
+            Effect.gen(function* () {
+              // Keep the successor binding and retirement atomic: interruption
+              // cannot leave a published space without a durable recovery pointer.
+              if (superseded) yield* retireTx(superseded);
+              return yield* store.writeHubAdminTx({
+                record: {
+                  requestId: request.requestId,
+                  requestDigest: digest,
+                  expectedVersion: request.expectedVersion,
+                  action,
+                  stage: "prepared",
+                  memberVersion: null,
+                  result: null,
+                  secretName:
+                    internalSpace !== null
+                      ? `memory-hub-internal-${internalSpace}`
+                      : outgoing || request.action === "installCredential"
+                        ? `memory-hub-${request.action === "installCredential" ? "installed" : "outgoing"}-${request.requestId}`
+                        : null,
+                },
+                expectedStage: null,
+              });
             }),
           );
+          superseded = undefined;
         }
         if (record.stage === "prepared") {
+          if (superseded) yield* tx(permit, retireTx(superseded));
           yield* permit;
           if (request.action === "installCredential") {
             // Retry stages identical bytes to the same private reference.
@@ -548,10 +652,16 @@ export const makeAdministrator = Effect.gen(function* () {
             if (memorySpaceId === null || record.secretName === null)
               return yield* new M.MemoryHubError({ code: "bootstrap_required" });
             const environmentId = yield* identity.getEnvironmentId;
-            const bytes = yield* secrets.getOrCreateRandom(record.secretName, 32);
-            const credentialDigest = NodeCrypto.createHash("sha256")
-              .update(Buffer.from(bytes).toString("base64url"))
-              .digest("hex");
+            const existing = yield* tx(permit, store.readHubMember(memorySpaceId, environmentId));
+            const credentialDigest = existing
+              ? null
+              : NodeCrypto.createHash("sha256")
+                  .update(
+                    Buffer.from(yield* secrets.getOrCreateRandom(record.secretName, 32)).toString(
+                      "base64url",
+                    ),
+                  )
+                  .digest("hex");
             const prepared = record;
             yield* tx(
               permit,
@@ -572,6 +682,8 @@ export const makeAdministrator = Effect.gen(function* () {
                     expectedStage: "prepared",
                   });
                 } else {
+                  if (credentialDigest === null)
+                    return yield* new M.MemoryHubError({ code: "identity_mismatch" });
                   yield* store.activateHubMemberTx({
                     requestId: request.requestId,
                     requestDigest: digest,
@@ -669,13 +781,17 @@ export const makeAdministrator = Effect.gen(function* () {
             }),
           );
         }
-        if (!record.result) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+        if (!record.result)
+          return yield* new M.MemoryHubError({
+            code:
+              (record.stage === "ready" || record.stage === "acknowledged") &&
+              request.action === "configure"
+                ? "revision_changed"
+                : "bootstrap_required",
+          });
         let credential: M.MemoryHubCredentialResult | null = null;
         if (outgoing && record.stage !== "acknowledged") {
           yield* permit;
-          const saved = yield* secrets.get(record.secretName!);
-          if (Option.isNone(saved))
-            return yield* new M.MemoryHubError({ code: "source_unavailable" });
           const view = record.result.view;
           if (
             view.settings.mode !== "hub" ||
@@ -694,6 +810,9 @@ export const makeAdministrator = Effect.gen(function* () {
             member.credentialVersion !== record.memberVersion
           )
             return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          const saved = yield* secrets.get(record.secretName!);
+          if (Option.isNone(saved))
+            return yield* new M.MemoryHubError({ code: "source_unavailable" });
           credential = {
             requestId: record.requestId,
             environmentId: request.environmentId,
