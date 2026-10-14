@@ -125,6 +125,46 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
     `;
   });
 
+// Native watch streams acquire after start returns. Tests await the exact
+// directory registration before editing; filesystem events remain real.
+const withRegisteredSettingsWatchers = <A, E, R>(
+  use: (awaitWatch: (directory: string) => Effect.Effect<void>) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const registrations = new Map<string, Deferred.Deferred<void>>();
+    const registration = (directory: string) => {
+      let deferred = registrations.get(directory);
+      if (!deferred) {
+        deferred = Deferred.makeUnsafe<void>();
+        registrations.set(directory, deferred);
+      }
+      return deferred;
+    };
+    const controlledFs = FileSystem.FileSystem.of({
+      ...fs,
+      watch: (directory) =>
+        Stream.callback<FileSystem.WatchEvent>((queue) =>
+          Effect.gen(function* () {
+            yield* Effect.acquireRelease(
+              Effect.sync(() =>
+                NodeFS.watch(directory, (_event, fileName) => {
+                  if (fileName !== null)
+                    Queue.offerUnsafe(queue, { _tag: "Update", path: String(fileName) });
+                }),
+              ),
+              (watcher) => Effect.sync(() => watcher.close()),
+            );
+            yield* Deferred.succeed(registration(directory), undefined);
+          }),
+        ),
+    });
+    return yield* use((directory) => Deferred.await(registration(directory))).pipe(
+      Effect.provide(layerServerSettings()),
+      Effect.provideService(FileSystem.FileSystem, controlledFs),
+    );
+  }).pipe(TestClock.withLive);
+
 it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
@@ -267,7 +307,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   it.effect("reloads when the destination of a symlinked settings file changes", () =>
-    Effect.scoped(
+    withRegisteredSettingsWatchers((awaitWatch) =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
         const fs = yield* FileSystem.FileSystem;
@@ -279,6 +319,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(linkedSettingsPath, config.settingsPath);
         yield* service.start;
+        yield* awaitWatch(path.dirname(linkedSettingsPath));
         const changes = yield* service.subscribeChanges;
 
         yield* writeFileStringAtomically({
@@ -286,14 +327,14 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           contents: `{ "responseStreamingMode": "paragraph" }`,
         });
 
-        const change = yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
       }),
-    ).pipe(TestClock.withLive, Effect.provide(layerServerSettings())),
+    ),
   );
 
   it.effect("follows a settings link that is repointed to another directory", () =>
-    Effect.scoped(
+    withRegisteredSettingsWatchers((awaitWatch) =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
         const fs = yield* FileSystem.FileSystem;
@@ -309,63 +350,40 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(firstSettingsPath, config.settingsPath);
         yield* service.start;
+        yield* awaitWatch(path.dirname(firstSettingsPath));
+        yield* awaitWatch(path.dirname(config.settingsPath));
 
         const repointChanges = yield* service.subscribeChanges;
         yield* fs.remove(config.settingsPath);
         yield* fs.symlink(secondSettingsPath, config.settingsPath);
-        const repointed = yield* repointChanges.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        const repointed = yield* repointChanges.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(repointed)?.responseStreamingMode, "paragraph");
 
+        yield* awaitWatch(path.dirname(secondSettingsPath));
         const editChanges = yield* service.subscribeChanges;
         yield* writeFileStringAtomically({
           filePath: secondSettingsPath,
           contents: `{ "responseStreamingMode": "turn" }`,
         });
-        const edited = yield* editChanges.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        const edited = yield* editChanges.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(edited)?.responseStreamingMode, "turn");
       }),
-    ).pipe(TestClock.withLive, Effect.provide(layerServerSettings())),
+    ),
   );
 
   it.effect("reloads when a dangling settings link gets its destination", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const targetWatching = yield* Deferred.make<void>();
-      let targetDirectory = "";
-      const controlledFs = FileSystem.FileSystem.of({
-        ...fs,
-        // Keep real filesystem notifications, but wait for native registration
-        // before creating the destination. start returns before stream acquisition.
-        watch: (directory) =>
-          Stream.callback<FileSystem.WatchEvent>((queue) =>
-            Effect.gen(function* () {
-              yield* Effect.acquireRelease(
-                Effect.sync(() =>
-                  NodeFS.watch(directory, (_event, fileName) => {
-                    if (fileName !== null)
-                      Queue.offerUnsafe(queue, {
-                        _tag: "Update",
-                        path: String(fileName),
-                      });
-                  }),
-                ),
-                (watcher) => Effect.sync(() => watcher.close()),
-              );
-              if (directory === targetDirectory) yield* Deferred.succeed(targetWatching, undefined);
-            }),
-          ),
-      });
-      yield* Effect.gen(function* () {
+    withRegisteredSettingsWatchers((awaitWatch) =>
+      Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const service = yield* ServerSettingsModule.ServerSettingsService;
         const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-dotfiles-" });
         const linkedSettingsPath = path.join(dotfiles, "not-yet", "settings.json");
-        targetDirectory = path.dirname(linkedSettingsPath);
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(linkedSettingsPath, config.settingsPath);
         yield* service.start;
-        yield* Deferred.await(targetWatching);
+        yield* awaitWatch(path.dirname(linkedSettingsPath));
         const changes = yield* service.subscribeChanges;
         yield* writeFileStringAtomically({
           filePath: linkedSettingsPath,
@@ -373,11 +391,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         });
         const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
-      }).pipe(
-        Effect.provide(layerServerSettings()),
-        Effect.provideService(FileSystem.FileSystem, controlledFs),
-      );
-    }).pipe(TestClock.withLive),
+      }),
+    ),
   );
 
   it.effect("preserves context when reading a provider environment secret fails", () => {
