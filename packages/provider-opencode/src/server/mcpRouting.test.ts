@@ -275,10 +275,12 @@ it.layer(McpProviderSessions.layer)("OpenCode v2 MCP routing", (it) => {
           });
           assert.equal((yield* Fiber.join(terminal))?.status, "completed");
           const available = index === 0 || !failReplacement;
-          assert.include(
-            systems.at(-1) ?? "",
-            `read=${available}, write=${available}, source=${available}`,
-          );
+          if (available) {
+            assert.include(systems.at(-1) ?? "", "read=true, write=true, source=true");
+          } else {
+            // The instruction replaces its prior value; no conversational correction is needed.
+            assert.notInclude(systems.at(-1) ?? "", "GOAT memory tools:");
+          }
         }
         yield* runtime.unloadThread!({ providerThread: thread });
       }).pipe(Effect.scoped),
