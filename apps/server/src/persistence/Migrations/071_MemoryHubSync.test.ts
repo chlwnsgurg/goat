@@ -298,3 +298,23 @@ it.effect("keeps retry accounting separate from canonical snapshot dependencies"
     );
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
+
+it.effect("r14 indexes only active same-memory resolutions and keeps receipt lookup keyed", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* memory;
+    yield* hub;
+    const definition = (yield* sql<{
+      sql: string;
+    }>`SELECT sql FROM sqlite_master WHERE type='index' AND name='memory_outbox_active_resolution'`)[0]!
+      .sql;
+    assert.include(definition, "(space,memory_id)");
+    assert.include(definition, "kind='resolve'");
+    assert.include(definition, "status IN ('pending','retry','running')");
+    const plan = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT operation_digest,receipt_json FROM memory_events WHERE memory_space_id='space' AND operation_id='operation' UNION ALL SELECT operation_digest,receipt_json FROM memory_compact_receipts WHERE space='space' AND operation_id='operation' UNION ALL SELECT json_extract(record_json,'$.receipt.operationDigest'),json_extract(record_json,'$.receipt') FROM memory_import_keys WHERE space='space' AND key_kind='hubReceipt' AND key='operation' LIMIT 1`;
+    assert.strictEqual(plan.filter((r) => r.detail.includes("SEARCH")).length, 3);
+    assert.isFalse(plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")));
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

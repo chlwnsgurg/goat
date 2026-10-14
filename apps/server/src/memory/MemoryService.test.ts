@@ -1810,3 +1810,232 @@ it.effect("commits 100 frozen local intents atomically and advances the next int
     assert.deepStrictEqual(yield* store.listMaterializableIntents(environmentId, 100), []);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect.each(["lost-response", "known-approval"] as const)(
+  "r14 reconciles %s after changed heads without another generation",
+  (mode) =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const at = M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z");
+      const makeOp = (n: number, parents: readonly M.MemoryRevisionId[]): M.MemoryOperation => ({
+        protocolVersion: 1,
+        kind: "upsert",
+        memorySpaceId: space,
+        memoryId,
+        operationId: M.MemoryOperationId.make(id(n)),
+        originEnvironmentId: environmentId,
+        expectedHeads: parents,
+        revision: {
+          memorySpaceId: space,
+          memoryId,
+          revisionId: M.MemoryRevisionId.make(id(n + 10)),
+          operationId: M.MemoryOperationId.make(id(n)),
+          parents,
+          scope: { kind: "user" },
+          payloadRef: M.MemoryRevisionId.make(id(n + 10)),
+          assertionKind: "inference",
+          provenance: { environmentId },
+          createdAtUtc: at,
+        },
+        payload: {
+          text: "synthetic reconcile input",
+          evidence: [],
+          derivedFromMemoryRevisions: [],
+        },
+      });
+      const first = makeOp(3, []);
+      if (first.kind !== "upsert") throw new Error("fixture");
+      for (const op of [
+        first,
+        makeOp(4, [first.revision.revisionId]),
+        makeOp(5, [first.revision.revisionId]),
+      ])
+        yield* store.apply(
+          decideMemoryOperation(
+            yield* store.loadAggregate(space, memoryId),
+            op,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+        );
+      const current = yield* store.loadAggregate(space, memoryId);
+      const heads = current.heads;
+      const selection = { instanceId: M.ProviderInstanceId.make("fixture"), model: "fixture" };
+      const ticket: M.MemoryResolutionLease = {
+        memorySpaceId: space,
+        memoryId,
+        conflictId: current.conflicts[0]!.conflictId,
+        conflictHeadSet: heads,
+        attemptId: M.MemoryOperationId.make(id(70)),
+        holderEnvironmentId: environmentId,
+        fencingToken: 1,
+        claimedAtHubTime: M.MemoryUtcTimestamp.make("1970-01-01T00:00:00.000Z"),
+        expiresAtHubTime: M.MemoryUtcTimestamp.make("1970-01-01T00:02:00.000Z"),
+        attemptDeadlineHubTime: M.MemoryUtcTimestamp.make("1970-01-01T00:10:00.000Z"),
+        frozenDefaultModelSelection: selection,
+      };
+      yield* store.persistResolutionTicket(ticket);
+      yield* store.recoverClaimCandidates(0);
+      const claimCount = (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='claim'`).length;
+      const base = makeOp(80, heads);
+      if (base.kind !== "upsert") throw new Error("fixture");
+      const op: M.MemoryOperation = {
+        ...base,
+        kind: "resolve",
+        conflictId: ticket.conflictId,
+        fencingToken: 1,
+        resolution: {
+          resolutionId: M.MemoryResolutionId.make(id(81)),
+          memorySpaceId: space,
+          memoryId,
+          inputRevisionIds: heads,
+          inputPayloadRefs: heads,
+          judgmentRef: M.MemoryResolutionId.make(id(81)),
+          requestedModelSelection: selection,
+          effectiveProvider: M.ProviderDriverKind.make("codex"),
+          effectiveModel: "fixture",
+          resolvingEnvironmentId: environmentId,
+          fencingToken: 1,
+          resultRevisionId: base.revision.revisionId,
+          appliedAtUtc: at,
+          revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-11-13T00:00:00.000Z"),
+        },
+        resolutionPayload: {
+          resolutionId: M.MemoryResolutionId.make(id(81)),
+          judgment: "synthetic reconcile judgment",
+        },
+      };
+      const key = { memorySpaceId: space, attemptId: ticket.attemptId };
+      const acquired = (yield* store.transact(
+        store.acquireResolutionTicketTx({
+          key,
+          expectedVersion: 0,
+          owner: "first",
+          coordinatorEpoch: 1,
+          now: 0,
+          ownedUntil: 100,
+        }),
+      ))!;
+      const ownership = { ...key, owner: "first", coordinatorEpoch: 1, version: acquired.version };
+      let saved = yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership,
+          submission: {
+            protocolVersion: 1,
+            memorySpaceId: space,
+            holderEnvironmentId: environmentId,
+            attemptId: ticket.attemptId,
+            operation: op,
+          },
+          digest: memoryOperationDigest(op),
+        }),
+      );
+      if (op.kind !== "resolve") throw new Error("fixture");
+      const receipt: M.MemoryHubReceipt = {
+        operationId: op.operationId,
+        memoryId,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "accepted",
+        hubSequence: 7,
+        resolutionApproval: {
+          resolutionId: op.resolution.resolutionId,
+          appliedAtUtc: at,
+          revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+        },
+      };
+      if (mode === "lost-response") {
+        // The response was lost; the next pull delivers our own admitted resolve.
+        yield* service.receiveHubPage({
+          memorySpaceId: space,
+          hubEnvironmentId: environmentId,
+          localEnvironmentId: environmentId,
+          expectedSequence: 0,
+          reauthorize: Effect.void,
+          page: {
+            highWatermark: 7,
+            throughSequence: 7,
+            hasMore: false,
+            entries: [{ kind: "operation", operation: op, receipt, hubSequence: 7 }],
+          },
+        });
+      } else {
+        saved = (yield* store.transact(
+          store.transitionResolutionTicketTx({
+            ownership: { ...ownership, version: saved.version },
+            now: 1,
+            nextState: "approved",
+            ownedUntil: 100,
+            nextAttemptAt: 0,
+            approval: receipt,
+          }),
+        ))!;
+        const other = makeOp(6, [first.revision.revisionId]);
+        yield* store.apply(
+          decideMemoryOperation(
+            yield* store.loadAggregate(space, memoryId),
+            other,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+        );
+      }
+      yield* store.recoverClaimCandidates(101);
+      const recovered = (yield* store.readRecoverableResolutionTickets({
+        memorySpaceId: space,
+        now: 101,
+        limit: 10,
+      }))[0]!;
+      assert.deepStrictEqual(recovered.submission, saved.submission);
+      assert.isTrue(recovered.reconcileRequired);
+      const next = (yield* store.transact(
+        store.acquireResolutionTicketTx({
+          key,
+          expectedVersion: recovered.version,
+          owner: "reconcile",
+          coordinatorEpoch: 2,
+          now: 101,
+          ownedUntil: 200,
+        }),
+      ))!;
+      const args = {
+        ownership: { ...key, owner: "reconcile", coordinatorEpoch: 2, version: next.version },
+        now: 101,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        reauthorize: Effect.void,
+      };
+      // Canonical SQL failure or authority loss rolls approval and cleanup back together.
+      yield* sql`CREATE TRIGGER r14_terminal_failure BEFORE UPDATE ON memory_outbox WHEN NEW.kind='resolve' AND json_extract(NEW.ticket_json,'$.state')='terminal' BEGIN SELECT RAISE(ABORT,'synthetic settlement failure'); END`;
+      assert.strictEqual(
+        (yield* service.reconcileResolutionSubmission(args).pipe(Effect.flip))._tag,
+        "MemoryStorageError",
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        1,
+      );
+      yield* sql`DROP TRIGGER r14_terminal_failure`;
+      const result = yield* service.reconcileResolutionSubmission(args);
+      assert.strictEqual(result?.outcome, "admitted");
+      assert.strictEqual(result?.row.state, "terminal");
+      assert.deepStrictEqual((yield* store.receipt(space, op.operationId))?.receipt, receipt);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_events WHERE operation_id=${op.operationId}`).length,
+        1,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='claim'`).length,
+        claimCount,
+        "new generation/attempt count is zero",
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        0,
+      );
+      assert.isNull(yield* service.reconcileResolutionSubmission(args));
+    }).pipe(Effect.provide(live)),
+);

@@ -654,6 +654,7 @@ const TicketRowSchema = Schema.Struct({
   submission: Schema.NullOr(M.MemoryHubApplyResolutionInput),
   submissionDigest: Schema.NullOr(digest),
   approval: Schema.NullOr(M.MemoryHubReceipt),
+  reconcileRequired: Schema.optionalKey(Schema.Boolean),
 });
 // SQL stores only immutable submission metadata; bodies live in purgeable payload rows.
 const HubAttemptReplay = Schema.Struct({
@@ -675,6 +676,10 @@ const StoredTicketRowSchema = Schema.Struct({
   ),
 });
 export type TicketRow = typeof TicketRowSchema.Type;
+export type SubmissionReconciliation =
+  | { readonly outcome: "admitted"; readonly row: TicketRow; readonly receipt: M.MemoryHubReceipt }
+  | { readonly outcome: "retired"; readonly row: TicketRow }
+  | { readonly outcome: "uncertain"; readonly row: TicketRow };
 export type TicketKey = { memorySpaceId: M.MemorySpaceId; attemptId: M.MemoryOperationId };
 export type TicketOwner = TicketKey & { owner: string; coordinatorEpoch: number; version: number };
 export type { Transaction };
@@ -920,6 +925,11 @@ export class MemoryStore extends Context.Service<
       approval?: M.MemoryHubReceipt;
       retireClaim?: { candidateId?: string; expectedGeneration: number; attemptId: string };
     }) => InTx<TicketRow | null>;
+    readonly reconcileResolutionSubmissionTx: (input: {
+      ownership: TicketOwner;
+      now: number;
+      rejection?: M.MemoryHubReceipt;
+    }) => InTx<SubmissionReconciliation | null>;
     readonly retireRejectedSubmissionTx: (input: {
       ownership: TicketOwner;
       candidateId: string;
@@ -4263,6 +4273,15 @@ const make = Effect.gen(function* () {
     );
     return result.toSorted((a, b) => a.utcDay.localeCompare(b.utcDay));
   });
+  const unresolvedSubmission = (
+    space: string | ReturnType<typeof sql.unsafe>,
+    memoryId: string | ReturnType<typeof sql.unsafe>,
+  ) => sql`EXISTS (
+    SELECT 1 FROM memory_outbox r WHERE r.space=${space} AND r.memory_id=${memoryId}
+    AND r.kind='resolve' AND r.status IN ('pending','retry','running')
+    AND (json_extract(r.ticket_json,'$.submission') IS NOT NULL
+      OR json_extract(r.ticket_json,'$.approval.outcome') != 'rejected') LIMIT 1
+  )`;
   const readDueClaimCandidates = Effect.fn("MemoryStore.readDueClaimCandidates")(function* (
     limit: number,
     now: number,
@@ -4271,7 +4290,7 @@ const make = Effect.gen(function* () {
     return yield* workRows(
       yield* stored(
         "claim-candidates",
-        sql<WorkRow>`SELECT o.* FROM memory_outbox o JOIN memory_items i ON i.space=o.space AND i.memory_id=o.memory_id WHERE o.space=${memorySpaceId} AND o.kind='claim' AND o.status IN ('pending','retry') AND o.next_attempt_at<=${now} AND i.status='quarantined' AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=i.space AND f.memory_id=i.memory_id) AND NOT EXISTS (SELECT 1 FROM json_each(i.availability_json,'$.reasons') r WHERE r.value IN ('scanner_pending','secret_detected','missing_parent','dependency_invalidated','forget_pending')) ORDER BY o.next_attempt_at,o.id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS))}`,
+        sql<WorkRow>`SELECT o.* FROM memory_outbox o JOIN memory_items i ON i.space=o.space AND i.memory_id=o.memory_id WHERE o.space=${memorySpaceId} AND o.kind='claim' AND o.status IN ('pending','retry') AND o.next_attempt_at<=${now} AND i.status='quarantined' AND NOT ${unresolvedSubmission(sql.unsafe("o.space"), sql.unsafe("o.memory_id"))} AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=i.space AND f.memory_id=i.memory_id) AND NOT EXISTS (SELECT 1 FROM json_each(i.availability_json,'$.reasons') r WHERE r.value IN ('scanner_pending','secret_detected','missing_parent','dependency_invalidated','forget_pending')) ORDER BY o.next_attempt_at,o.id LIMIT ${Math.max(0, Math.min(limit, M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS))}`,
       ),
     );
   });
@@ -4335,6 +4354,25 @@ const make = Effect.gen(function* () {
           return { after, upper };
         });
         const cancel = Effect.fnUntraced(function* (id: string) {
+          const tickets = yield* stored(
+            "claim-recovery-ticket",
+            sql<{
+              ticket_json: string;
+            }>`SELECT ticket_json FROM memory_outbox WHERE id=${id} AND kind='resolve' AND ticket_json IS NOT NULL`,
+          );
+          if (tickets[0]) {
+            const row = yield* storedTicketRowCodec.decode(tickets[0].ticket_json, strict);
+            if (row.submission || (row.approval && row.approval.outcome !== "rejected")) {
+              if (!row.reconcileRequired) {
+                // Recovery invalidates generation, never the durable result. Do not hydrate bodies.
+                yield* stored(
+                  "claim-recovery-reconcile",
+                  sql`UPDATE memory_outbox SET ticket_json=${yield* storedTicketRowCodec.encode({ ...row, reconcileRequired: true, version: row.version + 1 })},sync_version=sync_version+1 WHERE id=${id} AND sync_version=${row.version}`,
+                );
+              }
+              return;
+            }
+          }
           yield* clearTerminalSubmission(id);
           yield* stored(
             "claim-cancel",
@@ -4397,6 +4435,13 @@ const make = Effect.gen(function* () {
             }
           }
           if (!eligible || item.status !== "quarantined") continue;
+          if (
+            (yield* stored(
+              "claim-recovery-barrier",
+              sql`SELECT 1 WHERE ${unresolvedSubmission(row.space, row.memory_id)}`,
+            )).length
+          )
+            continue;
           const headSetDigest = hashText(yield* headsCodec.encode(item.conflict.heads));
           const candidateId = `claim:${row.space}:${row.memory_id}:${headSetDigest}`;
           // An exposure hold can clear without changing heads. Its cancelled
@@ -4454,7 +4499,7 @@ const make = Effect.gen(function* () {
   ) {
     const rows = yield* stored(
       "claim-cas",
-      sql`UPDATE memory_outbox SET status='running',claimed_by=${String(epoch)},claimed_until=${now + M.MEMORY_LEASE_MS},attempt=attempt+1 WHERE id=${id} AND attempt<2147483647 AND kind='claim' AND status IN ('pending','retry') AND next_attempt_at<=${now} AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) RETURNING id`,
+      sql`UPDATE memory_outbox SET status='running',claimed_by=${String(epoch)},claimed_until=${now + M.MEMORY_LEASE_MS},attempt=attempt+1 WHERE id=${id} AND attempt<2147483647 AND kind='claim' AND status IN ('pending','retry') AND next_attempt_at<=${now} AND NOT ${unresolvedSubmission(sql.unsafe("memory_outbox.space"), sql.unsafe("memory_outbox.memory_id"))} AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) RETURNING id`,
     );
     return rows.length === 1;
   });
@@ -5923,7 +5968,7 @@ const make = Effect.gen(function* () {
       sql<WorkRow & { sync_version: number; frozen_claim_json: string | null }>`
       SELECT o.* FROM memory_outbox o JOIN memory_items i ON i.space=o.space AND i.memory_id=o.memory_id
       WHERE o.id=${input.candidateId} AND o.space=${input.memorySpaceId} AND o.kind='claim' AND o.sync_version=${input.expectedGeneration}
-      AND o.status IN ('pending','retry','running') AND o.next_attempt_at<=${now} AND i.status='quarantined'
+      AND o.status IN ('pending','retry','running') AND o.next_attempt_at<=${now} AND i.status='quarantined' AND NOT ${unresolvedSubmission(sql.unsafe("o.space"), sql.unsafe("o.memory_id"))}
       AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=i.space AND f.memory_id=i.memory_id)`,
     );
     const row = rows[0];
@@ -6093,6 +6138,72 @@ const make = Effect.gen(function* () {
         };
       }
       return updated;
+    });
+  const reconcileResolutionSubmissionTx: MemoryStore["Service"]["reconcileResolutionSubmissionTx"] =
+    Effect.fn("MemoryStore.reconcileResolutionSubmissionTx")(function* (input) {
+      yield* Transaction;
+      const row = yield* ownedTicket(input.ownership, input.now);
+      if (!row?.submission || !row.submissionDigest) return null;
+      const op = row.submission.operation;
+      // All receipt sources are uniquely keyed by (space, operationId). Absence is uncertainty,
+      // including compacted/offline logs; a changed frontier alone is never negative proof.
+      const canonical = yield* receipt(input.ownership.memorySpaceId, op.operationId);
+      if (canonical && canonical.operationDigest !== row.submissionDigest)
+        return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+      const admitted =
+        canonical && "hubSequence" in canonical.receipt && canonical.receipt.hubSequence !== null
+          ? (canonical.receipt as M.MemoryHubReceipt)
+          : undefined;
+      const evidence = admitted ?? row.approval ?? input.rejection;
+      const result = evidence
+        ? yield* hubReceiptCodec.decode(yield* hubReceiptCodec.encode(evidence), strict)
+        : undefined;
+      if (!result) return { outcome: "uncertain" as const, row };
+      if (
+        result.operationId !== op.operationId ||
+        result.memoryId !== row.ticket.memoryId ||
+        result.operationDigest !== row.submissionDigest ||
+        !M.validateMemoryResolutionApproval(
+          op.kind,
+          op.kind === "resolve" ? op.resolution.resolutionId : null,
+          result,
+        )
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (
+        input.rejection &&
+        (input.rejection.outcome !== "rejected" ||
+          input.rejection.operationId !== op.operationId ||
+          input.rejection.operationDigest !== row.submissionDigest ||
+          input.rejection.memoryId !== row.ticket.memoryId)
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (result.outcome !== "rejected") {
+        if (result.hubSequence === null)
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const updated = yield* writeTicket(
+          input.ownership,
+          { ...row, state: "approved", approval: result, version: row.version + 1 },
+          row.version,
+        );
+        return updated ? { outcome: "admitted" as const, row: updated, receipt: result } : null;
+      }
+      if (row.approval && row.approval.outcome !== "rejected")
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const candidateId = `claim:${row.ticket.memorySpaceId}:${row.ticket.memoryId}:${hashText(yield* headsCodec.encode(row.ticket.conflictHeadSet))}`;
+      yield* stored(
+        "reconcile-rejected-claim",
+        sql`UPDATE memory_outbox SET frozen_claim_json=NULL,sync_version=sync_version+1,status='retry',terminal_at=NULL,claimed_by=NULL,claimed_until=NULL,next_attempt_at=${input.now} WHERE id=${candidateId} AND kind='claim' AND json_extract(frozen_claim_json,'$.attemptId')=${row.ticket.attemptId}`,
+      );
+      const updated = yield* transitionResolutionTicketTx({
+        ownership: input.ownership,
+        now: input.now,
+        nextState: "terminal",
+        ownedUntil: null,
+        nextAttemptAt: input.now,
+        approval: result,
+      });
+      return updated ? { outcome: "retired" as const, row: updated } : null;
     });
   const retireRejectedSubmissionTx: MemoryStore["Service"]["retireRejectedSubmissionTx"] =
     Effect.fn("MemoryStore.retireRejectedSubmissionTx")(function* (input) {
@@ -8731,6 +8842,7 @@ const make = Effect.gen(function* () {
     acquireResolutionTicketTx,
     transitionResolutionTicketTx,
     persistResolutionSubmissionTx,
+    reconcileResolutionSubmissionTx,
     retireRejectedSubmissionTx,
     renewResolutionTicketTx,
     failResolutionTicketTx,
