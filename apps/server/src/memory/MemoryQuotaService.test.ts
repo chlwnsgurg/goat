@@ -412,6 +412,8 @@ describe("MemoryQuotaService", () => {
       );
       assert.strictEqual((yield* store.readSuppressions(space, memory)).length, retained.length);
       const synced = yield* store.readEligibleOutbox(space, 0, 100);
+      // The base forget keeps its own delivery even after the expansion purges the memory.
+      assert.isTrue(synced.some((w) => w.id === `sync:${space}:${op.operationId}`));
       assert.strictEqual(
         synced.some((w) => w.id === `sync:${space}:${expansion.operationId}`),
         !extra,
@@ -473,6 +475,11 @@ describe("MemoryQuotaService", () => {
         assert.strictEqual(retried.receipt.outcome, "deleted");
         assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 300);
         assert.deepStrictEqual(yield* store.pendingForgetIntents(10), []);
+        const resynced = (yield* store.readEligibleOutbox(space, 0, 100)).map((w) => w.id);
+        assert.includeMembers(resynced, [
+          `sync:${space}:${op.operationId}`,
+          `sync:${space}:${retryId}`,
+        ]);
       }
       const counters = yield* store.counters(space);
       assert.strictEqual(
