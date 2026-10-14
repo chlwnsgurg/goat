@@ -1572,6 +1572,10 @@ const codec = <S extends Schema.Constraint>(schema: S) => {
   };
 };
 const decodeFailureCode = Schema.decodeUnknownEffect(M.MemoryFailureCode);
+const decodeHoldClass = Schema.decodeUnknownEffect(HoldClass);
+const pullRetryCodec = codec(PullRetry);
+const resolutionReasonsCodec = codec(Schema.Array(M.MemoryDeferredReason));
+const hubReceiptCodec = codec(M.MemoryHubReceipt);
 const decodeFailureEnvironment = Schema.decodeUnknownEffect(M.EnvironmentId);
 const threadHookCodec = codec(ThreadHookMetadata);
 const deferredRowCodec = codec(DeferredRow);
@@ -1968,7 +1972,7 @@ const make = Effect.gen(function* () {
       heads: row.heads_json ? yield* headsCodec.decode(row.heads_json, strict) : [],
       generation: row.generation ?? 0,
       reasons: row.reasons_json
-        ? yield* codec(Schema.Array(M.MemoryDeferredReason)).decode(row.reasons_json, strict)
+        ? yield* resolutionReasonsCodec.decode(row.reasons_json, strict)
         : [],
       tombstone: row.tombstone !== 0,
       pendingForget: row.pending_forget !== 0,
@@ -5671,7 +5675,7 @@ const make = Effect.gen(function* () {
       }>`SELECT pull_retry_json FROM memory_sync_cursors WHERE space=${input.memorySpaceId} AND hub_environment_id=${input.hubEnvironmentId}`,
     );
     return rows[0]?.pull_retry_json
-      ? yield* codec(PullRetry).decode(rows[0].pull_retry_json, strict)
+      ? yield* pullRetryCodec.decode(rows[0].pull_retry_json, strict)
       : emptyPullRetry;
   });
   const writePullRetryTx: MemoryStore["Service"]["writePullRetryTx"] = Effect.fn(
@@ -5686,7 +5690,7 @@ const make = Effect.gen(function* () {
     )
       return yield* new MemoryStoreConflict({ code: "invalid_output" });
     const next = { ...input.retry, version: current.version + 1 };
-    const json = yield* codec(PullRetry).encode(next);
+    const json = yield* pullRetryCodec.encode(next);
     const rows = yield* stored(
       "pull-retry-write",
       sql`INSERT INTO memory_sync_cursors(space,hub_environment_id,after_sequence,bootstrap_state,pull_retry_json)
@@ -5710,7 +5714,7 @@ const make = Effect.gen(function* () {
     if (!row) return null;
     return {
       holdClass: row.hold_class
-        ? yield* stored("hold-codec", Schema.decodeUnknownEffect(HoldClass)(row.hold_class))
+        ? yield* stored("hold-codec", decodeHoldClass(row.hold_class))
         : null,
       failureCode: row.failure_code
         ? yield* stored("failure-codec", decodeFailureCode(row.failure_code))
@@ -5976,8 +5980,8 @@ const make = Effect.gen(function* () {
       yield* Transaction;
       const row = yield* ownedTicket(input.ownership, input.now);
       if (!row) return null;
-      const rejection = yield* codec(M.MemoryHubReceipt).decode(
-        yield* codec(M.MemoryHubReceipt).encode(input.rejection),
+      const rejection = yield* hubReceiptCodec.decode(
+        yield* hubReceiptCodec.encode(input.rejection),
         strict,
       );
       if (

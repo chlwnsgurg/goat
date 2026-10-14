@@ -279,10 +279,15 @@ export default Effect.gen(function* () {
         : table === "memory_import_keys"
           ? `CASE WHEN ${prefix}key_kind='hub_checkpoint_token' THEN 0 ELSE 1 END`
           : "1";
-    for (const [dimension, expression] of [
-      ["hub_snapshot_bytes", bytes("")],
-      ["hub_snapshot_rows", recordRows("")],
-    ] as const) {
+    // Retry extends an existing cursor row; it adds bounded bytes, not canonical snapshot records.
+    const dimensions =
+      table === "memory_sync_cursors"
+        ? ([["hub_snapshot_bytes", bytes("")]] as const)
+        : ([
+            ["hub_snapshot_bytes", bytes("")],
+            ["hub_snapshot_rows", recordRows("")],
+          ] as const);
+    for (const [dimension, expression] of dimensions) {
       yield* sql.unsafe(
         `INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
         SELECT ${spaceColumn},?,'',sum(${expression}) FROM ${table} GROUP BY ${spaceColumn}

@@ -5120,6 +5120,12 @@ it.effect("pull bootstrap retry survives restart with version CAS and untouched 
       store.writePullRetryTx({ ...key, expectedVersion: 0, retry }),
     );
     assert.deepStrictEqual(first, { ...retry, version: 1 });
+    const retryBytes = new TextEncoder().encode(JSON.stringify({ ...retry, version: 1 })).length;
+    const bytes = () =>
+      sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`;
+    assert.strictEqual((yield* bytes())[0]!.value, retryBytes);
     const fresh = yield* Effect.service(Store.MemoryStore).pipe(
       Effect.provide(Layer.fresh(Store.layer)),
     );
@@ -5142,6 +5148,7 @@ it.effect("pull bootstrap retry survives restart with version CAS and untouched 
       )
       .pipe(Effect.exit);
     assert.deepStrictEqual(yield* fresh.readPullRetry(key), first);
+    assert.strictEqual((yield* bytes())[0]!.value, retryBytes);
     yield* fresh.transact(fresh.writePullRetryTx({ ...key, expectedVersion: 1, retry: held }));
     assert.strictEqual((yield* fresh.readPullRetry(key)).nextAttemptAt, Number.MAX_SAFE_INTEGER);
     const cursor = yield* sql<{
