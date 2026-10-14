@@ -3571,7 +3571,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const submitted = yield* Deferred.make<void>();
-      const reconciled = yield* Deferred.make<void>();
+      const recoveryObserved = yield* Deferred.make<void>();
       let saved: M.MemoryHubApplyResolutionInput | undefined;
       let deliver = false;
       let generated = 0;
@@ -3581,6 +3581,8 @@ it.effect(
           Effect.gen(function* () {
             saved = input;
             applies++;
+            // Wake on an incorrect replay too, so bypassing reconciliation fails an assertion.
+            if (deliver) yield* Deferred.succeed(recoveryObserved, undefined);
             yield* Deferred.succeed(submitted, undefined);
             return yield* new M.MemoryHubError({ code: "unavailable" });
           }),
@@ -3658,7 +3660,7 @@ it.effect(
             Effect.gen(function* () {
               const restarted = yield* Sync.MemorySyncService;
               yield* restarted.syncOnce;
-              yield* Deferred.await(reconciled);
+              yield* Deferred.await(recoveryObserved);
               yield* restarted.shutdown;
             }).pipe(
               Effect.provide(
@@ -3672,7 +3674,7 @@ it.effect(
                           .pipe(
                             Effect.tap((result) =>
                               result?.outcome === "admitted"
-                                ? Deferred.succeed(reconciled, undefined)
+                                ? Deferred.succeed(recoveryObserved, undefined)
                                 : Effect.void,
                             ),
                           ),
@@ -3910,7 +3912,10 @@ it.effect("resolution rearm passes 100 protected tickets to reach the next held 
     }>(4);
     const entered = yield* Deferred.make<void>();
     const leases = new Map<string, M.MemoryResolutionLease>();
-    const client = peer({ renew: (_c, input) => Effect.succeed(leases.get(input.attemptId)!) });
+    const client = peer({
+      claim: () => Effect.fail(new M.MemoryHubError({ code: "claim_busy" })),
+      renew: (_c, input) => Effect.succeed(leases.get(input.attemptId)!),
+    });
     let generated = 0;
     const model = realGeneration({
       resolveMemoryConflict: () =>
@@ -3956,7 +3961,7 @@ it.effect("resolution rearm passes 100 protected tickets to reach the next held 
               }),
             );
           // Synthetic scheduling state, with real live ownership and canonical frontiers.
-          yield* sql`UPDATE memory_outbox SET hold_class='authorization',failure_code='route_unavailable',next_attempt_at=${Number.MAX_SAFE_INTEGER} WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+          yield* sql`UPDATE memory_outbox SET hold_class='authorization',failure_code='route_unavailable',next_attempt_at=${Number.MAX_SAFE_INTEGER},ticket_json=json_set(ticket_json,'$.nextAttemptAt',${Number.MAX_SAFE_INTEGER}) WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
         }
         const base = yield* Sync.MemorySyncRuntime;
         yield* Effect.scoped(
