@@ -2,26 +2,32 @@ import { expect, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { Tool } from "effect/ai";
 import * as MemoryService from "../../../memory/MemoryService.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
 import { MemoryToolkit, MemoryReadSourceToolkit } from "./tools.ts";
 import { memoryError } from "./handlers.ts";
 import * as Fixture from "./handlers.testkit.ts";
 
+const decodeReceipt = Schema.decodeUnknownEffect(M.MemoryMutationReceipt);
+const decodePage = Schema.decodeUnknownEffect(M.MemoryPage);
+const decodeHistory = Schema.decodeUnknownEffect(M.MemoryHistoryPage);
+const encodeError = Schema.encodeSync(M.MemoryRpcError);
+
 it("stages exactly eight core tools and defines source separately", () => {
   expect(Object.keys(MemoryToolkit.tools)).toEqual(
     M.MEMORY_MCP_TOOLS.filter((name) => name !== "memory_read_source"),
   );
   expect(Object.keys(MemoryReadSourceToolkit.tools)).toEqual(["memory_read_source"]);
+  for (const tool of Object.values(MemoryToolkit.tools))
+    expect(Tool.getJsonSchema(tool).type).toBe("object");
 });
 it.effect(
   "real toolkit writes, reads, searches with service cursor, lists, histories, forgets and refuses invalid revert",
   () =>
     Effect.gen(function* () {
       const created = yield* Fixture.call("memory_upsert", Fixture.upsert());
-      expect(
-        (yield* Schema.decodeUnknownEffect(M.MemoryMutationReceipt)(created.body)).outcome,
-      ).toBe("accepted");
+      expect((yield* decodeReceipt(created.body)).outcome).toBe("accepted");
       const service = yield* MemoryService.MemoryService;
       const query = {
         memorySpaceId: Fixture.space,
@@ -32,7 +38,7 @@ it.effect(
       const direct = yield* service.search(query, Effect.void);
       expect((yield* Fixture.call("memory_search", query)).body).toEqual(direct);
       expect(
-        (yield* Schema.decodeUnknownEffect(M.MemoryPage)(
+        (yield* decodePage(
           (yield* Fixture.call("memory_list", {
             memorySpaceId: Fixture.space,
             includeQuarantined: false,
@@ -47,7 +53,7 @@ it.effect(
         })).body,
       ).toMatchObject({ status: "active", payload: { text: "synthetic memory" } });
       expect(
-        (yield* Schema.decodeUnknownEffect(M.MemoryHistoryPage)(
+        (yield* decodeHistory(
           (yield* Fixture.call("memory_history", {
             memorySpaceId: Fixture.space,
             memoryId: Fixture.memoryId,
@@ -73,6 +79,8 @@ it.effect(
           operationId: M.MemoryOperationId.make(Fixture.id(5)),
           memoryId: Fixture.memoryId,
           resolutionId: M.MemoryResolutionId.make(Fixture.id(6)),
+          restoredRevisionId: M.MemoryRevisionId.make(Fixture.id(7)),
+          expectedHeads: [M.MemoryRevisionId.make(Fixture.id(8))],
         })).result.isError,
       ).toBe(true);
       expect((yield* Fixture.call("memory_sync_status", {})).body).toMatchObject({
@@ -107,6 +115,8 @@ it.effect.each(M.MEMORY_MCP_TOOLS.filter((name) => name !== "memory_read_source"
                         memoryId: Fixture.memoryId,
                         operationId: M.MemoryOperationId.make(Fixture.id(5)),
                         resolutionId: M.MemoryResolutionId.make(Fixture.id(6)),
+                        restoredRevisionId: M.MemoryRevisionId.make(Fixture.id(7)),
+                        expectedHeads: [M.MemoryRevisionId.make(Fixture.id(8))],
                       }
                     : { memorySpaceId: Fixture.space, memoryId: Fixture.memoryId };
       expect((yield* Fixture.call(name, input, Fixture.scope([]))).body).toMatchObject({
@@ -144,7 +154,7 @@ it("maps safe code and capacity without exposing causes or undefined", () => {
   ]) {
     const safe = memoryError(error);
     expect(Object.values(safe).some((value) => value === undefined)).toBe(false);
-    const encoded = Schema.encodeSync(M.MemoryRpcError)(safe);
+    const encoded = encodeError(safe);
     expect(JSON.stringify(encoded)).not.toContain("synthetic private detail");
   }
   expect(
@@ -152,3 +162,20 @@ it("maps safe code and capacity without exposing causes or undefined", () => {
       .capacity,
   ).toMatchObject({ current: 3, limit: 2 });
 });
+
+it.effect("strict contract decoding rejects extra keys before persisting a raw MCP request", () =>
+  Effect.gen(function* () {
+    const result = yield* Fixture.call("memory_upsert", {
+      ...Fixture.upsert(),
+      unexpected: "synthetic",
+    });
+    expect(result.result.isError).toBe(true);
+    const service = yield* MemoryService.MemoryService;
+    expect(
+      (yield* service.list(
+        { memorySpaceId: Fixture.space, includeQuarantined: false, limit: 20 },
+        Effect.void,
+      )).items,
+    ).toHaveLength(0);
+  }).pipe(Effect.provide(Fixture.layer)),
+);

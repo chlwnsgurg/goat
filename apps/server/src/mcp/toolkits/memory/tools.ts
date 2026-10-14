@@ -1,126 +1,204 @@
 import * as M from "@goat/contracts";
 import * as Schema from "effect/Schema";
+import * as SchemaAST from "effect/SchemaAST";
 import { Tool, Toolkit } from "effect/ai";
 import * as MemoryService from "../../../memory/MemoryService.ts";
 import * as MemorySyncService from "../../../memory/MemorySyncService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
-const failure = Schema.Union([M.MemoryRpcError, M.OrchestratorMcpFailure]);
-const dependencies = [
-  McpInvocationContext.McpInvocationContext,
-  MemoryService.MemoryService,
-  MemorySyncService.MemorySyncService,
-  ThreadManagementService.ThreadManagementService,
-];
+/** JSON Schema presentation only; handlers still decode the original strict contracts. */
+export const memoryInputSchema = (schema: Schema.Top) => {
+  const expose = (ast: SchemaAST.AST): SchemaAST.AST => {
+    if (ast._tag === "Declaration" && ast.typeParameters.length === 1)
+      return expose(ast.typeParameters[0]!);
+    if (ast._tag === "Objects")
+      return new SchemaAST.Objects(
+        ast.propertySignatures.map(
+          (field) => new SchemaAST.PropertySignature(field.name, expose(field.type)),
+        ),
+        ast.indexSignatures.map(
+          (field) => new SchemaAST.IndexSignature(expose(field.parameter), expose(field.type)),
+        ),
+        ast.annotations,
+        ast.checks,
+        ast.encoding,
+        ast.context,
+      );
+    if (ast._tag === "Arrays")
+      return new SchemaAST.Arrays(
+        ast.isMutable,
+        ast.elements.map(expose),
+        ast.rest.map(expose),
+        ast.annotations,
+        ast.checks,
+        ast.encoding,
+        ast.context,
+      );
+    if (ast._tag === "Union")
+      return new SchemaAST.Union(
+        ast.types.map(expose),
+        ast.options,
+        ast.annotations,
+        ast.checks,
+        ast.encoding,
+        ast.context,
+      );
+    if (ast._tag === "Suspend")
+      return new SchemaAST.Suspend(
+        () => expose(ast.thunk()),
+        ast.annotations,
+        ast.checks,
+        ast.encoding,
+        ast.context,
+      );
+    return ast;
+  };
+  const document = Schema.toJsonSchemaDocument(Schema.make(expose(schema.ast)), {
+    onExcessProperty: "error",
+  });
+  return {
+    ...document.schema,
+    type: "object" as const,
+    ...(Object.keys(document.definitions).length === 0 ? {} : { $defs: document.definitions }),
+  };
+};
 
-const SearchTool = Tool.make("memory_search", {
+const failure = Schema.Union([M.MemoryRpcError, M.OrchestratorMcpFailure]);
+const SearchTool = Tool.dynamic("memory_search", {
   description:
     "Search memory. Return the service cursor unchanged; pass it to the next request with the same query and scope.",
-  parameters: M.MemorySearchInput,
+  parameters: memoryInputSchema(M.MemorySearchInput),
   success: M.MemoryPage,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);
 
-const ListTool = Tool.make("memory_list", {
+const ListTool = Tool.dynamic("memory_list", {
   description: "List one bounded memory page.",
-  parameters: M.MemoryListInput,
+  parameters: memoryInputSchema(M.MemoryListInput),
   success: M.MemoryPage,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);
 
-const ReadTool = Tool.make("memory_read", {
+const ReadTool = Tool.dynamic("memory_read", {
   description: "Read one memory item.",
-  parameters: M.MemoryReadInput,
+  parameters: memoryInputSchema(M.MemoryReadInput),
   success: M.MemoryItem,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);
 
-const HistoryTool = Tool.make("memory_history", {
+const HistoryTool = Tool.dynamic("memory_history", {
   description: "Read one bounded memory history page.",
-  parameters: M.MemoryHistoryInput,
+  parameters: memoryInputSchema(M.MemoryHistoryInput),
   success: M.MemoryHistoryPage,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);
 
-const SyncStatusTool = Tool.make("memory_sync_status", {
+const SyncStatusTool = Tool.dynamic("memory_sync_status", {
   description: "Read memory synchronization status, including disabled or unbound state.",
-  parameters: M.MemorySyncStatusInput,
+  parameters: memoryInputSchema(M.MemorySyncStatusInput),
   success: M.MemorySyncStatus,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);
 
-const UpsertTool = Tool.make("memory_upsert", {
+const UpsertTool = Tool.dynamic("memory_upsert", {
   description:
     "Create or update memory with an explicit memory:write grant. Read-only sessions cannot write.",
-  parameters: M.MemoryUpsertInput,
+  parameters: memoryInputSchema(M.MemoryUpsertInput),
   success: M.MemoryMutationReceipt,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);
 
-const ForgetTool = Tool.make("memory_forget", {
+const ForgetTool = Tool.dynamic("memory_forget", {
   description: "Forget memory. Requires memory:write and a session allowed to write.",
-  parameters: M.MemoryForgetInput,
+  parameters: memoryInputSchema(M.MemoryForgetInput),
   success: M.MemoryMutationReceipt,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, false);
 
-const RevertResolutionTool = Tool.make("memory_revert_resolution", {
+const RevertResolutionTool = Tool.dynamic("memory_revert_resolution", {
   description: "Revert a memory resolution within its deadline. Requires memory:write.",
-  parameters: M.MemoryRevertResolutionInput,
+  parameters: memoryInputSchema(M.MemoryRevertResolutionInput),
   success: M.MemoryRevertResult,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, false);
 
-const ReadSourceTool = Tool.make("memory_read_source", {
+const ReadSourceTool = Tool.dynamic("memory_read_source", {
   description:
     "Read original evidence through its owner. Requires memory:read and independently granted orchestration:read. No arbitrary path or SSH target.",
-  parameters: M.MemoryReadSourceInput,
+  parameters: memoryInputSchema(M.MemoryReadSourceInput),
   success: M.MemorySourcePage,
   failure,
   failureMode: "return",
-  dependencies,
 })
+  .addDependency(McpInvocationContext.McpInvocationContext)
+  .addDependency(MemoryService.MemoryService)
+  .addDependency(MemorySyncService.MemorySyncService)
+  .addDependency(ThreadManagementService.ThreadManagementService)
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.OpenWorld, false);

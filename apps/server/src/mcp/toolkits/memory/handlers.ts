@@ -17,6 +17,8 @@ export const memoryError = (error: unknown): M.MemoryRpcError => {
   if (isMemoryError(error)) return error;
   if (typeof error !== "object" || error === null)
     return new M.MemoryRpcError({ code: "storage_failed" });
+  if ("_tag" in error && error._tag === "SchemaError")
+    return new M.MemoryRpcError({ code: "invalid_output" });
   if (
     "_tag" in error &&
     error._tag === "MemoryCapacityError" &&
@@ -72,43 +74,54 @@ export const invocationPermit = (requirement: MemoryAccess.MemoryAccessRequireme
     );
   });
 
+const decodeSearch = Schema.decodeUnknownEffect(M.MemorySearchInput);
+const decodeList = Schema.decodeUnknownEffect(M.MemoryListInput);
+const decodeRead = Schema.decodeUnknownEffect(M.MemoryReadInput);
+const decodeHistory = Schema.decodeUnknownEffect(M.MemoryHistoryInput);
+const decodeSyncStatus = Schema.decodeUnknownEffect(M.MemorySyncStatusInput);
+const decodeUpsert = Schema.decodeUnknownEffect(M.MemoryUpsertInput);
+const decodeForget = Schema.decodeUnknownEffect(M.MemoryForgetInput);
+const decodeRevertResolution = Schema.decodeUnknownEffect(M.MemoryRevertResolutionInput);
 const receipt = Schema.decodeUnknownEffect(M.MemoryMutationReceipt);
 const handlers = {
   memory_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.search(input, yield* invocationPermit("read"));
+      return yield* service.search(yield* decodeSearch(input), yield* invocationPermit("read"));
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.list(input, yield* invocationPermit("read"));
+      return yield* service.list(yield* decodeList(input), yield* invocationPermit("read"));
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.read(input, yield* invocationPermit("read"));
+      return yield* service.read(yield* decodeRead(input), yield* invocationPermit("read"));
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_history: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.history(input, yield* invocationPermit("read"));
+      return yield* service.history(yield* decodeHistory(input), yield* invocationPermit("read"));
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_sync_status: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const service = yield* MemorySyncService.MemorySyncService;
-      return yield* service.syncStatus(input, yield* invocationPermit("read"));
+      return yield* service.syncStatus(
+        yield* decodeSyncStatus(input),
+        yield* invocationPermit("read"),
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_upsert: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
       return yield* service
-        .upsert(input, yield* invocationPermit("write"))
+        .upsert(yield* decodeUpsert(input), yield* invocationPermit("write"))
         .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
     }).pipe(Effect.mapError(memoryError)),
   ),
@@ -116,14 +129,17 @@ const handlers = {
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
       return yield* service
-        .forget(input, yield* invocationPermit("write"))
+        .forget(yield* decodeForget(input), yield* invocationPermit("write"))
         .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
     }).pipe(Effect.mapError(memoryError)),
   ),
   memory_revert_resolution: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
-      return yield* service.revertResolution(input, yield* invocationPermit("write"));
+      return yield* service.revertResolution(
+        yield* decodeRevertResolution(input),
+        yield* invocationPermit("write"),
+      );
     }).pipe(Effect.mapError(memoryError)),
   ),
 } satisfies McpToolAccess.Handlers<typeof MemoryToolkit.tools>;
