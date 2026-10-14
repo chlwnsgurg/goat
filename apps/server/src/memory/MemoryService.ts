@@ -77,6 +77,10 @@ export class MemoryService extends Context.Service<
       Store.MaterializedIntent & { receipt: Store.StoredReceipt },
       MemoryServiceError
     >;
+    readonly readSource: (
+      input: M.MemoryReadSourceInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemorySourcePage, MemoryServiceError>;
     readonly prepareSourceRead: (
       input: M.MemoryReadSourceInput,
       permit: Permit,
@@ -228,6 +232,7 @@ const encodeProjectKey = Schema.encodeSync(
   Schema.fromJsonString(Schema.NullOr(M.MemoryProjectKey)),
 );
 const strict = { onExcessProperty: "error" } as const;
+const encodePageItem = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const decodeBindingGet = Schema.decodeUnknownEffect(M.MemoryProjectBindingGetInput);
 const decodeBindingUpdate = Schema.decodeUnknownEffect(M.MemoryProjectBindingUpdateInput);
 const encodeBindingUpdate = Schema.encodeSync(
@@ -260,6 +265,7 @@ const decodeHubPage = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeHubReceipt = Schema.decodeUnknownEffect(M.MemoryHubReceipt);
 const decodeHistoryPage = Schema.decodeUnknownEffect(M.MemoryHistoryPage);
 const isConflict = Schema.is(Store.MemoryStoreConflict);
+const isFailureCode = Schema.is(M.MemoryFailureCode);
 const invalid = () => new Store.MemoryStoreConflict({ code: "invalid_output" });
 const hash = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
 export const memoryStableUuid = (text: string) => {
@@ -267,7 +273,9 @@ export const memoryStableUuid = (text: string) => {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 };
 const decode = <A, E>(effect: Effect.Effect<A, E>) => effect.pipe(Effect.mapError(invalid));
-const make = Effect.gen(function* () {
+const make = Effect.fnUntraced(function* (
+  sourceReadAuthority?: MemorySourceReadAuthority["readSource"],
+) {
   const repositoryResolver = yield* RepositoryResolver.RepositoryIdentityResolver;
   const store = yield* Store.MemoryStore;
   const quota = yield* Quota.MemoryQuotaService;
@@ -797,6 +805,7 @@ const make = Effect.gen(function* () {
         const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
         if (!current.item) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
         if (current.identity) yield* requireScope(current.identity.scope);
+        yield* permit;
         return current.item;
       }),
     );
@@ -805,47 +814,127 @@ const make = Effect.gen(function* () {
     input: M.MemoryListInput | M.MemorySearchInput,
     permit: Permit,
   ) {
+    yield* permit;
+    const scope = input.scope ?? { kind: "user" as const };
+    yield* requireScope(scope);
+    const scopeKey =
+      scope.kind === "user"
+        ? "user"
+        : scope.kind === "thread"
+          ? `thread:${scope.thread.environmentId.length}:${scope.thread.environmentId}:${scope.thread.threadId}`
+          : scope.projectKey.kind === "repository"
+            ? `repository:${scope.projectKey.groupingKey}`
+            : `explicit:${scope.projectKey.sharedProjectId}`;
+    const normalizedQuery = "query" in input ? input.query.normalize("NFC").trim() : undefined;
+    const binding =
+      "query" in input
+        ? {
+            memorySpaceId: input.memorySpaceId,
+            queryDigest: NodeCrypto.createHash("sha256").update(normalizedQuery!).digest("hex"),
+            mode: input.mode,
+            scopeKey: NodeCrypto.createHash("sha256").update(scopeKey).digest("hex"),
+          }
+        : undefined;
+    const cursor = input.cursor
+      ? yield* Effect.try({
+          try: () =>
+            binding
+              ? M.decodeMemorySearchCursor(input.cursor!, binding)
+              : M.MemoryId.make(input.cursor!),
+          catch: () => new Store.MemoryStoreConflict({ code: "invalid_cursor" }),
+        })
+      : undefined;
+    if ("query" in input) {
+      // Commit the bounded recovery batch even when substring is refused until ready.
+      const coverage = yield* store.searchCoverage({
+        memorySpaceId: input.memorySpaceId,
+        scope: input.scope ?? { kind: "user" },
+        limit: input.limit,
+      });
+      if (!coverage.ready) {
+        yield* permit;
+        if (input.mode === "substring")
+          return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
+        const rows = yield* query(
+          sql<{
+            watermark: number;
+          }>`SELECT coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark`,
+        );
+        const watermark = rows[0]!.watermark;
+        yield* permit;
+        return {
+          items: [],
+          projectionWatermark: watermark,
+          nextCursor: null,
+          indexCoverage: {
+            status: "unavailable" as const,
+            eligibleItems: 0,
+            indexedItems: 0,
+            unindexedItems: 0,
+            projectionWatermark: watermark,
+          },
+        };
+      }
+    }
     return yield* store.transact(
       Effect.gen(function* () {
         yield* permit;
-        const scope = input.scope ?? { kind: "user" as const };
-        yield* requireScope(scope);
-        const scopeKey =
-          scope.kind === "user"
-            ? "user"
-            : scope.kind === "thread"
-              ? `thread:${scope.thread.environmentId.length}:${scope.thread.environmentId}:${scope.thread.threadId}`
-              : scope.projectKey.kind === "repository"
-                ? `repository:${scope.projectKey.groupingKey}`
-                : `explicit:${scope.projectKey.sharedProjectId}`;
-        const cursor = input.cursor
-          ? yield* decode(Effect.try({ try: () => M.MemoryId.make(input.cursor!), catch: invalid }))
-          : undefined;
         const filter: Store.MemoryReadFilter = {
           memorySpaceId: input.memorySpaceId,
           scope,
           limit: input.limit,
           ...(cursor ? { afterMemoryId: cursor } : {}),
         };
-        let items =
+        const coverage = "query" in input ? yield* store.searchCoverage(filter) : undefined;
+        const searched =
+          "query" in input && coverage?.ready
+            ? yield* store.search(filter, normalizedQuery!, input.mode)
+            : undefined;
+        if ("query" in input && input.mode === "substring" && !coverage?.ready)
+          return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
+        let items = "query" in input ? (searched?.items ?? []) : yield* store.list(filter);
+        let nextCursor =
           "query" in input
-            ? yield* store.search(filter, input.query, input.mode)
-            : yield* store.list(filter);
-        const last = items.at(-1)?.memoryId;
-        const nextCursor = items.length === input.limit ? (last ?? null) : null;
+            ? searched && !searched.exhausted && searched.examinedAfterMemoryId
+              ? M.encodeMemorySearchCursor(binding!, searched.examinedAfterMemoryId)
+              : null
+            : items.length === input.limit
+              ? (items.at(-1)?.memoryId ?? null)
+              : null;
+        if (!("query" in input)) {
+          let bytes = 2048;
+          const bounded: M.MemoryItem[] = [];
+          for (const item of items) {
+            const encoded = yield* query(encodePageItem(item));
+            const size = new TextEncoder().encode(encoded).length + 1;
+            if (bytes + size > M.MEMORY_PAGE_MAX_UTF8_BYTES) {
+              if (!bounded.length)
+                return yield* new Store.MemoryStoreConflict({ code: "payload_too_large" });
+              nextCursor = bounded.at(-1)!.memoryId;
+              break;
+            }
+            bytes += size;
+            bounded.push(item);
+          }
+          items = bounded;
+        }
         if ("includeQuarantined" in input && !input.includeQuarantined)
           items = items.filter((i) => i.status !== "quarantined");
-        const rows = yield* query(sql<{
-          watermark: number;
-          eligible: number;
-          indexed: number;
-        }>`SELECT
-        coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark,
-        count(CASE WHEN status='active' THEN 1 END) AS eligible,
-        count(CASE WHEN status='active' AND index_state='ready' AND indexed_generation=generation THEN 1 END) AS indexed
-        FROM memory_items WHERE space=${input.memorySpaceId} AND scope_key=${scopeKey}`);
-        const state = rows[0]!;
-        if ("query" in input && input.mode === "substring") state.indexed = state.eligible;
+        const rows = yield* query(
+          sql<{
+            watermark: number;
+          }>`SELECT coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark`,
+        );
+        const state = {
+          watermark: rows[0]!.watermark,
+          eligible: coverage?.ready ? coverage.eligible : 0,
+          indexed: coverage?.ready
+            ? "query" in input && input.mode === "substring"
+              ? coverage.eligible
+              : coverage.indexed
+            : 0,
+        };
+        yield* permit;
         return yield* decode(
           decodePage(
             {
@@ -855,8 +944,9 @@ const make = Effect.gen(function* () {
               ...("query" in input
                 ? {
                     indexCoverage: {
-                      status:
-                        state.eligible === state.indexed
+                      status: !coverage?.ready
+                        ? "unavailable"
+                        : state.eligible === state.indexed
                           ? "available"
                           : state.indexed === 0
                             ? "unavailable"
@@ -877,8 +967,18 @@ const make = Effect.gen(function* () {
   });
   const list = (input: M.MemoryListInput, permit: Permit) =>
     decode(decodeList(input, strict)).pipe(Effect.flatMap((v) => page(v, permit)));
-  const search = (input: M.MemorySearchInput, permit: Permit) =>
-    decode(decodeSearch(input, strict)).pipe(Effect.flatMap((v) => page(v, permit)));
+  const search = Effect.fn("MemoryService.search")(function* (
+    input: M.MemorySearchInput,
+    permit: Permit,
+  ) {
+    // Validate every non-cursor field first, preserving strictness and its error channel.
+    const { cursor: _cursor, ...rest } = input;
+    yield* decode(decodeSearch(rest, strict));
+    const value = yield* decodeSearch(input, strict).pipe(
+      Effect.mapError(() => new Store.MemoryStoreConflict({ code: "invalid_cursor" })),
+    );
+    return yield* page(value, permit);
+  });
   const history = Effect.fn("MemoryService.history")(function* (
     input: M.MemoryHistoryInput,
     permit: Permit,
@@ -963,6 +1063,7 @@ const make = Effect.gen(function* () {
         const tombstone =
           current.tombstone && offset <= reportEnd && end > reportEnd ? current.tombstone : null;
         const total = reportEnd + Number(current.tombstone !== undefined);
+        yield* permit;
         return yield* decode(
           decodeHistoryPage(
             {
@@ -1105,6 +1206,7 @@ const make = Effect.gen(function* () {
     return {
       memorySpaceId: input.memorySpaceId,
       projectionWatermark: result.projectionWatermark,
+      nextCursor: result.nextCursor,
       items: result.items.flatMap((i) =>
         i.status === "active" && i.localAvailability.exposure === "visible"
           ? [
@@ -1139,9 +1241,11 @@ const make = Effect.gen(function* () {
             watermark: number;
           }>`SELECT projection_watermark AS watermark FROM memory_compaction_state WHERE space=${space}`,
         );
+        yield* permit;
         return {
           memorySpaceId: space,
           projectionWatermark: rows[0]?.watermark ?? 0,
+          nextCursor: null,
           items: items.flatMap((i) =>
             i.status === "active" && i.localAvailability.exposure === "visible"
               ? [
@@ -1228,6 +1332,9 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* permit;
         const request = yield* decode(decodeSourceRequest(input.request.request, strict));
+        const outcome = yield* decode(decodeSourceOutcome(input.outcome, strict));
+        // Owner denial is authoritative after the live permit, even if the locator changed.
+        if (outcome.kind === "denied") return outcome;
         const { memorySpaceId, memoryId, sourceThread, messageIds, limit, cursor } = request;
         const locator = yield* sourceLocator({
           memorySpaceId,
@@ -1243,7 +1350,6 @@ const make = Effect.gen(function* () {
             (yield* decode(encodeSourceWatermark(request.sourceWatermark)))
         )
           return yield* new Store.MemoryStoreConflict({ code: "source_invalidated" });
-        const outcome = yield* decode(decodeSourceOutcome(input.outcome, strict));
         if (outcome.kind === "available") {
           if (
             (yield* decode(encodeSourceThread(outcome.page.sourceThread))) !==
@@ -1261,6 +1367,40 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readSource: MemoryService["Service"]["readSource"] = Effect.fn("MemoryService.readSource")(
+    function* (input, permit) {
+      yield* permit;
+      // L5 binds Sync's existing authority seam; production remains closed without that port.
+      if (!sourceReadAuthority) return yield* new MemoryAccessError({ code: "unavailable" });
+      const request = yield* prepareSourceRead(input, permit);
+      yield* permit;
+      const outcome = yield* sourceReadAuthority(request, permit).pipe(
+        Effect.catchTags({
+          MemoryHubError: (error) =>
+            Effect.gen(function* () {
+              if (error.code === "capacity_exceeded" && error.capacity) {
+                const { dimension, current, limit, reclaimable } = error.capacity;
+                return yield* new Store.MemoryCapacityError({
+                  dimension,
+                  current,
+                  limit,
+                  reclaimable,
+                });
+              }
+              return yield* new Store.MemoryStoreConflict({
+                code: isFailureCode(error.code) ? error.code : "source_unavailable",
+              });
+            }),
+        }),
+      );
+      yield* permit;
+      const validated = yield* validateSourceOutcome({ request, outcome }, permit);
+      yield* permit;
+      if (validated.kind === "available") return validated.page;
+      if (validated.kind === "denied") return yield* new MemoryAccessError({ code: "unavailable" });
+      return yield* new Store.MemoryStoreConflict({ code: validated.code });
+    },
+  );
   const admitHubOperationTx: MemoryService["Service"]["admitHubOperationTx"] = Effect.fn(
     "MemoryService.admitHubOperationTx",
   )(function* (input) {
@@ -1700,6 +1840,7 @@ const make = Effect.gen(function* () {
   });
   return MemoryService.of({
     commitLocalIntent,
+    readSource,
     prepareSourceRead,
     validateSourceOutcome,
     admitHubOperation,
@@ -1736,4 +1877,7 @@ const make = Effect.gen(function* () {
     readContextRevisions,
   });
 });
-export const layer = Layer.effect(MemoryService, make);
+export const layer = Layer.effect(MemoryService, make());
+/** Bind an application-owned callback, without importing Sync or constructing a cyclic layer. */
+export const layerWithSourceReadAuthority = (authority: MemorySourceReadAuthority["readSource"]) =>
+  Layer.effect(MemoryService, make(authority));

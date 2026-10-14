@@ -1,4 +1,4 @@
-import { MemoryProviderCapabilities } from "./memory.ts";
+import { MemoryProviderCapabilities, MemoryTaskGrantCeilingField } from "./memory.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -626,6 +626,7 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
 export const OrchestrationV2Run = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
@@ -836,6 +837,7 @@ export const OrchestrationV2SubagentWorkflow = Schema.Struct({
 export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWorkflow.Type;
 
 export const OrchestrationV2Subagent = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
   id: NodeId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
@@ -2848,6 +2850,7 @@ export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJs
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     threadId: ThreadId,
@@ -3086,6 +3089,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     notification: Schema.optional(OrchestrationV2Notification),
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -3271,6 +3275,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.request"),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     parentThreadId: ThreadId,
@@ -3333,6 +3338,7 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 const OrchestrationV2InternalCommand = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("delegated_task.remote.register"),
+    memoryGrantCeiling: MemoryTaskGrantCeilingField,
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     parentThreadId: ThreadId,
@@ -3504,6 +3510,7 @@ export type OrchestrationV2ArchivedShellStreamItem =
   typeof OrchestrationV2ArchivedShellStreamItem.Type;
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
+  memoryGrantCeiling: MemoryTaskGrantCeilingField,
   commandId: CommandId,
   creationSource: Schema.optional(OrchestrationV2CreationSource),
   threadId: Schema.optional(ThreadId),
