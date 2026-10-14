@@ -671,6 +671,18 @@ const AdminRecordSchema = Schema.Struct({
   ),
 );
 export type AdminRecord = typeof AdminRecordSchema.Type;
+const AdminReplaySchema = Schema.Struct({
+  requestId: M.MemoryOperationId,
+  requestDigest: digest,
+  expectedVersion: Schema.Int,
+  stage: Schema.Literal("acknowledged"),
+  actionDigest: digest,
+  secretName: AdminRecordSchema.fields.secretName,
+  result: AdminRecordSchema.fields.result,
+  memberVersion: AdminRecordSchema.fields.memberVersion,
+});
+export type AdminReplay = typeof AdminReplaySchema.Type;
+
 const HubCheckpointHandleSchema = Schema.Struct({
   checkpointId: Schema.String,
   snapshotToken: Schema.String,
@@ -895,7 +907,9 @@ export class MemoryStore extends Context.Service<
       | M.MemoryHubUnauthorizedError
       | M.MemoryHubForbiddenError
     >;
-    readonly readHubAdminTx: (requestId: M.MemoryOperationId) => InTx<AdminRecord | undefined>;
+    readonly readHubAdminTx: (
+      requestId: M.MemoryOperationId,
+    ) => InTx<AdminRecord | AdminReplay | undefined>;
     readonly writeHubAdminTx: (input: {
       record: AdminRecord;
       expectedStage: AdminRecord["stage"] | null;
@@ -5597,6 +5611,7 @@ const make = Effect.gen(function* () {
   const adminCodec = codec(AdminRecordSchema);
   const adminDecode = Schema.decodeUnknownEffect(AdminRecordSchema);
   const adminActionCodec = codec(PersistedAdminActionSchema);
+  const adminReplayCodec = codec(AdminReplaySchema);
   const readHubAdminTx: MemoryStore["Service"]["readHubAdminTx"] = Effect.fn(
     "MemoryStore.readHubAdminTx",
   )(function* (requestId) {
@@ -5607,9 +5622,15 @@ const make = Effect.gen(function* () {
         admin_json: string;
       }>`SELECT admin_json FROM memory_outbox WHERE id=${`admin:${requestId}`} AND kind='admin'`,
     );
-    return rows[0]
-      ? yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict))
-      : undefined;
+    if (rows[0])
+      return yield* stored("hub-admin-codec", adminCodec.decode(rows[0].admin_json, strict));
+    const guards = yield* stored(
+      "hub-admin-replay",
+      sql<{
+        record_json: string;
+      }>`SELECT record_json FROM memory_import_keys WHERE space='_admin' AND key_kind='hub_admin' AND key=${requestId}`,
+    );
+    return guards[0] ? yield* adminReplayCodec.decode(guards[0].record_json, strict) : undefined;
   });
   const writeHubAdminTx: MemoryStore["Service"]["writeHubAdminTx"] = Effect.fn(
     "MemoryStore.writeHubAdminTx",
@@ -5620,6 +5641,17 @@ const make = Effect.gen(function* () {
     if (new TextEncoder().encode(json).length > M.MEMORY_PAGE_MAX_UTF8_BYTES)
       return yield* new MemoryStoreConflict({ code: "payload_too_large" });
     const old = yield* readHubAdminTx(record.requestId);
+    if (old && !("action" in old)) {
+      if (
+        old.requestDigest !== record.requestDigest ||
+        old.expectedVersion !== record.expectedVersion ||
+        old.actionDigest !== hashText(yield* adminActionCodec.encode(record.action)) ||
+        old.secretName !== record.secretName
+      )
+        return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+      // Replay returns the original terminal result, never recreates work or a credential.
+      return { ...record, stage: old.stage, result: old.result, memberVersion: old.memberVersion };
+    }
     if (old) {
       if (
         old.requestDigest !== record.requestDigest ||
@@ -5661,9 +5693,10 @@ const make = Effect.gen(function* () {
         dimension: "work_bytes",
         limit: M.MEMORY_WORK_MAX_PAYLOAD_BYTES,
       });
+    const terminalAt = record.stage === "acknowledged" ? yield* Clock.currentTimeMillis : null;
     yield* stored(
       "hub-admin-write",
-      sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,admin_json,next_attempt_at) VALUES (${`admin:${record.requestId}`},'_admin','admin','pending','{}',${json},0) ON CONFLICT(id) DO UPDATE SET admin_json=excluded.admin_json,status=${record.stage === "acknowledged" ? "completed" : "pending"}`,
+      sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,admin_json,next_attempt_at,terminal_at) VALUES (${`admin:${record.requestId}`},'_admin','admin',${record.stage === "acknowledged" ? "completed" : "pending"},'{}',${json},0,${terminalAt}) ON CONFLICT(id) DO UPDATE SET admin_json=excluded.admin_json,status=excluded.status,terminal_at=coalesce(memory_outbox.terminal_at,excluded.terminal_at)`,
     );
     return record;
   });
@@ -5685,8 +5718,9 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     yield* Transaction;
     const record = yield* readHubAdminTx(input.requestId);
+    if (!record || !("action" in record))
+      return yield* new MemoryStoreConflict({ code: "revision_changed" });
     if (
-      !record ||
       record.requestDigest !== input.requestDigest ||
       (record.action.action === "configure"
         ? record.action.settings.mode !== "hub" ||
@@ -5973,6 +6007,30 @@ const make = Effect.gen(function* () {
       sql`UPDATE memory_hub_source_reads SET state='expired',locator_json='{}',payload_ref=NULL WHERE space=${space} AND request_id=${row.request_id}`,
     );
   });
+  const compactTerminalAdmins = Effect.fnUntraced(function* (now: number, limit: number) {
+    const rows = yield* stored(
+      "hub-admin-sweep",
+      sql<{
+        id: string;
+        admin_json: string;
+      }>`SELECT id,admin_json FROM memory_outbox WHERE kind='admin' AND status='completed' AND terminal_at<=${now - M.MEMORY_LOG_RETENTION_MS} AND json_extract(admin_json,'$.stage')='acknowledged' ORDER BY terminal_at,id LIMIT ${limit + 1}`,
+    );
+    for (const row of rows.slice(0, limit)) {
+      const record = yield* adminCodec.decode(row.admin_json, strict);
+      const { action, ...replay } = record;
+      const guard = {
+        ...replay,
+        stage: "acknowledged" as const,
+        actionDigest: hashText(yield* adminActionCodec.encode(action)),
+      };
+      yield* stored(
+        "hub-admin-guard",
+        sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES ('_admin','hub_admin',${record.requestId},${record.requestId},${yield* adminReplayCodec.encode(guard)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
+      );
+      yield* stored("hub-admin-detail-retire", sql`DELETE FROM memory_outbox WHERE id=${row.id}`);
+    }
+    return { removedRows: Math.min(rows.length, limit), cleanupPending: rows.length > limit };
+  });
   const purgeHubTransientTx: MemoryStore["Service"]["purgeHubTransientTx"] = Effect.fn(
     "MemoryStore.purgeHubTransientTx",
   )(function* (input) {
@@ -6017,9 +6075,14 @@ const make = Effect.gen(function* () {
       "hub-transient-pin-release",
       sql`UPDATE memory_hub_retention SET handles_json=${yield* handleCodec.encode(handles)},published_pinned_bytes=max(0,published_pinned_bytes-${released}) WHERE space=${input.memorySpaceId}`,
     );
+    const admins = yield* compactTerminalAdmins(
+      input.now,
+      Math.max(0, remaining - Math.min(pages.length, remaining)),
+    );
     return {
-      removedRows: Math.min(rows.length, limit) + Math.min(pages.length, remaining),
-      cleanupPending: rows.length > limit || pages.length > remaining,
+      removedRows:
+        Math.min(rows.length, limit) + Math.min(pages.length, remaining) + admins.removedRows,
+      cleanupPending: rows.length > limit || pages.length > remaining || admins.cleanupPending,
     };
   });
   const requestHubSourceReadTx: MemoryStore["Service"]["requestHubSourceReadTx"] = Effect.fn(

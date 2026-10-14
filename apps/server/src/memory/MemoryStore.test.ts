@@ -3730,3 +3730,95 @@ it.effect.each(["refusal", "forget", "escaped"] as const)(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "compacts acknowledged admin after thirty days into an immutable replay and secret-name guard",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const first: Store.AdminRecord = {
+        requestId: M.MemoryOperationId.make(id(995)),
+        requestDigest: hash,
+        expectedVersion: 0,
+        stage: "prepared",
+        action: {
+          action: "configure",
+          requestId: M.MemoryOperationId.make(id(995)),
+          expectedVersion: 0,
+          settings: { mode: "disabled" },
+        },
+        secretName: "synthetic-secret-name",
+        result: null,
+        memberVersion: null,
+      };
+      yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+      yield* store.transact(
+        store.writeHubAdminTx({
+          record: { ...first, stage: "activated" },
+          expectedStage: "prepared",
+        }),
+      );
+      const ready: Store.AdminRecord = {
+        ...first,
+        stage: "ready",
+        result: { view: { settings: { mode: "disabled" }, version: 1 } },
+      };
+      yield* store.transact(store.writeHubAdminTx({ record: ready, expectedStage: "activated" }));
+      const terminal = yield* store.transact(
+        store.writeHubAdminTx({
+          record: { ...ready, stage: "acknowledged" },
+          expectedStage: "ready",
+        }),
+      );
+      yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: M.MEMORY_LOG_RETENTION_MS - 1,
+          limit: 100,
+        }),
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 1);
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* store.purgeHubTransientTx({
+              memorySpaceId: space,
+              now: M.MEMORY_LOG_RETENTION_MS,
+              limit: 100,
+            });
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 1);
+      yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: M.MEMORY_LOG_RETENTION_MS,
+          limit: 100,
+        }),
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 0);
+      const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+      const guard = yield* fresh.transact(fresh.readHubAdminTx(first.requestId));
+      assert.isDefined(guard);
+      assert.isFalse(guard !== undefined && "action" in guard);
+      assert.strictEqual(guard?.secretName, first.secretName);
+      assert.deepStrictEqual(guard?.result, terminal.result);
+      assert.deepStrictEqual(
+        yield* fresh.transact(fresh.writeHubAdminTx({ record: first, expectedStage: null })),
+        terminal,
+      );
+      assert.strictEqual((yield* sql`SELECT 1 FROM memory_outbox WHERE kind='admin'`).length, 0);
+      const mismatch = yield* fresh
+        .transact(
+          fresh.writeHubAdminTx({
+            record: { ...first, secretName: "different-secret" },
+            expectedStage: null,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(mismatch._tag, "MemoryStoreConflict");
+    }).pipe(Effect.provide(live)),
+);
