@@ -2268,8 +2268,10 @@ describe("MemoryStore transient source relay", () => {
           true,
         );
         // Keep the real relay response unconsumed while an approved canonical change is scanned.
-        const next = operation(305);
+        const nextBase = operation(305);
+        if (nextBase.kind !== "upsert") throw new Error("fixture");
         const current = yield* store.loadAggregate(space, memory);
+        const next = { ...nextBase, revision: { ...nextBase.revision, parents: current.heads } };
         const approved = decideMemoryOperation(
           current,
           next,
@@ -2279,7 +2281,7 @@ describe("MemoryStore transient source relay", () => {
             operationId: next.operationId,
             memoryId: memory,
             operationDigest: memoryOperationDigest(next),
-            outcome: "conflicted",
+            outcome: "accepted",
             hubSequence: 2,
           },
         );

@@ -6357,7 +6357,7 @@ const make = Effect.gen(function* () {
       );
     yield* stored(
       "hub-token-first-issue",
-      sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hub_checkpoint_token',${tokenKey},NULL,${guardJson})`,
+      sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hub_checkpoint_token',${tokenKey},${space},${guardJson})`,
     );
     yield* stored(
       "hub-snapshot-pin",
