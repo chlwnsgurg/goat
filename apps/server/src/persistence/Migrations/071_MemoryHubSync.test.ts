@@ -91,7 +91,20 @@ it.effect(
         { dimension: "hub_snapshot_bytes", value: 6 },
         { dimension: "hub_snapshot_rows", value: 1 },
       ]);
+      const generation = () =>
+        sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space='space' AND dimension='hub_snapshot_generation'`;
+      yield* sql`UPDATE memory_payloads SET body_json=body_json WHERE space='space'`;
+      assert.deepStrictEqual(yield* counters(), [
+        { dimension: "hub_snapshot_bytes", value: 6 },
+        { dimension: "hub_snapshot_rows", value: 1 },
+      ]);
+      assert.deepStrictEqual(yield* generation(), []);
       yield* sql`UPDATE memory_payloads SET body_json='한글abc' WHERE space='space'`;
+      assert.deepStrictEqual(yield* generation(), [{ value: 1 }]);
+      yield* sql`UPDATE memory_payloads SET dependencies_json='["local-only"]' WHERE space='space'`;
+      assert.deepStrictEqual(yield* generation(), [{ value: 1 }]);
       assert.strictEqual((yield* counters())[0]!.value, 9);
       yield* sql
         .withTransaction(

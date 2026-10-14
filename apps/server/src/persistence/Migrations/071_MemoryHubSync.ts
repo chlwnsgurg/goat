@@ -261,9 +261,28 @@ export default Effect.gen(function* () {
         : table === "memory_import_keys"
           ? `CASE WHEN ${prefix}key_kind='hub_checkpoint_token' THEN 0 ELSE 1 END`
           : "1";
+    const inputChanged = [
+      ...new Set([
+        spaceColumn,
+        ...columns.split(","),
+        ...(table === "memory_import_keys" ? ["key_kind"] : []),
+      ]),
+    ]
+      .map((column) => `OLD.${column} IS NOT NEW.${column}`)
+      .join(" OR ");
     for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
       const prefix = action === "DELETE" ? "OLD" : "NEW";
-      yield* sql.unsafe(`CREATE TRIGGER ${table}_snapshot_generation_${action.toLowerCase()} AFTER ${action} ON ${table} ${table === "memory_import_keys" ? `WHEN ${prefix}.key_kind!='hub_checkpoint_token'` : ""} BEGIN
+      const conditions = [
+        ...(table === "memory_import_keys"
+          ? [
+              action === "UPDATE"
+                ? "(OLD.key_kind!='hub_checkpoint_token' OR NEW.key_kind!='hub_checkpoint_token')"
+                : `${prefix}.key_kind!='hub_checkpoint_token'`,
+            ]
+          : []),
+        ...(action === "UPDATE" ? [`(${inputChanged})`] : []),
+      ];
+      yield* sql.unsafe(`CREATE TRIGGER ${table}_snapshot_generation_${action.toLowerCase()} AFTER ${action} ON ${table} ${conditions.length ? `WHEN ${conditions.join(" AND ")}` : ""} BEGIN
         INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${prefix}.${spaceColumn},'hub_snapshot_generation','',1)
         ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+1;
       END`);
@@ -290,7 +309,7 @@ export default Effect.gen(function* () {
         ["DELETE", change("OLD", -1)],
       ] as const)
         yield* sql.unsafe(
-          `CREATE TRIGGER ${table}_${dimension}_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN ${body} END`,
+          `CREATE TRIGGER ${table}_${dimension}_${action.toLowerCase()} AFTER ${action} ON ${table} ${action === "UPDATE" ? `WHEN OLD.${spaceColumn} IS NOT NEW.${spaceColumn} OR (${dimension === "hub_snapshot_rows" ? recordRows("OLD.") : bytes("OLD.")}) IS NOT (${dimension === "hub_snapshot_rows" ? recordRows("NEW.") : bytes("NEW.")})` : ""} BEGIN ${body} END`,
         );
     }
   }

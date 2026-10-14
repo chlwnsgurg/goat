@@ -1284,6 +1284,51 @@ it.effect(
     }).pipe(Effect.provide(live)),
 );
 
+it.effect("index-only updates preserve materialized checkpoint credit and staging usage", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active')`;
+    yield* service.upsert(input(1290), Effect.void);
+    const operation = yield* store.readWorkOperation(`sync:${space}:${id(1290)}`);
+    if (!operation) throw new Error("fixture");
+    const authority: Store.HubAuthority = {
+      principal: {
+        memorySpaceId: space,
+        environmentId,
+        credentialVersion: 1,
+        scopes: ["memory:sync"],
+      },
+      now: Clock.currentTimeMillis,
+      reauthorize: Effect.void,
+    };
+    yield* service.admitHubOperation({ authority, operation });
+    yield* store.transact(
+      store.prepareHubProducerCheckpointTx({
+        authority,
+        checkpointId: "index-staging",
+        hubEnvironmentId: environmentId,
+      }),
+    );
+    const before = yield* store.transact(store.readHubUsageTx(space));
+    assert.isAbove(before.checkpointReservationConsumedBytes, 0);
+    const generation =
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation'`;
+    yield* sql`UPDATE memory_items SET index_state='ready',indexed_revision='local-index',indexed_generation=7,indexed_bytes=123 WHERE space=${space}`;
+    assert.deepStrictEqual(
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_generation'`,
+      generation,
+    );
+    assert.deepStrictEqual(yield* store.transact(store.readHubUsageTx(space)), before);
+    assert.isAbove(
+      (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:index-staging'`)
+        .length,
+      0,
+    );
+  }).pipe(Effect.provide(live)),
+);
+
 it.effect(
   "the reserved first forget keeps checkpoint representability at a fully pinned budget",
   () =>
