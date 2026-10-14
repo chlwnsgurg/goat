@@ -5869,8 +5869,8 @@ it.effect.each(turnStartMemoryCases)(
                 payload: {
                   ...continued,
                   providerThreadId: providerThread.id,
-                  rootNodeId,
-                  activeAttemptId: attemptId,
+                  rootNodeId: continued.rootNodeId,
+                  activeAttemptId: continued.activeAttemptId,
                   status: "starting",
                 },
               },
@@ -5878,19 +5878,29 @@ it.effect.each(turnStartMemoryCases)(
                 ...eventBase,
                 id: yield* ids.allocate.event({ threadId }),
                 type: "node.updated",
-                payload: { ...node, runId: startRunId },
+                payload: {
+                  ...node,
+                  id: continued.rootNodeId!,
+                  rootNodeId: continued.rootNodeId!,
+                  runId: startRunId,
+                },
               },
               {
                 ...eventBase,
                 id: yield* ids.allocate.event({ threadId }),
                 type: "run-attempt.updated",
-                payload: { ...attempt, runId: startRunId },
+                payload: {
+                  ...attempt,
+                  id: continued.activeAttemptId!,
+                  rootNodeId: continued.rootNodeId!,
+                  runId: startRunId,
+                },
               },
               {
                 ...eventBase,
                 id: yield* ids.allocate.event({ threadId }),
                 type: "checkpoint-scope.created",
-                payload: { ...checkpoint, runId: startRunId },
+                payload: { ...checkpoint, nodeId: continued.rootNodeId!, runId: startRunId },
               },
             ],
           });
@@ -5908,7 +5918,8 @@ it.effect.each(turnStartMemoryCases)(
           ...runtimePolicy,
           ...("readOnly" in testCase ? { sandboxPolicy: "read-only" as const } : {}),
         };
-        const startLayer = ProviderTurnStart.layer.pipe(
+        // The replay harness also builds this layer; use the manager under test here.
+        const startLayer = Layer.fresh(ProviderTurnStart.layer).pipe(
           Layer.provide(
             Layer.mergeAll(
               Layer.succeed(EventSink.EventSinkV2, sink),
@@ -5966,19 +5977,28 @@ it.effect.each(turnStartMemoryCases)(
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            ProviderReplayHarness.layerWithRegistry(
-              { name: "memory-start-admission" },
-              ProviderAdapterRegistry.layerFromAdapters([
-                {
-                  instanceId: modelSelection.instanceId,
-                  driver: ProviderDriverKind.make("codex"),
-                  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
-                  planSelectionTransition: () =>
-                    Effect.succeed({ type: "apply_on_next_turn" as const }),
-                  openSession: () => Effect.die("unused replay provider"),
-                } as ProviderAdapter.ProviderAdapterV2["Service"],
-              ]),
-              { databaseLayer: layerTestDatabase, runEffectWorker: false },
+            Layer.effect(
+              Orchestrator.OrchestratorV2,
+              Effect.gen(function* () {
+                return yield* Orchestrator.OrchestratorV2;
+              }),
+            ).pipe(
+              Layer.provide(
+                ProviderReplayHarness.layerWithRegistry(
+                  { name: "memory-start-admission" },
+                  ProviderAdapterRegistry.layerFromAdapters([
+                    {
+                      instanceId: modelSelection.instanceId,
+                      driver: ProviderDriverKind.make("codex"),
+                      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+                      planSelectionTransition: () =>
+                        Effect.succeed({ type: "apply_on_next_turn" as const }),
+                      openSession: () => Effect.die("unused replay provider"),
+                    } as ProviderAdapter.ProviderAdapterV2["Service"],
+                  ]),
+                  { databaseLayer: layerTestDatabase, runEffectWorker: false },
+                ),
+              ),
             ),
           ),
         ),

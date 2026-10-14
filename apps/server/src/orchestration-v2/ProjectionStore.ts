@@ -1,3 +1,4 @@
+import { MAX_CONTINUATION_CHAIN } from "./ContinuationChain.ts";
 import { LEGACY_MCP_APP_OUTPUT_KEY } from "@goat/contracts/legacyT3Names";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -4045,12 +4046,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE bindings.thread_id = ${threadId}
               ORDER BY sessions.updated_at ASC, sessions.provider_session_id ASC
             `.pipe(Effect.flatMap(decodeRows(decodeProviderSessionPayload, threadId)));
+            // Read only the current prompt and its bounded automatic-continuation ancestry.
+            const memoryMessageIds = [];
+            let memoryRun = runs.find((candidate) => candidate.id === runId);
+            for (
+              let depth = 0;
+              memoryRun !== undefined && depth <= MAX_CONTINUATION_CHAIN;
+              depth++
+            ) {
+              memoryMessageIds.push(memoryRun.userMessageId);
+              const sourceId =
+                memoryRun.restartContinuationOfRunId ?? memoryRun.usageLimitContinuationOfRunId;
+              memoryRun =
+                sourceId === undefined
+                  ? undefined
+                  : runs.find((candidate) => candidate.id === sourceId);
+            }
             // Compact retries need their original markers; emptiness is an existence check.
             const messages = yield* sql<PayloadRow>`
               SELECT payload_json FROM orchestration_v2_projection_messages
               WHERE thread_id = ${threadId} AND (
-                message_id IN (SELECT json_extract(payload_json, '$.userMessageId') FROM orchestration_v2_projection_runs
-                  WHERE thread_id = ${threadId} AND run_id = ${runId})
+                message_id IN ${sql.in(memoryMessageIds)}
                 OR (role = 'user' AND lower(trim(json_extract(payload_json, '$.text'), ${javascriptTrimWhitespace})) = '/compact')
               ) ORDER BY created_at ASC, message_id ASC
             `.pipe(Effect.flatMap(decodeRows(decodeMessagePayload, threadId)));
