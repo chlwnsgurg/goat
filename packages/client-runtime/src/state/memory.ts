@@ -167,8 +167,10 @@ export function createMemoryEnvironmentAtoms<R, E>(
         const allowed = get(readPermissions.permissionAtom(environmentId));
         const prepared = get(sessions.preparedConnectionValueAtom(environmentId));
         const config = get(sessions.initialConfigValueAtom(environmentId));
-        const entries = get(catalogValueAtom).entries;
-        ledger.retainEnvironments(entries);
+        const catalog = get(catalogValueAtom);
+        const entries = catalog.entries;
+        // The initial empty catalog is not evidence of environment removal.
+        if (catalog.isReady) ledger.retainEnvironments(entries);
         if (get(disposedAtom) || !entries.get(environmentId)?.enabled) {
           return Stream.succeed(emptyMemoryExposure());
         }
