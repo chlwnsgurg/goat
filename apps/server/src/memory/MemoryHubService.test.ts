@@ -1,5 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- historical admin request fixture.
+import * as NodeCrypto from "node:crypto";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
@@ -571,7 +574,172 @@ const provision: M.MemoryHubSettingsUpdateInput = {
   environmentId: M.EnvironmentId.make("new-member"),
 };
 
+const encodeAdminRequest = Schema.encodeEffect(
+  Schema.fromJsonString(M.MemoryHubSettingsUpdateInput),
+);
+const missingAcknowledgementCases = (
+  ["configure", "rotateMemberCredential", "revokeMember"] as const
+).flatMap((action) =>
+  [
+    { historical: false, retryFirst: false },
+    { historical: true, retryFirst: false },
+    { historical: true, retryFirst: true },
+  ].map((entry) => ({ action, ...entry })),
+);
+
 describe("MemoryHubAdministrator", () => {
+  it.effect.each(missingAcknowledgementCases)(
+    "missing acknowledgement before $action (historical=$historical, retryFirst=$retryFirst)",
+    ({ action, historical, retryFirst }) =>
+      Effect.gen(function* () {
+        const { admin, backend, view } = yield* adminFixture;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const bad: M.MemoryHubSettingsUpdateInput = {
+          requestId: M.MemoryOperationId.make(id(430)),
+          expectedVersion: 0,
+          action: "acknowledgeCredential",
+          credentialRequestId: M.MemoryOperationId.make(id(431)),
+        };
+        if (historical) {
+          const json = yield* encodeAdminRequest(bad);
+          const record: Store.AdminRecord = {
+            requestId: bad.requestId,
+            requestDigest: NodeCrypto.createHash("sha256").update(json).digest("hex"),
+            expectedVersion: 0,
+            action: bad,
+            stage: "prepared",
+            memberVersion: null,
+            secretName: null,
+            result: null,
+          };
+          yield* store.transact(
+            Effect.gen(function* () {
+              yield* store.writeHubAdminTx({ record, expectedStage: null });
+              yield* store.writeHubAdminTx({
+                record: { ...record, stage: "activated" },
+                expectedStage: "prepared",
+              });
+            }),
+          );
+        }
+        const restarted = yield* Hub.makeAdministrator.pipe(
+          Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+        );
+        if (retryFirst) {
+          const error = yield* restarted.update(bad, Effect.void).pipe(Effect.flip);
+          assert.strictEqual(error._tag, "MemoryStoreConflict");
+          if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "not_found");
+          assert.strictEqual((yield* Ref.get(view)).version, 0);
+          assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+        }
+        // Recovery must also run when the first post-upgrade call is a normal admin action.
+        if (!historical) {
+          const before = yield* sql`SELECT * FROM memory_outbox ORDER BY id`;
+          for (let retry = 0; retry < 2; retry++) {
+            const error = yield* admin.update(bad, Effect.void).pipe(Effect.flip);
+            assert.strictEqual(error._tag, "MemoryStoreConflict");
+            if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "not_found");
+          }
+          assert.deepStrictEqual(yield* sql`SELECT * FROM memory_outbox ORDER BY id`, before);
+          assert.strictEqual((yield* Ref.get(view)).version, 0);
+        }
+        const next: M.MemoryHubSettingsUpdateInput =
+          action === "configure"
+            ? {
+                requestId: M.MemoryOperationId.make(id(432)),
+                expectedVersion: 0,
+                action,
+                settings: { mode: "disabled" },
+              }
+            : {
+                requestId: M.MemoryOperationId.make(id(432)),
+                expectedVersion: 0,
+                action,
+                environmentId: otherEnv,
+              };
+        const result = yield* restarted.update(next, Effect.void);
+        assert.strictEqual(result.view.version, 1);
+        if (action === "rotateMemberCredential")
+          assert.strictEqual(result.credential!.credentialVersion, 2);
+        if (action === "revokeMember")
+          assert.strictEqual((yield* store.readHubMember(space, otherEnv))!.status, "revoked");
+        const after = yield* sql`SELECT * FROM memory_outbox ORDER BY id`;
+        for (let retry = 0; retry < 2; retry++) {
+          const error = yield* restarted.update(bad, Effect.void).pipe(Effect.flip);
+          assert.strictEqual(error._tag, "MemoryStoreConflict");
+          if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "not_found");
+        }
+        assert.deepStrictEqual(yield* sql`SELECT * FROM memory_outbox ORDER BY id`, after);
+        assert.strictEqual((yield* Ref.get(view)).version, 1);
+        assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+        const failed = yield* store.transact(store.readHubAdminTx(bad.requestId));
+        if (historical) {
+          assert.strictEqual(failed!.stage, "acknowledged");
+          assert.isNull(failed!.result);
+          yield* TestClock.adjust(M.MEMORY_LOG_RETENTION_MS);
+          yield* store.transact(
+            store.purgeHubTransientTx({
+              memorySpaceId: space,
+              now: yield* Clock.currentTimeMillis,
+              limit: M.MEMORY_DEFERRED_SWEEP_MAX_ITEMS,
+            }),
+          );
+          const replay = (yield* store.transact(store.readHubAdminTx(bad.requestId)))!;
+          assert.isFalse("action" in replay);
+          const error = yield* restarted.update(bad, Effect.void).pipe(Effect.flip);
+          assert.strictEqual(error._tag, "MemoryStoreConflict");
+          if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "not_found");
+          assert.strictEqual((yield* Ref.get(view)).version, 1);
+        } else assert.isUndefined(failed);
+      }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect(
+    "rejects acknowledgement of a prepared credential or a non-credential action without writes",
+    () =>
+      Effect.gen(function* () {
+        const { admin, backend } = yield* adminFixture;
+        const store = yield* Store.MemoryStore;
+        const secrets = yield* Secrets.ServerSecretStore;
+        const failing = yield* Hub.makeAdministrator.pipe(
+          Effect.provideService(Hub.MemoryHubAdminSettings, backend),
+          Effect.provideService(Secrets.ServerSecretStore, {
+            ...secrets,
+            getOrCreateRandom: () =>
+              Effect.fail(
+                new Secrets.SecretStorePersistError({ resource: "synthetic", cause: undefined }),
+              ),
+          }),
+        );
+        yield* failing.update(provision, Effect.void).pipe(Effect.flip);
+        const configured: M.MemoryHubSettingsUpdateInput = {
+          requestId: M.MemoryOperationId.make(id(440)),
+          expectedVersion: 0,
+          action: "configure",
+          settings: { mode: "disabled" },
+        };
+        yield* admin.update(configured, Effect.void);
+        const sql = yield* SqlClient.SqlClient;
+        const before = yield* sql`SELECT * FROM memory_outbox ORDER BY id`;
+        for (const credentialRequestId of [provision.requestId, configured.requestId]) {
+          const error = yield* admin
+            .update(
+              {
+                requestId: M.MemoryOperationId.make(id(441)),
+                expectedVersion: 1,
+                action: "acknowledgeCredential",
+                credentialRequestId,
+              },
+              Effect.void,
+            )
+            .pipe(Effect.flip);
+          assert.strictEqual(error._tag, "MemoryStoreConflict");
+          if (error._tag === "MemoryStoreConflict") assert.strictEqual(error.code, "not_found");
+        }
+        assert.deepStrictEqual(yield* sql`SELECT * FROM memory_outbox ORDER BY id`, before);
+        assert.isUndefined(yield* store.transact(store.readActivatedHubAdminTx()));
+      }).pipe(Effect.provide(adminDependencies)),
+  );
   it.effect(
     "resumes after activation/settings failure using the same private secret and member version",
     () =>

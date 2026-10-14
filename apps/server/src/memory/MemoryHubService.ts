@@ -413,9 +413,44 @@ export const makeAdministrator = Effect.gen(function* () {
     return yield* settings.withLock(
       Effect.gen(function* () {
         yield* permit;
+        // Older versions activated missing-target acknowledgements before validation.
+        // Finish only those no-op records, without consuming a settings revision.
+        for (;;) {
+          const stuck = yield* tx(permit, store.readActivatedHubAdminTx());
+          if (!stuck || stuck.action.action !== "acknowledgeCredential") break;
+          const target = yield* tx(permit, store.readHubAdminTx(stuck.action.credentialRequestId));
+          if (target) break;
+          yield* tx(
+            permit,
+            Effect.gen(function* () {
+              const ready = yield* store.writeHubAdminTx({
+                record: { ...stuck, stage: "ready" },
+                expectedStage: "activated",
+              });
+              yield* store.writeHubAdminTx({
+                record: { ...ready, stage: "acknowledged" },
+                expectedStage: "ready",
+              });
+            }),
+          );
+        }
         let record = yield* tx(permit, store.readHubAdminTx(request.requestId));
         if (record && record.requestDigest !== digest)
           return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+        if (request.action === "acknowledgeCredential") {
+          if (record?.stage === "acknowledged" && record.result === null)
+            return yield* new Store.MemoryStoreConflict({ code: "not_found" });
+          const original = yield* tx(permit, store.readHubAdminTx(request.credentialRequestId));
+          if (
+            !original ||
+            (original.stage !== "ready" && original.stage !== "acknowledged") ||
+            ("action" in original
+              ? original.action.action !== "provisionMember" &&
+                original.action.action !== "rotateMemberCredential"
+              : original.memberVersion === null)
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "not_found" });
+        }
         const outgoing =
           request.action === "provisionMember" || request.action === "rotateMemberCredential";
         if (!record || record.stage === "prepared") {
