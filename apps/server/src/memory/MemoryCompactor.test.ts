@@ -64,7 +64,7 @@ const seed = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${hubEnv},${"a".repeat(64)},1,'active',0),(${space},${memberEnv},${"b".repeat(64)},1,'active',0)`;
 });
-const operation = (n = 10): M.MemoryOperation => ({
+const operation = (n = 10): Extract<M.MemoryOperation, { kind: "upsert" }> => ({
   protocolVersion: 1,
   kind: "upsert",
   memorySpaceId: space,
@@ -264,9 +264,17 @@ describe("MemoryCompactor", () => {
         principal(),
       );
       yield* push();
-      // Admission prepaid the changed snapshot. Consume that slot first; another
-      // publication while the old token pins its pages needs additional space.
       const initial = yield* compactor.compact(principal());
+      // An unchanged replacement can retire equally sized unpinned pages without
+      // growing retained bytes. Add accepted input so the next snapshot must grow.
+      const next = operation(11);
+      const changedMemoryId = M.MemoryId.make(id(3));
+      const changed = yield* push({
+        ...next,
+        memoryId: changedMemoryId,
+        revision: { ...next.revision, memoryId: changedMemoryId },
+      });
+      assert.strictEqual(changed.receipts[0]!.outcome, "accepted");
       const sql = yield* SqlClient.SqlClient;
       yield* sql`UPDATE memory_hub_retention SET published_pinned_bytes=${M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES} WHERE space=${space}`;
       const beforeRetention = yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`;
@@ -276,10 +284,10 @@ describe("MemoryCompactor", () => {
         yield* sql`SELECT * FROM memory_import_keys WHERE space=${space} AND key_kind='hub_checkpoint_token' ORDER BY key`;
       const beforeMembers =
         yield* sql`SELECT * FROM memory_hub_members WHERE space=${space} ORDER BY environment`;
-      assert.strictEqual(
-        (yield* compactor.compact(principal()).pipe(Effect.flip))._tag,
-        "MemoryCapacityError",
-      );
+      const failure = yield* compactor.compact(principal()).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryCapacityError");
+      if (failure._tag === "MemoryCapacityError")
+        assert.strictEqual(failure.dimension, "checkpoint_staging");
       assert.deepStrictEqual(
         yield* sql`SELECT * FROM memory_hub_retention WHERE space=${space}`,
         beforeRetention,

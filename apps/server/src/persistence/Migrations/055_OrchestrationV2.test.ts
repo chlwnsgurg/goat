@@ -79,6 +79,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 68, name: "RemoteReportRelay" },
         { migration_id: 69, name: "ProjectionTurnItemRequestIndex" },
         { migration_id: 70, name: "Memory" },
+        { migration_id: 71, name: "MemoryHubSync" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
