@@ -1081,6 +1081,19 @@ export class MemoryStore extends Context.Service<
       },
       MemoryStorageError
     >;
+    readonly readLocalProcessingStatus: (input: {
+      environmentId: M.EnvironmentId;
+      memorySpaceId: M.MemorySpaceId | null;
+      hubEnvironmentId: M.EnvironmentId | null;
+    }) => Effect.Effect<
+      {
+        processing: M.MemoryProcessingStatus;
+        pendingSync: number;
+        quarantined: number;
+        parked: number;
+      },
+      MemoryStorageError
+    >;
     readonly readBootstrap: (input: {
       memorySpaceId: M.MemorySpaceId;
       hubEnvironmentId: M.EnvironmentId;
@@ -6899,9 +6912,10 @@ const make = Effect.gen(function* () {
     });
     return next;
   });
-  const readProcessing: MemoryStore["Service"]["readProcessing"] = Effect.fn(
-    "MemoryStore.readProcessing",
-  )(function* (input) {
+  const readProcessingFor = Effect.fn("MemoryStore.readProcessingFor")(function* (input: {
+    space: string;
+    binding: { memorySpaceId: M.MemorySpaceId; hubEnvironmentId: M.EnvironmentId } | null;
+  }) {
     return yield* transact(
       Effect.gen(function* () {
         const rows = yield* stored(
@@ -6909,7 +6923,7 @@ const make = Effect.gen(function* () {
           sql<{
             dimension: string;
             value: number;
-          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.memorySpaceId} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
+          }>`SELECT dimension,value FROM memory_quota_counters WHERE space=${input.space} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
         );
         const values = new Map(rows.map((r) => [r.dimension, r.value]));
         const count = (name: string) => values.get(`processing_${name}`) ?? 0;
@@ -6917,14 +6931,14 @@ const make = Effect.gen(function* () {
           "processing-oldest",
           sql<{
             processing_oldest_at: string;
-          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.memorySpaceId} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
+          }>`SELECT processing_oldest_at FROM memory_items WHERE space=${input.space} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
         );
-        const bootstrap = yield* readBootstrap(input);
+        const sequence = input.binding ? (yield* readBootstrap(input.binding)).afterSequence : 0;
         const state = yield* stored(
           "processing-watermark",
           sql<{
             projection_watermark: number;
-          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}`,
+          }>`SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.space}`,
         );
         const eligible = count("eligible");
         const indexed = count("indexed");
@@ -6932,7 +6946,7 @@ const make = Effect.gen(function* () {
           "processing-codec",
           codec(M.MemoryProcessingStatus).decode(
             yield* codec(M.MemoryProcessingStatus).encode({
-              lastReceivedHubSequence: bootstrap.afterSequence,
+              lastReceivedHubSequence: sequence,
               receiveLag: null,
               deferred: count("deferred"),
               oldestDeferredAtUtc: oldest[0]
@@ -6967,6 +6981,17 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const readProcessing: MemoryStore["Service"]["readProcessing"] = (input) =>
+    readProcessingFor({ space: input.memorySpaceId, binding: input });
+  const readLocalProcessingStatus: MemoryStore["Service"]["readLocalProcessingStatus"] = (input) =>
+    readProcessingFor({
+      // WP2 drafts use an internal key, never a protocol MemorySpaceId or a new space.
+      space: input.memorySpaceId ?? `_local:${input.environmentId}`,
+      binding:
+        input.memorySpaceId !== null && input.hubEnvironmentId !== null
+          ? { memorySpaceId: input.memorySpaceId, hubEnvironmentId: input.hubEnvironmentId }
+          : null,
+    });
   const readBootstrap: MemoryStore["Service"]["readBootstrap"] = Effect.fn(
     "MemoryStore.readBootstrap",
   )(function* (input) {
@@ -8868,6 +8893,7 @@ const make = Effect.gen(function* () {
     readPendingHubAdmins,
     readActivatedHubAdminTx,
     readProcessing,
+    readLocalProcessingStatus,
     readBootstrap,
     discardBootstrapTx,
     retireFrozenClaimTx,

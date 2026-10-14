@@ -6877,3 +6877,57 @@ it.effect.each(["submitting", "approved", "approval-only"] as const)(
       assert.deepStrictEqual(yield* store.pendingReports(100), []);
     }).pipe(Effect.provide(live)),
 );
+
+it.effect("r16 nullable processing reads the actual local item counters and PK plans", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const key = `_local:${env}`;
+    // Internal local keys are not MemorySpaceId UUIDs; seed nonempty item state to detect
+    // an implementation that replaces nullable processing with an empty status constant.
+    const deferred = '[{"state":"held","sinceAtUtc":"2026-10-14T00:00:00.000Z"}]';
+    yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json,deferred_json,cleanup_pending) VALUES (${key},${memory},'{}','user','[]','quarantined',0,'{}','{"reasons":["secret_detected","scanner_pending","missing_parent"]}',${deferred},1)`;
+    yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,metadata_json) VALUES (${key},'parked','operation','[]','missing_parent','{}')`;
+    const input = { environmentId: env, memorySpaceId: null, hubEnvironmentId: null };
+    const status = yield* store.readLocalProcessingStatus(input);
+    assert.strictEqual(status.quarantined, 1);
+    assert.strictEqual(status.parked, 1);
+    assert.strictEqual(status.processing.deferred, 1);
+    assert.strictEqual(status.processing.oldestDeferredAtUtc, "2026-10-14T00:00:00.000Z");
+    assert.strictEqual(status.processing.scannerHeldItems, 1);
+    assert.strictEqual(status.processing.scannerPendingItems, 1);
+    assert.strictEqual(status.processing.missingParentItems, 1);
+    assert.strictEqual(status.processing.pendingCleanupItems, 1);
+    assert.deepStrictEqual(
+      yield* store.readLocalProcessingStatus({ ...input, hubEnvironmentId: env }),
+      status,
+    );
+    yield* store
+      .transact(
+        sql`DELETE FROM memory_items WHERE space=${key}`.pipe(
+          Effect.andThen(Effect.fail("rollback")),
+        ),
+      )
+      .pipe(Effect.flip);
+    assert.deepStrictEqual(yield* store.readLocalProcessingStatus(input), status);
+    const plans = [
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT dimension,value FROM memory_quota_counters WHERE space=${key} AND scope_key='' AND dimension IN ('processing_quarantined','processing_eligible','processing_indexed','processing_cleanup','processing_scanner_held','processing_scanner_pending','processing_missing_parent','processing_deferred','processing_pending_sync','processing_parked','processing_report_backlog','processing_report_failed','processing_admission_failures')`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT processing_oldest_at FROM memory_items WHERE space=${key} AND processing_oldest_at IS NOT NULL ORDER BY processing_oldest_at LIMIT 1`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT projection_watermark FROM memory_compaction_state WHERE space=${key}`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT bootstrap_state,after_sequence FROM memory_sync_cursors WHERE space=${space} AND hub_environment_id=${env}`,
+    ];
+    for (const plan of plans) {
+      assert.isTrue(plan.every((row) => row.detail.includes("SEARCH")));
+      assert.isFalse(plan.some((row) => /SCAN|TEMP B-TREE/.test(row.detail)));
+    }
+    yield* Effect.log("R16_PROCESSING_EXPLAIN", JSON.stringify(plans));
+  }).pipe(Effect.provide(live)),
+);

@@ -867,3 +867,53 @@ it.effect(
       assert.isAbove(status.requiredCheckpointBoundBytes!, 0);
     }).pipe(Effect.provide(services)),
 );
+
+it.effect("r16 unbound storage preserves environment samples and FTS using indexed reads", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const quota = yield* Quota.MemoryQuotaService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* store.recordSample(env, sample(0));
+    yield* store.putFtsState({
+      environment: env,
+      lastMergeAt: null,
+      state: "braked",
+      changedAt: 0,
+      allocatedBytes: 123,
+      measuredAt: 0,
+      measurementStatus: "available",
+      mergePending: false,
+      changedRows: 0,
+    });
+    const status = yield* quota.readUnboundStorageStatus({ environmentId: env });
+    assert.strictEqual(status.dbFileBytes, 100);
+    assert.strictEqual(status.growth.current?.memoryLogicalBytes, 0);
+    assert.strictEqual(status.ftsAdmission.state, "braked");
+    assert.strictEqual(status.ftsAdmission.allocatedBytes, 123);
+    assert.deepStrictEqual(status.warnings, ["fts_braked"]);
+    const other = yield* quota.readUnboundStorageStatus({
+      environmentId: M.EnvironmentId.make("other"),
+    });
+    assert.isNull(other.dbFileBytes);
+    assert.strictEqual(other.ftsAdmission.state, "open");
+    const plans = [
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT dimension,scope_key,value FROM memory_quota_counters WHERE space=${`_local:${env}`}`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT sample_json FROM memory_storage_samples WHERE environment=${env}`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT current_sample_json FROM memory_compaction_state WHERE space=${`_environment:${env}`} AND current_sample_json IS NOT NULL`,
+      yield* sql<{
+        detail: string;
+      }>`EXPLAIN QUERY PLAN SELECT state FROM memory_fts_maintenance_state WHERE environment=${env}`,
+    ];
+    for (const plan of plans) {
+      assert.isTrue(plan.every((row) => row.detail.includes("SEARCH")));
+      assert.isFalse(plan.some((row) => /SCAN|TEMP B-TREE/.test(row.detail)));
+    }
+    yield* Effect.log("R16_STORAGE_EXPLAIN", JSON.stringify(plans));
+  }).pipe(Effect.provide(services)),
+);
