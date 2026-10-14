@@ -8,6 +8,7 @@ import {
   presentMemoryItem,
   presentMemoryOwnerPolicy,
   presentMemoryReport,
+  presentMemoryResolution,
   presentMemoryRevert,
   presentMemoryRevertResult,
   presentMemoryRunAccess,
@@ -122,6 +123,37 @@ describe("memory presentation boundaries", () => {
       canForget: false,
     });
   });
+  it.each([
+    ["codex", "Codex"],
+    ["claudeAgent", "Claude"],
+    ["cursor", "Cursor"],
+    ["grok", "Grok"],
+    ["opencode", "OpenCode"],
+    ["antigravity", "Antigravity"],
+    ["custom-resolver", "custom-resolver"],
+  ])("labels resolver %s independently of importer profiles", (driver, label) => {
+    expect(
+      presentMemoryResolution({
+        ...entry,
+        resolution: { ...resolution, effectiveProvider: M.ProviderDriverKind.make(driver) },
+      }).providerLabel,
+    ).toBe(label);
+  });
+  it("shows retained resolution metadata without regenerating purged judgment", () => {
+    expect(presentMemoryResolution({ ...entry, payload: null })).toMatchObject({
+      label: "자동 해결 적용됨",
+      providerLabel: "Codex",
+      effectiveModel: "synthetic",
+      resolvingEnvironmentId: "owner",
+      judgmentAvailable: false,
+    });
+    expect(
+      presentMemoryResolution({
+        ...entry,
+        resolution: { ...resolution, revertsResolutionId: resolution.resolutionId },
+      }).label,
+    ).toBe("되돌리기 적용됨");
+  });
   it("allows a retained current resolution only before the 30-day deadline", () => {
     const input = { item, entry, history, now: Date.parse(deadline) - 1 };
     expect(presentMemoryRevert(input).canRevert).toBe(true);
@@ -191,7 +223,7 @@ describe("memory presentation boundaries", () => {
         revisionId: null,
         pendingSync: true,
       }),
-    ).toMatchObject({ label: "잊기 요청 반영됨", pendingSync: true });
+    ).toMatchObject({ label: "잊기 요청 반영됨", pendingSync: true, expansionStatus: "unknown" });
   });
   it("preserves desired pending enrollment without claiming effective permission", () => {
     const view = decodeOwnerView({

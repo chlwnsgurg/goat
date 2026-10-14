@@ -67,6 +67,31 @@ const REVERT_LABELS = {
   revert_expired: "되돌리기 기간 만료",
 } as const;
 
+const MEMORY_RESOLVER_LABELS = new Map([
+  ["codex", "Codex"],
+  ["claudeAgent", "Claude"],
+  ["cursor", "Cursor"],
+  ["grok", "Grok"],
+  ["opencode", "OpenCode"],
+  ["antigravity", "Antigravity"],
+]);
+
+/** Retained resolution metadata remains useful even when its judgment has been purged. */
+export function presentMemoryResolution(entry: MemoryHistoryPage["resolutions"][number]) {
+  const resolution = entry.resolution;
+  return {
+    label: resolution.revertsResolutionId === undefined ? "자동 해결 적용됨" : "되돌리기 적용됨",
+    providerLabel:
+      MEMORY_RESOLVER_LABELS.get(resolution.effectiveProvider) ?? resolution.effectiveProvider,
+    requestedModelSelection: resolution.requestedModelSelection,
+    effectiveModel: resolution.effectiveModel,
+    resolvingEnvironmentId: resolution.resolvingEnvironmentId,
+    appliedAtUtc: resolution.appliedAtUtc,
+    revertDeadlineUtc: resolution.revertDeadlineUtc,
+    judgmentAvailable: entry.payload !== null,
+  };
+}
+
 export function presentMemoryRevertResult(result: MemoryRevertResult) {
   return {
     label: REVERT_LABELS[result.status],
@@ -133,6 +158,7 @@ export function presentMemoryForget(receipt: MemoryMutationReceipt) {
           ? "잊기 요청 반영됨"
           : "잊기 결과 확인 필요",
     pendingSync: receipt.pendingSync,
+    expansionStatus: receipt.forgetExpansion?.status ?? "unknown",
     failureCode: receipt.failureCode ?? null,
     notice: MEMORY_FORGET_NOTICE,
   };
