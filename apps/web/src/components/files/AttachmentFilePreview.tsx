@@ -1,5 +1,5 @@
 import { filePreviewDelimiter } from "@goat/shared/delimitedPreview";
-import type { EnvironmentId } from "@goat/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@goat/contracts";
 import { formatAttachmentSize } from "@goat/client-runtime/state/attachments";
 import { readFilePreviewResponse } from "@goat/client-runtime/file-preview";
 import { filePreviewKind, FILE_TEXT_PREVIEW_MAX_BYTES } from "@goat/shared/filePreview";
@@ -67,6 +67,8 @@ export function AttachmentFilePreview(props: {
   asset?: { environmentId: EnvironmentId; attachmentId: string };
   /** An agent's HTML render, shown in the app theme. */
   htmlRender?: boolean;
+  /** The thread an HTML render's links open beside. */
+  threadRef?: ScopedThreadRef;
   /** First crumb: where the file comes from. */
   origin?: string;
   onRemove?: () => void;
@@ -256,6 +258,7 @@ export function AttachmentFilePreview(props: {
       title={props.name}
       pdf={kind === "pdf"}
       htmlRender={props.htmlRender === true}
+      threadRef={props.threadRef}
     />
   ) : kind === "audio" ? (
     <AudioPreview src={url} name={props.name} onError={() => setError("Unable to load audio.")} />

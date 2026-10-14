@@ -1,9 +1,9 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef, scopeThreadRef } from "@goat/client-runtime/environment";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate, useRouter } from "@tanstack/react-router";
 import type { EnvironmentId, ThreadId } from "@goat/contracts";
 import { LinkIcon, PlusIcon } from "~/components/solar";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { isElectron } from "../env";
@@ -22,6 +22,7 @@ import type { GlobalAgentDraftState } from "../globalAgentResolver";
 import { buildThreadRouteParams } from "../threadRoutes";
 import {
   readThreadShell,
+  readProject,
   useAllEnvironmentShellsBootstrapped,
   useProjects,
   useThreadShell,
@@ -73,6 +74,10 @@ function IndexDraftLanding() {
     if (session === null) return "none";
     return session.promotedTo != null ? "promoted" : "unpromoted";
   });
+  const router = useRouter();
+  // Read at effect time: this page stays mounted while a navigation away from
+  // "/" is still loading, but the router already points at the new location.
+  const isStillOnIndex = useEffectEvent(() => router.state.location.pathname === "/");
   const startingRef = useRef(false);
   // Unmount only. Dependency changes must not cancel or restart an in-flight run:
   // creating the scratch project changes `projects`, and a restart would create twice.
@@ -132,10 +137,10 @@ function IndexDraftLanding() {
   const targetDraftId = resolution.kind === "open-draft" ? resolution.draftId : null;
 
   useEffect(() => {
-    if (startingRef.current || resolutionKind === "wait") return;
+    if (startingRef.current || resolutionKind === "wait" || !isStillOnIndex()) return;
     startingRef.current = true;
     const fail = () => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || !isStillOnIndex()) return;
       startingRef.current = false;
       setStartState((state) => ({ ...state, failed: true }));
     };
@@ -148,7 +153,7 @@ function IndexDraftLanding() {
     const createGlobalAgent = async (environmentId: EnvironmentId) => {
       const project = await openScratchProject(environmentId);
       // handleNewThread reads the route when called; never start it from a page the user moved to.
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || !isStillOnIndex()) return;
       if (project === null) return fail();
       const created = await handleNewThread(scopeProjectRef(environmentId, project.id), {
         replace: true,
@@ -161,6 +166,7 @@ function IndexDraftLanding() {
     // Today's behavior: a draft in the most recent project, or the hero (rendered below).
     // Reads the live project: a confirm wait may have outlasted this run's inputs.
     const startFallback = async () => {
+      if (!mountedRef.current || !isStillOnIndex()) return;
       const project = mostRecentProjectRef.current;
       if (project === null) {
         // Release so a project arriving later re-runs this effect (mostRecentProject is a
@@ -170,7 +176,18 @@ function IndexDraftLanding() {
         setFallbackReady(true);
         return;
       }
-      await handleNewThread(scopeProjectRef(project.environmentId, project.id), { replace: true });
+      const projectRef = scopeProjectRef(project.environmentId, project.id);
+      const retry = () => {
+        if (!mountedRef.current || !isStillOnIndex()) return;
+        startingRef.current = false;
+        setStartState((state) => ({ ...state, retryRequest: state.retryRequest + 1 }));
+      };
+      if (readProject(projectRef) === null) {
+        retry();
+        return;
+      }
+      const opened = await handleNewThread(projectRef, { replace: true });
+      if (opened === null) retry();
     };
     const run = async (): Promise<unknown> => {
       if (
@@ -204,7 +221,7 @@ function IndexDraftLanding() {
           readShell: () => readThreadShell(confirmRef),
         });
         // The wait can take seconds; never act after "/" has unmounted.
-        if (!mountedRef.current) return undefined;
+        if (!mountedRef.current || !isStillOnIndex()) return undefined;
         if (settled.kind === "open-thread") {
           return openThread(settled.environmentId, settled.threadId);
         }

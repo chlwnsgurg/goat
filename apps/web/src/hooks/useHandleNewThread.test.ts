@@ -17,6 +17,7 @@ import {
 const testState = vi.hoisted(() => {
   let completeProjectFileRead: (value: GoatProjectFile | null) => void = () => undefined;
   let projectFileRead = Promise.resolve<GoatProjectFile | null>(null);
+  let projectRemoved = false;
   const router = {
     state: { location: { href: "/" }, matches: [{ params: {} as Record<string, string> }] },
     navigate: vi.fn(async (request: { params: { draftId: string } }) => {
@@ -29,6 +30,15 @@ const testState = vi.hoisted(() => {
     settings: {} as { -readonly [K in keyof ServerSettings]: ServerSettings[K] },
     projectDefault: null as "local" | "worktree" | null,
     shellExists: false,
+    get projectRemoved() {
+      return projectRemoved;
+    },
+    removeProject() {
+      projectRemoved = true;
+    },
+    restoreProject() {
+      projectRemoved = false;
+    },
     get projectFileRead() {
       return projectFileRead;
     },
@@ -86,15 +96,19 @@ vi.mock("../logicalProject", () => ({
   selectProjectGroupingSettings: () => ({}),
 }));
 vi.mock("../state/entities", () => ({
-  readProjects: () => [
-    {
-      id: "project-remote",
-      environmentId: "environment-ssh",
-      workspaceRoot: "/remote/project",
-      defaultThreadEnvMode: testState.projectDefault,
-      defaultModelSelection: null,
-    },
-  ],
+  readProject: () => (testState.projectRemoved ? null : { id: "project-remote" }),
+  readProjects: () =>
+    testState.projectRemoved
+      ? []
+      : [
+          {
+            id: "project-remote",
+            environmentId: "environment-ssh",
+            workspaceRoot: "/remote/project",
+            defaultThreadEnvMode: testState.projectDefault,
+            defaultModelSelection: null,
+          },
+        ],
   readThreadShell: () => (testState.shellExists ? {} : null),
   readThreadShells: () => [],
   useProjects: () => [],
@@ -171,6 +185,7 @@ beforeEach(() => {
   };
   testState.projectDefault = null;
   testState.shellExists = false;
+  testState.restoreProject();
   testState.router.state.location.href = "/";
   testState.router.state.matches = [{ params: {} }];
   testState.router.navigate.mockClear();
@@ -219,6 +234,17 @@ describe.each(["new", "stored", "active", "fallback"] as const)(
       };
       const result = await useNewThreadHandler()(projectRef, options);
       expect(store().getDraftSession(result!.draftId)).toMatchObject(options);
+    });
+    it("abandons a delayed draft open when the project is removed meanwhile", async () => {
+      prepare();
+      testState.settings.defaultThreadEnvMode = null;
+      const before = store().getDraftSession(draftId);
+      const pending = useNewThreadHandler()(projectRef, { replace: true });
+      testState.removeProject();
+      testState.completeProjectFileRead(null);
+      await expect(pending).resolves.toBeNull();
+      expect(store().getDraftSession(draftId)).toEqual(before);
+      expect(testState.router.navigate).not.toHaveBeenCalled();
     });
     it("abandons a delayed open after navigation", async () => {
       prepare();

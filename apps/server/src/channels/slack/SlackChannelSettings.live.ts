@@ -159,7 +159,7 @@ export const make = Effect.gen(function* () {
   const writeConnections = (connections: ReadonlyArray<StoredConnection>) =>
     Effect.gen(function* () {
       const contents = yield* encodeSettingsFile({ version: 1, connections });
-      const tempPath = `${settingsPath}.${yield* crypto.randomUUIDv4}.tmp`;
+      const tempPath = `${settingsPath}.${yield* crypto.randomUUIDv4()}.tmp`;
       yield* fs.makeDirectory(config.stateDir, { recursive: true });
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(tempPath, `${contents}\n`, { mode: 0o600 });
@@ -342,7 +342,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const newConnectionId = crypto.randomUUIDv4.pipe(
+  const newConnectionId = crypto.randomUUIDv4().pipe(
     Effect.map((uuid) =>
       SlackChannelConnectionId.make(`slack-${uuid.replaceAll("-", "").slice(0, 12)}`),
     ),

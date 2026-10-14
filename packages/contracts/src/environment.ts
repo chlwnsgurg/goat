@@ -135,6 +135,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   worktreesDirectory: Schema.optionalKey(Schema.Boolean),
   /** Server answers `server.getWorktreesDirectoryStatus` and falls back when it is unavailable. */
   worktreesDirectoryStatus: Schema.optionalKey(Schema.Boolean),
+  /** Server can exclude PR-linked threads from inactivity settlement. */
+  threadAutoSettlementScope: Schema.optionalKey(Schema.Boolean),
   /** Server persists the opt-in for continuing interrupted threads after restarts. */
   threadRestartContinuation: Schema.optionalKey(Schema.Boolean),
   /** Server resolves `projectSettingsOverrides`; older servers ignore the key. */
