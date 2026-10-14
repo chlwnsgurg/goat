@@ -5324,6 +5324,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
       memorySpaceId: space,
       candidateId: candidate.id,
       expectedGeneration: 0,
+      expectedAttempt: candidate.attempt,
       attemptId: ticket.attemptId,
       coordinatorEpoch: 2,
       now: 4,
@@ -5843,5 +5844,100 @@ it.effect("new checkpoint judgment bodies receive stage ownership at insertion",
       0,
     );
     assert.isAbove((yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space}`).length, 0);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("review-r11 stale claim hold can overwrite a reacquired owner in same epoch", () =>
+  Effect.gen(function* () {
+    const { store, claim } = yield* seedResolutionConflict;
+    yield* store.recoverClaimCandidates(0);
+    const c = (yield* store.readDueClaimCandidates(1, 0, space))[0]!;
+    yield* store.transact(
+      store.prepareClaimAttemptTx({
+        memorySpaceId: space,
+        candidateId: c.id,
+        expectedGeneration: 0,
+        conflictHeads: claim.conflictHeadSet,
+        proposedClaim: claim,
+      }),
+    );
+    assert.isTrue(yield* store.claimCandidate(c.id, 2, 0));
+    const stale = {
+      memorySpaceId: space,
+      candidateId: c.id,
+      expectedGeneration: 0,
+      expectedAttempt: c.attempt + 1,
+      attemptId: claim.attemptId,
+      coordinatorEpoch: 2,
+      now: 1,
+      failureCode: "unavailable" as const,
+      holdClass: "availability" as const,
+    };
+    assert.isTrue(yield* store.transact(store.holdClaimCandidateTx(stale)));
+    yield* store.transact(
+      store.rearmResolutionHoldsTx({
+        memorySpaceId: space,
+        holdClass: "availability",
+        now: 2,
+        afterId: "",
+        limit: 100,
+      }),
+    );
+    assert.isTrue(yield* store.claimCandidate(c.id, 2, 2));
+    const overwritten = yield* store.transact(store.holdClaimCandidateTx({ ...stale, now: 3 }));
+    assert.isFalse(overwritten);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("review-r11 failure report ignores durable delivered guard after report compaction", () =>
+  Effect.gen(function* () {
+    const { store, sql, key, ownership } = yield* seedSubmission;
+    const first = yield* store.transact(
+      store.failResolutionTicketTx({
+        ownership,
+        now: 1,
+        failureCode: "generation_failed",
+        nextAttemptAt: 2,
+        reportConflictFailure: true,
+      }),
+    );
+    if (!first) throw new Error("fixture");
+    const report = (yield* store.pendingReports(100))[0]!;
+    yield* store.acknowledgeReport({
+      ...report,
+      state: "delivered",
+      reportThread: { environmentId: env, threadId: M.ThreadId.make(id(500)) },
+      sequence: 1,
+    });
+    // Model the existing retention cleanup: report row removed, persistent guard retained.
+    yield* sql`DELETE FROM memory_report_outbox WHERE report_id=${report.reportId}`;
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_import_keys WHERE space=${space} AND key_kind='report_delivered' AND key=${report.reportId}`)
+        .length,
+      1,
+    );
+    const owner = yield* store.transact(
+      store.acquireResolutionTicketTx({
+        key,
+        expectedVersion: first.version,
+        owner: "again",
+        coordinatorEpoch: 2,
+        now: 2,
+        ownedUntil: 100,
+      }),
+    );
+    if (!owner) throw new Error("fixture");
+    yield* store.transact(
+      store.failResolutionTicketTx({
+        ownership: { ...key, version: owner.version, owner: "again", coordinatorEpoch: 2 },
+        now: 3,
+        failureCode: "generation_failed",
+        nextAttemptAt: 4,
+        reportConflictFailure: true,
+      }),
+    );
+    assert.deepStrictEqual(yield* store.pendingReports(100), []);
+    assert.isFalse(yield* store.claimReport(report.reportId, "delivery", 4, 100));
+    assert.deepStrictEqual(yield* store.pendingReports(100), []);
   }).pipe(Effect.provide(live)),
 );
