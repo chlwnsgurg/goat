@@ -87,6 +87,13 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
     const entered = yield* Deferred.make<M.ResolveMemoryConflictInput>();
     const released = yield* Deferred.make<M.MemoryId>();
     let generated = 0;
+    const leaseTrace: Array<{
+      method: string;
+      now: number;
+      result: string;
+      expires?: string;
+      claimed?: string;
+    }> = [];
     let descriptorHealthy = true;
     let probes = 0;
     let rearmObservations = 0;
@@ -165,6 +172,48 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
         const client = yield* Client.MemoryHubClient;
         return Client.MemoryHubClient.of({
           ...client,
+          claim: (connection, input) =>
+            Effect.gen(function* () {
+              const result = yield* Effect.result(client.claim(connection, input));
+              leaseTrace.push({
+                method: "claim",
+                now: yield* Clock.currentTimeMillis,
+                result:
+                  result._tag === "Success"
+                    ? "success"
+                    : result.failure._tag === "MemoryHubError"
+                      ? result.failure.code
+                      : result.failure._tag,
+                ...(result._tag === "Success"
+                  ? {
+                      expires: result.success.expiresAtHubTime,
+                      claimed: result.success.claimedAtHubTime,
+                    }
+                  : {}),
+              });
+              return result._tag === "Success" ? result.success : yield* result.failure;
+            }),
+          renew: (connection, input) =>
+            Effect.gen(function* () {
+              const result = yield* Effect.result(client.renew(connection, input));
+              leaseTrace.push({
+                method: "renew",
+                now: yield* Clock.currentTimeMillis,
+                result:
+                  result._tag === "Success"
+                    ? "success"
+                    : result.failure._tag === "MemoryHubError"
+                      ? result.failure.code
+                      : result.failure._tag,
+                ...(result._tag === "Success"
+                  ? {
+                      expires: result.success.expiresAtHubTime,
+                      claimed: result.success.claimedAtHubTime,
+                    }
+                  : {}),
+              });
+              return result._tag === "Success" ? result.success : yield* result.failure;
+            }),
           preflight: (connection) =>
             client.preflight(connection).pipe(
               Effect.tap(() =>
@@ -301,6 +350,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
       aggregate,
       released,
       generated: () => generated,
+      leaseTrace,
       startProduction,
       setDescriptorHealthy: (healthy: boolean) => {
         descriptorHealthy = healthy;
@@ -722,6 +772,7 @@ it.effect(
         );
         assert.fail(
           JSON.stringify({
+            trace: c.a.leaseTrace,
             generated: c.a.generated(),
             now: yield* Clock.currentTimeMillis,
             failureCode: status.failureCode,
@@ -827,7 +878,7 @@ it.effect(
       }
       const other = memory(60);
       yield* write(c.b, c.space, other, 1143, "ordinary sync survives source denial");
-      yield* c.b.tick;
+      yield* c.b.sync.syncOnce;
       assert.strictEqual(
         activeText(yield* c.h.aggregate(c.space, other)),
         "ordinary sync survives source denial",
