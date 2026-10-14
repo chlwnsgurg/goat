@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- this test needs native watch registration readiness, which FileSystem.watch does not expose.
+import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -31,6 +33,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -325,28 +328,56 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   it.effect("reloads when a dangling settings link gets its destination", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const targetWatching = yield* Deferred.make<void>();
+      let targetDirectory = "";
+      const controlledFs = FileSystem.FileSystem.of({
+        ...fs,
+        // Keep real filesystem notifications, but wait for native registration
+        // before creating the destination. start returns before stream acquisition.
+        watch: (directory) =>
+          Stream.callback<FileSystem.WatchEvent>((queue) =>
+            Effect.gen(function* () {
+              yield* Effect.acquireRelease(
+                Effect.sync(() =>
+                  NodeFS.watch(directory, (_event, fileName) => {
+                    if (fileName !== null)
+                      Queue.offerUnsafe(queue, {
+                        _tag: "Update",
+                        path: String(fileName),
+                      });
+                  }),
+                ),
+                (watcher) => Effect.sync(() => watcher.close()),
+              );
+              if (directory === targetDirectory) yield* Deferred.succeed(targetWatching, undefined);
+            }),
+          ),
+      });
+      yield* Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
-        const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const service = yield* ServerSettingsModule.ServerSettingsService;
         const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "goat-settings-dotfiles-" });
         const linkedSettingsPath = path.join(dotfiles, "not-yet", "settings.json");
+        targetDirectory = path.dirname(linkedSettingsPath);
         yield* fs.remove(config.settingsPath, { force: true });
         yield* fs.symlink(linkedSettingsPath, config.settingsPath);
         yield* service.start;
+        yield* Deferred.await(targetWatching);
         const changes = yield* service.subscribeChanges;
-
         yield* writeFileStringAtomically({
           filePath: linkedSettingsPath,
           contents: `{ "responseStreamingMode": "paragraph" }`,
         });
-
-        const change = yield* changes.pipe(Stream.runHead, Effect.timeout("2 seconds"));
+        const change = yield* changes.pipe(Stream.runHead);
         assert.equal(Option.getOrUndefined(change)?.responseStreamingMode, "paragraph");
-      }),
-    ).pipe(TestClock.withLive, Effect.provide(layerServerSettings())),
+      }).pipe(
+        Effect.provide(layerServerSettings()),
+        Effect.provideService(FileSystem.FileSystem, controlledFs),
+      );
+    }).pipe(TestClock.withLive),
   );
 
   it.effect("preserves context when reading a provider environment secret fails", () => {
