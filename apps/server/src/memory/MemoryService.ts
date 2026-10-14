@@ -228,6 +228,7 @@ const encodeProjectKey = Schema.encodeSync(
   Schema.fromJsonString(Schema.NullOr(M.MemoryProjectKey)),
 );
 const strict = { onExcessProperty: "error" } as const;
+const encodePageItem = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const decodeBindingGet = Schema.decodeUnknownEffect(M.MemoryProjectBindingGetInput);
 const decodeBindingUpdate = Schema.decodeUnknownEffect(M.MemoryProjectBindingUpdateInput);
 const encodeBindingUpdate = Schema.encodeSync(
@@ -797,6 +798,7 @@ const make = Effect.gen(function* () {
         const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
         if (!current.item) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
         if (current.identity) yield* requireScope(current.identity.scope);
+        yield* permit;
         return current.item;
       }),
     );
@@ -805,47 +807,126 @@ const make = Effect.gen(function* () {
     input: M.MemoryListInput | M.MemorySearchInput,
     permit: Permit,
   ) {
+    yield* permit;
+    const scope = input.scope ?? { kind: "user" as const };
+    yield* requireScope(scope);
+    const scopeKey =
+      scope.kind === "user"
+        ? "user"
+        : scope.kind === "thread"
+          ? `thread:${scope.thread.environmentId.length}:${scope.thread.environmentId}:${scope.thread.threadId}`
+          : scope.projectKey.kind === "repository"
+            ? `repository:${scope.projectKey.groupingKey}`
+            : `explicit:${scope.projectKey.sharedProjectId}`;
+    const normalizedQuery = "query" in input ? input.query.normalize("NFC").trim() : undefined;
+    const binding =
+      "query" in input
+        ? {
+            memorySpaceId: input.memorySpaceId,
+            queryDigest: NodeCrypto.createHash("sha256").update(normalizedQuery!).digest("hex"),
+            mode: input.mode,
+            scopeKey: NodeCrypto.createHash("sha256").update(scopeKey).digest("hex"),
+          }
+        : undefined;
+    const cursor = input.cursor
+      ? yield* Effect.try({
+          try: () =>
+            binding
+              ? M.decodeMemorySearchCursor(input.cursor!, binding)
+              : M.MemoryId.make(input.cursor!),
+          catch: () => new Store.MemoryStoreConflict({ code: "invalid_cursor" }),
+        })
+      : undefined;
+    if ("query" in input) {
+      // Commit the bounded recovery batch even when substring is refused until ready.
+      const coverage = yield* store.searchCoverage({
+        memorySpaceId: input.memorySpaceId,
+        scope: input.scope ?? { kind: "user" },
+        limit: input.limit,
+      });
+      if (!coverage.ready) {
+        yield* permit;
+        if (input.mode === "substring")
+          return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
+        const rows = yield* query(
+          sql<{
+            watermark: number;
+          }>`SELECT coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark`,
+        );
+        const watermark = rows[0]!.watermark;
+        return {
+          items: [],
+          projectionWatermark: watermark,
+          nextCursor: null,
+          indexCoverage: {
+            status: "unavailable" as const,
+            eligibleItems: 0,
+            indexedItems: 0,
+            unindexedItems: 0,
+            projectionWatermark: watermark,
+          },
+        };
+      }
+    }
     return yield* store.transact(
       Effect.gen(function* () {
         yield* permit;
-        const scope = input.scope ?? { kind: "user" as const };
-        yield* requireScope(scope);
-        const scopeKey =
-          scope.kind === "user"
-            ? "user"
-            : scope.kind === "thread"
-              ? `thread:${scope.thread.environmentId.length}:${scope.thread.environmentId}:${scope.thread.threadId}`
-              : scope.projectKey.kind === "repository"
-                ? `repository:${scope.projectKey.groupingKey}`
-                : `explicit:${scope.projectKey.sharedProjectId}`;
-        const cursor = input.cursor
-          ? yield* decode(Effect.try({ try: () => M.MemoryId.make(input.cursor!), catch: invalid }))
-          : undefined;
         const filter: Store.MemoryReadFilter = {
           memorySpaceId: input.memorySpaceId,
           scope,
           limit: input.limit,
           ...(cursor ? { afterMemoryId: cursor } : {}),
         };
-        let items =
+        const coverage = "query" in input ? yield* store.searchCoverage(filter) : undefined;
+        const searched =
+          "query" in input && coverage?.ready
+            ? yield* store.search(filter, normalizedQuery!, input.mode)
+            : undefined;
+        if ("query" in input && input.mode === "substring" && !coverage?.ready)
+          return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
+        let items = "query" in input ? (searched?.items ?? []) : yield* store.list(filter);
+        let nextCursor =
           "query" in input
-            ? yield* store.search(filter, input.query, input.mode)
-            : yield* store.list(filter);
-        const last = items.at(-1)?.memoryId;
-        const nextCursor = items.length === input.limit ? (last ?? null) : null;
+            ? searched && !searched.exhausted && searched.examinedAfterMemoryId
+              ? M.encodeMemorySearchCursor(binding!, searched.examinedAfterMemoryId)
+              : null
+            : items.length === input.limit
+              ? (items.at(-1)?.memoryId ?? null)
+              : null;
+        if (!("query" in input)) {
+          let bytes = 2048;
+          const bounded: M.MemoryItem[] = [];
+          for (const item of items) {
+            const encoded = yield* query(encodePageItem(item));
+            const size = new TextEncoder().encode(encoded).length + 1;
+            if (bytes + size > M.MEMORY_PAGE_MAX_UTF8_BYTES) {
+              if (!bounded.length)
+                return yield* new Store.MemoryStoreConflict({ code: "payload_too_large" });
+              nextCursor = bounded.at(-1)!.memoryId;
+              break;
+            }
+            bytes += size;
+            bounded.push(item);
+          }
+          items = bounded;
+        }
         if ("includeQuarantined" in input && !input.includeQuarantined)
           items = items.filter((i) => i.status !== "quarantined");
-        const rows = yield* query(sql<{
-          watermark: number;
-          eligible: number;
-          indexed: number;
-        }>`SELECT
-        coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark,
-        count(CASE WHEN status='active' THEN 1 END) AS eligible,
-        count(CASE WHEN status='active' AND index_state='ready' AND indexed_generation=generation THEN 1 END) AS indexed
-        FROM memory_items WHERE space=${input.memorySpaceId} AND scope_key=${scopeKey}`);
-        const state = rows[0]!;
-        if ("query" in input && input.mode === "substring") state.indexed = state.eligible;
+        const rows = yield* query(
+          sql<{
+            watermark: number;
+          }>`SELECT coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark`,
+        );
+        const state = {
+          watermark: rows[0]!.watermark,
+          eligible: coverage?.ready ? coverage.eligible : 0,
+          indexed: coverage?.ready
+            ? "query" in input && input.mode === "substring"
+              ? coverage.eligible
+              : coverage.indexed
+            : 0,
+        };
+        yield* permit;
         return yield* decode(
           decodePage(
             {
@@ -855,8 +936,9 @@ const make = Effect.gen(function* () {
               ...("query" in input
                 ? {
                     indexCoverage: {
-                      status:
-                        state.eligible === state.indexed
+                      status: !coverage?.ready
+                        ? "unavailable"
+                        : state.eligible === state.indexed
                           ? "available"
                           : state.indexed === 0
                             ? "unavailable"
@@ -963,6 +1045,7 @@ const make = Effect.gen(function* () {
         const tombstone =
           current.tombstone && offset <= reportEnd && end > reportEnd ? current.tombstone : null;
         const total = reportEnd + Number(current.tombstone !== undefined);
+        yield* permit;
         return yield* decode(
           decodeHistoryPage(
             {
@@ -1140,6 +1223,7 @@ const make = Effect.gen(function* () {
             watermark: number;
           }>`SELECT projection_watermark AS watermark FROM memory_compaction_state WHERE space=${space}`,
         );
+        yield* permit;
         return {
           memorySpaceId: space,
           projectionWatermark: rows[0]?.watermark ?? 0,

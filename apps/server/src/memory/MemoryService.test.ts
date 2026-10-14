@@ -13,16 +13,18 @@ import migration from "../persistence/Migrations/070_Memory.ts";
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
+import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
+import { memoryAccessPermit } from "./MemoryAccess.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
 const memoryId = M.MemoryId.make(id(2));
 const environmentId = M.EnvironmentId.make("fixture");
-const database = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-);
+const database = Layer.effectDiscard(
+  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const store = Store.layer.pipe(Layer.provideMerge(database));
 const live = Service.layer.pipe(
   Layer.provide(
@@ -247,6 +249,77 @@ describe("MemoryService", () => {
         Effect.void,
       );
       assert.deepStrictEqual(page.items, []);
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("consumes read-only write denial before any domain mutation", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const permit = memoryAccessPermit(
+        {
+          grantedScopes: ["memory:read", "memory:write"],
+          reauthorize: () => Effect.void,
+          readOnly: true,
+        },
+        "write",
+      );
+      assert.strictEqual(
+        (yield* service.upsert(input(), permit).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
+      assert.deepStrictEqual(
+        (yield* service.list(
+          { memorySpaceId: space, limit: 100, includeQuarantined: true },
+          Effect.void,
+        )).items,
+        [],
+      );
+    }).pipe(Effect.provide(live)),
+  );
+  it.effect("binds search continuation to normalized query, mode, space and scope", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      yield* service.upsert(input(), Effect.void);
+      const request = {
+        memorySpaceId: space,
+        query: "  synthetic  ",
+        limit: 1,
+        mode: "substring" as const,
+      };
+      const first = yield* service.search(request, Effect.void);
+      assert.isTrue(first.nextCursor?.startsWith("ms1:"));
+      assert.isFalse(first.nextCursor!.includes("synthetic"));
+      const last = yield* service.search(
+        { ...request, query: "synthetic", cursor: first.nextCursor! },
+        Effect.void,
+      );
+      assert.deepStrictEqual(last.items, []);
+      assert.isNull(last.nextCursor);
+      for (const mismatch of [
+        { query: "other" },
+        { mode: "fts" as const },
+        { memorySpaceId: M.MemorySpaceId.make(id(999)) },
+        {
+          scope: {
+            kind: "project" as const,
+            projectKey: { kind: "explicit" as const, sharedProjectId: "fixture" },
+          },
+        },
+      ]) {
+        const failure = yield* service
+          .search({ ...request, ...mismatch, cursor: first.nextCursor! }, Effect.void)
+          .pipe(Effect.flip);
+        assert.isTrue("code" in failure && failure.code === "invalid_cursor");
+      }
+      const codec = Schema.fromJsonString(M.MemoryPage);
+      const wire = yield* Schema.encodeEffect(codec)(first);
+      assert.deepStrictEqual(yield* Schema.decodeEffect(codec)(wire), first);
+      // Both MCP/RPC receive this page: transport serialization preserves the examined cursor.
+      let checks = 0;
+      const revoked = Effect.suspend(() => (++checks === 1 ? Effect.void : denied));
+      assert.strictEqual(
+        (yield* service.search(request, revoked).pipe(Effect.flip))._tag,
+        "MemoryAccessError",
+      );
     }).pipe(Effect.provide(live)),
   );
   it.effect("returns index coverage on empty search", () =>
