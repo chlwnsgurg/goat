@@ -20,33 +20,78 @@ const insertTask = Effect.gen(function* () {
     `;
 });
 
+const insertDispatches = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  for (const kind of ["thread", "task"]) {
+    yield* sql`
+      INSERT INTO remote_dispatches (
+        correlation_id,kind,origin_thread_id,host,read_key,delivery,state,created_at,updated_at
+      ) VALUES (
+        ${`synthetic-${kind}`},${kind},'synthetic-origin','synthetic-host','synthetic-read-key',
+        'notify_only','launching','2026-10-15','2026-10-15'
+      )
+    `;
+  }
+});
+
 it.effect(
-  "defaults existing tasks to none, constrains ceilings, and safely reruns via the ledger",
+  "defaults existing tasks and dispatches to none, constrains ceilings, and safely reruns via the ledger",
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 72 });
       yield* insertTask;
+      yield* insertDispatches;
       assert.deepStrictEqual(yield* runMigrations(), [[73, "MemoryTaskGrantCeiling"]]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },
       ]);
+      assert.deepStrictEqual(
+        yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
+        [
+          { kind: "task", memory_grant_ceiling: "none" },
+          { kind: "thread", memory_grant_ceiling: "none" },
+        ],
+      );
       for (const ceiling of ["none", "read", "read_write"]) {
         yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling=${ceiling}`;
+        yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling=${ceiling}`;
         assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
           { memory_grant_ceiling: ceiling },
         ]);
+        assert.deepStrictEqual(
+          yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
+          [
+            { kind: "task", memory_grant_ceiling: ceiling },
+            { kind: "thread", memory_grant_ceiling: ceiling },
+          ],
+        );
       }
       for (const ceiling of ["full-access", "", null]) {
         yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling=${ceiling}`.pipe(Effect.flip);
+        yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling=${ceiling}`.pipe(Effect.flip);
         assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
           { memory_grant_ceiling: "read_write" },
         ]);
+        assert.deepStrictEqual(
+          yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
+          [
+            { kind: "task", memory_grant_ceiling: "read_write" },
+            { kind: "thread", memory_grant_ceiling: "read_write" },
+          ],
+        );
       }
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "read_write" },
       ]);
+      assert.deepStrictEqual(
+        yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
+        [
+          { kind: "task", memory_grant_ceiling: "read_write" },
+          { kind: "thread", memory_grant_ceiling: "read_write" },
+        ],
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
@@ -57,7 +102,9 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
       yield* insertTask;
+      yield* insertDispatches;
       yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling='read'`;
+      yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling='read'`;
       // An upstream migration claims 73; the existing GOAT ceiling moves to 74.
       const incoming = [
         ...migrationEntries.filter(([id]) => id < 73),
@@ -87,8 +134,18 @@ it.effect(
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "read" },
       ]);
-      const columns = yield* sql<{ name: string }>`PRAGMA table_info(scheduled_tasks)`;
-      assert.strictEqual(columns.filter(({ name }) => name === "memory_grant_ceiling").length, 1);
+      assert.deepStrictEqual(
+        yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
+        [
+          { kind: "task", memory_grant_ceiling: "read" },
+          { kind: "thread", memory_grant_ceiling: "read" },
+        ],
+      );
+      const taskColumns = yield* sql<{ name: string }>`PRAGMA table_info(scheduled_tasks)`;
+      const dispatchColumns = yield* sql<{ name: string }>`PRAGMA table_info(remote_dispatches)`;
+      for (const columns of [taskColumns, dispatchColumns]) {
+        assert.strictEqual(columns.filter(({ name }) => name === "memory_grant_ceiling").length, 1);
+      }
       assert.deepStrictEqual(yield* reconcileGoatMigrationIds(incoming), []);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
