@@ -5,7 +5,6 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Equal from "effect/Equal";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -108,6 +107,7 @@ const stableId = (attempt: string, kind: string) => {
 };
 const sameHeads = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && [...a].sort().every((h, i) => h === [...b].sort()[i]);
+const selectionKey = Schema.encodeSync(Schema.fromJsonString(M.MemoryModelSelection));
 const decodePull = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
 const decodeSource = Schema.decodeUnknownEffect(M.MemorySourceReadOutcome);
 const decodeGenerated = Schema.decodeUnknownEffect(M.ResolveMemoryConflictExecutionResult);
@@ -259,7 +259,10 @@ const make = Effect.gen(function* () {
               ? null
               : now + 60000,
           nextAttemptAt:
-            now + (relinquish || state === "recoverable" || state === "submitting" ? 30000 : 0),
+            now +
+            (relinquish || retireClaim || state === "recoverable" || state === "submitting"
+              ? 30000
+              : 0),
           ...(approval ? { approval } : {}),
           ...(retireClaim ? { retireClaim } : {}),
         }),
@@ -350,10 +353,8 @@ const make = Effect.gen(function* () {
         );
         if (
           trusted.execution.environmentId !== local ||
-          !Equal.equals(
-            trusted.execution.requestedModelSelection,
-            row.ticket.frozenDefaultModelSelection,
-          ) ||
+          selectionKey(trusted.execution.requestedModelSelection) !==
+            selectionKey(row.ticket.frozenDefaultModelSelection) ||
           !M.validateMemoryGenerationResult(input, trusted.result) ||
           scanMemoryValue(trusted.result).kind !== "allowed"
         )
@@ -602,12 +603,14 @@ const make = Effect.gen(function* () {
               : hub.claim(frozen.claim, r.principal!);
             yield* ensureEpoch(r.settings.memoryHubVersion);
             if (
+              ticket.memorySpaceId !== r.space ||
+              ticket.memoryId !== work.memoryId ||
+              ticket.holderEnvironmentId !== local ||
+              ticket.conflictId !== frozen.claim.conflictId ||
               ticket.attemptId !== frozen.claim.attemptId ||
               !sameHeads(ticket.conflictHeadSet, frozen.claim.conflictHeadSet) ||
-              !Equal.equals(
-                ticket.frozenDefaultModelSelection,
-                frozen.claim.frozenDefaultModelSelection,
-              )
+              selectionKey(ticket.frozenDefaultModelSelection) !==
+                selectionKey(frozen.claim.frozenDefaultModelSelection)
             )
               return yield* new M.MemoryHubError({ code: "invalid_output" });
             yield* store.persistResolutionTicket(ticket);
@@ -793,7 +796,13 @@ const make = Effect.gen(function* () {
           .ownerPermit(request)
           .pipe(Effect.andThen(ensureEpoch(r.settings.memoryHubVersion)));
         yield* permit;
-        const outcome = yield* runtime.ownerReader.readCommitted(request, permit);
+        const outcome = yield* runtime.ownerReader.readCommitted(request, permit).pipe(
+          Effect.timeout("15 seconds"),
+          Effect.catchTags({
+            TimeoutError: () =>
+              Effect.succeed({ kind: "unavailable", code: "source_unavailable" } as const),
+          }),
+        );
         yield* permit;
         const checked = yield* decodeSource(outcome).pipe(
           Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
