@@ -1513,7 +1513,7 @@ export class MemoryStore extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<MemoryWork>, MemoryStorageError>;
     readonly findClaimCandidate: (input: {
       memorySpaceId: M.MemorySpaceId;
-      candidateId: string;
+      candidateId?: string;
       attemptId: M.MemoryOperationId;
     }) => Effect.Effect<MemoryWork | null, MemoryStorageError>;
     readonly recoverClaimCandidates: (now: number) => Effect.Effect<void, MemoryStorageError>;
@@ -1993,6 +1993,15 @@ const make = Effect.gen(function* () {
           snapshot.tombstone ||
           snapshot.pendingForget ||
           snapshot.status !== "quarantined" ||
+          snapshot.reasons.some((reason) =>
+            [
+              "scanner_pending",
+              "secret_detected",
+              "missing_parent",
+              "dependency_invalidated",
+              "forget_pending",
+            ].includes(reason),
+          ) ||
           !sameHeadSet(snapshot.heads, input.heads)
         )
           return yield* new MemoryStoreConflict({ code: "conflict_changed" });
@@ -2009,8 +2018,8 @@ const make = Effect.gen(function* () {
             created_at: number;
             body_json: string | null;
           }>`SELECT r.revision_id,r.operation_id,r.parents_json,r.scope_json,r.assertion_kind,r.provenance_json,r.payload_ref,r.created_at,p.body_json
-        FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
-        WHERE r.space=${input.memorySpaceId} AND r.memory_id=${input.memoryId} AND r.revision_id IN (SELECT value FROM json_each(${yield* headsCodec.encode(input.heads)}))`,
+        FROM json_each(${yield* headsCodec.encode(input.heads)}) selected CROSS JOIN memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+        WHERE r.space=${input.memorySpaceId} AND r.revision_id=selected.value AND r.memory_id=${input.memoryId}`,
         );
         if (rows.length !== input.heads.length)
           return yield* new MemoryStoreConflict({ code: "missing_parent" });
@@ -4206,9 +4215,21 @@ const make = Effect.gen(function* () {
   const findClaimCandidate: MemoryStore["Service"]["findClaimCandidate"] = Effect.fn(
     "MemoryStore.findClaimCandidate",
   )(function* (input) {
+    let candidateId = input.candidateId;
+    if (candidateId === undefined) {
+      const tickets = yield* stored(
+        "claim-ticket-key",
+        sql<{
+          ticket_json: string | null;
+        }>`SELECT ticket_json FROM memory_outbox WHERE id=${`resolve:${input.memorySpaceId}:${input.attemptId}`} AND space=${input.memorySpaceId}`,
+      );
+      if (!tickets[0]?.ticket_json) return null;
+      const row = yield* storedTicketRowCodec.decode(tickets[0].ticket_json, strict);
+      candidateId = `claim:${input.memorySpaceId}:${row.ticket.memoryId}:${hashText(yield* headsCodec.encode(row.ticket.conflictHeadSet))}`;
+    }
     const rows = yield* stored(
       "claim-keyed",
-      sql<WorkRow>`SELECT o.* FROM memory_outbox o WHERE o.id=${input.candidateId} AND o.space=${input.memorySpaceId} AND o.kind='claim' AND json_extract(o.frozen_claim_json,'$.attemptId')=${input.attemptId}`,
+      sql<WorkRow>`SELECT o.* FROM memory_outbox o WHERE o.id=${candidateId} AND o.space=${input.memorySpaceId} AND o.kind='claim' AND json_extract(o.frozen_claim_json,'$.attemptId')=${input.attemptId}`,
     );
     return (yield* workRows(rows))[0] ?? null;
   });

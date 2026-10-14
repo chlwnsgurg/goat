@@ -4962,6 +4962,16 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     });
     assert.strictEqual(heads.length, 2);
     assert.isTrue(heads.every((h) => h.payload !== null));
+    const plan = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT r.revision_id,p.body_json FROM json_each(${JSON.stringify(claim.conflictHeadSet)}) selected CROSS JOIN memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.revision_id=selected.value AND r.memory_id=${memory}`;
+    assert.isTrue(
+      plan.some((row) =>
+        row.detail.includes("SEARCH r USING INDEX sqlite_autoindex_memory_revisions_1"),
+      ),
+    );
+    assert.isFalse(plan.some((row) => row.detail.includes("SCAN r")));
+
     assert.strictEqual(
       (yield* store
         .readResolutionHeads({
@@ -5259,7 +5269,7 @@ it.effect("resolution failure reports and permanent holds are owner fenced and t
     // Claim-stage hold also needs its generation, frozen attempt and live coordinator ownership.
     yield* fresh.recoverClaimCandidates(0);
     const candidate = (yield* fresh.readDueClaimCandidates(1, 0, space))[0]!;
-    yield* sql`UPDATE memory_outbox SET status='running',claimed_by='2',claimed_until=100,frozen_claim_json=${JSON.stringify({ protocolVersion: 1, ...ticket, conflictHeadSet: ticket.conflictHeadSet })} WHERE id=${candidate.id}`;
+    yield* sql`UPDATE memory_outbox SET status='running',claimed_by='2',claimed_until=100,frozen_claim_json=${JSON.stringify(M.MemoryHubClaimInput.make({ protocolVersion: 1, memorySpaceId: ticket.memorySpaceId, memoryId: ticket.memoryId, conflictId: ticket.conflictId, conflictHeadSet: ticket.conflictHeadSet, holderEnvironmentId: ticket.holderEnvironmentId, attemptId: ticket.attemptId, frozenDefaultModelSelection: ticket.frozenDefaultModelSelection }))} WHERE id=${candidate.id}`;
     const hold = {
       memorySpaceId: space,
       candidateId: candidate.id,
@@ -5381,6 +5391,11 @@ it.effect(
         frozenDefaultModelSelection: ticket.frozenDefaultModelSelection,
       });
       yield* sql`UPDATE memory_outbox SET frozen_claim_json=${JSON.stringify(frozen)} WHERE id=${candidate.id}`;
+      assert.strictEqual(
+        (yield* store.findClaimCandidate({ memorySpaceId: space, attemptId: ticket.attemptId }))
+          ?.id,
+        candidate.id,
+      );
       const submitted = yield* store.transact(
         store.persistResolutionSubmissionTx({
           ownership,
@@ -5477,14 +5492,32 @@ it.effect(
         }),
       );
       if (!approvedOwner) throw new Error("fixture");
-      const approval: M.MemoryHubReceipt = { ...rejection, outcome: "accepted", hubSequence: 1 };
+      const acceptedSubmission = yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership: {
+            ...approvedKey,
+            owner: "accepted",
+            coordinatorEpoch: 1,
+            version: approvedOwner.version,
+          },
+          submission: { ...submission, attemptId: approvedTicket.attemptId },
+          digest: memoryOperationDigest(submission.operation),
+        }),
+      );
+      const approval: M.MemoryHubReceipt = {
+        operationId: rejection.operationId,
+        memoryId: memory,
+        operationDigest: rejection.operationDigest,
+        outcome: "accepted",
+        hubSequence: 1,
+      };
       const approved = yield* store.transact(
         store.transitionResolutionTicketTx({
           ownership: {
             ...approvedKey,
             owner: "accepted",
             coordinatorEpoch: 1,
-            version: approvedOwner.version,
+            version: acceptedSubmission.version,
           },
           nextState: "approved",
           now: 1,
