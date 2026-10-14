@@ -151,8 +151,8 @@ const make = Effect.gen(function* () {
   let stopped = false;
   let started = false;
   let reservations = 0;
-  let lastSuccess: string | null = null;
-  let lastFailure: M.MemoryFailureCode | undefined;
+  let lastSuccess: { epoch: number; at: string } | null = null;
+  let lastFailure: { epoch: number; code: M.MemoryFailureCode } | undefined;
   const background: Fiber.Fiber<void, never>[] = [];
   // Slots remain reserved through persistence and bounded release in the outer finalizer.
   const executions = new Map<
@@ -184,7 +184,7 @@ const make = Effect.gen(function* () {
       const s = yield* readSettings;
       if (!stopped && s.memoryHubVersion === epoch) {
         resetStatus(epoch);
-        lastFailure = failureCode(error);
+        lastFailure = { epoch, code: failureCode(error) };
       }
     },
     (effect) => Effect.ignore(effect),
@@ -1099,7 +1099,7 @@ const make = Effect.gen(function* () {
       yield* pullTail(r, budget);
       yield* sweep;
       yield* ensureEpoch(r.settings.memoryHubVersion);
-      lastSuccess = iso(yield* Clock.currentTimeMillis);
+      lastSuccess = { epoch: r.settings.memoryHubVersion, at: iso(yield* Clock.currentTimeMillis) };
     }),
   );
   // A single tracked cycle includes manual sync and registry sweeps. Waiters coalesce;
@@ -1248,6 +1248,8 @@ const make = Effect.gen(function* () {
         const current = yield* readSettings;
         if (current.memoryHubVersion !== epoch)
           return yield* new M.MemoryHubError({ code: "fenced" });
+        const failure = lastFailure?.epoch === epoch ? lastFailure.code : undefined;
+        const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
         return {
           memorySpaceId: space,
           state:
@@ -1255,17 +1257,17 @@ const make = Effect.gen(function* () {
               ? "disabled"
               : bootstrap !== "ready"
                 ? "bootstrapping"
-                : lastFailure
+                : failure
                   ? "offline"
                   : "online",
           pendingSync: persisted.pendingSync,
           quarantined: persisted.quarantined,
           parked: persisted.parked,
-          lastSuccessfulSyncAtUtc: lastSuccess,
+          lastSuccessfulSyncAtUtc: success,
           lastHubSequence: persisted.processing.lastReceivedHubSequence,
           storage,
           processing: persisted.processing,
-          ...(lastFailure ? { failureCode: lastFailure } : {}),
+          ...(failure ? { failureCode: failure } : {}),
         };
       }),
     readSource: (validated, permit) =>
