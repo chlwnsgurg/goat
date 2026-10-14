@@ -1,5 +1,3 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- this test needs native watch registration readiness, which FileSystem.watch does not expose.
-import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -33,7 +31,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as Queue from "effect/Queue";
+import * as PubSub from "effect/PubSub";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -125,8 +123,8 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
     `;
   });
 
-// Native watch streams acquire after start returns. Tests await the exact
-// directory registration before editing; filesystem events remain real.
+// File operations remain real; this external watch seam delivers notifications
+// after their commits instead of relying on macOS's first native event timing.
 const withRegisteredSettingsWatchers = <A, E, R>(
   use: (
     awaitWatch: (directory: string, count?: number) => Effect.Effect<void>,
@@ -134,6 +132,8 @@ const withRegisteredSettingsWatchers = <A, E, R>(
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const events = yield* PubSub.unbounded<FileSystem.WatchEvent>();
     const registrations = new Map<string, Deferred.Deferred<void>>();
     const counts = new Map<string, number>();
     const registration = (directory: string, count = 1) => {
@@ -145,24 +145,28 @@ const withRegisteredSettingsWatchers = <A, E, R>(
       }
       return deferred;
     };
+    const notify = (filePath: string) =>
+      PubSub.publish(events, { _tag: "Update" as const, path: filePath });
     const controlledFs = FileSystem.FileSystem.of({
       ...fs,
+      rename: (from, to) => fs.rename(from, to).pipe(Effect.tap(() => notify(to))),
+      remove: (filePath, options) =>
+        fs.remove(filePath, options).pipe(Effect.tap(() => notify(filePath))),
+      symlink: (from, to) => fs.symlink(from, to).pipe(Effect.tap(() => notify(to))),
       watch: (directory) =>
-        Stream.callback<FileSystem.WatchEvent>((queue) =>
-          Effect.gen(function* () {
-            yield* Effect.acquireRelease(
-              Effect.sync(() =>
-                NodeFS.watch(directory, (_event, fileName) => {
-                  if (fileName !== null)
-                    Queue.offerUnsafe(queue, { _tag: "Update", path: String(fileName) });
-                }),
+        Stream.unwrap(
+          PubSub.subscribe(events).pipe(
+            Effect.tap(() => {
+              const count = (counts.get(directory) ?? 0) + 1;
+              counts.set(directory, count);
+              return Deferred.succeed(registration(directory, count), undefined);
+            }),
+            Effect.map((subscription) =>
+              Stream.fromSubscription(subscription).pipe(
+                Stream.filter((event) => path.dirname(event.path) === directory),
               ),
-              (watcher) => Effect.sync(() => watcher.close()),
-            );
-            const count = (counts.get(directory) ?? 0) + 1;
-            counts.set(directory, count);
-            yield* Deferred.succeed(registration(directory, count), undefined);
-          }),
+            ),
+          ),
         ),
     });
     return yield* use((directory, count) => Deferred.await(registration(directory, count))).pipe(
