@@ -147,7 +147,12 @@ export const MEMORY_PERMANENT_METADATA_MAX_BYTES = 134217728;
 export const MEMORY_MAX_LIFETIME_IDS = 50000;
 export const MEMORY_IDENTITY_CORE_MAX_BYTES = 1024;
 export const MEMORY_DEDUP_MAX_RECEIPTS = 250000;
-export const MEMORY_COMPACT_RECEIPT_MAX_BYTES = 256;
+// Version 2 maximum: approved resolve with maximum ordinals + both forget correlation fields.
+export const MEMORY_COMPACT_RECEIPT_ENCODING_MAX_BYTES = 332;
+// Four bytes leave room for a future small discriminator without inflating lifetime charges.
+export const MEMORY_COMPACT_RECEIPT_HEADROOM_BYTES = 4;
+export const MEMORY_COMPACT_RECEIPT_MAX_BYTES =
+  MEMORY_COMPACT_RECEIPT_ENCODING_MAX_BYTES + MEMORY_COMPACT_RECEIPT_HEADROOM_BYTES;
 export const MEMORY_IMPORT_BATCH_RETENTION_MS = 2592000000;
 export const MEMORY_REPORT_DETAIL_RETENTION_MS = 2592000000;
 export const MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT = 32;
@@ -1059,6 +1064,8 @@ export const MemoryStorageGrowth = struct({
 export type MemoryStorageGrowth = typeof MemoryStorageGrowth.Type;
 
 export const MemoryStorageStatus = struct({
+  requiredCheckpointBoundBytes: Schema.optionalKey(NonNegativeInt),
+  lastSnapshotBytes: Schema.optionalKey(NonNegativeInt),
   quotas: array(MemoryStorageQuota).check(
     Schema.makeFilter((vs) => unique(vs.map((v) => v.dimension))),
   ),
@@ -1867,7 +1874,33 @@ export interface MemoryHubPrincipal {
   readonly scopes: readonly ["memory:sync"];
 }
 
+export const MemoryResolutionApproval = struct({
+  resolutionId: MemoryResolutionId,
+  appliedAtUtc: MemoryUtcTimestamp,
+  revertDeadlineUtc: MemoryUtcTimestamp,
+}).check(
+  Schema.makeFilter(
+    (v) => Date.parse(v.revertDeadlineUtc) - Date.parse(v.appliedAtUtc) === MEMORY_REVERT_WINDOW_MS,
+  ),
+);
+export type MemoryResolutionApproval = typeof MemoryResolutionApproval.Type;
+
+/** Approval validation works equally on operation bodies and purged metadata. */
+export function validateMemoryResolutionApproval(
+  kind: "upsert" | "forget" | "resolve" | "revert",
+  resolutionId: MemoryResolutionId | null | undefined,
+  receipt: MemoryHubReceipt,
+): boolean {
+  const approvedResolve =
+    kind === "resolve" && (receipt.outcome === "accepted" || receipt.outcome === "conflicted");
+  return approvedResolve
+    ? receipt.resolutionApproval !== undefined &&
+        receipt.resolutionApproval.resolutionId === resolutionId
+    : receipt.resolutionApproval === undefined;
+}
+
 export const MemoryHubReceipt = struct({
+  resolutionApproval: Schema.optionalKey(MemoryResolutionApproval),
   forgetExpansion: Schema.optionalKey(MemoryForgetExpansion),
   forgetRetryOf: Schema.optionalKey(MemoryForgetRetry),
   operationId: MemoryOperationId,
@@ -1882,37 +1915,12 @@ export const MemoryHubReceipt = struct({
     (v) =>
       (v.outcome === "rejected") === (v.failureCode !== undefined) &&
       (v.failureCode === "capacity_exceeded") === (v.capacity !== undefined) &&
-      (v.outcome === "rejected" || v.hubSequence !== null),
+      (v.outcome === "rejected" || v.hubSequence !== null) &&
+      (!(v.outcome === "rejected" || v.outcome === "deleted") ||
+        v.resolutionApproval === undefined),
   ),
 );
 export type MemoryHubReceipt = typeof MemoryHubReceipt.Type;
-
-export const MemoryHubEntry = Schema.Union([
-  struct({
-    kind: Schema.Literal("operation"),
-    hubSequence: PositiveInt,
-    receipt: MemoryHubReceipt,
-    operation: MemoryOperation,
-  }),
-  struct({
-    kind: Schema.Literal("metadata"),
-    hubSequence: PositiveInt,
-    receipt: MemoryHubReceipt,
-    memoryId: MemoryId,
-    revision: Schema.optionalKey(MemoryRevision),
-    tombstone: Schema.optionalKey(MemoryTombstone),
-  }),
-]).check(
-  Schema.makeFilter(
-    (v) =>
-      v.hubSequence === v.receipt.hubSequence &&
-      (v.kind === "operation"
-        ? v.operation.operationId === v.receipt.operationId &&
-          v.operation.memoryId === v.receipt.memoryId
-        : v.memoryId === v.receipt.memoryId),
-  ),
-);
-export type MemoryHubEntry = typeof MemoryHubEntry.Type;
 
 export const MemoryCheckpointReportGuard = struct({
   reportId: digest,
@@ -1935,7 +1943,11 @@ export const MemoryCompactReceipt = struct({
   reportGuard: Schema.NullOr(MemoryCheckpointReportGuard),
 }).check(
   Schema.makeFilter((v) => {
-    if (v.receipt.hubSequence === null) return false;
+    if (
+      v.receipt.hubSequence === null ||
+      !validateMemoryResolutionApproval(v.operationKind, v.resolutionId, v.receipt)
+    )
+      return false;
     if (v.operationKind === "forget" || v.receipt.outcome === "rejected") {
       if (v.revisionId !== null) return false;
     } else if (v.revisionId === null) return false;
@@ -1963,12 +1975,62 @@ export const MemoryCompactReceipt = struct({
       ? v.reportGuard !== null &&
           v.reportGuard.resolutionId === v.resolutionId &&
           v.reportGuard.outcome === (v.operationKind === "resolve" ? "resolved" : "reverted") &&
-          (v.operationKind !== "resolve" ||
-            v.reportGuard.resolvingEnvironmentId === v.originEnvironmentId)
+          v.reportGuard.resolvingEnvironmentId === v.originEnvironmentId
       : v.reportGuard === null;
   }),
 );
 export type MemoryCompactReceipt = typeof MemoryCompactReceipt.Type;
+
+const encodeHubReceiptIntegrity = Schema.encodeSync(Schema.fromJsonString(MemoryHubReceipt));
+
+export const MemoryHubEntry = Schema.Union([
+  struct({
+    kind: Schema.Literal("operation"),
+    hubSequence: PositiveInt,
+    receipt: MemoryHubReceipt,
+    operation: MemoryOperation,
+  }),
+  struct({
+    kind: Schema.Literal("metadata"),
+    operationKind: Schema.Literals(["upsert", "forget", "resolve", "revert"]),
+    resolutionId: Schema.optionalKey(MemoryResolutionId),
+    hubSequence: PositiveInt,
+    receipt: MemoryHubReceipt,
+    memoryId: MemoryId,
+    revision: Schema.optionalKey(MemoryRevision),
+    tombstone: Schema.optionalKey(MemoryTombstone),
+    compactReceipt: Schema.optionalKey(MemoryCompactReceipt),
+  }),
+]).check(
+  Schema.makeFilter(
+    (v) =>
+      (v.kind === "operation" ||
+        v.compactReceipt === undefined ||
+        (v.compactReceipt.operationKind === v.operationKind &&
+          encodeHubReceiptIntegrity(v.compactReceipt.receipt) ===
+            encodeHubReceiptIntegrity(v.receipt) &&
+          (v.operationKind !== "resolve" || v.compactReceipt.resolutionId === v.resolutionId) &&
+          (v.revision === undefined || v.compactReceipt.revisionId === v.revision.revisionId))) &&
+      v.hubSequence === v.receipt.hubSequence &&
+      (v.kind === "operation"
+        ? v.operation.operationId === v.receipt.operationId &&
+          v.operation.memoryId === v.receipt.memoryId
+        : v.memoryId === v.receipt.memoryId &&
+          (v.operationKind === "resolve"
+            ? v.resolutionId !== undefined
+            : v.resolutionId === undefined)) &&
+      validateMemoryResolutionApproval(
+        v.kind === "operation" ? v.operation.kind : v.operationKind,
+        v.kind === "operation"
+          ? v.operation.kind === "resolve"
+            ? v.operation.resolution.resolutionId
+            : null
+          : v.resolutionId,
+        v.receipt,
+      ),
+  ),
+);
+export type MemoryHubEntry = typeof MemoryHubEntry.Type;
 
 export const MemoryIdentityRecord = struct({
   memorySpaceId: MemorySpaceId,
@@ -2366,7 +2428,9 @@ export function validateMemoryCheckpointRecords(
   const metadata = [
     ...identities,
     ...fences,
-    ...receipts.map((r) => ({ ...r, memoryId: r.receipt.memoryId })),
+    ...receipts
+      .filter((r) => r.receipt.outcome !== "rejected")
+      .map((r) => ({ ...r, memoryId: r.receipt.memoryId })),
     ...revisions.map((r) => r.revision),
     ...resolutions.map((r) => r.resolution),
     ...tombstones,
@@ -2388,6 +2452,7 @@ export function validateMemoryCheckpointRecords(
   if (
     !receipts.every(
       (r) =>
+        r.receipt.outcome === "rejected" ||
         r.operationKind !== "resolve" ||
         (fence(r.receipt.memoryId)?.highestFencingToken ?? -1) >= (r.fencingToken ?? 0),
     )
@@ -2395,7 +2460,10 @@ export function validateMemoryCheckpointRecords(
     return false;
   if (
     !receipts.every(
-      (r) => r.receipt.hubSequence !== null && r.receipt.hubSequence <= first.checkpointSequence,
+      (r) =>
+        r.memorySpaceId === first.memorySpaceId &&
+        r.receipt.hubSequence !== null &&
+        r.receipt.hubSequence <= first.checkpointSequence,
     )
   )
     return false;
@@ -2406,8 +2474,11 @@ export function validateMemoryCheckpointRecords(
         r !== undefined &&
         r.receipt.memoryId === i.memoryId &&
         r.originEnvironmentId === i.creatingEnvironmentId &&
-        (r.receipt.outcome === "accepted" || r.receipt.outcome === "conflicted") &&
-        r.operationKind === "upsert"
+        (((r.receipt.outcome === "accepted" || r.receipt.outcome === "conflicted") &&
+          r.operationKind === "upsert") ||
+          (r.receipt.outcome === "deleted" &&
+            r.operationKind === "forget" &&
+            tombstonesById.get(i.memoryId)?.deleteOperationId === i.createOperationId))
       );
     })
   )
@@ -2462,6 +2533,8 @@ export function validateMemoryCheckpointRecords(
         rec.reportGuard?.resolvingEnvironmentId === r.resolvingEnvironmentId &&
         rec.revisionId === r.resultRevisionId &&
         rec.fencingToken === r.fencingToken &&
+        rec.receipt.resolutionApproval?.appliedAtUtc === r.appliedAtUtc &&
+        rec.receipt.resolutionApproval?.revertDeadlineUtc === r.revertDeadlineUtc &&
         result !== undefined &&
         result.memoryId === r.memoryId &&
         result.operationId === rec.receipt.operationId &&
