@@ -103,6 +103,7 @@ const make = Effect.gen(function* () {
   const entries = new Map<
     symbol,
     {
+      token: symbol;
       view: View;
       epoch: number;
       expires: number;
@@ -114,7 +115,13 @@ const make = Effect.gen(function* () {
       }>;
     }
   >();
+  // In-flight selections also consume bounded metadata; eviction cancels their admission.
+  const tokens = new Map<M.ThreadId, { token: symbol; expires: number }>();
+  const tokenBytes = 256;
   let cacheBytes = 0;
+  const removeToken = (threadId: M.ThreadId) => {
+    if (tokens.delete(threadId)) cacheBytes -= tokenBytes;
+  };
   const removeEntry = (key: symbol) => {
     const entry = entries.get(key);
     if (entry) cacheBytes -= entry.bytes;
@@ -127,17 +134,33 @@ const make = Effect.gen(function* () {
   };
   const sweep = (now: number) => {
     for (const [key, entry] of entries) if (entry.expires <= now) removeEntry(key);
+    for (const [threadId, token] of tokens) if (token.expires <= now) removeToken(threadId);
   };
   const invalidate = (threadId: M.ThreadId) =>
     Effect.sync(() => {
+      removeToken(threadId);
       for (const [key, entry] of entries) if (entry.view.threadId === threadId) removeEntry(key);
     });
+  const reserve = (bytes: number) => {
+    while (cacheBytes + bytes > M.MEMORY_DERIVED_CACHE_MAX_BYTES) {
+      if (entries.size) removeEntry(entries.keys().next().value!);
+      else if (tokens.size) removeToken(tokens.keys().next().value!);
+      else return false;
+    }
+    return true;
+  };
   const permits = (policy: MemorySnapshotPolicy, expected: MemorySnapshotPolicy) =>
     policy.grant !== "none" && policy.policyEpoch === expected.policyEpoch;
   const forThread = Effect.fn("MemorySnapshot.forThread")(
     function* (threadId: M.ThreadId, policy: MemorySnapshotPolicy, currentPolicy: CurrentPolicy) {
       yield* invalidate(threadId);
-      sweep(yield* Clock.currentTimeMillis);
+      const started = yield* Clock.currentTimeMillis;
+      sweep(started);
+      const token = Symbol();
+      const expires = started + M.MEMORY_DERIVED_CACHE_TTL_MS;
+      if (!reserve(tokenBytes)) return undefined;
+      tokens.set(threadId, { token, expires });
+      cacheBytes += tokenBytes;
       if (!permits(yield* currentPolicy, policy) || policy.grant === "none") return undefined;
       const initial = yield* capture(threadId);
       if (!initial) return undefined;
@@ -197,14 +220,20 @@ const make = Effect.gen(function* () {
       });
       const now = yield* Clock.currentTimeMillis;
       sweep(now);
-      while (cacheBytes + bytes > M.MEMORY_DERIVED_CACHE_MAX_BYTES && entries.size)
-        removeEntry(entries.keys().next().value!);
+      if (
+        tokens.get(threadId)?.token !== token ||
+        expires <= now ||
+        !reserve(bytes) ||
+        tokens.get(threadId)?.token !== token
+      )
+        return undefined;
       const key = Symbol();
       associations.set(snapshot, key);
       entries.set(key, {
+        token,
         view,
         epoch: policy.policyEpoch,
-        expires: now + M.MEMORY_DERIVED_CACHE_TTL_MS,
+        expires,
         bytes,
         selected: snapshot.items.map((item) => ({
           memoryId: item.memoryId,
@@ -236,6 +265,8 @@ const make = Effect.gen(function* () {
       };
       if (
         !entry ||
+        snapshot.memorySpaceId !== entry.view.space ||
+        tokens.get(execution.threadId)?.token !== entry.token ||
         entry.view.threadId !== execution.threadId ||
         entry.view.runId !== execution.runId
       )
@@ -258,11 +289,15 @@ const make = Effect.gen(function* () {
       // Restore allows a newer watermark, but never a different execution or binding.
       if (!view || !sameView({ ...entry.view, watermark: view.watermark }, view)) return clear();
       const current = yield* service.readContextRevisions(
-        snapshot.memorySpaceId,
+        entry.view.space,
         entry.selected.map((i) => i.memoryId),
         Effect.void,
       );
-      if (current.projectionWatermark !== view.watermark) return clear();
+      if (
+        current.memorySpaceId !== entry.view.space ||
+        current.projectionWatermark !== view.watermark
+      )
+        return clear();
       const survivors = entry.selected.flatMap((original) =>
         current.items.filter(
           (item) =>
@@ -286,8 +321,17 @@ const make = Effect.gen(function* () {
         try: () => 2 * new TextEncoder().encode(encodeSnapshot(restored)).length,
         catch: (cause) => new MemorySnapshotError({ cause }),
       });
-      while (cacheBytes + bytes > M.MEMORY_DERIVED_CACHE_MAX_BYTES && entries.size)
-        removeEntry(entries.keys().next().value!);
+      const now = yield* Clock.currentTimeMillis;
+      sweep(now);
+      if (
+        entry.expires <= now ||
+        entries.get(key!) !== entry ||
+        tokens.get(execution.threadId)?.token !== entry.token ||
+        !reserve(bytes) ||
+        entries.get(key!) !== entry ||
+        tokens.get(execution.threadId)?.token !== entry.token
+      )
+        return clear();
       const restoredKey = Symbol();
       associations.set(restored, restoredKey);
       entries.set(restoredKey, {

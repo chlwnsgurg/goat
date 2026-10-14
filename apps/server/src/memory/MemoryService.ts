@@ -854,6 +854,7 @@ const make = Effect.gen(function* () {
           }>`SELECT coalesce((SELECT projection_watermark FROM memory_compaction_state WHERE space=${input.memorySpaceId}),0) AS watermark`,
         );
         const watermark = rows[0]!.watermark;
+        yield* permit;
         return {
           items: [],
           projectionWatermark: watermark,
@@ -959,8 +960,18 @@ const make = Effect.gen(function* () {
   });
   const list = (input: M.MemoryListInput, permit: Permit) =>
     decode(decodeList(input, strict)).pipe(Effect.flatMap((v) => page(v, permit)));
-  const search = (input: M.MemorySearchInput, permit: Permit) =>
-    decode(decodeSearch(input, strict)).pipe(Effect.flatMap((v) => page(v, permit)));
+  const search = Effect.fn("MemoryService.search")(function* (
+    input: M.MemorySearchInput,
+    permit: Permit,
+  ) {
+    // Validate every non-cursor field first, preserving strictness and its error channel.
+    const { cursor: _cursor, ...rest } = input;
+    yield* decode(decodeSearch(rest, strict));
+    const value = yield* decodeSearch(input, strict).pipe(
+      Effect.mapError(() => new Store.MemoryStoreConflict({ code: "invalid_cursor" })),
+    );
+    return yield* page(value, permit);
+  });
   const history = Effect.fn("MemoryService.history")(function* (
     input: M.MemoryHistoryInput,
     permit: Permit,

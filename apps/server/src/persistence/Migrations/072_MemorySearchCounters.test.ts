@@ -23,6 +23,9 @@ it.effect(
       yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
       INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
       SELECT ${space},printf('00000000-0000-4000-8000-%012d',n),'{}','user','[]','quarantined',0,'{}','{}' FROM ids`;
+      const text = "synthetic old indexed text";
+      yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'old-ref','old-memory',${JSON.stringify({ text, evidence: [], derivedFromMemoryRevisions: [] })},'[]')`;
+      yield* sql`UPDATE memory_items SET status='active',payload_ref='old-ref',index_state='ready',indexed_generation=generation`;
       const indexesBefore =
         yield* sql`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_items' ORDER BY name`;
       yield* migration;
@@ -34,7 +37,17 @@ it.effect(
       yield* store
         .transact(
           Effect.gen(function* () {
-            assert.isFalse((yield* store.searchCoverage(filter)).ready);
+            const coverage = yield* store.searchCoverage(filter);
+            assert.deepStrictEqual(coverage, {
+              ready: false,
+              eligible: 1000,
+              indexed: 1000,
+              textBytes: 1000 * new TextEncoder().encode(text).length,
+            });
+            assert.deepStrictEqual(
+              yield* sql`SELECT after_rowid,ready FROM memory_search_backfill`,
+              [{ after_rowid: 1000, ready: 0 }],
+            );
             return yield* new Store.MemoryStoreConflict({ code: "unavailable" });
           }),
         )
@@ -42,6 +55,11 @@ it.effect(
       assert.deepStrictEqual(yield* sql`SELECT after_rowid,ready FROM memory_search_backfill`, [
         { after_rowid: 0, ready: 0 },
       ]);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM memory_search_counters`, []);
+      assert.deepStrictEqual(
+        yield* sql`SELECT count(*) AS n FROM memory_items WHERE search_counted=1`,
+        [{ n: 0 }],
+      );
       const refused = yield* store.search(filter, "synthetic", "substring").pipe(Effect.flip);
       assert.isTrue("code" in refused && refused.code === "unavailable");
       assert.deepStrictEqual(yield* sql`SELECT after_rowid,ready FROM memory_search_backfill`, [

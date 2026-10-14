@@ -49,6 +49,7 @@ const input = (n = 3): M.MemoryUpsertInput => ({
   payload: { text: "synthetic memory", evidence: [], derivedFromMemoryRevisions: [] },
   baseBoundary: null,
 });
+const encodeItemJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryItem));
 const encodeResolution = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolution));
 const encodeSelectionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryModelSelection));
 const encodeRevisionIds = Schema.encodeEffect(
@@ -2218,4 +2219,143 @@ it.effect(
         bytes,
       );
     }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "classifies only cursor schema errors as invalid_cursor and binds NFC-equivalent queries",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const value = input();
+      yield* service.upsert(
+        { ...value, payload: { ...value.payload, text: "synthetic café" } },
+        Effect.void,
+      );
+      const request = { memorySpaceId: space, query: "café", limit: 1, mode: "substring" as const };
+      const first = yield* service.search(request, Effect.void);
+      assert.strictEqual(first.items.length, 1);
+      assert.isNotNull(first.nextCursor);
+      const next = yield* service.search(
+        { ...request, query: "cafe\u0301", cursor: first.nextCursor! },
+        Effect.void,
+      );
+      assert.deepStrictEqual(next.items, []);
+      for (const cursor of [
+        id(2),
+        "ms1:%",
+        "ms1:" + encodeURIComponent("{}"),
+        "ms1:" + "x".repeat(20000),
+        "",
+      ]) {
+        const failure = yield* service
+          .search({ ...request, cursor }, Effect.void)
+          .pipe(Effect.flip);
+        assert.isTrue("code" in failure && failure.code === "invalid_cursor");
+      }
+      for (const invalid of [
+        { limit: 0 },
+        { query: "" },
+        { query: " cafe " },
+        { unexpected: true },
+      ]) {
+        const failure = yield* service
+          .search({ ...request, ...invalid, cursor: "ms1:%" }, Effect.void)
+          .pipe(Effect.flip);
+        assert.isTrue("code" in failure && failure.code === "invalid_output");
+      }
+    }).pipe(Effect.provide(live)),
+);
+it.effect("reauthorizes immediately before returning unready FTS coverage", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1001)
+      INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json)
+      SELECT ${space},printf('00000000-0000-4000-8000-%012d',n),'{}','user','[]','quarantined',0,'{}','{}' FROM ids`;
+    let checks = 0;
+    const permit = Effect.suspend(() => (++checks < 3 ? Effect.void : denied));
+    const failure = yield* service
+      .search({ memorySpaceId: space, query: "synthetic", limit: 10, mode: "fts" }, permit)
+      .pipe(Effect.flip);
+    assert.strictEqual(failure._tag, "MemoryAccessError");
+    assert.strictEqual(checks, 3);
+    assert.deepStrictEqual(yield* sql`SELECT after_rowid,ready FROM memory_search_backfill`, [
+      { after_rowid: 1000, ready: 0 },
+    ]);
+  }).pipe(Effect.provide(live)),
+);
+it.effect("list byte cap retains the quarantined row cursor before a visible short tail", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    const value = input();
+    yield* service.upsert(
+      { ...value, payload: { ...value.payload, text: "synthetic " + "x".repeat(14500) } },
+      Effect.void,
+    );
+    for (const n of [10, 11, 12, 13, 14])
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,item_json,availability_json)
+        SELECT space,${id(n)},scope_json,scope_key,heads_json,status,payload_ref,projection_watermark,json_set(item_json,'$.memoryId',${id(n)},'$.revision.memoryId',${id(n)}),availability_json FROM memory_items WHERE memory_id=${memoryId}`;
+    const quarantined: M.MemoryItem = {
+      memorySpaceId: space,
+      memoryId: M.MemoryId.make(id(13)),
+      status: "quarantined",
+      scope: { kind: "user" },
+      pendingSync: false,
+      localAvailability: { exposure: "held", reasons: [], deferred: [], cleanupPending: false },
+      conflict: {
+        memorySpaceId: space,
+        memoryId: M.MemoryId.make(id(13)),
+        conflictId: M.MemoryConflictId.make(id(500)),
+        heads: [M.MemoryRevisionId.make(id(501)), M.MemoryRevisionId.make(id(502))],
+        status: "quarantined",
+      },
+    };
+    const json = yield* encodeItemJson(quarantined);
+    yield* sql`UPDATE memory_items SET status='quarantined',payload_ref=NULL,item_json=${json} WHERE memory_id=${id(13)}`;
+    const request = { memorySpaceId: space, limit: 100, includeQuarantined: false };
+    const first = yield* service.list(request, Effect.void);
+    assert.deepStrictEqual(
+      first.items.map((i) => i.memoryId),
+      [memoryId, id(10), id(11), id(12)],
+    );
+    assert.strictEqual(first.nextCursor, id(13));
+    const tail = yield* service.list({ ...request, cursor: first.nextCursor! }, Effect.void);
+    assert.deepStrictEqual(
+      tail.items.map((i) => i.memoryId),
+      [id(14)],
+    );
+    assert.isNull(tail.nextCursor);
+  }).pipe(Effect.provide(live)),
+);
+it.effect("list refuses a valid first item exceeding the reserved page envelope", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* service.upsert(input(), Effect.void);
+    const current = yield* service.read({ memorySpaceId: space, memoryId }, Effect.void);
+    if (current.status !== "active") throw new Error("Fixture kind");
+    const base = new TextEncoder().encode(yield* encodeItemJson(current)).length;
+    const large = {
+      ...current,
+      revision: {
+        ...current.revision,
+        provenance: {
+          ...current.revision.provenance,
+          environmentId: M.EnvironmentId.make(
+            "m".repeat(M.MEMORY_PAGE_MAX_UTF8_BYTES - 1000 - base),
+          ),
+        },
+      },
+    };
+    const encoded = yield* encodeItemJson(large);
+    assert.isTrue(new TextEncoder().encode(encoded).length + 2048 > M.MEMORY_PAGE_MAX_UTF8_BYTES);
+    // Store projection does not duplicate the immutable payload.
+    const { payload: _payload, ...projection } = large;
+    yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(projection)} WHERE memory_id=${memoryId}`;
+    const failure = yield* service
+      .list({ memorySpaceId: space, limit: 100, includeQuarantined: true }, Effect.void)
+      .pipe(Effect.flip);
+    assert.isTrue("code" in failure && failure.code === "payload_too_large");
+  }).pipe(Effect.provide(live)),
 );
