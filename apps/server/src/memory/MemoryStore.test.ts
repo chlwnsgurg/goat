@@ -4359,3 +4359,74 @@ it.effect(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "recovery preserves current frontier tickets while cancelling stale tickets and discovering unrelated claims",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ticket, key, ownership, submission } = yield* seedSubmission;
+      yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership,
+          submission,
+          digest: memoryOperationDigest(submission.operation),
+        }),
+      );
+      // A second memory becomes quarantined while the first submission is in flight.
+      const other = M.MemoryId.make(id(980));
+      const aggregate = yield* store.loadAggregate(space, memory);
+      if (aggregate.item?.status !== "quarantined") throw new Error("fixture");
+      const item = {
+        ...aggregate.item,
+        memoryId: other,
+        conflict: { ...aggregate.item.conflict, memoryId: other },
+      };
+      yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) SELECT space,${other},scope_json,scope_key,heads_json,status,projection_watermark,${JSON.stringify(item)},availability_json FROM memory_items WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.recoverClaimCandidates(0);
+      const rows = yield* sql<{
+        status: string;
+        ticket_json: string;
+      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.strictEqual(rows[0]!.status, "pending");
+      assert.strictEqual(JSON.parse(rows[0]!.ticket_json).state, "submitting");
+      assert.isNotNull(JSON.parse(rows[0]!.ticket_json).submission);
+      assert.isTrue(
+        (yield* store.readDueClaimCandidates(100, 0)).some((c) => c.memoryId === other),
+      );
+      const changed = {
+        ...aggregate.item,
+        conflict: {
+          ...aggregate.item.conflict,
+          heads: [M.MemoryRevisionId.make(id(981)), M.MemoryRevisionId.make(id(982))],
+        },
+      };
+      yield* sql`UPDATE memory_items SET item_json=${JSON.stringify(changed)},heads_json=${JSON.stringify(changed.conflict.heads)} WHERE space=${space} AND memory_id=${memory}`;
+      yield* store.recoverClaimCandidates(1);
+      const stale = yield* sql<{
+        status: string;
+        ticket_json: string;
+      }>`SELECT status,ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.strictEqual(stale[0]!.status, "cancelled");
+      const terminal = JSON.parse(stale[0]!.ticket_json);
+      assert.strictEqual(terminal.state, "terminal");
+      assert.isNull(terminal.owner);
+      assert.isNull(terminal.submission);
+      assert.isNull(
+        yield* store.transact(
+          store.acquireResolutionTicketTx({
+            key,
+            expectedVersion: terminal.version,
+            owner: "late",
+            coordinatorEpoch: 2,
+            now: 101,
+            ownedUntil: 200,
+          }),
+        ),
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        0,
+      );
+    }).pipe(Effect.provide(live)),
+);
