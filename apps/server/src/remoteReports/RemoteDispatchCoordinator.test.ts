@@ -237,6 +237,7 @@ const fixture = Effect.gen(function* () {
     c: Coordinator.RemoteDispatchCoordinator["Service"],
     delivery: "wake" | "next_turn" | "notify_only" = "wake",
     message: string | undefined = "work",
+    memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling,
   ) =>
     c.launch(
       {
@@ -249,6 +250,7 @@ const fixture = Effect.gen(function* () {
           workspace: { type: "cwd" },
           title: "fixture",
           message,
+          ...(memoryGrantCeiling === undefined ? {} : { memoryGrantCeiling }),
           runtimeMode: "full-access",
           callerRuntimeMode: "full-access",
         },
@@ -587,6 +589,23 @@ it.effect(
         assert.equal(f.launches.length, 9);
       }).pipe(Effect.provide(f.layer));
     }).pipe(Effect.provide(database)),
+);
+
+it.effect("report fallback preserves captured memory ceilings on every launch attempt", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.refuse(true);
+    yield* Effect.gen(function* () {
+      const coordinator = yield* Coordinator.RemoteDispatchCoordinator;
+      for (const ceiling of ["none", "read_write", "read"] as const) {
+        yield* f.launch(coordinator, "notify_only", "work", ceiling);
+        const attempts = f.launches.slice(-2);
+        assert.equal(attempts.length, 2);
+        assert.equal(attempts[0]?.memoryGrantCeiling, ceiling);
+        assert.equal(attempts[1]?.memoryGrantCeiling, ceiling);
+      }
+    }).pipe(Effect.provide(f.layer));
+  }).pipe(Effect.provide(database)),
 );
 
 it.effect("refused report arguments retry once with the original message and never drain", () =>

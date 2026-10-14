@@ -1267,6 +1267,10 @@ describe("SSH dispatch launch lineage", () => {
   /** Launches against a fake remote and returns the arguments goat_thread_launch received. */
   const launchAgainst = (remote: {
     readonly declaresLaunchedBy: boolean;
+    readonly memoryCeilings?: ReadonlyArray<import("@goat/contracts").MemoryTaskGrantCeiling>;
+    readonly declaresMemoryCeiling?: boolean;
+    readonly advertisesMemory?: boolean;
+    readonly onMemoryLaunch?: () => void;
     readonly declaresReport?: boolean;
     readonly declaresNotifyOnCompletion?: boolean;
     /** Launch for an outside client, with no launching thread. */
@@ -1283,6 +1287,8 @@ describe("SSH dispatch launch lineage", () => {
       const host = "lineage-host";
       const target = { alias: host, hostname: host, username: null, port: null };
       const launches: Array<Record<string, unknown>> = [];
+      const memorySessions: Array<ReadonlyArray<string>> = [];
+      const presentedTokens: Array<string | null> = [];
       let declaresReport = remote.declaresReport === true;
       const fetchEndpoint = vi.fn(async (_url: string, init?: RequestInit) => {
         const request = JSON.parse(String(init?.body)) as {
@@ -1316,12 +1322,18 @@ describe("SSH dispatch launch lineage", () => {
               id: request.id,
               result: {
                 tools: [
+                  ...(remote.advertisesMemory
+                    ? [{ name: "memory_search", inputSchema: { type: "object", properties: {} } }]
+                    : []),
                   {
                     name: "goat_thread_launch",
                     inputSchema: {
                       type: "object",
                       properties: {
                         title: { type: "string" },
+                        ...(remote.declaresMemoryCeiling
+                          ? { memoryGrantCeiling: { type: "string" } }
+                          : {}),
                         ...(remote.declaresLaunchedBy ? { launchedBy: { type: "object" } } : {}),
                         ...(declaresReport ? { report: { type: "object" } } : {}),
                         ...(remote.declaresNotifyOnCompletion === true
@@ -1335,6 +1347,8 @@ describe("SSH dispatch launch lineage", () => {
             });
           case "tools/call": {
             if (request.params?.name === "goat_thread_launch") {
+              remote.onMemoryLaunch?.();
+              presentedTokens.push(new Headers(init?.headers).get("authorization"));
               launches.push(request.params.arguments ?? {});
             }
             const report = request.params?.arguments?.report as
@@ -1369,11 +1383,14 @@ describe("SSH dispatch launch lineage", () => {
           }),
         disconnectEnvironment: () => Effect.die("Unexpected SSH disconnect"),
         revalidateTunnels: () => Effect.void,
-        issueMcpClientSession: () =>
-          Effect.succeed({
-            token: "fixture-session",
-            expiresAt: null,
-            runtimeModeCeilingApplied: true,
+        issueMcpClientSession: (_target, options) =>
+          Effect.sync(() => {
+            memorySessions.push(options.memoryScopes ?? []);
+            return {
+              token: `fixture-session-${memorySessions.length}`,
+              expiresAt: null,
+              runtimeModeCeilingApplied: true,
+            };
           }),
         runRemoteScript: () =>
           Effect.succeed({
@@ -1392,25 +1409,32 @@ describe("SSH dispatch launch lineage", () => {
       try {
         const result = yield* Effect.gen(function* () {
           const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
-          const launch = dispatch.launchThread(
-            {
-              host,
-              cwd: "/home/agent/repo",
-              workspace: { type: "cwd" },
-              title: "Lineage probe",
-              runtimeMode: "approval-required",
-              callerRuntimeMode: "approval-required",
-              ...(remote.outside === true ? {} : { launchedBy: launcher }),
-              ...(remote.withReport === true
-                ? { message: "Do the work", report: reportBinding, reportNote: "Report back." }
-                : {}),
-            },
-            Effect.void,
-          );
-          if (remote.upgradeBetweenLaunches !== true) return yield* launch;
-          yield* launch;
+          const launch = (memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling) =>
+            dispatch.launchThread(
+              {
+                host,
+                cwd: "/home/agent/repo",
+                workspace: { type: "cwd" },
+                title: "Lineage probe",
+                ...(memoryGrantCeiling === undefined ? {} : { memoryGrantCeiling }),
+                runtimeMode: "approval-required",
+                callerRuntimeMode: "approval-required",
+                ...(remote.outside === true ? {} : { launchedBy: launcher }),
+                ...(remote.withReport === true
+                  ? { message: "Do the work", report: reportBinding, reportNote: "Report back." }
+                  : {}),
+              },
+              Effect.void,
+            );
+          if (remote.memoryCeilings !== undefined) {
+            let result;
+            for (const ceiling of remote.memoryCeilings) result = yield* launch(ceiling);
+            return result!;
+          }
+          if (remote.upgradeBetweenLaunches !== true) return yield* launch();
+          yield* launch();
           declaresReport = true;
-          return yield* launch;
+          return yield* launch();
         }).pipe(
           Effect.provide(
             SshRemoteDispatch.layer.pipe(
@@ -1420,13 +1444,78 @@ describe("SSH dispatch launch lineage", () => {
             ),
           ),
         );
-        return { result, launches };
+        return { result, launches, memorySessions, presentedTokens };
       } finally {
         vi.unstubAllGlobals();
         managerLayer.mockRestore();
         discoverHosts.mockRestore();
       }
     });
+
+  it.effect("issues and reuses SSH sessions only within a task memory ceiling in both orders", () =>
+    Effect.gen(function* () {
+      for (const ceilings of [
+        ["none", "read_write", "read", "none", "read_write", "read"],
+        ["read", "read_write", "none", "read", "read_write", "none"],
+      ] as const) {
+        const { launches, memorySessions, presentedTokens } = yield* launchAgainst({
+          declaresLaunchedBy: true,
+          declaresMemoryCeiling: true,
+          memoryCeilings: ceilings,
+        });
+        expect(launches.map((launch) => launch.memoryGrantCeiling)).toEqual(ceilings);
+        const scopes = (ceiling: string) =>
+          ceiling === "none"
+            ? []
+            : ceiling === "read"
+              ? ["memory:read"]
+              : ["memory:read", "memory:write"];
+        expect(memorySessions).toEqual(ceilings.slice(0, 3).map(scopes));
+        expect(presentedTokens).toEqual([
+          "Bearer fixture-session-1",
+          "Bearer fixture-session-2",
+          "Bearer fixture-session-3",
+          "Bearer fixture-session-1",
+          "Bearer fixture-session-2",
+          "Bearer fixture-session-3",
+        ]);
+      }
+    }),
+  );
+
+  it.effect("refuses a memory-advertising destination that lacks ceiling admission", () =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const result = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        advertisesMemory: true,
+        onMemoryLaunch: () => {
+          attempts += 1;
+        },
+      }).pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(attempts).toBe(0);
+      if (result._tag === "Failure")
+        expect(result.failure).toMatchObject({ reason: "remote_refused" });
+    }),
+  );
+
+  it.effect("refuses a legacy destination that cannot carry even an explicit none ceiling", () =>
+    Effect.gen(function* () {
+      let launchAttempts = 0;
+      const result = yield* launchAgainst({
+        declaresLaunchedBy: true,
+        memoryCeilings: ["none"],
+        onMemoryLaunch: () => {
+          launchAttempts += 1;
+        },
+      }).pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(launchAttempts).toBe(0);
+      if (result._tag === "Failure")
+        expect(result.failure).toMatchObject({ reason: "remote_refused" });
+    }),
+  );
 
   it.effect("asks a remote that can be told not to watch the launch it is forwarded", () =>
     Effect.gen(function* () {

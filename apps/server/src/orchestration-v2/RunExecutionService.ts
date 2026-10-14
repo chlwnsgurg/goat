@@ -525,6 +525,25 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
 /**
  * SERVICE DEFINITION
  */
+/** L2 consumes this at provider prepare/reuse, before issuing credentials or snapshots. */
+export interface RunMemoryPrepareInput {
+  readonly memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling | null;
+}
+
+export function runMemoryPrepareInput(input: {
+  readonly run: OrchestrationV2Run;
+  readonly message: Pick<
+    import("@goat/contracts").OrchestrationV2ConversationMessage,
+    "createdBy" | "scheduledTaskId"
+  >;
+}): RunMemoryPrepareInput {
+  const ordinary =
+    input.message.createdBy === "user" &&
+    input.message.scheduledTaskId === undefined &&
+    input.run.delegatedTaskId === undefined;
+  return { memoryGrantCeiling: ordinary ? null : (input.run.memoryGrantCeiling ?? "none") };
+}
+
 export interface RunExecutionServiceV2StartRootRunInput {
   readonly cloudSource?: import("@goat/contracts").OrchestrationV2CloudTask["source"];
   readonly reattach?: boolean;

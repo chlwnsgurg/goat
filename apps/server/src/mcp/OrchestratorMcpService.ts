@@ -2165,6 +2165,11 @@ const make = Effect.gen(function* () {
                 }),
               }),
         };
+        yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const { task } = yield* scheduledTasks
           .upsert(upsertInput)
           .pipe(
@@ -2236,6 +2241,11 @@ const make = Effect.gen(function* () {
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
         };
+        yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const { task } = yield* scheduledTasks
           .upsert(upsertInput)
           .pipe(
@@ -2479,6 +2489,11 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+        const memoryGrantCeiling = yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const parentRun = parent.runs
           .filter(ThreadManagementService.isActiveRun)
           .toSorted((left, right) => right.ordinal - left.ordinal)[0];
@@ -2515,6 +2530,11 @@ const make = Effect.gen(function* () {
           });
           const register = Effect.gen(function* () {
             yield* authorizeRemoteWrite(scope, parentRun.id);
+            yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+              Effect.mapError(() =>
+                failure("invalid_request", "Caller memory authority is no longer available."),
+              ),
+            );
             const records = yield* remoteDispatch
               .listForOrigin(scope.thread.threadId)
               .pipe(
@@ -2533,6 +2553,7 @@ const make = Effect.gen(function* () {
             yield* threadManagement
               .dispatch({
                 type: "delegated_task.remote.register",
+                memoryGrantCeiling,
                 commandId,
                 parentThreadId: scope.thread.threadId,
                 parentRunId: parentRun.id,
@@ -2560,6 +2581,7 @@ const make = Effect.gen(function* () {
                 launch: {
                   host,
                   cwd: remote.cwd,
+                  memoryGrantCeiling,
                   workspace: remote.workspace ?? { type: "cwd" },
                   title: input.title ?? taskPrompt(input).slice(0, 72),
                   message: taskPrompt(input),
@@ -2690,9 +2712,15 @@ const make = Effect.gen(function* () {
             parent.thread.worktreePath,
             parent.thread.branch,
           );
+        yield* captureMcpTaskMemoryGrantCeiling(scope, false).pipe(
+          Effect.mapError(() =>
+            failure("invalid_request", "Caller memory authority is no longer available."),
+          ),
+        );
         const result = yield* threadManagement
           .dispatch({
             type: "delegated_task.request",
+            memoryGrantCeiling,
             createdBy: "agent",
             creationSource: "mcp",
             commandId,

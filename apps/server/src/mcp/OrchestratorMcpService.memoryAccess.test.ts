@@ -7,7 +7,10 @@ import {
 } from "@goat/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { captureRpcMemoryGrantCeiling } from "../auth/RpcAuthorization.ts";
+import {
+  captureRpcMemoryGrantCeiling,
+  rejectPublicMemoryGrantCeiling,
+} from "../auth/RpcAuthorization.ts";
 import { captureMcpTaskMemoryGrantCeiling } from "./OrchestratorMcpService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
@@ -99,5 +102,17 @@ it.effect("RPC capture reauthorizes every call and recaptures lower and restored
     revoked = true;
     const failure = yield* captureRpcMemoryGrantCeiling(input).pipe(Effect.flip);
     assert.strictEqual(failure._tag, "EnvironmentAuthorizationError");
+  }),
+);
+
+it.effect("rejects client-forged task memory ceilings before dispatch", () =>
+  Effect.gen(function* () {
+    for (const memoryGrantCeiling of ["read", "read_write"]) {
+      assert.strictEqual(
+        (yield* rejectPublicMemoryGrantCeiling({ memoryGrantCeiling }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+    }
+    yield* rejectPublicMemoryGrantCeiling({});
   }),
 );

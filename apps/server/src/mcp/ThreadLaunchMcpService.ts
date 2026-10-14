@@ -5,6 +5,8 @@ import {
   type RuntimeMode,
   type ProviderInteractionMode,
 } from "@goat/contracts";
+import { captureRpcMemoryGrantCeiling } from "../auth/RpcAuthorization.ts";
+import { effectiveMemoryGrant } from "../memory/MemoryAccess.ts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -75,6 +77,41 @@ function workspaceMissingMessage(error: ThreadLaunch.ThreadLaunchWorkspaceMissin
     : `${error.message} Clone it back with goat_project_clone {remoteUrl:"${error.remoteUrl}", destinationPath:"${error.path}"}, ${relocate}, then launch again.`;
 }
 
+/** Forwarded metadata only lowers authenticated authority, including live reauthorization. */
+export const admitRemoteMemoryGrantCeiling = (
+  scope: McpInvocationContext.McpInvocationScope,
+  ceiling: import("@goat/contracts").MemoryTaskGrantCeiling,
+  policy: ServerSettings.MemoryProviderPolicy,
+) =>
+  Effect.gen(function* () {
+    const readOnly = scope.client?.access === "read-only";
+    const captured = yield* captureRpcMemoryGrantCeiling({
+      grantedScopes: scope.grantedScopes,
+      reauthorize: scope.reauthorize,
+      readOnly: false,
+    });
+    const effective = effectiveMemoryGrant({
+      ...policy,
+      readOnly,
+      memoryGrantCeiling: ceiling,
+      dispatchScopes:
+        captured === "none"
+          ? []
+          : captured === "read"
+            ? ["memory:read"]
+            : ["memory:read", "memory:write"],
+    });
+    if (
+      ceiling !== "none" &&
+      (captured === "none" || (ceiling === "read_write" && captured !== "read_write"))
+    )
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: "Forwarded memory ceiling exceeds authenticated destination authority.",
+      });
+    return effective;
+  });
+
 const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const launches = yield* ThreadLaunch.ThreadLaunchService;
@@ -94,6 +131,27 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller } = context;
+        const forwarded = input.memoryGrantCeiling;
+        if (forwarded !== undefined && (scope.thread !== undefined || scope.client === undefined))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "Only an authenticated outside dispatch may forward a memory ceiling.",
+          });
+        const policy = yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy);
+        const memoryGrantCeiling =
+          forwarded === undefined
+            ? yield* captureRpcMemoryGrantCeiling({
+                grantedScopes: scope.grantedScopes,
+                reauthorize: scope.reauthorize,
+                readOnly: scope.client?.access === "read-only",
+              }).pipe(Effect.mapError(unavailable))
+            : yield* admitRemoteMemoryGrantCeiling(
+                scope,
+                forwarded,
+                Option.isSome(policy)
+                  ? yield* policy.value.read
+                  : { policyReady: false, enableAgentMemoryAccess: false, epoch: 0 },
+              ).pipe(Effect.mapError(unavailable));
         if (
           input.launchedBy !== undefined &&
           (caller !== undefined ||
@@ -303,6 +361,7 @@ const make = Effect.gen(function* () {
             : {
                 initialMessage: {
                   messageId,
+                  memoryGrantCeiling,
                   ...(caller === undefined ? {} : { senderThreadId: caller.id }),
                   text: standing.text,
                   attachments,

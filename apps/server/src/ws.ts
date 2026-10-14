@@ -1358,6 +1358,26 @@ const layerWsRpc = (
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
+      const captureTaskMemoryCeiling = RpcAuthorization.captureRpcMemoryGrantCeiling({
+        grantedScopes: currentSession.scopes,
+        readOnly: false,
+        reauthorize: (required) =>
+          sessions.listActive().pipe(
+            Effect.mapError(() =>
+              rpcAuthorizationError(required[0] ?? AuthOrchestrationOperateScope),
+            ),
+            Effect.flatMap((active) => {
+              const live = active.find((session) => session.sessionId === currentSessionId);
+              const missing = required.find(
+                (scope) => !(live?.permissions ?? live?.scopes ?? []).includes(scope),
+              );
+              return live === undefined || missing !== undefined
+                ? Effect.fail(rpcAuthorizationError(missing ?? AuthOrchestrationOperateScope))
+                : Effect.void;
+            }),
+          ),
+      });
+
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const hostResources = yield* HostResources.HostResources;
       const hostStatus = yield* HostStatusMcpService.HostStatusMcpService;
@@ -1928,17 +1948,22 @@ const layerWsRpc = (
               startup
                 .enqueueCommand(
                   // A retry also restarts the preparation work the launch owns.
-                  (command.type === "prepared-run.retry"
-                    ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
-                        ThreadManagementService.withCreationProvenance(command, {
-                          createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
-                        }),
-                        channelOwner,
-                      )
-                  ).pipe(Effect.provide(intakeContext)),
+                  RpcAuthorization.rejectPublicMemoryGrantCeiling(command)
+                    .pipe(
+                      Effect.andThen(
+                        command.type === "prepared-run.retry"
+                          ? threadLaunch.retryPreparation(command)
+                          : ThreadMessageIntake.dispatchCommand(
+                              ThreadManagementService.withCreationProvenance(command, {
+                                createdBy: "user",
+                                creationSource:
+                                  "creationSource" in command ? command.creationSource : "web",
+                              }),
+                              channelOwner,
+                            ),
+                      ),
+                    )
+                    .pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
                   Effect.tap(() => recordClientCommandAnalytics(command)),
@@ -2047,39 +2072,45 @@ const layerWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  ThreadMessageIntake.launchThread({
-                    commandId: input.commandId,
-                    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                    ...(input.reuseExistingThread === undefined
-                      ? {}
-                      : { reuseExistingThread: input.reuseExistingThread }),
-                    projectId: input.projectId,
-                    title: input.title,
-                    ...(input.generateTitle === undefined
-                      ? {}
-                      : { generateTitle: input.generateTitle }),
-                    modelSelection: input.modelSelection,
-                    runtimeMode: input.runtimeMode,
-                    interactionMode: input.interactionMode,
-                    workspaceStrategy: input.workspaceStrategy,
-                    ...(input.initialMessage === undefined
-                      ? {}
-                      : {
-                          initialMessage: {
-                            ...(input.initialMessage.messageId === undefined
-                              ? {}
-                              : { messageId: input.initialMessage.messageId }),
-                            text: input.initialMessage.text,
-                            attachments: input.initialMessage.attachments,
-                            ...(input.initialMessage.context === undefined
-                              ? {}
-                              : { context: input.initialMessage.context }),
-                          },
+                  RpcAuthorization.rejectPublicMemoryGrantCeiling(input)
+                    .pipe(
+                      Effect.andThen(
+                        ThreadMessageIntake.launchThread({
+                          commandId: input.commandId,
+                          ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                          ...(input.reuseExistingThread === undefined
+                            ? {}
+                            : { reuseExistingThread: input.reuseExistingThread }),
+                          projectId: input.projectId,
+                          title: input.title,
+                          ...(input.generateTitle === undefined
+                            ? {}
+                            : { generateTitle: input.generateTitle }),
+                          modelSelection: input.modelSelection,
+                          runtimeMode: input.runtimeMode,
+                          interactionMode: input.interactionMode,
+                          workspaceStrategy: input.workspaceStrategy,
+                          ...(input.initialMessage === undefined
+                            ? {}
+                            : {
+                                initialMessage: {
+                                  ...(input.initialMessage.messageId === undefined
+                                    ? {}
+                                    : { messageId: input.initialMessage.messageId }),
+                                  text: input.initialMessage.text,
+                                  attachments: input.initialMessage.attachments,
+                                  ...(input.initialMessage.context === undefined
+                                    ? {}
+                                    : { context: input.initialMessage.context }),
+                                },
+                              }),
+                          createdBy: "user",
+                          creationSource: input.creationSource ?? "web",
+                          fromClient: true,
                         }),
-                    createdBy: "user",
-                    creationSource: input.creationSource ?? "web",
-                    fromClient: true,
-                  }).pipe(Effect.provide(intakeContext)),
+                      ),
+                    )
+                    .pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
                   Effect.tap(() =>
@@ -2152,9 +2183,11 @@ const layerWsRpc = (
           scheduledTasks.list().pipe(Effect.map(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
-        [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
+        [WS_METHODS.scheduledTasksUpsert]: (input) =>
+          captureTaskMemoryCeiling.pipe(Effect.andThen(scheduledTasks.upsert(input))),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(captureTaskMemoryCeiling),
             Effect.andThen(scheduledTasks.setEnabled(input)),
           ),
         [WS_METHODS.scheduledTasksDelete]: (input) =>

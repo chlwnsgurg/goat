@@ -1,4 +1,6 @@
 import {
+  MEMORY_MCP_TOOLS,
+  MEMORY_ADMINISTRATION_MCP_TOOLS,
   AttachmentCreateUploadUrlInput,
   AttachmentCreateUploadUrlResult,
   ChatAttachmentId,
@@ -115,6 +117,7 @@ type SshDispatchDestination =
   | { readonly host: string; readonly target?: undefined }
   | { readonly target: DesktopSshEnvironmentTarget; readonly host?: undefined };
 export type SshLaunchInput = SshDispatchDestination & {
+  readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
   readonly cwd: string;
   readonly workspace: SshLaunchWorkspace;
   readonly title: string;
@@ -250,7 +253,9 @@ const sessionKey = (
   target: DesktopSshEnvironmentTarget,
   ceiling: RuntimeMode,
   approvals: boolean,
-) => `${targetConnectionKey(target)}\u0000${ceiling}${approvals ? "\u0000approvals" : ""}`;
+  memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling = "none",
+) =>
+  `${targetConnectionKey(target)}\u0000${ceiling}\u0000${memoryGrantCeiling}${approvals ? "\u0000approvals" : ""}`;
 const decodeRemoteCapabilities = Schema.decodeUnknownEffect(OrchestratorMcpCapabilitiesResult);
 
 const decodeRemoteProject = Schema.decodeUnknownEffect(Schema.Struct({ id: ProjectId }));
@@ -559,8 +564,9 @@ const make = Effect.gen(function* () {
     target: DesktopSshEnvironmentTarget,
     ceiling: RuntimeMode,
     approvals = false,
+    memoryGrantCeiling: import("@goat/contracts").MemoryTaskGrantCeiling = "none",
   ) {
-    const key = sessionKey(target, ceiling, approvals);
+    const key = sessionKey(target, ceiling, approvals, memoryGrantCeiling);
     const now = yield* Clock.currentTimeMillis;
     const cached = sessions.get(key);
     if (cached !== undefined && cached.expiresAt - SESSION_REFRESH_MARGIN_MS > now) return cached;
@@ -571,6 +577,12 @@ const make = Effect.gen(function* () {
         ttl: SESSION_TTL,
         runtimeModeCeiling: ceiling,
         ...(approvals ? { approvals: true } : {}),
+        memoryScopes:
+          memoryGrantCeiling === "none"
+            ? []
+            : memoryGrantCeiling === "read"
+              ? ["memory:read"]
+              : ["memory:read", "memory:write"],
       }),
     ).pipe(
       approvals
@@ -604,9 +616,10 @@ const make = Effect.gen(function* () {
       readonly target: DesktopSshEnvironmentTarget;
       readonly httpBaseUrl: string;
       readonly ceiling: RuntimeMode;
+      readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
       readonly token: string;
     }) {
-      const key = `${remote.target.alias}\u0000${remote.ceiling}`;
+      const key = sessionKey(remote.target, remote.ceiling, false, remote.memoryGrantCeiling);
       const known = launchArguments.get(key);
       if (known !== undefined) return known;
       // Effect.exit also catches defects, so even a malformed listing only
@@ -621,6 +634,16 @@ const make = Effect.gen(function* () {
       const declared = new Set(
         listed.value.find((tool) => tool.name === "goat_thread_launch")?.argumentNames ?? [],
       );
+      const advertisesMemory = listed.value.some((tool) =>
+        [...MEMORY_MCP_TOOLS, ...MEMORY_ADMINISTRATION_MCP_TOOLS].some(
+          (name) => tool.name === name,
+        ),
+      );
+      if (advertisesMemory && !declared.has("memoryGrantCeiling"))
+        return yield* failure(
+          "remote_refused",
+          "Remote memory tools require explicit task ceiling admission.",
+        );
       if (declared.has("report") && declared.has("standingInstructions"))
         launchArguments.set(key, declared);
       return declared;
@@ -638,6 +661,7 @@ const make = Effect.gen(function* () {
     readonly target: DesktopSshEnvironmentTarget;
     readonly httpBaseUrl: string;
     readonly ceiling: RuntimeMode;
+    readonly memoryGrantCeiling?: import("@goat/contracts").MemoryTaskGrantCeiling;
     readonly token: string;
     readonly tool: string;
     readonly arguments: Readonly<Record<string, unknown>>;
@@ -666,7 +690,7 @@ const make = Effect.gen(function* () {
         }
         if (describe(error).includes("HTTP 401")) {
           // Revoked or expired on the remote: forget it so the next call issues a fresh one.
-          sessions.delete(sessionKey(input.target, input.ceiling, false));
+          sessions.delete(sessionKey(input.target, input.ceiling, false, input.memoryGrantCeiling));
           return failure(
             "remote_refused",
             `${input.target.alias} rejected this machine's GOAT session; call the tool again to sign in anew.`,
@@ -1087,11 +1111,13 @@ const make = Effect.gen(function* () {
     if (versionNote !== null) notes.push(versionNote);
     // Bootstrap may have taken a while; the session carries the caller's authority.
     yield* beforeLaunch;
-    const session = yield* sessionFor(target, input.callerRuntimeMode);
+    const memoryGrantCeiling = input.memoryGrantCeiling ?? "none";
+    const session = yield* sessionFor(target, input.callerRuntimeMode, false, memoryGrantCeiling);
     const remote = {
       target,
       httpBaseUrl: bootstrap.httpBaseUrl,
       ceiling: input.callerRuntimeMode,
+      memoryGrantCeiling,
       token: session.token,
     };
     if (!session.ceilingApplied && input.runtimeMode !== "approval-required") {
@@ -1142,6 +1168,9 @@ const make = Effect.gen(function* () {
     }
 
     const declared = yield* remoteLaunchArguments(remote);
+    // A task must never reach a tool that silently strips its server-owned ceiling.
+    if (input.memoryGrantCeiling !== undefined && declared?.has("memoryGrantCeiling") !== true)
+      return yield* failure("remote_refused", "Remote GOAT does not accept task memory ceilings.");
     const forwardLaunchedBy =
       input.launchedBy !== undefined && declared?.has("launchedBy") === true;
     // This machine owns any watch of a launch it forwards. Without this, a remote that
@@ -1186,6 +1215,7 @@ const make = Effect.gen(function* () {
             title: input.title,
             workspaceStrategy,
             runtimeMode: input.runtimeMode,
+            ...(declared?.has("memoryGrantCeiling") === true ? { memoryGrantCeiling } : {}),
             ...(input.interactionMode === undefined
               ? {}
               : { interactionMode: input.interactionMode }),
