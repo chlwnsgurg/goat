@@ -7,6 +7,7 @@ import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Fiber from "effect/Fiber";
+import * as Deferred from "effect/Deferred";
 import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -35,8 +36,14 @@ function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
   const scriptPath = NodePath.join(dir, "mock.mjs");
   const source = NodeFS.readFileSync(mockAgentPath, "utf8")
     .replace(
+      'const sessionId = "grok-text-session";',
+      `NodeFS.writeFileSync(process.env.GOAT_ACP_PID_PATH, String(process.pid));
+const sessionId = "grok-text-session";`,
+    )
+    .replace(
       "if (request.id === undefined) continue;",
-      `if (request.method === "session/cancel" && globalThis.stalledPromptId !== undefined) {
+      `if (request.method === undefined) continue;
+    if (request.method === "session/cancel" && globalThis.stalledPromptId !== undefined && !process.env.GOAT_MEMORY_IGNORE_CANCEL) {
       write({ jsonrpc: "2.0", id: globalThis.stalledPromptId, result: { stopReason: "cancelled" } });
       globalThis.stalledPromptId = undefined;
     }
@@ -80,16 +87,18 @@ function withFakeAcpGrok<A, E, R>(
   memoryRunnerContext?: MemoryGenerationRunnerContext,
 ) {
   return Effect.gen(function* () {
-    const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-grok-text-acp-"));
-    yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
-        NodeFS.rmSync(tempDir, { recursive: true, force: true });
-      }),
+    const tempDir = yield* Effect.acquireRelease(
+      Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-grok-text-acp-"))),
+      (tempDir) =>
+        Effect.sync(() => {
+          NodeFS.rmSync(tempDir, { recursive: true, force: true });
+        }),
     );
     const log = NodePath.join(tempDir, "requests.ndjson");
     NodeFS.writeFileSync(log, "");
     const binaryPath = makeAcpGrokWrapper(tempDir, {
       GOAT_ACP_REQUEST_LOG_PATH: log,
+      GOAT_ACP_PID_PATH: NodePath.join(tempDir, "acp.pid"),
       ...(memoryRunnerContext === undefined ? {} : { GOAT_MEMORY_RUN: "1" }),
       ...env,
     });
@@ -111,6 +120,20 @@ function readJsonRpcRequests(
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
+}
+
+function waitForJsonRpcRequest(filePath: string, method: string) {
+  return Effect.callback<void>((resume) => {
+    const check = () => {
+      if (readJsonRpcRequests(filePath).some((request) => request.method === method)) {
+        resume(Effect.void);
+      }
+    };
+    const watcher = NodeFS.watch(filePath, check);
+    // Also check after subscribing so an already-written request cannot be missed.
+    check();
+    return Effect.sync(() => watcher.close());
+  });
 }
 
 it.layer(layerGrokTextGenerationTest)("GrokTextGeneration", (it) => {
@@ -425,7 +448,7 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
           ...(scenario === "authority" ? { execution: { effectiveModel: "forged" } } : {}),
         }),
       },
-      (generation) =>
+      (generation, tempDir) =>
         Effect.gen(function* () {
           const selection =
             scenario === "model"
@@ -438,57 +461,60 @@ it.layer(layerGrokTextGenerationTest)("Grok memory generation", (it) => {
           ).pipe(Effect.flip);
           expect(failure._tag).toBe("TextGenerationError");
           if (scenario === "model") expect(failure.cause).toMatchObject({ code: "unavailable" });
+          const requests = readJsonRpcRequests(NodePath.join(tempDir, "requests.ndjson"));
+          const cwd = requests.find((request) => request.method === "session/new")?.params?.cwd;
+          expect(typeof cwd).toBe("string");
+          expect(NodeFS.existsSync(NodePath.dirname(String(cwd)))).toBe(false);
         }),
       memoryContext,
     ),
   );
 
-  it.effect.each(operations)(
-    "%s times out, cancels ACP and removes its isolated workspace",
-    (operation) =>
-      withFakeAcpGrok(
-        { GOAT_MEMORY_STALL: "1" },
-        (generation, tempDir) =>
-          Effect.gen(function* () {
-            const log = NodePath.join(tempDir, "requests.ndjson");
-            const prompting = Effect.tryPromise({
-              try: (signal) =>
-                new Promise<void>((resolve) => {
-                  const watcher = NodeFS.watch(log, () => {
-                    if (
-                      readJsonRpcRequests(log).some(
-                        (request) => request.method === "session/prompt",
-                      )
-                    ) {
-                      watcher.close();
-                      resolve();
-                    }
-                  });
-                  signal.addEventListener("abort", () => watcher.close(), { once: true });
-                }),
-              catch: () =>
-                new M.TextGenerationError({
-                  operation,
-                  detail: "Synthetic ACP readiness watch failed.",
-                }),
-            });
-            const ready = yield* prompting.pipe(Effect.forkChild);
-            const fiber = yield* (
-              operation === "resolveMemoryConflict"
-                ? generation.resolveMemoryConflict!(memoryConflict)
-                : generation.generateMemorySummary!(memorySummary)
-            ).pipe(Effect.flip, Effect.forkChild);
-            yield* Fiber.join(ready);
-            yield* TestClock.adjust(180_000);
-            const failure = yield* Fiber.join(fiber);
-            expect(failure.detail).toContain("timed out");
-            const requests = readJsonRpcRequests(log);
-            const cwd = requests.find((request) => request.method === "session/new")?.params?.cwd;
-            expect(typeof cwd).toBe("string");
-            expect(NodeFS.existsSync(String(cwd))).toBe(false);
-            expect(requests.some((request) => request.method === "session/cancel")).toBe(true);
-          }),
-        memoryContext,
-      ).pipe(Effect.provide(TestClock.layer())),
+  it.effect.each(
+    operations.flatMap((operation) =>
+      [false, true].map((ignoreCancel) => ({ operation, ignoreCancel })),
+    ),
+  )(
+    "$operation times out and cleans up ACP and its workspace (ignoreCancel=$ignoreCancel)",
+    ({ operation, ignoreCancel }) =>
+      Effect.gen(function* () {
+        const removedTempDir = yield* withFakeAcpGrok(
+          { GOAT_MEMORY_STALL: "1", ...(ignoreCancel ? { GOAT_MEMORY_IGNORE_CANCEL: "1" } : {}) },
+          (generation, tempDir) =>
+            Effect.gen(function* () {
+              const log = NodePath.join(tempDir, "requests.ndjson");
+              const ready = yield* Deferred.make<void>();
+              yield* waitForJsonRpcRequest(log, "session/prompt").pipe(
+                Effect.andThen(Deferred.succeed(ready, undefined)),
+                Effect.forkChild,
+              );
+              const fiber = yield* (
+                operation === "resolveMemoryConflict"
+                  ? generation.resolveMemoryConflict!(memoryConflict)
+                  : generation.generateMemorySummary!(memorySummary)
+              ).pipe(Effect.flip, Effect.forkChild);
+              yield* Deferred.await(ready);
+              yield* TestClock.adjust(180_000);
+              yield* waitForJsonRpcRequest(log, "session/cancel");
+              // The request timeout starts a separate bounded cancellation wait.
+              // Advance it too when the ACP peer never acknowledges cancellation.
+              if (ignoreCancel) yield* TestClock.adjust(2_000);
+              const failure = yield* Fiber.join(fiber);
+              expect(failure.detail).toContain("timed out");
+              const requests = readJsonRpcRequests(log);
+              const cwd = requests.find((request) => request.method === "session/new")?.params?.cwd;
+              expect(typeof cwd).toBe("string");
+              expect(NodeFS.existsSync(String(cwd))).toBe(false);
+              expect(NodeFS.existsSync(NodePath.dirname(String(cwd)))).toBe(false);
+              expect(requests.some((request) => request.method === "session/cancel")).toBe(true);
+              const pid = Number(NodeFS.readFileSync(NodePath.join(tempDir, "acp.pid"), "utf8"));
+              // Signal 0 only probes the fixture PID; generation must have reaped it.
+              expect(() => process.kill(pid, 0)).toThrow(/ESRCH/);
+              return tempDir;
+            }),
+          memoryContext,
+        );
+        expect(NodeFS.existsSync(removedTempDir)).toBe(false);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 });

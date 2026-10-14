@@ -7,6 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { AcpRequestError } from "effect-acp/errors";
 import type * as EffectAcpErrors from "effect-acp/errors";
@@ -31,6 +32,7 @@ import {
 } from "./acpSupport.ts";
 
 const GROK_TIMEOUT_MS = 180_000;
+const GROK_CANCEL_TIMEOUT_MS = 2_000;
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
@@ -73,7 +75,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
           ? {
               runtimeMode: "approval-required" as const,
               cancelBehavior: "wait-for-prompt" as const,
-              cancelTimeout: 2_000,
+              cancelTimeout: GROK_CANCEL_TIMEOUT_MS,
             }
           : {}),
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
@@ -81,6 +83,19 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, commandSpawner),
       );
+
+      // Headless generation has no adapter consuming the runtime's event queue.
+      // Native cancellation needs its barrier acknowledged after the prompt settles.
+      if (memory) {
+        yield* runtime.getEvents().pipe(
+          Stream.runForEach((event) =>
+            event._tag === "EventStreamBarrier"
+              ? Deferred.succeed(event.acknowledge, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+      }
 
       if (memory) {
         const deny = () =>
@@ -171,11 +186,11 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
         });
         if (memory && (yield* Deferred.isDone(rejected))) return yield* Deferred.await(rejected);
         return result;
-      }).pipe(Effect.raceFirst(Deferred.await(rejected)), Effect.forkChild);
-      // Timeout the join, keeping the prompt alive until ACP acknowledges cancel.
-      // Interrupting it first can tear down the session before cancel reaches the agent.
+      }).pipe(Effect.forkChild);
+      // Race only the join: rejection and timeout must send cancel before interrupting
+      // the actual prompt. A non-responsive agent is terminated before scope cleanup.
       const promptResult = yield* Fiber.join(promptFiber).pipe(
-        Effect.onInterrupt(() => runtime.cancel.pipe(Effect.timeoutOption(2_000), Effect.ignore)),
+        Effect.raceFirst(Deferred.await(rejected)),
         Effect.timeoutOption(GROK_TIMEOUT_MS),
         Effect.flatMap(
           Option.match({
@@ -185,6 +200,22 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
               ),
             onSome: (value) => Effect.succeed(value),
           }),
+        ),
+        Effect.onError(() =>
+          runtime.cancel.pipe(
+            Effect.timeoutOption(GROK_CANCEL_TIMEOUT_MS),
+            Effect.ignore,
+            // Error finalizers are masked; make the bounded wait interruptible.
+            Effect.interruptible,
+            Effect.ensuring(
+              Effect.gen(function* () {
+                if (memory && runtime.terminateProcessGroup) {
+                  yield* runtime.terminateProcessGroup.pipe(Effect.ignore);
+                }
+                yield* Fiber.interrupt(promptFiber).pipe(Effect.ignore);
+              }),
+            ),
+          ),
         ),
         Effect.mapError((cause: EffectAcpErrors.AcpError | TextGenerationError) =>
           isTextGenerationError(cause)
