@@ -6350,6 +6350,13 @@ it.effect.each([
     });
     assert.isUndefined(JSON.parse(before.ticket_json).reconcileRequired);
     yield* store.recoverClaimCandidates(101);
+    const durable = (yield* sql<{
+      ticket_json: string;
+    }>`SELECT ticket_json FROM memory_outbox WHERE id=${workId}`)[0]!;
+    assert.isNotNull(
+      JSON.parse(durable.ticket_json).submission,
+      "recovery must retain uncertain/accepted submission metadata and body",
+    );
     const recovered = (yield* store.readRecoverableResolutionTickets({
       memorySpaceId: space,
       now: 101,
@@ -6429,6 +6436,18 @@ it.effect.each(["uncertain", "rejected"] as const)(
         ),
       );
       yield* store.recoverClaimCandidates(101);
+      const durable = (yield* sql<{
+        ticket_json: string;
+      }>`SELECT ticket_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`)[0]!;
+      assert.isNotNull(
+        JSON.parse(durable.ticket_json).submission,
+        "recovery must retain uncertain/accepted submission metadata and body",
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        1,
+      );
       const recovered = (yield* store.readRecoverableResolutionTickets({
         memorySpaceId: space,
         now: 101,
@@ -6494,5 +6513,73 @@ it.effect.each(["uncertain", "rejected"] as const)(
       assert.isFalse(
         plan.some((r) => r.detail.includes("SCAN") || r.detail.includes("TEMP B-TREE")),
       );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "r14 keyed canonical lookup sees checkpoint approval behind a local pending receipt",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ownership, submission } = yield* seedSubmission;
+      const op = submission.operation;
+      if (op.kind !== "resolve") throw new Error("fixture");
+      const digest = memoryOperationDigest(op);
+      const saved = yield* store.transact(
+        store.persistResolutionSubmissionTx({ ownership, submission, digest }),
+      );
+      const args = { ownership: { ...ownership, version: saved.version }, now: 1 };
+      for (const rejection of [
+        {
+          operationId: M.MemoryOperationId.make(id(79999)),
+          memoryId: memory,
+          operationDigest: digest,
+          outcome: "rejected" as const,
+          hubSequence: null,
+          failureCode: "fenced" as const,
+        },
+        {
+          operationId: op.operationId,
+          memoryId: memory,
+          operationDigest: "b".repeat(64),
+          outcome: "rejected" as const,
+          hubSequence: null,
+          failureCode: "fenced" as const,
+        },
+      ])
+        assert.strictEqual(
+          (yield* store
+            .transact(store.reconcileResolutionSubmissionTx({ ...args, rejection }))
+            .pipe(Effect.flip))._tag,
+          "MemoryStoreConflict",
+        );
+      const receipt: M.MemoryHubReceipt = {
+        operationId: op.operationId,
+        memoryId: memory,
+        operationDigest: digest,
+        outcome: "accepted",
+        hubSequence: 7,
+        resolutionApproval: {
+          resolutionId: op.resolution.resolutionId,
+          appliedAtUtc: op.resolution.appliedAtUtc,
+          revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+        },
+      };
+      // Snapshot representations may coexist with a local pending event. Three PK probes,
+      // rather than the first local receipt, decide admission without reading the operation body.
+      const local: M.MemoryMutationReceipt = {
+        operationId: op.operationId,
+        memoryId: memory,
+        outcome: "accepted",
+        revisionId: op.revision.revisionId,
+        pendingSync: true,
+      };
+      yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES(1,${space},${memory},${op.operationId},'resolve',${env},${digest},'{}',${JSON.stringify(local)},0)`;
+      yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES(${space},'hubReceipt',${op.operationId},${memory},${JSON.stringify({ receipt })})`;
+      const result = yield* store.transact(store.reconcileResolutionSubmissionTx(args));
+      assert.strictEqual(result?.outcome, "admitted");
+      if (result?.outcome !== "admitted") throw new Error("fixture");
+      assert.deepStrictEqual(result.receipt, receipt);
+      assert.deepStrictEqual(result.row.submission, submission);
+      assert.strictEqual(result.row.state, "approved");
     }).pipe(Effect.provide(live)),
 );

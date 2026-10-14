@@ -6147,13 +6147,27 @@ const make = Effect.gen(function* () {
       const op = row.submission.operation;
       // All receipt sources are uniquely keyed by (space, operationId). Absence is uncertainty,
       // including compacted/offline logs; a changed frontier alone is never negative proof.
-      const canonical = yield* receipt(input.ownership.memorySpaceId, op.operationId);
-      if (canonical && canonical.operationDigest !== row.submissionDigest)
-        return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
-      const admitted =
-        canonical && "hubSequence" in canonical.receipt && canonical.receipt.hubSequence !== null
-          ? (canonical.receipt as M.MemoryHubReceipt)
-          : undefined;
+      const receipts = yield* stored(
+        "resolution-admission-keyed",
+        sql<{ operation_digest: string; receipt_json: string }>`
+        SELECT operation_digest,receipt_json FROM memory_events WHERE memory_space_id=${input.ownership.memorySpaceId} AND operation_id=${op.operationId}
+        UNION ALL SELECT operation_digest,receipt_json FROM memory_compact_receipts WHERE space=${input.ownership.memorySpaceId} AND operation_id=${op.operationId}
+        UNION ALL SELECT json_extract(record_json,'$.receipt.operationDigest'),json_extract(record_json,'$.receipt') FROM memory_import_keys WHERE space=${input.ownership.memorySpaceId} AND key_kind='hubReceipt' AND key=${op.operationId} LIMIT 3`,
+      );
+      let admitted: M.MemoryHubReceipt | undefined;
+      for (const canonical of receipts) {
+        if (canonical.operation_digest !== row.submissionDigest)
+          return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+        const value = yield* receiptCodec.decode(canonical.receipt_json, strict);
+        if ("hubSequence" in value) {
+          if (
+            admitted &&
+            (yield* hubReceiptCodec.encode(admitted)) !== (yield* hubReceiptCodec.encode(value))
+          )
+            return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+          admitted = value;
+        }
+      }
       const evidence = admitted ?? row.approval ?? input.rejection;
       const result = evidence
         ? yield* hubReceiptCodec.decode(yield* hubReceiptCodec.encode(evidence), strict)
@@ -6203,7 +6217,8 @@ const make = Effect.gen(function* () {
         nextAttemptAt: input.now,
         approval: result,
       });
-      return updated ? { outcome: "retired" as const, row: updated } : null;
+      if (!updated) return yield* new MemoryStoreConflict({ code: "fenced" });
+      return { outcome: "retired" as const, row: updated };
     });
   const retireRejectedSubmissionTx: MemoryStore["Service"]["retireRejectedSubmissionTx"] =
     Effect.fn("MemoryStore.retireRejectedSubmissionTx")(function* (input) {
