@@ -6928,6 +6928,8 @@ it.effect("r16 nullable processing reads the actual local item counters and PK p
       assert.isTrue(plan.every((row) => row.detail.includes("SEARCH")));
       assert.isFalse(plan.some((row) => /SCAN|TEMP B-TREE/.test(row.detail)));
     }
-    yield* Effect.log("R16_PROCESSING_EXPLAIN", JSON.stringify(plans));
+    yield* Effect.log("R16_PROCESSING_EXPLAIN", JSON.stringify(plans)).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
   }).pipe(Effect.provide(live)),
 );

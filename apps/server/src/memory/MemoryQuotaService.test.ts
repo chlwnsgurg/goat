@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Logger from "effect/Logger";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -914,6 +915,8 @@ it.effect("r16 unbound storage preserves environment samples and FTS using index
       assert.isTrue(plan.every((row) => row.detail.includes("SEARCH")));
       assert.isFalse(plan.some((row) => /SCAN|TEMP B-TREE/.test(row.detail)));
     }
-    yield* Effect.log("R16_STORAGE_EXPLAIN", JSON.stringify(plans));
+    yield* Effect.log("R16_STORAGE_EXPLAIN", JSON.stringify(plans)).pipe(
+      Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
+    );
   }).pipe(Effect.provide(services)),
 );
