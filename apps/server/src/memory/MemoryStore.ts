@@ -7558,6 +7558,8 @@ const make = Effect.gen(function* () {
       (yield* receiptCodec.encode(old.receipt)) !== (yield* receiptCodec.encode(settledReceipt))
     )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    // Canonical replay may enrich receipts, but its domain incorporation already happened.
+    const canonicalReplay = old && "hubSequence" in old.receipt && old.receipt.hubSequence !== null;
     if (entry.receipt.outcome !== "rejected" && entry.revision) {
       const revision = entry.revision;
       if (
@@ -7568,6 +7570,7 @@ const make = Effect.gen(function* () {
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
       const current = yield* loadAggregate(input.memorySpaceId, entry.memoryId);
       if (
+        !canonicalReplay &&
         !current.tombstone &&
         !current.revisions.some(
           (pair) => pair.revision.revisionId === revision.revisionId && pair.payload !== null,
@@ -7609,7 +7612,7 @@ const make = Effect.gen(function* () {
         });
       }
     }
-    if (entry.tombstone) {
+    if (entry.tombstone && !canonicalReplay) {
       if (
         entry.tombstone.memorySpaceId !== input.memorySpaceId ||
         entry.tombstone.memoryId !== entry.memoryId

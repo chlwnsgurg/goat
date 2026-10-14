@@ -3894,3 +3894,52 @@ it.effect(
       assert.strictEqual(mismatch._tag, "MemoryStoreConflict");
     }).pipe(Effect.provide(live)),
 );
+
+it.effect("keeps the successor frontier and exposure on body-free canonical metadata replay", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const first = operation();
+    const second = childOperation();
+    if (first.kind === "forget" || second.kind === "forget") throw new Error("fixture");
+    for (const [index, op] of [first, second].entries()) {
+      yield* store.apply({
+        ...decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          op,
+          Store.approvedReplica,
+          { kind: "allowed" },
+        ),
+        receipt: {
+          operationId: op.operationId,
+          memoryId: memory,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "accepted",
+          hubSequence: index + 1,
+        },
+      });
+    }
+    const before = yield* store.loadAggregate(space, memory);
+    assert.deepStrictEqual(before.heads, [second.revision.revisionId]);
+    assert.strictEqual(before.item?.localAvailability.exposure, "visible");
+    yield* sql`DELETE FROM memory_payloads WHERE space=${space} AND payload_ref=${first.revision.payloadRef}`;
+    const receipt = (yield* store.receipt(space, first.operationId))!.receipt;
+    if (!("hubSequence" in receipt) || receipt.hubSequence === null) throw new Error("fixture");
+    yield* store.transact(
+      store.settleMetadataEntryTx({
+        memorySpaceId: space,
+        entry: {
+          kind: "metadata",
+          operationKind: "upsert",
+          memoryId: memory,
+          hubSequence: 1,
+          receipt,
+          revision: first.revision,
+        },
+      }),
+    );
+    const after = yield* store.loadAggregate(space, memory);
+    assert.deepStrictEqual(after.heads, [second.revision.revisionId]);
+    assert.deepStrictEqual(after.item, before.item);
+  }).pipe(Effect.provide(live)),
+);
