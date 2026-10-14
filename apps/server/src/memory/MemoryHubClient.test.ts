@@ -128,9 +128,7 @@ it.effect("unavailable retries identical input after clock-driven backoff", () =
       bodies.push(init?.body);
       return bodies.length === 1 ? json({}, 503) : json({ requests: [] });
     };
-    const program = client
-      .sourceReadCollect(connection, input)
-      .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch));
+    const program = client.sourceReadCollect(connection, input);
     // Network milestone, then TestClock drives the retry schedule; no wall-clock sleep.
     const markedFetch: typeof globalThis.fetch = async (url, init) => {
       const response = await fetch(url, init);
@@ -257,7 +255,7 @@ const revision = {
   parents: [id(5), id(6)],
   scope: { kind: "user" },
   payloadRef: id(3),
-  assertionKind: "fact",
+  assertionKind: "inference",
   provenance: { environmentId: "member" },
   createdAtUtc: "2026-10-14T00:00:00.000Z",
 };

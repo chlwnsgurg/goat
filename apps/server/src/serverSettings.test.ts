@@ -2,6 +2,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
   MemoryOperationId,
+  MemoryHubSettings,
+  MemoryHubForbiddenError,
+  MemoryHubEndpoint,
+  EnvironmentId,
+  MemorySpaceId,
   ModelSelection,
   ProjectId,
   ProjectScript,
@@ -51,6 +56,7 @@ it.effect("translates a persisted environment theme on load", () =>
 );
 // goat-rename: legacy-end
 
+const decodeHubSettings = Schema.decodeUnknownEffect(MemoryHubSettings);
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
@@ -2338,9 +2344,93 @@ it.effect(
       const retry = yield* Effect.result(transitions.applyMemoryHubTransition(input, permit));
       assert.strictEqual(retry._tag, "Failure");
       assert.strictEqual(checks, 2);
-      const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
       assert.deepStrictEqual(persisted.memoryHub, { mode: "disabled" });
       assert.strictEqual(persisted.memoryHubVersion, 1);
       assert.strictEqual(persisted.standingInstructions, before.standingInstructions);
+    }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect(
+  "hub transitions persist only a secret reference and disabling removes the member union",
+  () =>
+    Effect.gen(function* () {
+      const transitions = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const credential = "z".repeat(43);
+      yield* secrets.set("memory-hub-fixture", new TextEncoder().encode(credential));
+      const settings = yield* decodeHubSettings({
+        mode: "member",
+        secretName: "memory-hub-fixture",
+        endpoint: MemoryHubEndpoint.make("https://hub.invalid"),
+        hubEnvironmentId: EnvironmentId.make("synthetic-hub"),
+        memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+      });
+      const requestId = MemoryOperationId.make("00000000-0000-4000-8000-000000000077");
+      yield* transitions.applyMemoryHubTransition(
+        { requestId, expectedVersion: 0, settings },
+        Effect.void,
+      );
+      const raw = yield* fs.readFileString(config.settingsPath);
+      assert.isFalse(raw.includes(credential));
+      assert.deepStrictEqual((yield* decodeServerSettingsJson(raw)).memoryHub, settings);
+      yield* transitions.applyMemoryHubTransition(
+        {
+          requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000078"),
+          expectedVersion: 1,
+          settings: { mode: "disabled" },
+        },
+        Effect.void,
+      );
+      const disabled = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepStrictEqual(disabled.memoryHub, { mode: "disabled" });
+      assert.strictEqual(disabled.memoryHubVersion, 2);
+    }).pipe(
+      Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
+    ),
+);
+
+it.effect(
+  "a transition waiting behind the settings lock repeats current permission before CAS",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const transitions = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+      const locked = yield* Deferred.make<void>();
+      const unlock = yield* Deferred.make<void>();
+      let authorized = true;
+      const permit = Effect.suspend(() =>
+        authorized ? Effect.void : Effect.fail(new MemoryHubForbiddenError({})),
+      );
+      const holder = yield* service
+        .withSettingsSnapshot(() =>
+          Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(unlock))),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(locked);
+      const transition = yield* Effect.result(
+        transitions.applyMemoryHubTransition(
+          {
+            requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000079"),
+            expectedVersion: 0,
+            settings: { mode: "hub", memorySpaceId: null },
+          },
+          permit,
+        ),
+      ).pipe(Effect.forkChild);
+      authorized = false;
+      yield* Deferred.succeed(unlock, undefined);
+      yield* Fiber.join(holder);
+      const result = yield* Fiber.join(transition);
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure")
+        assert.strictEqual(result.failure._tag, "MemoryHubForbiddenError");
+      assert.strictEqual((yield* service.getSettings).memoryHubVersion, 0);
     }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
 );
