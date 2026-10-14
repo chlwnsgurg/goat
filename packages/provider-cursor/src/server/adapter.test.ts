@@ -1,3 +1,4 @@
+import type { AuthEnvironmentScope } from "@goat/contracts";
 import * as ProviderHost from "@goat/provider-core/server/ProviderHost";
 import * as Exit from "effect/Exit";
 import { MemoryId, MemoryRevisionId, MemorySpaceId } from "@goat/contracts";
@@ -392,6 +393,18 @@ describe("CursorAdapterV2", () => {
       let sendCalls = 0;
       const instanceId = ProviderInstanceId.make("cursor");
       const threadId = ThreadId.make("cursor-transport-error-thread");
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      const config = (grantedScopes: ReadonlyArray<AuthEnvironmentScope>) => ({
+        environmentId: EnvironmentId.make("fixture"),
+        threadId,
+        providerSessionId: "cursor-error-session",
+        providerInstanceId: instanceId,
+        endpoint: "http://fixture.invalid/mcp",
+        authorizationHeader: "Bearer memory-fixture",
+        browserToolsAvailable: false,
+        grantedScopes,
+      });
+      yield* sessions.set(config(["memory:read", "memory:write", "orchestration:read"]));
       const modelSelection = { instanceId, model: "composer-2.5" };
       const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
         runtimeMode: "full-access",
@@ -513,6 +526,7 @@ describe("CursorAdapterV2", () => {
 
       assert.include(sentMessages[0]!, memoryContextText(snapshot));
       assert.equal(refreshes, 1);
+      assert.include(sentMessages[0]!, "read=true, write=true, source=true");
       assert.isDefined(runtime.compactThread);
       yield* runtime.compactThread!({
         threadId,
@@ -541,6 +555,7 @@ describe("CursorAdapterV2", () => {
       assert.equal(sentMessages[1], "/compress");
       assert.equal(refreshes, 1);
       memory = undefined;
+      yield* sessions.set(config([]));
       yield* runtime.startTurn({
         ...ordinaryInput,
         runOrdinal: 3,
@@ -565,12 +580,35 @@ describe("CursorAdapterV2", () => {
       assert.notInclude(sentMessages[2]!, "external_goat_memory");
       assert.equal(refreshes, 2);
       assert.deepEqual(imageCounts, [0, 0, 1]);
+      assert.include(sentMessages[2]!, "read=false, write=false, source=false");
+      memory = snapshot;
+      const grants: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
+        ["memory:read"],
+        ["memory:read", "memory:write", "orchestration:read"],
+      ];
+      for (const [index, grant] of grants.entries()) {
+        yield* sessions.set(config(grant));
+        yield* runtime.startTurn({
+          ...ordinaryInput,
+          runOrdinal: index + 4,
+          providerTurnOrdinal: index + 4,
+        });
+        yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.include(sentMessages[index + 3]!, memoryContextText(snapshot));
+        assert.include(
+          sentMessages[index + 3]!,
+          `read=true, write=${index === 1}, source=${index === 1}`,
+        );
+      }
       memory = { ...snapshot, renderedText: snapshot.renderedText.replace("data", "tampered") };
       const failed = yield* runtime
         .startTurn({ ...ordinaryInput, runOrdinal: 4, providerTurnOrdinal: 4 })
         .pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(failed));
-      assert.equal(sentMessages.length, 3);
+      assert.equal(sentMessages.length, 5);
     }).pipe(
       Effect.scoped,
       Effect.provide(
