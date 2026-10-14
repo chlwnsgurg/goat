@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
@@ -37,8 +38,34 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as RemoteReportService from "../../../remoteReports/RemoteReportService.ts";
+import type * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+import * as ThreadResults from "../../../threadResults/ThreadResultService.ts";
 import * as ProjectHandlers from "./handlers.ts";
+import * as ThreadLaunchMcpService from "../../ThreadLaunchMcpService.ts";
+import * as ProviderAdapters from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as CloudSource from "../../../orchestration-v2/CloudTaskSourceService.ts";
+import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ProjectToolkit } from "./tools.ts";
+
+const localAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+  instanceId: ProviderInstanceId.make("codex"),
+  driver: ProviderDriverKind.make("codex"),
+  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+  openSession: () => Effect.die("Launch admission does not open a provider session."),
+};
+
+/** Launch handlers resolve their service from the tool invocation context. */
+const withLaunchService = <A, E, R>(dependencies: Layer.Layer<A, E, R>) =>
+  ThreadLaunchMcpService.layer.pipe(
+    Layer.provide(
+      Layer.mock(ProviderAdapters.ProviderAdapterRegistryV2)({
+        get: () => Effect.succeed(localAdapter),
+      }),
+    ),
+    Layer.provide(Layer.mock(CloudSource.CloudTaskSourceService)({})),
+    Layer.provideMerge(dependencies),
+  );
 
 type Registration = Parameters<LaunchWatchService.LaunchWatchServiceShape["register"]>[0];
 type ExternalWatch = Parameters<LaunchWatchService.LaunchWatchServiceShape["watchExternal"]>[0];
@@ -177,7 +204,7 @@ const launchFromThread = (params: {
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+          Layer.provide(withLaunchService(layerDependencies)),
         ),
       ),
     );
@@ -193,13 +220,17 @@ const launchFromThread = (params: {
             environmentId: EnvironmentId.make("foreign-env"),
           },
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(layerDependencies)),
+        );
       expect(refused.at(-1)?.result).toMatchObject({ code: "invalid_request" });
       expect(launchedInput).toBeUndefined();
     }
     const result = yield* toolkit
       .handle("goat_thread_launch", input)
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(layerDependencies)));
     return {
       result: result.at(-1)?.result,
       launchedSender,
@@ -495,14 +526,18 @@ it.effect("launches a scratch thread into the Scratch project", () =>
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+          Layer.provide(withLaunchService(layerDependencies)),
         ),
       ),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"goat_thread_launch">>[1]) =>
       toolkit
         .handle("goat_thread_launch", params)
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(layerDependencies)),
+        );
 
     const result = yield* handle({ title: "Notes", scratch: true, message: "Draft a list" });
     expect(result.at(-1)?.result).toMatchObject({ projectId: scratchProjectId });
@@ -601,14 +636,18 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-          Layer.provide(layerDependencies),
+          Layer.provide(withLaunchService(layerDependencies)),
         ),
       ),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"goat_project_create">>[1]) =>
       toolkit
         .handle("goat_project_create", params)
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(layerDependencies)),
+        );
 
     const result = yield* handle({ title: "Pinball Stats" });
     expect(result.at(-1)?.result).toMatchObject({
@@ -720,13 +759,15 @@ it.effect("a client launches at its ceiling with the project's default model", (
     });
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const handle = (params: Parameters<typeof toolkit.handle<"goat_thread_launch">>[1]) =>
       toolkit
         .handle("goat_thread_launch", params)
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
 
     const result = yield* handle({ title: "Fix", projectId, message: "Fix the bug" });
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
@@ -782,7 +823,9 @@ it.effect("a launch binds only an existing checkout that is one of the project's
     }
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const launchInto = (worktreePath: string) =>
@@ -792,7 +835,7 @@ it.effect("a launch binds only an existing checkout that is one of the project's
           projectId,
           workspaceStrategy: { type: "existing_worktree", worktreePath },
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
 
     expect((yield* launchInto(worktree)).at(-1)?.result).toMatchObject({ projectId });
     expect((yield* launchInto(repo)).at(-1)?.result).toMatchObject({ projectId });
@@ -836,7 +879,9 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     });
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const launchFrom = (baseRef: string) =>
@@ -846,7 +891,7 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
           projectId,
           workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: false },
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
 
     const refused = (yield* launchFrom("t3/renamed")).at(-1)?.result;
     expect(refused).toMatchObject({ code: "invalid_request" });
@@ -882,7 +927,7 @@ it.effect(
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
           McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-            Layer.provide(dependencies),
+            Layer.provide(withLaunchService(dependencies)),
           ),
         ),
       );
@@ -892,7 +937,11 @@ it.effect(
           projectId,
           workspaceStrategy: { type: "worktree", baseRef: "origin/lane", branch: "lane" },
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))).at(-1)?.result;
+        .pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.provide(withLaunchService(dependencies)),
+        )).at(-1)?.result;
       expect(refused).toMatchObject({ code: "invalid_request" });
       expect((refused as { message: string }).message).toBe(
         'Branch "lane" is already checked out at /worktrees/lane in project "Client target". No thread was created. Launch into that checkout with workspaceStrategy {type:"existing_worktree", worktreePath:"/worktrees/lane"}, or pass a branch name that does not exist yet.',
@@ -952,6 +1001,7 @@ it.effect("lists and reads another machine's projects through that machine's own
       ),
     );
     const dependencies = HostThreadsMcpService.layer.pipe(
+      Layer.provide(Layer.mock(ThreadResults.ThreadResultService)({})),
       Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
       Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
       Layer.provide(
@@ -973,13 +1023,15 @@ it.effect("lists and reads another machine's projects through that machine's own
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
 
     const listed = yield* toolkit
       .handle("goat_project_list", { host: "box", limit: 5 })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
     expect(listed.at(-1)?.result).toMatchObject({
       host: "box",
       projects: [{ id: "project:remote" }],
@@ -987,7 +1039,7 @@ it.effect("lists and reads another machine's projects through that machine's own
     });
     const read = yield* toolkit
       .handle("goat_project_read", { host: "box", projectId: ProjectId.make("project:remote") })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
     expect(read.at(-1)?.result).toMatchObject({ id: "project:remote", host: "box" });
     expect(
       calls.map(({ host, tool, arguments: args, writes }) => [host, tool, args, writes]),
@@ -1091,7 +1143,9 @@ const reportLaunch = (options: {
     );
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(withLaunchService(dependencies)),
+        ),
       ),
     );
     const handle = (report?: typeof reportBinding) =>
@@ -1101,7 +1155,7 @@ const reportLaunch = (options: {
           projectId,
           ...(report === undefined ? {} : { report }),
         })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
     return { operations, bound, launched, handle };
   });
 it.effect("a thread caller cannot supply an origin binding", () =>
@@ -1210,7 +1264,7 @@ it.effect(
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
           McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-            Layer.provide(dependencies),
+            Layer.provide(withLaunchService(dependencies)),
           ),
         ),
       );
@@ -1228,7 +1282,7 @@ it.effect(
             projectId,
             launchedBy: { ...launcher, environmentId, ...(via === undefined ? {} : { via }) },
           })
-          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(withLaunchService(dependencies)));
       expect((yield* handle(EnvironmentId.make("environment"))).at(-1)?.result).toMatchObject({
         code: "invalid_request",
       });

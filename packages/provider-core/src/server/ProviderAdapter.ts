@@ -1,5 +1,7 @@
 import type { OrchestrationV2HistoricalMessage } from "@goat/contracts";
 import {
+  OrchestrationV2CloudTask,
+  OrchestrationV2CloudSourceRestriction,
   ChatAttachment,
   CheckpointId,
   MessageId,
@@ -402,7 +404,31 @@ export interface ProviderAdapterV2EnsureThreadInput {
   readonly existingProviderThread?: OrchestrationV2ProviderThread;
 }
 
+export interface ProviderAdapterV2CloudLaunchSource {
+  /** Existing verified checkout, never a cloud output directory. */
+  readonly cwd: string;
+  readonly restriction: OrchestrationV2CloudSourceRestriction;
+}
+
+export type ProviderAdapterV2CloudTaskMetadata = Pick<
+  OrchestrationV2CloudTask,
+  "url" | "title" | "progress"
+>;
+
 export interface ProviderAdapterV2TurnInput {
+  /** Initial launch only. Follow-up and attach must not require this checkout. */
+  readonly cloudLaunchSource?: ProviderAdapterV2CloudLaunchSource;
+  readonly cloudSource?: OrchestrationV2CloudTask["source"];
+  /** Acknowledged durable acceptance; use before observing a submitted task. */
+  readonly commitCloudTask?: (
+    task: OrchestrationV2CloudTask,
+    refs?: Pick<OrchestrationV2ProviderThread, "nativeThreadRef" | "nativeConversationHeadRef">,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Attached-runtime metadata after terminal; waits for run subscription cleanup. */
+  readonly commitCloudTaskMetadata?: (
+    nativeId: string,
+    metadata: ProviderAdapterV2CloudTaskMetadata,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -588,6 +614,12 @@ export interface ProviderAdapterV2SessionRuntime {
   ) => Effect.Effect<boolean, ProviderAdapterV2Error>;
   readonly startTurn: (
     input: ProviderAdapterV2TurnInput,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Attach observation to saved work. Never submit a prompt or create a task. */
+  readonly resumeTurn?: (
+    input: Omit<ProviderAdapterV2TurnInput, "message" | "cloudLaunchSource"> & {
+      readonly cloudTask: OrchestrationV2CloudTask;
+    },
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly compactThread?: (
     input: ProviderAdapterV2TurnInput,

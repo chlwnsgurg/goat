@@ -1,4 +1,5 @@
 import { useOpenPullRequest } from "../../../native/useOpenPullRequest";
+import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
 import {
   type GitActionRequestInput,
   buildMenuItems,
@@ -38,6 +39,9 @@ import {
 } from "../../../native/StackHeader";
 import { useEnvironmentQuery } from "../../../state/query";
 import { useThreadSelection } from "../../../state/use-thread-selection";
+import { useThreadShell } from "../../../state/entities";
+import { useThreadProjection } from "../../../state/use-thread-detail";
+import { useRemoteEnvironmentRuntime } from "../../../state/use-remote-environment-registry";
 import { useSelectedThreadGitActions } from "../../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../../state/use-selected-thread-git-state";
 import { useSelectedThreadWorktree } from "../../../state/use-selected-thread-worktree";
@@ -64,7 +68,29 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
     if (isBlankLink) navigation.goBack();
   }, [isBlankLink, navigation]);
   if (isBlankLink) return null;
-  return <GitOverviewSheetContent {...props} />;
+  return <GitOverviewSheetGuard {...props} />;
+}
+
+function GitOverviewSheetGuard(props: GitOverviewSheetProps) {
+  const navigation = useNavigation();
+  const environmentId = EnvironmentId.make(props.route.params.environmentId);
+  const threadId = ThreadId.make(props.route.params.threadId);
+  const thread = useThreadShell({ environmentId, threadId });
+  const projection = useThreadProjection({ environmentId, threadId });
+  const runtime = useRemoteEnvironmentRuntime(environmentId);
+  const provider = runtime?.serverConfig?.providers.find(
+    (candidate) =>
+      candidate.instanceId ===
+      (projection?.projection.thread.providerInstanceId ?? thread?.providerInstanceId),
+  );
+  const { showLocalWorkspace } = deriveCloudTaskState(projection?.projection, provider);
+  const isInspector = props.presentation === "inspector";
+  useEffect(() => {
+    if (showLocalWorkspace || isInspector) return;
+    if (navigation.canGoBack()) navigation.goBack();
+    else navigation.navigate("Thread", { environmentId, threadId });
+  }, [environmentId, isInspector, navigation, showLocalWorkspace, threadId]);
+  return showLocalWorkspace ? <GitOverviewSheetContent {...props} /> : null;
 }
 
 function GitOverviewSheetContent(props: GitOverviewSheetProps) {

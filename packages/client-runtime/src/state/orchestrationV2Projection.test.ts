@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   MessageId,
+  EventId,
   ProjectId,
   ProviderInstanceId,
   NodeId,
@@ -105,6 +106,87 @@ const emptyProjection = {
 } as OrchestrationV2ThreadProjection;
 
 describe("applyOrchestrationV2ProjectionEvent", () => {
+  it("shows committed cloud summaries and PR links once per run across follow-up and replay", () => {
+    let projection = applyOrchestrationV2ProjectionEvent(emptyProjection, {
+      id: EventId.make("event:cloud-run"),
+      type: "run.created",
+      threadId,
+      occurredAt: now,
+      payload: run,
+    })!;
+    for (const currentRun of [run, { ...run, id: RunId.make("run:cloud-followup"), ordinal: 2 }]) {
+      if (currentRun.id !== runId)
+        projection = applyOrchestrationV2ProjectionEvent(projection, {
+          id: EventId.make("event:cloud-followup-run"),
+          type: "run.created",
+          threadId,
+          occurredAt: now,
+          payload: currentRun,
+        })!;
+      const messageId = MessageId.make(`message:cloud-result:${currentRun.id}`);
+      const text = `Summary for ${currentRun.id}\nPull request: https://github.com/acme/repo/pull/1`;
+      const messageEvent = {
+        id: EventId.make(`event:cloud-message:${currentRun.id}`),
+        type: "message.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: messageId,
+          threadId,
+          runId: currentRun.id,
+          nodeId: null,
+          createdBy: "agent",
+          creationSource: "provider",
+          role: "assistant",
+          text,
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      } satisfies OrchestrationV2DomainEvent;
+      const itemEvent = {
+        id: EventId.make(`event:cloud-item:${currentRun.id}`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`turn-item:cloud-result:${currentRun.id}`),
+          type: "assistant_message",
+          threadId,
+          runId: currentRun.id,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: currentRun.ordinal * 1_000_000 + 1,
+          status: "completed",
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          messageId,
+          text,
+          streaming: false,
+        },
+      } satisfies OrchestrationV2DomainEvent;
+      const previousRows = projection.visibleTurnItems;
+      projection = applyOrchestrationV2ProjectionEvent(projection, messageEvent)!;
+      expect(projection.visibleTurnItems).toEqual(previousRows);
+      projection = applyOrchestrationV2ProjectionEvent(projection, itemEvent)!;
+      const committedRows = projection.visibleTurnItems;
+      expect(committedRows.at(-1)?.item).toEqual(itemEvent.payload);
+      expect(committedRows.slice(0, -1)).toEqual(previousRows);
+      projection = applyOrchestrationV2ProjectionEvent(projection, messageEvent)!;
+      projection = applyOrchestrationV2ProjectionEvent(projection, itemEvent)!;
+      expect(projection.visibleTurnItems).toEqual(committedRows);
+    }
+    expect(projection.turnItems).toHaveLength(2);
+    expect(projection.visibleTurnItems).toHaveLength(2);
+    expect(projection.messages).toHaveLength(2);
+  });
+
   it("keeps live token usage when the terminal provider turn omits it", () => {
     const providerTurnId = ProviderTurnId.make("provider-turn-reducer");
     const running = {

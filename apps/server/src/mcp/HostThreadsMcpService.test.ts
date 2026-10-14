@@ -4,6 +4,9 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   OrchestratorMcpFailure,
+  type OrchestratorMcpCloudTask,
+  type OrchestratorMcpThreadReadResult,
+  RunId,
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadListResult,
   ProviderInstanceId,
@@ -15,6 +18,7 @@ import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
+import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
 import * as HostThreadsMcpService from "./HostThreadsMcpService.ts";
 import type { LaunchWatch } from "./launchWatch.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
@@ -89,6 +93,15 @@ const localList: OrchestratorMcpThreadListResult = {
   total: 1,
 };
 
+const remoteCloudTask: OrchestratorMcpCloudTask = {
+  taskId: "host-cloud-task",
+  status: "running",
+  tracking: "link-only",
+  url: "https://example.com/tasks/host",
+  localChangesExcluded: true,
+  updatedAt: "2026-10-13T01:00:00.000Z",
+};
+
 /** The service over fakes: `hostCall` answers each remote call after running its authorization. */
 const runService = <A, E>(
   options: {
@@ -102,6 +115,8 @@ const runService = <A, E>(
     readonly relaySend?: boolean;
     /** The caller's launch watch that find returns. */
     readonly watch?: LaunchWatch;
+    readonly localRead?: OrchestratorMcpThreadReadResult;
+    readonly onResult?: (id: ThreadId, runId: RunId | null | undefined) => void;
     readonly hostCall: (
       call: SshRemoteDispatch.SshHostToolCall,
     ) => Effect.Effect<unknown, SshRemoteDispatch.SshRemoteDispatchError>;
@@ -112,6 +127,15 @@ const runService = <A, E>(
   const relays: Array<unknown> = [];
   const rearms: Array<Parameters<LaunchWatchService.LaunchWatchServiceShape["rearm"]>[0]> = [];
   const layer = HostThreadsMcpService.layer.pipe(
+    Layer.provide(
+      Layer.mock(ThreadResultService.ThreadResultService)({
+        forRun: (id, runId) =>
+          Effect.sync(() => {
+            options.onResult?.(id, runId);
+            return null;
+          }),
+      }),
+    ),
     Layer.provide(
       Layer.mock(RemoteReportService.RemoteReportService)({
         origin: () =>
@@ -146,6 +170,10 @@ const runService = <A, E>(
     Layer.provide(
       Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
         listThreads: () => Effect.succeed(localList),
+        readThread: () =>
+          options.localRead === undefined
+            ? Effect.die("unused local read")
+            : Effect.succeed(options.localRead),
       }),
     ),
     Layer.provide(
@@ -225,94 +253,100 @@ describe("HostThreadsMcpService", () => {
     }),
   );
 
-  it.effect("reads an older host's status from one timeline item, with this caller's watch", () =>
-    Effect.gen(function* () {
-      const at = "2026-10-13T01:00:00.000Z";
-      const remoteRun = (runId: string, status: string, startedAt: string | null) => ({
-        runId,
-        ordinal: Number(runId.slice(4)),
-        status,
-        providerInstanceId: "codex",
-        model: "gpt-5",
-        requestedAt: at,
-        startedAt,
-        completedAt: null,
-      });
-      const { result, calls } = yield* runService(
-        {
-          interactionMode: "default",
-          watch: {
-            pendingRuns: ["run-2"],
-            reportedRuns: ["run-1"],
-            notifyWebhook: false,
-            webhookTarget: { type: "named", name: "bot" },
-          } as unknown as LaunchWatch,
-          hostCall: (call) =>
-            call.tool === "goat_thread_status"
-              ? Effect.fail(
-                  new SshRemoteDispatch.SshRemoteDispatchError({
-                    reason: "remote_refused",
-                    message: `GOAT on box ${SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED}.`,
+  it.effect.each([false, true])(
+    "status fallback keeps optional cloud=%s metadata and caller watch",
+    (cloud) =>
+      Effect.gen(function* () {
+        const at = "2026-10-13T01:00:00.000Z";
+        const remoteRun = (runId: string, status: string, startedAt: string | null) => ({
+          runId,
+          ordinal: Number(runId.slice(4)),
+          status,
+          providerInstanceId: "codex",
+          model: "gpt-5",
+          requestedAt: at,
+          startedAt,
+          completedAt: null,
+        });
+        const { result, calls } = yield* runService(
+          {
+            interactionMode: "default",
+            watch: {
+              pendingRuns: ["run-2"],
+              reportedRuns: ["run-1"],
+              notifyWebhook: false,
+              webhookTarget: { type: "named", name: "bot" },
+            } as unknown as LaunchWatch,
+            hostCall: (call) =>
+              call.tool === "goat_thread_status"
+                ? Effect.fail(
+                    new SshRemoteDispatch.SshRemoteDispatchError({
+                      reason: "remote_refused",
+                      message: `GOAT on box ${SshRemoteDispatch.REMOTE_THREAD_STATUS_UNSUPPORTED}.`,
+                    }),
+                  )
+                : Effect.succeed({
+                    ...(cloud ? { cloudTask: remoteCloudTask } : {}),
+                    thread: {
+                      threadId: "remote-1",
+                      projectId: "remote-project",
+                      title: "Fix the flake",
+                      createdBy: "agent",
+                      creationSource: "mcp",
+                      status: "running",
+                      latestRunId: "run-3",
+                      activeRunId: "run-2",
+                      providerInstanceId: "codex",
+                      model: "gpt-5",
+                      runtimeMode: "full-access",
+                      interactionMode: "default",
+                      linkedPullRequest: null,
+                      titleRegeneration: null,
+                      branch: null,
+                      worktreePath: null,
+                      parentThreadId: null,
+                      relationshipToParent: null,
+                      runCount: 3,
+                      itemCount: 4,
+                      pendingRequestCount: 1,
+                      archived: false,
+                      settled: false,
+                      settledAt: null,
+                      snoozed: false,
+                      snoozedUntil: null,
+                      createdAt: at,
+                      updatedAt: at,
+                    },
+                    recentRuns: [
+                      remoteRun("run-3", "queued", null),
+                      remoteRun("run-2", "running", at),
+                    ],
+                    items: [],
+                    nextPosition: null,
+                    hasMore: false,
                   }),
-                )
-              : Effect.succeed({
-                  thread: {
-                    threadId: "remote-1",
-                    projectId: "remote-project",
-                    title: "Fix the flake",
-                    createdBy: "agent",
-                    creationSource: "mcp",
-                    status: "running",
-                    latestRunId: "run-3",
-                    activeRunId: "run-2",
-                    providerInstanceId: "codex",
-                    model: "gpt-5",
-                    runtimeMode: "full-access",
-                    interactionMode: "default",
-                    linkedPullRequest: null,
-                    titleRegeneration: null,
-                    branch: null,
-                    worktreePath: null,
-                    parentThreadId: null,
-                    relationshipToParent: null,
-                    runCount: 3,
-                    itemCount: 4,
-                    pendingRequestCount: 1,
-                    archived: false,
-                    settled: false,
-                    settledAt: null,
-                    snoozed: false,
-                    snoozedUntil: null,
-                    createdAt: at,
-                    updatedAt: at,
-                  },
-                  recentRuns: [
-                    remoteRun("run-3", "queued", null),
-                    remoteRun("run-2", "running", at),
-                  ],
-                  items: [],
-                  nextPosition: null,
-                  hasMore: false,
-                }),
-        },
-        (service) =>
-          service.threadStatus(scope, { host: "box", threadId: ThreadId.make("remote-1") }),
-      );
-      expect(calls.map((call) => [call.tool, call.writes])).toEqual([
-        ["goat_thread_status", false],
-        ["goat_thread_read", false],
-      ]);
-      expect(result._tag === "Success" && result.success).toMatchObject({
-        host: "box",
-        phase: "waiting",
-        terminal: false,
-        run: { runId: "run-2", status: "running", startedAt: at },
-        queuedRunId: "run-3",
-        pendingRequest: { requestId: null, kind: null },
-        lastActivityAt: at,
-        watch: { pendingRunIds: ["run-2"], lastReportedRunId: "run-1", webhook: true },
-      });
-    }),
+          },
+          (service) =>
+            service.threadStatus(scope, { host: "box", threadId: ThreadId.make("remote-1") }),
+        );
+        expect(calls.map((call) => [call.tool, call.writes])).toEqual([
+          ["goat_thread_status", false],
+          ["goat_thread_read", false],
+        ]);
+        expect(result._tag === "Success" && result.success).toMatchObject({
+          host: "box",
+          phase: "waiting",
+          terminal: false,
+          run: { runId: "run-2", status: "running", startedAt: at },
+          queuedRunId: "run-3",
+          pendingRequest: { requestId: null, kind: null },
+          lastActivityAt: at,
+          watch: { pendingRunIds: ["run-2"], lastReportedRunId: "run-1", webhook: true },
+        });
+        expect(result._tag === "Success" ? result.success.cloudTask : null).toEqual(
+          cloud ? remoteCloudTask : undefined,
+        );
+      }),
   );
 
   it.effect("bounds a remote status and names only the next pending run", () =>
@@ -341,6 +375,7 @@ describe("HostThreadsMcpService", () => {
               lastMessage: { role: "assistant", excerpt: "y".repeat(5_000), at },
               lastError: "e".repeat(1_048_576),
               watch: { pendingRunIds: ["a", "b"], lastReportedRunId: null, webhook: false },
+              cloudTask: remoteCloudTask,
             }),
         },
         (service) =>
@@ -357,6 +392,7 @@ describe("HostThreadsMcpService", () => {
         lastReportedRunId: null,
         webhook: false,
       });
+      expect(result.success.cloudTask).toEqual(remoteCloudTask);
     }),
   );
 
@@ -696,4 +732,34 @@ it.effect.each([true, false])("decodes remote wait with question IDs present=%s"
     else expect(calls[0]?.arguments).not.toHaveProperty("ignoreRequestIds");
     expect(calls[0]?.writes).toBe(false);
   }),
+);
+
+it.effect(
+  "local read enriches the result once inside the host service and retains cloud metadata",
+  () =>
+    Effect.gen(function* () {
+      const runId = RunId.make("run:local-cloud-result");
+      const read = {
+        thread: { latestRunId: runId },
+        cloudTask: remoteCloudTask,
+        recentRuns: [],
+        items: [],
+        nextPosition: null,
+        hasMore: false,
+      } as unknown as OrchestratorMcpThreadReadResult;
+      const enriched: ReadonlyArray<ThreadId | RunId | null | undefined>[] = [];
+      const { result, calls } = yield* runService(
+        {
+          interactionMode: "default",
+          localRead: read,
+          onResult: (id, run) => enriched.push([id, run]),
+          hostCall: () => Effect.die("a local read must not reach SSH"),
+        },
+        (service) => service.readThread(scope, { threadId }),
+      );
+      expect(result._tag).toBe("Success");
+      if (result._tag === "Success") expect(result.success).toEqual({ ...read, result: null });
+      expect(enriched).toEqual([[threadId, runId]]);
+      expect(calls).toEqual([]);
+    }),
 );

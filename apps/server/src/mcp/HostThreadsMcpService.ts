@@ -37,7 +37,8 @@ import type { LaunchWatch } from "./launchWatch.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
-import { assertLiveCaller, readCaller } from "./threadAccess.ts";
+import * as ThreadResultService from "../threadResults/ThreadResultService.ts";
+import { assertLiveCaller, readCaller, unavailable } from "./threadAccess.ts";
 import { boundedStatus, statusFromRead } from "./threadStatus.ts";
 
 /**
@@ -225,6 +226,7 @@ const authorize = (writes: boolean) =>
 
 const make = Effect.gen(function* () {
   const local = yield* OrchestratorMcpService.OrchestratorMcpService;
+  const results = yield* ThreadResultService.ThreadResultService;
   const dispatch = yield* SshRemoteDispatch.SshRemoteDispatch;
   const coordinator = yield* RemoteDispatchCoordinator.RemoteDispatchCoordinator;
   // Only words an error better, so a layer without report bindings goes without.
@@ -511,7 +513,14 @@ const make = Effect.gen(function* () {
 
   const readThread: HostThreadsMcpServiceShape["readThread"] = (scope, input) =>
     input.host === undefined
-      ? local.readThread(scope, input)
+      ? local.readThread(scope, input).pipe(
+          Effect.flatMap((read) =>
+            results.forRun(input.threadId, read.thread.latestRunId).pipe(
+              Effect.mapError(unavailable),
+              Effect.map((result) => ({ ...read, result })),
+            ),
+          ),
+        )
       : onHost(
           scope,
           {

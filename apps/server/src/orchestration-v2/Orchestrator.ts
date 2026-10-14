@@ -73,6 +73,7 @@ import {
   pendingBackgroundTurnItems,
 } from "@goat/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
+import { canCheckpoint, isCloudExecution } from "@goat/provider-core/server/cloudTask";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -90,7 +91,11 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
+import {
+  CommandPolicyCapabilityUnsupportedError,
+  CommandPolicyV2,
+  resolveMessageDispatchIntent,
+} from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "@goat/provider-core/server/notification";
@@ -154,6 +159,11 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
     return `Failed to dispatch orchestration command ${this.commandType} (${this.commandId}).`;
   }
 }
+
+const isOrchestratorDispatchError = Schema.is(OrchestratorDispatchError);
+const isCommandPolicyCapabilityUnsupportedError = Schema.is(
+  CommandPolicyCapabilityUnsupportedError,
+);
 
 export class OrchestratorCommandRejectedError extends Schema.TaggedError<OrchestratorCommandRejectedError>()(
   "OrchestratorCommandRejectedError",
@@ -953,7 +963,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   const enforceCommandPolicy =
-    (command: OrchestrationV2Command) =>
+    (command: OrchestrationV2ServerCommand) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, OrchestratorDispatchError, R> =>
       effect.pipe(
         Effect.mapError(
@@ -1531,6 +1541,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+      yield* commandPolicy
+        .ensureFollowUp({
+          commandId,
+          threadId,
+          providerInstanceId: queuedRun.providerInstanceId,
+          capabilities: targetCapabilities,
+          projection,
+          excludingRunId: queuedRun.id,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorDispatchError({
+                commandId,
+                commandType: "message.dispatch",
+                cause,
+              }),
+          ),
+        );
       const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
       const targetLastCompletedRun = lastDeliveredRunForProviderThread(
@@ -1652,30 +1681,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               )
           : null;
       const activeHandoff = handoff ?? legacyImportRecoveryHandoff;
-      const checkpointScope =
-        storedCheckpointScope ??
-        (yield* runtimePolicy
-          .resolve({ thread: projection.thread, modelSelection: queuedRun.modelSelection })
-          .pipe(
-            Effect.flatMap((resolvedRuntimePolicy) =>
-              checkpointService.prepareRootRunScope({
-                threadId,
-                runId: queuedRun.id,
-                rootNodeId: rootNode.id,
-                providerThreadId: queuedProviderThread.id,
-                cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
-                createdAt: now,
-              }),
-            ),
-            Effect.mapError(
-              (cause) =>
-                new OrchestratorDispatchError({
-                  commandId,
-                  commandType: "message.dispatch",
-                  cause,
+      const checkpointScope = !canCheckpoint(targetCapabilities)
+        ? null
+        : (storedCheckpointScope ??
+          (yield* runtimePolicy
+            .resolve({ thread: projection.thread, modelSelection: queuedRun.modelSelection })
+            .pipe(
+              Effect.flatMap((resolvedRuntimePolicy) =>
+                checkpointService.prepareRootRunScope({
+                  threadId,
+                  runId: queuedRun.id,
+                  rootNodeId: rootNode.id,
+                  providerThreadId: queuedProviderThread.id,
+                  cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
+                  createdAt: now,
                 }),
-            ),
-          ));
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestratorDispatchError({
+                    commandId,
+                    commandType: "message.dispatch",
+                    cause,
+                  }),
+              ),
+            )));
       const providerSessionId =
         (!canResumeAcrossInstances &&
         queuedProviderThread.providerSessionId !== null &&
@@ -1797,7 +1827,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               summary: activeHandoff.summaryText,
             };
       const checkpointEvents: ReadonlyArray<Omit<OrchestrationV2DomainEvent, "id">> =
-        storedCheckpointScope === undefined
+        checkpointScope !== null && storedCheckpointScope === undefined
           ? [
               {
                 type: "checkpoint-scope.created",
@@ -1974,7 +2004,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         ],
       );
-    }).pipe(Effect.catch((cause) => failQueuedRunStart(threadId, cause)));
+    }).pipe(
+      // Admission refusal keeps a legacy queued message editable and cancellable.
+      Effect.catchIf(
+        (cause) =>
+          !(
+            isOrchestratorDispatchError(cause) &&
+            isCommandPolicyCapabilityUnsupportedError(cause.cause) &&
+            cause.cause.capability === "follow_up"
+          ),
+        (cause) => failQueuedRunStart(threadId, cause),
+      ),
+    );
 
   const resumeQueuedRuns = Effect.gen(function* () {
     const threadIds = yield* projectionStore.getRecoveryThreadIds("queued-runs");
@@ -4399,6 +4440,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
+      if (session.providerSession.capabilities.sessions.executionLocation === "cloud") {
+        return yield* new OrchestratorDispatchError({
+          commandId: input.command.commandId,
+          commandType: input.command.type,
+          cause:
+            "Cloud messages use same-session follow-ups; interrupt-and-restart is unavailable.",
+        });
+      }
       const checkpointScope = yield* checkpointService
         .prepareRootRunScope({
           threadId: input.command.threadId,
@@ -4619,6 +4668,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      const admissionSelection = command.modelSelection ?? projection.thread.modelSelection;
+      const admissionAdapter = yield* providerAdapters
+        .get(admissionSelection.instanceId)
+        .pipe(mapDispatchError(command));
+      const admissionCapabilities = yield* admissionAdapter
+        .getCapabilities()
+        .pipe(mapDispatchError(command));
+      yield* enforceCommandPolicy(command)(
+        commandPolicy.ensureFollowUp({
+          commandId: command.commandId,
+          threadId: command.threadId,
+          providerInstanceId: admissionSelection.instanceId,
+          capabilities: admissionCapabilities,
+          projection,
+        }),
+      );
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5123,7 +5188,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
         const rootNodeId = idAllocator.derive.rootNode({ runId });
         const checkpointScope =
-          queueBehindRun.status === "preparing" || worktreeMissingRun !== undefined
+          !canCheckpoint(queuedCapabilities) ||
+          queueBehindRun.status === "preparing" ||
+          worktreeMissingRun !== undefined
             ? null
             : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
                 Effect.flatMap((resolvedRuntimePolicy) =>
@@ -5477,7 +5544,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
         const rootNodeId = idAllocator.derive.rootNode({ runId });
         const checkpointScope =
-          dispatchMode.type === "defer_start"
+          !canCheckpoint(admissionCapabilities) || dispatchMode.type === "defer_start"
             ? null
             : yield* runtimePolicy
                 .resolve({
@@ -6170,29 +6237,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     }),
                 ),
               );
-      const checkpointScope = yield* checkpointService
-        .prepareRootRunScope({
-          threadId: command.threadId,
-          runId,
-          rootNodeId,
-          providerThreadId: providerThread.id,
-          cwd:
-            resolvedRuntimePolicy.cwd ??
-            existingProviderSession?.cwd ??
-            projection.thread.worktreePath ??
-            process.cwd(),
-          createdAt: now,
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause,
-              }),
-          ),
-        );
+      const checkpointScope = !canCheckpoint(capabilities)
+        ? null
+        : yield* checkpointService
+            .prepareRootRunScope({
+              threadId: command.threadId,
+              runId,
+              rootNodeId,
+              providerThreadId: providerThread.id,
+              cwd:
+                resolvedRuntimePolicy.cwd ??
+                existingProviderSession?.cwd ??
+                projection.thread.worktreePath ??
+                process.cwd(),
+              createdAt: now,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause,
+                  }),
+              ),
+            );
       const run: OrchestrationV2Run = {
         id: runId,
         threadId: command.threadId,
@@ -6248,7 +6317,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerTurnId: null,
         nativeItemRef: null,
         runtimeRequestId: null,
-        checkpointScopeId: checkpointScope.id,
+        checkpointScopeId: checkpointScope?.id ?? null,
         startedAt: null,
         completedAt: null,
       };
@@ -6568,24 +6637,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: rootNode,
       });
-      yield* emitEvent({
-        type: "checkpoint-scope.created",
-        threadId: command.threadId,
-        runId,
-        nodeId: rootNodeId,
-        providerInstanceId: modelSelection.instanceId,
-        occurredAt: now,
-        payload: yield* checkpointService.ensureScope(checkpointScope).pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause,
-              }),
+      if (checkpointScope !== null) {
+        yield* emitEvent({
+          type: "checkpoint-scope.created",
+          threadId: command.threadId,
+          runId,
+          nodeId: rootNodeId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: now,
+          payload: yield* checkpointService.ensureScope(checkpointScope).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+            ),
           ),
-        ),
-      });
+        });
+      }
       if (handoffTurnItem !== null) {
         yield* emitEvent({
           type: "turn-item.updated",
@@ -7033,6 +7104,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
+      const targetCapabilities = yield* targetAdapter.getCapabilities().pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProviderAdapterError({
+              commandId: command.commandId,
+              providerInstanceId: command.modelSelection.instanceId,
+              cause,
+            }),
+        ),
+      );
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
         commandId: command.commandId,
@@ -7092,6 +7173,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         title: command.title ?? null,
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        ...(isCloudExecution(targetCapabilities)
+          ? { completionDelivery: { state: "pending" as const, observedByRunId: null } }
+          : {}),
         status: "running",
         result: null,
         startedAt: now,
@@ -8259,6 +8343,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Queued run ${command.queuedRunId} is not queued.`,
         });
       }
+      const promotionAdapter = yield* providerAdapters
+        .get(queuedRun.providerInstanceId)
+        .pipe(mapDispatchError(command));
+      const promotionCapabilities = yield* promotionAdapter
+        .getCapabilities()
+        .pipe(mapDispatchError(command));
+      yield* enforceCommandPolicy(command)(
+        commandPolicy.ensureFollowUp({
+          commandId: command.commandId,
+          threadId: command.threadId,
+          providerInstanceId: queuedRun.providerInstanceId,
+          capabilities: promotionCapabilities,
+          projection,
+          excludingRunId: queuedRun.id,
+        }),
+      );
       const queuedRootNode =
         queuedRun.rootNodeId === null
           ? undefined
@@ -8758,38 +8858,48 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
+      const preparedAdapter = yield* providerAdapters
+        .get(state.run.providerInstanceId)
+        .pipe(mapDispatchError(command));
+      const preparedCapabilities = yield* preparedAdapter
+        .getCapabilities()
+        .pipe(mapDispatchError(command));
       const resolvedRuntimePolicy = yield* runtimePolicy
         .resolve({ thread: projection.thread, modelSelection: state.run.modelSelection })
         .pipe(mapDispatchError(command));
-      const checkpointScope = yield* checkpointService
-        .prepareRootRunScope({
+      const checkpointScope = !canCheckpoint(preparedCapabilities)
+        ? null
+        : yield* checkpointService
+            .prepareRootRunScope({
+              threadId: command.threadId,
+              runId: state.run.id,
+              rootNodeId: state.rootNode.id,
+              providerThreadId: state.providerThread.id,
+              cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
+              createdAt: now,
+            })
+            .pipe(mapDispatchError(command));
+      const emitEvent = emit(events, command);
+      if (checkpointScope !== null) {
+        yield* emitEvent({
+          type: "checkpoint-scope.created",
           threadId: command.threadId,
           runId: state.run.id,
-          rootNodeId: state.rootNode.id,
-          providerThreadId: state.providerThread.id,
-          cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
-          createdAt: now,
-        })
-        .pipe(mapDispatchError(command));
-      const emitEvent = emit(events, command);
-      yield* emitEvent({
-        type: "checkpoint-scope.created",
-        threadId: command.threadId,
-        runId: state.run.id,
-        nodeId: state.rootNode.id,
-        providerInstanceId: state.run.providerInstanceId,
-        occurredAt: now,
-        payload: checkpointScope,
-      });
-      yield* emitEvent({
-        type: "node.updated",
-        threadId: command.threadId,
-        runId: state.run.id,
-        nodeId: state.rootNode.id,
-        providerInstanceId: state.run.providerInstanceId,
-        occurredAt: now,
-        payload: { ...state.rootNode, checkpointScopeId: checkpointScope.id },
-      });
+          nodeId: state.rootNode.id,
+          providerInstanceId: state.run.providerInstanceId,
+          occurredAt: now,
+          payload: checkpointScope,
+        });
+        yield* emitEvent({
+          type: "node.updated",
+          threadId: command.threadId,
+          runId: state.run.id,
+          nodeId: state.rootNode.id,
+          providerInstanceId: state.run.providerInstanceId,
+          occurredAt: now,
+          payload: { ...state.rootNode, checkpointScopeId: checkpointScope.id },
+        });
+      }
       yield* emitEvent({
         type: "turn-item.updated",
         threadId: command.threadId,
@@ -9048,6 +9158,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     Effect.gen(function* () {
       const emitEvent = emit(input.events, input.command);
       const runOrdinals = new Map(input.projection.runs.map((run) => [run.id, run.ordinal]));
+      const cloudThreadIds = new Set(
+        input.projection.providerThreads
+          .filter((thread) => thread.cloudTask !== undefined)
+          .map((thread) => thread.id),
+      );
+      const cloudRunIds = new Set(
+        input.projection.runs
+          .filter(
+            (run) => run.providerThreadId !== null && cloudThreadIds.has(run.providerThreadId),
+          )
+          .map((run) => run.id),
+      );
       const allocateEventId = () =>
         idAllocator.allocate.event({
           threadId: input.command.threadId,
@@ -9077,6 +9199,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         turnItems: input.projection.turnItems,
         runs: input.projection.runs,
       })) {
+        if (
+          (item.runId !== null && cloudRunIds.has(item.runId)) ||
+          (item.providerThreadId != null && cloudThreadIds.has(item.providerThreadId))
+        )
+          continue;
         // An item without a run counts as the stopped run's.
         const itemRunOrdinal = item.runId === null ? undefined : runOrdinals.get(item.runId);
         if (itemRunOrdinal !== undefined && itemRunOrdinal > input.throughRunOrdinal) continue;
@@ -9177,6 +9304,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
       for (const providerThread of input.projection.providerThreads) {
+        if (providerThread.cloudTask !== undefined) continue;
         // A live process owns its roster and reports clearing it.
         if (
           (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 ||
@@ -9373,7 +9501,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
       const scopeId = rootNode.checkpointScopeId;
-      if (scopeId !== null) {
+      if (scopeId !== null && providerThread?.cloudTask === undefined) {
         yield* Ref.update(input.effects, (effects) => [
           ...effects,
           {
@@ -9597,6 +9725,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           stoppedRun.activeAttemptId !== stopped.providerTurn?.runAttemptId)
       )
         return;
+      const recordedThread = projection.providerThreads.find(
+        (thread) => thread.id === stoppedRun.providerThreadId,
+      );
+      // Cancel acknowledgement and missing transport are not cloud terminal evidence.
+      if (
+        stopped.providerThread?.cloudTask !== undefined ||
+        recordedThread?.cloudTask !== undefined
+      )
+        return;
       const now = yield* DateTime.now;
       if (stopped.providerTurn !== undefined && stoppedRun.status === "running") {
         const output = yield* projectionStore
@@ -9760,6 +9897,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         run?.providerThreadId === null
           ? undefined
           : projection.providerThreads.find((candidate) => candidate.id === run?.providerThreadId);
+      const hasActiveCloudTask =
+        providerThread?.cloudTask?.status === "running" ||
+        providerThread?.cloudTask?.status === "submitting";
+      const hasRecordedCloudTask = providerThread?.cloudTask !== undefined;
       const hasBackgroundWork =
         run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id &&
         derivePendingBackgroundWork({
@@ -9775,7 +9916,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection.providerTurns.findLast(
           (candidate) =>
             candidate.runAttemptId === run?.activeAttemptId &&
-            (run?.status === "running" || candidate.status === "running" || hasBackgroundWork),
+            (run?.status === "running" ||
+              candidate.status === "running" ||
+              hasBackgroundWork ||
+              hasActiveCloudTask),
         ) ??
         (hasBackgroundWork
           ? projection.providerTurns.findLast(
@@ -9930,6 +10074,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
+      if (hasRecordedCloudTask && providerTurn === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "Cloud acceptance is still being tracked. Remote work may continue; no remote stop was confirmed.",
+        });
+      }
       if (
         providerTurn === undefined &&
         (run.status === "preparing" || run.status === "starting" || run.status === "running")
@@ -10074,6 +10226,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ),
             );
       if (Option.isNone(sessionOption)) {
+        if (providerThread.cloudTask !== undefined)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "Cloud tracking is not attached. Remote work may continue; retry after tracking attaches.",
+          });
         yield* emitEvent({
           type: "turn-item.updated",
           threadId: command.threadId,
@@ -10351,10 +10510,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       const projection = yield* projectionStore
-        .getThreadRecords(command.threadId, ["runs", "providerThreads", "turnItems", "subagents"], {
-          turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
-          turnItemStatuses: ["pending", "running", "waiting"],
-        })
+        .getThreadRecords(
+          command.threadId,
+          ["runs", "providerThreads", "providerTurns", "turnItems", "subagents"],
+          {
+            turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+            turnItemStatuses: ["pending", "running", "waiting"],
+          },
+        )
         .pipe(
           Effect.mapError(
             (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
@@ -10371,7 +10534,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       // Queued messages never started and cannot own background work.
       const latestRun = projection.runs.findLast((run) => run.status !== "queued");
-      const target =
+      let target =
         projection.runs.findLast(
           (run) =>
             run.status === "preparing" || run.status === "starting" || run.status === "running",
@@ -10385,6 +10548,48 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }).length > 0
           ? latestRun
           : undefined);
+      const cloudThread = projection.providerThreads.find(
+        (thread) =>
+          thread.id === (target ?? latestRun)?.providerThreadId && thread.cloudTask !== undefined,
+      );
+      const activeCloudTask =
+        cloudThread?.cloudTask?.status === "running" ||
+        cloudThread?.cloudTask?.status === "submitting";
+      const hasRecordedCloudTask = cloudThread?.cloudTask !== undefined;
+      if (activeCloudTask && cloudThread !== undefined) {
+        const adapter = yield* providerAdapters
+          .get(cloudThread.providerInstanceId)
+          .pipe(mapDispatchError(command));
+        const capabilities = yield* adapter.getCapabilities().pipe(mapDispatchError(command));
+        yield* enforceCommandPolicy(command)(
+          commandPolicy.ensureInterrupt({
+            commandId: command.commandId,
+            threadId: command.threadId,
+            providerInstanceId: cloudThread.providerInstanceId,
+            capabilities,
+          }),
+        );
+        const currentCloudRun = target ?? latestRun;
+        const hasCloudTurn = projection.providerTurns.some(
+          (turn) =>
+            turn.providerThreadId === cloudThread.id &&
+            turn.runAttemptId === currentCloudRun?.activeAttemptId,
+        );
+        const cloudRuntime =
+          cloudThread.providerSessionId === null
+            ? Option.none()
+            : yield* providerSessions
+                .get(cloudThread.providerSessionId)
+                .pipe(mapDispatchError(command));
+        if (!hasCloudTurn || Option.isNone(cloudRuntime))
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "Cloud tracking has not attached an interruptible turn. Remote work may continue; retry after tracking attaches.",
+          });
+        target = currentCloudRun;
+      }
       if (target !== undefined) {
         const interruptEvents = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
         const interruptEffects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
@@ -10411,6 +10616,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           yield* Ref.update(effects, (existing) => [...existing, ...enqueued]);
           return interrupted.value;
         }
+        // A recorded remote task can still run while its status is unknown or its result
+        // awaits terminal ingestion. Only local work may use the Stop fallback.
+        if (hasRecordedCloudTask) return yield* Effect.failCause(interrupted.cause);
         yield* Effect.logWarning("thread.stop could not interrupt the running turn", {
           threadId: command.threadId,
           runId: target.id,

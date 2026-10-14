@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./server/cloudTask": {
+      "types": "./src/server/cloudTask.ts",
+      "import": "./src/server/cloudTask.ts"
+    },
     "./client": {
       "types": "./src/client.ts",
       "import": "./src/client.ts"

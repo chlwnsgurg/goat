@@ -72,6 +72,24 @@ running the send button shows which action it will take. Long-press it to use th
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
 
+## Cloud tasks
+
+When a configured provider runs in the cloud, its task uses the published remote
+branch. Local edits and commits that have not been pushed are not included; push
+first if you want the task to use them. A branch that has never been published
+cannot start a cloud task. Some providers also require a clean checkout of that
+pushed revision; resolve the displayed source restriction before sending.
+
+Open the task or its returned pull request from the conversation. Cloud changes
+stay in the remote repository, so this thread has no local checkpoint or worktree
+to diff or rewind. Project files, editor and terminal still show your local source;
+they do not show cloud changes. Your task history keeps its summary and links.
+
+Follow-ups use the same cloud conversation when supported. Otherwise the composer
+explains why another message cannot be sent. A task marked “Running in the cloud”
+with link-only tracking has been submitted; its link is the place to check progress.
+Restarting GOAT does not stop remote cloud work.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

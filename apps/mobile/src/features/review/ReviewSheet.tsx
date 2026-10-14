@@ -1,4 +1,5 @@
 import type { EnvironmentId, ThreadId } from "@goat/contracts";
+import { deriveCloudTaskState } from "@goat/client-runtime/state/cloud-task";
 import { formatDiffCount } from "@goat/client-runtime/diff-count";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
@@ -39,6 +40,9 @@ import { MaterialScreenContent } from "../../components/MaterialScreenContent";
 import { cn } from "../../lib/cn";
 import { environmentCatalog } from "../../connection/catalog";
 import { useEnvironmentPresentation } from "../../state/presentation";
+import { useThreadShell } from "../../state/entities";
+import { useThreadProjection } from "../../state/use-thread-detail";
+import { useRemoteEnvironmentRuntime } from "../../state/use-remote-environment-registry";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
@@ -450,6 +454,26 @@ type ReviewSheetProps = StaticScreenProps<{
 }>;
 
 export function ReviewSheet(props: ReviewSheetProps) {
+  const navigation = useNavigation();
+  const { environmentId, threadId } = props.route.params;
+  const thread = useThreadShell({ environmentId, threadId });
+  const projection = useThreadProjection({ environmentId, threadId });
+  const runtime = useRemoteEnvironmentRuntime(environmentId);
+  const provider = runtime?.serverConfig?.providers.find(
+    (candidate) =>
+      candidate.instanceId ===
+      (projection?.projection.thread.providerInstanceId ?? thread?.providerInstanceId),
+  );
+  const { showLocalWorkspace } = deriveCloudTaskState(projection?.projection, provider);
+  useEffect(() => {
+    if (showLocalWorkspace) return;
+    if (navigation.canGoBack()) navigation.goBack();
+    else navigation.navigate("Thread", { environmentId, threadId });
+  }, [environmentId, navigation, showLocalWorkspace, threadId]);
+  return showLocalWorkspace ? <ReviewSheetContent {...props} /> : null;
+}
+
+function ReviewSheetContent(props: ReviewSheetProps) {
   const { nativeReviewDiffStyle } = useAppearanceCodeSurface();
   useAdaptiveWorkspacePaneRole("inspector");
   const { panes, showAuxiliaryPane } = useAdaptiveWorkspaceLayout();
