@@ -37,6 +37,8 @@ import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
+import { captureMemoryGrantCeiling } from "../memory/MemoryAccess.ts";
+
 import { DESKTOP_BOOTSTRAP_SUBJECT } from "./PairingGrantStore.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
@@ -331,3 +333,25 @@ export const requireConnectionCatalogHost = (session: {
             requiredScope: AuthSettingsWriteScope,
           }),
         );
+
+/** Server-only task input port; capture live session grants before persistence, outside SQL. */
+export const captureRpcMemoryGrantCeiling = <E, R>(input: {
+  readonly grantedScopes?: ReadonlyArray<AuthEnvironmentScope> | undefined;
+  readonly reauthorize?:
+    | ((scopes: ReadonlyArray<AuthEnvironmentScope>) => Effect.Effect<void, E, R>)
+    | undefined;
+  readonly readOnly: boolean;
+}) =>
+  Effect.gen(function* () {
+    if (input.grantedScopes === undefined || input.reauthorize === undefined)
+      return "none" as const;
+    const ceiling = captureMemoryGrantCeiling(input.grantedScopes, input.readOnly);
+    const scopes: ReadonlyArray<AuthEnvironmentScope> =
+      ceiling === "none"
+        ? []
+        : ceiling === "read"
+          ? ["memory:read"]
+          : ["memory:read", "memory:write"];
+    yield* input.reauthorize(scopes);
+    return ceiling;
+  });
