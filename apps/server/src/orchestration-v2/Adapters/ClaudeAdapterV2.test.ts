@@ -3644,6 +3644,112 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect.each(["refresh", "tamper", "offer", "prior-success"] as const)(
+    "settles an abort after a rejected memory steer (%s)",
+    (failure) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          let steerOffers = 0;
+          const harness = yield* makeWakeHarnessWithOptions({
+            offer: (message) =>
+              message.priority === "now" &&
+              (failure === "offer" || (failure === "prior-success" && ++steerOffers === 2))
+                ? Effect.die("fixture offer failure")
+                : Effect.void,
+          });
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          let steering = false;
+          const base = makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("rejected-steer"),
+            text: "work",
+            attachments: [],
+          });
+          yield* harness.runtime.startTurn({
+            ...base,
+            refreshMemoryContext: () =>
+              Effect.gen(function* () {
+                if (!steering) return wp4Memory();
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+                if (failure === "refresh") return yield* Effect.die("fixture refresh failure");
+                return failure === "tamper"
+                  ? { ...wp4Memory(), renderedText: "tampered" }
+                  : wp4Memory();
+              }),
+          });
+          yield* harness.offerAndWait({
+            ...harness.offeredMessages[0]!,
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const steerInput = {
+            threadId: harness.threadId,
+            runId: base.runId,
+            providerThread: harness.providerThread,
+            providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+              driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+              nativeTurnId: `turn:${base.attemptId}`,
+            }),
+            message: { ...base.message, text: "steer" },
+          };
+          if (failure === "prior-success") {
+            yield* harness.runtime.steerTurn(steerInput);
+            assert.equal(harness.offeredMessages[1]?.priority, "now");
+          }
+          steering = true;
+          const steer = yield* harness.runtime
+            .steerTurn({
+              threadId: harness.threadId,
+              runId: base.runId,
+              providerThread: harness.providerThread,
+              providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeTurnId: `turn:${base.attemptId}`,
+              }),
+              message: { ...base.message, text: "steer" },
+            })
+            .pipe(Effect.exit, Effect.forkChild);
+          yield* Deferred.await(entered);
+          yield* Deferred.succeed(release, undefined);
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(steer)));
+          assert.equal(harness.offeredMessages.length, failure === "prior-success" ? 2 : 1);
+          yield* harness.offerAndWait(
+            makeResultFrame({
+              uuid: "rejected-steer-result",
+              result: "",
+              terminalReason: "aborted_streaming",
+            }),
+          );
+          if (failure === "prior-success") {
+            assert.equal(yield* Queue.size(harness.terminalReceipts), 0);
+            yield* harness.offerAndWait(
+              makeResultFrame({ uuid: "successful-steer-result", result: "done" }),
+            );
+          }
+          const terminal = yield* Queue.take(harness.terminalReceipts);
+          assert.equal(terminal.status, failure === "prior-success" ? "completed" : "interrupted");
+          // Terminal cleared the active turn; the next ordinary prompt is admitted.
+          yield* harness.runtime.startTurn({
+            ...base,
+            attemptId: RunAttemptId.make("after-rejected-steer"),
+          });
+          assert.equal(harness.offeredMessages.length, failure === "prior-success" ? 3 : 2);
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            MemoryDerivedCache.layer,
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect("surfaces a Claude safety model fallback without failing the turn", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;

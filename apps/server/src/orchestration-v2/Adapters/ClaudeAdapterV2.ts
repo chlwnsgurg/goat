@@ -3531,7 +3531,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           >(),
         );
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        const steeredTurns = yield* Ref.make(new Map<OrchestrationV2ProviderTurn["id"], symbol>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         if (adapterOptions.mcpCredentialRotations)
           yield* adapterOptions.mcpCredentialRotations.pipe(
@@ -7737,7 +7737,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return;
             }
             yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
+              const next = new Map(current);
               next.delete(context.providerTurnId);
               return next;
             });
@@ -9003,12 +9003,23 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               fileSystem,
               skillNames: yield* userInvocableSkillNames(currentTurn.input.runtimePolicy.cwd),
             });
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.add(turnInput.providerTurnId);
-              return next;
-            });
-            yield* existing.query.offer(yield* withFreshMemory(userMessage, currentTurn.input));
+            const admitted = yield* withFreshMemory(userMessage, currentTurn.input);
+            const previousSteer = (yield* Ref.get(steeredTurns)).get(turnInput.providerTurnId);
+            const marker = Symbol();
+            yield* Ref.update(steeredTurns, (current) =>
+              new Map(current).set(turnInput.providerTurnId, marker),
+            );
+            yield* existing.query.offer(admitted).pipe(
+              Effect.onError(() =>
+                Ref.update(steeredTurns, (current) => {
+                  if (current.get(turnInput.providerTurnId) !== marker) return current;
+                  const next = new Map(current);
+                  if (previousSteer) next.set(turnInput.providerTurnId, previousSteer);
+                  else next.delete(turnInput.providerTurnId);
+                  return next;
+                }),
+              ),
+            );
           },
           (effect, turnInput) =>
             effect.pipe(
