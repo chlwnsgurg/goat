@@ -194,6 +194,7 @@ const makeScenario = (fileSystem?: FileSystem.FileSystem) =>
   });
 
 const scenario = makeScenario();
+const encodeSettingsJson = Schema.encodeEffect(Schema.fromJsonString(M.ServerSettings));
 
 // Keep the actual cache lookup pending before it acquires the same SQLite
 // connection. Synthetic watch events avoid depending on native fs.watch timing.
@@ -240,7 +241,7 @@ const pendingReloadScenario = Effect.gen(function* () {
       holdHistory = true;
       yield* fs.writeFileString(
         config.settingsPath,
-        JSON.stringify({
+        yield* encodeSettingsJson({
           ...before,
           memoryHub,
           memoryHubVersion: version,
