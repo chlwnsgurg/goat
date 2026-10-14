@@ -637,9 +637,7 @@ const assertPersisted = (
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const config = yield* Config.ServerConfig;
-      const settings = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(M.ServerSettings))(
-        yield* fs.readFileString(config.settingsPath),
-      );
+      const settings = yield* decodeSettings(yield* fs.readFileString(config.settingsPath));
       assert.deepStrictEqual(settings.memoryOwnerSourceReadPolicy, policy);
     }),
   );
