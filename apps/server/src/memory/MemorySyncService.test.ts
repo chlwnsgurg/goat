@@ -5381,6 +5381,146 @@ it.effect("persisted push-only protocol hold is probed after coordinator restart
   }),
 );
 
+it.effect("paged rearm keeps a later same-class failure registered until a real probe ACK", () =>
+  Effect.gen(function* () {
+    let healthy = false;
+    let probes = 0;
+    let pushes = 0;
+    const client = peer({
+      preflight: () =>
+        Effect.sync(() => {
+          probes++;
+          return recoveredDescriptor;
+        }),
+      push: (_c, input) =>
+        Effect.gen(function* () {
+          pushes++;
+          assert.strictEqual(input.operations.length, 1);
+          const sent = input.operations[0]!;
+          assert.strictEqual(sent.kind, "upsert");
+          if (sent.kind !== "upsert") throw new Error("expected upsert");
+          assert.strictEqual(sent.payload.text, "synthetic fact 98200");
+          if (!healthy) return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
+          return {
+            receipts: input.operations.map((op) => ({
+              operationId: op.operationId,
+              memoryId: op.memoryId,
+              operationDigest: memoryOperationDigest(op),
+              hubSequence: 1,
+              outcome: "accepted" as const,
+            })),
+          };
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* enqueue(98200);
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        // Completed history sorts after the only push; raw rearm must consume two pages.
+        for (let n = 0; n < 101; n++) {
+          const historyId = `zz-history:${String(n).padStart(3, "0")}`;
+          yield* sql`INSERT INTO memory_outbox(id,space,memory_id,kind,status,metadata_json,next_attempt_at) SELECT ${historyId},space,memory_id,kind,'completed',metadata_json,0 FROM memory_outbox WHERE id='sync:98200'`;
+        }
+        assert.deepStrictEqual(
+          yield* sql`SELECT count(*) AS count FROM memory_outbox WHERE id>='sync:98200'`,
+          [{ count: 102 }],
+        );
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.start;
+        assert.strictEqual(pushes, 1);
+        assert.strictEqual((yield* store.readWorkHold("sync:98200"))?.holdClass, "protocol");
+        yield* TestClock.adjust(30000);
+        yield* sync.syncOnce;
+        assert.strictEqual(probes, 1);
+        assert.strictEqual(pushes, 2, "first page retries and fails before final page finishes");
+        assert.strictEqual((yield* store.readWorkHold("sync:98200"))?.holdClass, "protocol");
+        healthy = true;
+        yield* sync.syncOnce;
+        assert.strictEqual(pushes, 2, "pull/manual sync cannot release the new permanent hold");
+        yield* TestClock.adjust(29999);
+        assert.strictEqual(probes, 1);
+        yield* TestClock.adjust(1);
+        assert.strictEqual(probes, 2, "final rearm page must retain the later failure's probe");
+        yield* sync.syncOnce;
+        assert.strictEqual(pushes, 3);
+        assert.isNull((yield* store.readWorkHold("sync:98200"))?.holdClass);
+        assert.strictEqual((yield* store.readWork("sync:98200"))?.status, "completed");
+        yield* sync.shutdown;
+        yield* TestClock.adjust(900000);
+        assert.strictEqual(probes, 2);
+      }).pipe(Effect.provide(fixture(client))),
+    );
+  }),
+);
+
+it.effect("a same-class failure during preflight supersedes the observed recovery generation", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let probes = 0;
+    let pushes = 0;
+    let healthy = false;
+    const client = peer({
+      preflight: () =>
+        Effect.gen(function* () {
+          probes++;
+          if (probes === 1) {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+          }
+          return recoveredDescriptor;
+        }),
+      push: (_c, input) =>
+        Effect.gen(function* () {
+          pushes++;
+          if (!healthy) return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
+          return {
+            receipts: input.operations.map((op, n) => ({
+              operationId: op.operationId,
+              memoryId: op.memoryId,
+              operationDigest: memoryOperationDigest(op),
+              hubSequence: n + 1,
+              outcome: "accepted" as const,
+            })),
+          };
+        }),
+    });
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* enqueue(98200);
+        const store = yield* Store.MemoryStore;
+        const sync = yield* Sync.MemorySyncService;
+        yield* sync.start;
+        yield* TestClock.adjust(30000);
+        yield* Deferred.await(entered);
+        // A different work item fails with the same class while its descriptor is in flight.
+        yield* enqueue(98201, M.MemoryId.make(id(3)));
+        yield* sync.syncOnce;
+        assert.strictEqual(pushes, 2);
+        healthy = true;
+        yield* Deferred.succeed(release, undefined);
+        yield* TestClock.adjust(29999);
+        yield* sync.syncOnce;
+        assert.strictEqual(probes, 1);
+        assert.strictEqual(pushes, 2, "old observation cannot settle the newer failure");
+        assert.strictEqual((yield* store.readWorkHold("sync:98201"))?.holdClass, "protocol");
+        yield* TestClock.adjust(1);
+        assert.strictEqual(probes, 2, "one retained scheduler probes the new generation");
+        yield* sync.syncOnce;
+        assert.strictEqual(pushes, 3);
+        for (const n of [98200, 98201]) {
+          assert.isNull((yield* store.readWorkHold(`sync:${n}`))?.holdClass);
+          assert.strictEqual((yield* store.readWork(`sync:${n}`))?.status, "completed");
+        }
+        yield* sync.shutdown;
+      }).pipe(Effect.provide(fixture(client))),
+    );
+  }),
+);
+
 it.effect("hold discovery runs once per committed epoch, not per manual or periodic sync", () =>
   Effect.scoped(
     Effect.gen(function* () {

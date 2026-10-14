@@ -297,7 +297,12 @@ const make = Effect.gen(function* () {
   });
   type Route = NonNullable<Effect.Success<ReturnType<typeof route>>>;
   // At most three descriptor-recoverable classes and one probe fiber per committed epoch.
-  const recoveries = new Map<Store.MemoryHoldClass, { route: Route; delay: number; due: number }>();
+  const recoveries = new Map<
+    Store.MemoryHoldClass,
+    { generation: number; route: Route; delay: number; due: number }
+  >();
+  // Never reset on epoch cancellation: an old probe cannot settle a later registration.
+  let recoveryGeneration = 0;
   let recoveryFiber: Fiber.Fiber<void, never> | null = null;
   let recoveryChanged = yield* Deferred.make<void>();
   const wakeRecovery = Effect.suspend(() => Deferred.succeed(recoveryChanged, undefined));
@@ -307,19 +312,24 @@ const make = Effect.gen(function* () {
   ): Effect.Effect<void, Service.MemoryAccessError> =>
     Effect.gen(function* () {
       if (!started || stopped || cancelling || !r.connection || !c || c === "authorization") return;
+      const now = yield* Clock.currentTimeMillis;
       yield* ensureEpoch(r.settings.memoryHubVersion);
-      if (!recoveries.has(c))
-        recoveries.set(c, {
-          route: r,
-          delay: 30000,
-          due: (yield* Clock.currentTimeMillis) + 30000,
-        });
+      if (stopped || cancelling) return;
+      const previous = recoveries.get(c);
+      // Each failure supersedes an in-flight observation, preserving accumulated backoff.
+      // Coalesce the class into one slot, but leave at least 30s for its next real probe.
+      recoveries.set(c, {
+        generation: ++recoveryGeneration,
+        route: r,
+        delay: previous?.delay ?? 30000,
+        due: Math.max(previous?.due ?? 0, now + 30000),
+      });
       if (recoveryFiber) {
         yield* wakeRecovery;
         return;
       }
       const ready = yield* Deferred.make<void>();
-      recoveryFiber = yield* Deferred.await(ready).pipe(
+      const fiber = yield* Deferred.await(ready).pipe(
         Effect.andThen(Effect.suspend(() => recoveryLoop)),
         Effect.ensuring(
           Effect.sync(() => {
@@ -328,7 +338,11 @@ const make = Effect.gen(function* () {
         ),
         Effect.forkIn(scope),
       );
+      recoveryFiber = fiber;
       yield* Deferred.succeed(ready, undefined);
+      // Cancellation may have captured the probe before forkIn published this fiber.
+      // Finish the start gate, then retire that late publication before returning.
+      if (stopped || cancelling) yield* Fiber.interrupt(fiber);
     }).pipe(Effect.uninterruptible);
   let discoveryEpoch: number | null = null;
   let discoveryFailure: Store.MemoryStorageError | null = null;
@@ -1534,9 +1548,9 @@ const make = Effect.gen(function* () {
       pending.syncAfter = page.sync.next ?? pending.syncAfter;
       pending.resolutionAfter = page.resolution.next ?? pending.resolutionAfter;
       if (pending.syncDone && pending.resolutionDone) {
+        // This cursor sweep owns no recovery generation. A later failure may already
+        // have registered the next probe while an earlier page was being retried.
         rearms.delete(c);
-        recoveries.delete(c);
-        yield* wakeRecovery;
       }
     }
     if (rearms.size) pendingSync = true;
@@ -1674,7 +1688,7 @@ const make = Effect.gen(function* () {
             yield* ensureEpoch(r.settings.memoryHubVersion);
           }).pipe(Effect.timeout("15 seconds")),
         );
-        if (recoveries.get(c) !== pending) continue;
+        if (recoveries.get(c)?.generation !== pending.generation) continue;
         if (observed._tag === "Success") {
           recoveries.delete(c);
           enqueueRearm(r.settings.memoryHubVersion, r.space!, [c]);
