@@ -1111,7 +1111,7 @@ const sourceFixture = (ownerIsHub = false) =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         yield* sql`INSERT INTO orchestration_v2_projection_threads(thread_id,project_id,title,default_provider,runtime_mode,interaction_mode,created_at,updated_at,payload_json) VALUES (${thread.threadId},'fixture-project','fixture','codex','full-access','default','1970-01-01T00:00:00.000Z','1970-01-01T00:00:00.000Z','{}')`;
-        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind) VALUES (1,${watermark.fromEventId},${thread.threadId},'message.updated',${yield* encodeMessage(msg)},'1970-01-01T00:00:00.000Z',2,'thread')`;
+        yield* sql`INSERT INTO orchestration_events(sequence,event_id,stream_id,event_type,payload_json,occurred_at,application_event_version,aggregate_kind,stream_version,actor_kind,metadata_json) VALUES (1,${watermark.fromEventId},${thread.threadId},'message.updated',${yield* encodeMessage(msg)},'1970-01-01T00:00:00.000Z',2,'thread',1,'user','{}')`;
       }),
     );
     const op: M.MemoryOperation = {
@@ -1223,8 +1223,6 @@ it.effect.each([false, true])(
       c.a.blockSourceResult(gate);
       const fiber = yield* c.a.sync.readSource(c.validated, Effect.void).pipe(Effect.forkScoped);
       const request = yield* Deferred.await(c.a.sourceRequested);
-      assert.isDefined(request.stamp);
-      assert.notStrictEqual(request.requestId, c.validated.request.requestId);
       yield* c.owner.sync.syncOnce;
       yield* Deferred.succeed(gate, undefined);
       const outcome = yield* Fiber.join(fiber);
@@ -1237,6 +1235,8 @@ it.effect.each([false, true])(
           nextCursor: null,
         },
       });
+      assert.isDefined(request.stamp);
+      assert.notStrictEqual(request.requestId, c.validated.request.requestId);
       for (const env of [c.h, c.a])
         yield* env.run(
           Effect.gen(function* () {
@@ -1326,4 +1326,19 @@ it.effect(
       const secondResult = yield* Fiber.join(second);
       assert.strictEqual(secondResult.kind, "available");
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("requester rejects a denied live caller permit before hub admission", () =>
+  Effect.gen(function* () {
+    const c = yield* sourceFixture();
+    const denied = Effect.fail(new Service.MemoryAccessError({ code: "route_unavailable" }));
+    const error = yield* c.a.sync.readSource(c.validated, denied).pipe(Effect.flip);
+    assert.strictEqual(error._tag, "MemoryAccessError");
+    yield* c.h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_source_reads`).length, 0);
+      }),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
