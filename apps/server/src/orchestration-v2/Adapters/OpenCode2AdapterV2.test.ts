@@ -501,8 +501,8 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
               value: "<any>",
             }),
             reply("session.instructions.entry.put", null),
-            out("session.active"),
-            replyData("session.active", {}),
+            out("message.list", { sessionID: SESSION, order: "asc", limit: "100" }),
+            reply("message.list", history),
             out("session.prompt", { sessionID: SESSION, text: "hi" }),
             promptAccepted,
             event("session.execution.succeeded", { sessionID: SESSION }),
@@ -530,6 +530,8 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         assert.isTrue(Exit.isFailure(failed));
         assert.equal((yield* Fiber.join(terminal))?.status, "failed");
         assert.equal(values.length, reason === "tampered" ? 0 : 1);
+        const readable = yield* runtime.readThreadSnapshot({ providerThread: thread });
+        assert.isTrue(readable.messages.length > 0);
         failPut = false;
         const success = yield* terminalOf(runtime).pipe(Effect.forkScoped);
         yield* runtime.startTurn({

@@ -3780,7 +3780,6 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const newest = yield* client.message.list({ sessionID, order: "desc", limit: 1 });
           yield* markBefore(sessionId, newest.data[0]?.id ?? null);
           if (state.active !== turn || turn.interrupted) return;
-          if (state.active !== turn || turn.interrupted) return;
           yield* prepareMemory(sessionId, state, turnInput);
           if (!sending()) return;
           return yield* client.session.command({ sessionID, ...command });
@@ -4110,7 +4109,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 ? Effect.gen(function* () {
                     // Without a clear rejection the server may have taken the
                     // prompt, so the next turn checks before it prompts again.
-                    if (!CLEAR_PROMPT_REJECTIONS.has(cause._tag)) markUnsettled(state);
+                    if (!turn.unsent && !CLEAR_PROMPT_REJECTIONS.has(cause._tag))
+                      markUnsettled(state);
                     yield* finishTurn(state, {
                       status: "failed",
                       failure: makeProviderFailure({ cause, class: "provider_error" }),
