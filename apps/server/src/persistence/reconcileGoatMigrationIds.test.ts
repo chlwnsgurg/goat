@@ -102,7 +102,10 @@ describe("GOAT migration ids", () => {
       const ledger = yield* history;
       assert.isTrue(ledger.some(([n, name]) => n === 71 && name === "Memory"));
       assert.strictEqual(
-        (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters`)[0]?.value,
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space='fixture' AND dimension='live' AND scope_key='user'`)[0]
+          ?.value,
         7,
       );
       assert.strictEqual(

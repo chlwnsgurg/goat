@@ -1540,6 +1540,7 @@ const make = Effect.gen(function* () {
         ["hub_receipts", "receipts", M.MEMORY_DEDUP_MAX_RECEIPTS],
         ["hub_ids", "lifetime_ids", M.MEMORY_MAX_LIFETIME_IDS],
         ["hub_keys", "import_source_items", M.MEMORY_IMPORT_MAX_SOURCE_ITEMS],
+        ["hub_checkpoint", "checkpoint_staging", M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES],
       ] as const) {
         const current = after.get(counter);
         if (current === undefined || before.get(counter) === undefined)
@@ -4040,14 +4041,24 @@ const make = Effect.gen(function* () {
   const acknowledgeReport = Effect.fn("MemoryStore.acknowledgeReport")(function* (
     input: M.MemoryReportDelivery,
   ) {
-    const report = yield* stored("report-codec", decodeReport(input, strict));
-    if (report.state !== "delivered" || !report.reportThread || report.sequence === null)
-      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-    const rows = yield* stored(
-      "report-ack",
-      sql`UPDATE memory_report_outbox SET state='delivered',report_thread_json=${yield* threadCodec.encode(report.reportThread)},delivered_sequence=${report.sequence},delivered_at=${yield* Clock.currentTimeMillis},claimed_by=NULL,claimed_until=NULL WHERE report_id=${report.reportId} AND operation_id=${report.operationId} AND resolving_environment_id=${report.resolvingEnvironmentId} AND outcome=${report.outcome} RETURNING report_id`,
+    return yield* transact(
+      Effect.gen(function* () {
+        const report = yield* stored("report-codec", decodeReport(input, strict));
+        if (report.state !== "delivered" || !report.reportThread || report.sequence === null)
+          return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        const rows = yield* stored(
+          "report-ack",
+          sql`UPDATE memory_report_outbox SET state='delivered',report_thread_json=${yield* threadCodec.encode(report.reportThread)},delivered_sequence=${report.sequence},delivered_at=${yield* Clock.currentTimeMillis},claimed_by=NULL,claimed_until=NULL WHERE report_id=${report.reportId} AND operation_id=${report.operationId} AND resolving_environment_id=${report.resolvingEnvironmentId} AND outcome=${report.outcome} RETURNING report_id`,
+        );
+        if (!rows.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+        yield* stored(
+          "report-delivery-guard",
+          sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json)
+      SELECT space,'report_delivered',report_id,memory_id,${JSON.stringify({ operationId: report.operationId, outcome: report.outcome, resolvingEnvironmentId: report.resolvingEnvironmentId })}
+      FROM memory_report_outbox WHERE report_id=${report.reportId} ON CONFLICT(space,key_kind,key) DO NOTHING`,
+        );
+      }),
     );
-    if (!rows.length) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
   });
   const failGenerationAttempt = Effect.fn("MemoryStore.failGenerationAttempt")(function* (input: {
     work: MemoryWork;
@@ -6734,6 +6745,36 @@ const make = Effect.gen(function* () {
       removedRows++;
       reclaimedLogicalBytes += judgment.bytes;
     }
+    const terminalWork = yield* stored(
+      "hub-compact-terminal-work",
+      sql<{
+        id: string;
+        bytes: number;
+      }>`SELECT id,length(CAST(metadata_json AS BLOB))+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0) AS bytes FROM memory_outbox o WHERE space=${input.memorySpaceId} AND kind IN ('sync','resolve','revert_intent') AND status IN ('completed','failed','cancelled') AND terminal_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND NOT EXISTS(SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=o.space AND f.operation_id=json_extract(o.metadata_json,'$.operationId')) ORDER BY terminal_at,id LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const work of terminalWork) {
+      yield* stored(
+        "hub-compact-terminal-work-delete",
+        sql`DELETE FROM memory_outbox WHERE id=${work.id}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += work.bytes;
+    }
+    const deliveredReports = yield* stored(
+      "hub-compact-delivered-report",
+      sql<{
+        report_id: string;
+        bytes: number;
+      }>`SELECT report_id,coalesce(length(CAST(report_thread_json AS BLOB)),0)+length(CAST(operation_id AS BLOB))+32 AS bytes FROM memory_report_outbox r WHERE space=${input.memorySpaceId} AND state='delivered' AND delivered_at<=${input.now - M.MEMORY_LOG_RETENTION_MS} AND EXISTS(SELECT 1 FROM memory_import_keys g WHERE g.space=r.space AND g.key_kind='report_delivered' AND g.key=r.report_id) ORDER BY delivered_at,report_id LIMIT ${Math.max(0, limit - removedRows)}`,
+    );
+    for (const report of deliveredReports) {
+      yield* stored(
+        "hub-compact-delivered-report-delete",
+        sql`DELETE FROM memory_report_outbox WHERE report_id=${report.report_id}`,
+      );
+      removedRows++;
+      reclaimedLogicalBytes += report.bytes;
+    }
     const status: M.MemoryCompactionStatus = {
       lastRunAtUtc: M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(input.now))),
       removedRows,
@@ -7385,7 +7426,7 @@ const make = Effect.gen(function* () {
     transitionHubLeaseTx: (input) => withHubBudget(transitionHubLeaseTx(input)),
     readHubRetentionTx,
     readHubUsageTx,
-    reserveHubCheckpointTx,
+    reserveHubCheckpointTx: (input) => withHubBudget(reserveHubCheckpointTx(input)),
     settleMetadataEntryTx,
     reconcileResolutionReportTx,
     acquireSyncWorkTx,
@@ -7400,7 +7441,10 @@ const make = Effect.gen(function* () {
     transact,
     receipt,
     loadAggregate: (space, id) => transact(loadAggregate(space, id)),
-    apply: (decision) => applyDecision(decision),
+    apply: (decision) =>
+      decision.admission.kind === "hubAdmission" && decision.operation.kind !== "forget"
+        ? transact(withHubBudget(applyDecision(decision)))
+        : applyDecision(decision),
     reconnectParked: (decision, generation) => applyDecision(decision, generation),
     readAncestry: (space, id, parents) => transact(readAncestry(space, id, parents)),
     withReceivedCursor,

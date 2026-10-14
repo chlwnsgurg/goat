@@ -88,6 +88,10 @@ export default Effect.gen(function* () {
       "hub_receipts",
       `(SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger i WHERE NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id))+(SELECT count(*) FROM memory_import_keys WHERE key_kind IN ${guardKinds})`,
     ],
+    [
+      "hub_checkpoint",
+      "(SELECT coalesce(sum(checkpoint_bytes+published_pinned_bytes),0) FROM memory_hub_retention)",
+    ],
     ["hub_ids", "(SELECT count(*) FROM memory_identity_ledger)"],
     [
       "hub_keys",
@@ -120,11 +124,17 @@ export default Effect.gen(function* () {
       );
     const charge = (value: string) =>
       delta("hub_metadata", value) + delta("hub_private_metadata", value);
+    const checkpoint = (expression: string) =>
+      table === "memory_hub_retention" ? delta("hub_checkpoint", expression) : "";
     yield* install(
       table,
-      charge(qualify("NEW")),
-      charge(`${qualify("NEW")}-(${qualify("OLD")})`),
-      charge(`-(${qualify("OLD")})`),
+      charge(qualify("NEW")) + checkpoint("NEW.checkpoint_bytes+NEW.published_pinned_bytes"),
+      charge(`${qualify("NEW")}-(${qualify("OLD")})`) +
+        checkpoint(
+          "NEW.checkpoint_bytes+NEW.published_pinned_bytes-OLD.checkpoint_bytes-OLD.published_pinned_bytes",
+        ),
+      charge(`-(${qualify("OLD")})`) +
+        checkpoint("-OLD.checkpoint_bytes-OLD.published_pinned_bytes"),
     );
   }
   const identityCharge = (prefix: string) =>

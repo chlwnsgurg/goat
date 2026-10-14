@@ -996,6 +996,45 @@ describe("body-free hub metadata report ownership", () => {
           fresh.reconcileResolutionReportTx({ record: compact, localEnvironmentId: environmentId }),
         );
         assert.strictEqual((yield* fresh.pendingReports(100)).length, Number(localOwner));
+        if (localOwner) {
+          const report = (yield* fresh.pendingReports(100))[0]!;
+          const delivered = {
+            ...report,
+            state: "delivered" as const,
+            reportThread: { environmentId, threadId: M.ThreadId.make("report-fixture") },
+            sequence: 1,
+          };
+          yield* fresh
+            .transact(
+              fresh
+                .acknowledgeReport(delivered)
+                .pipe(
+                  Effect.andThen(
+                    Effect.fail(new Store.MemoryStoreConflict({ code: "revision_changed" })),
+                  ),
+                ),
+            )
+            .pipe(Effect.flip);
+          assert.strictEqual((yield* fresh.pendingReports(100)).length, 1);
+          assert.strictEqual(
+            (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
+            0,
+          );
+          yield* fresh.acknowledgeReport(delivered);
+          assert.strictEqual((yield* fresh.pendingReports(100)).length, 0);
+          // Simulate expiration of the detailed delivery row; the permanent guard must stop replay.
+          yield* sql`DELETE FROM memory_report_outbox WHERE report_id=${reportId}`;
+          const again = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+          assert.isFalse(
+            (yield* again.transact(
+              again.reconcileResolutionReportTx({
+                record: compact,
+                localEnvironmentId: environmentId,
+              }),
+            )).deliverable,
+          );
+          assert.strictEqual((yield* again.pendingReports(100)).length, 0);
+        }
       }).pipe(Effect.provide(live)),
   );
 });

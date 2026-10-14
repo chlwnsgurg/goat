@@ -3275,3 +3275,247 @@ it.effect.each(["completed", "failed", "cancelled", "transition"] as const)(
       );
     }).pipe(Effect.provide(live)),
 );
+
+it.effect.each([0, 1])(
+  "enforces global metadata equality plus %s across spaces without leaking failed writes",
+  (extra) =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const record: Store.AdminRecord = {
+        requestId: M.MemoryOperationId.make(id(971)),
+        requestDigest: hash,
+        expectedVersion: 0,
+        stage: "prepared",
+        action: {
+          action: "configure",
+          requestId: M.MemoryOperationId.make(id(971)),
+          expectedVersion: 0,
+          settings: { mode: "hub", memorySpaceId: space },
+        },
+        secretName: null,
+        result: null,
+        memberVersion: null,
+      };
+      // Measure the real write's encoded delta under rollback, then reserve the rest in another space.
+      let delta = 0;
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            const before = yield* sql<{
+              value: number;
+            }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata'`;
+            yield* store.writeHubAdminTx({ record, expectedStage: null });
+            const after = yield* sql<{
+              value: number;
+            }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata'`;
+            delta = after[0]!.value - before[0]!.value;
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.isAbove(delta, 0);
+      const filler =
+        M.MEMORY_PERMANENT_METADATA_MAX_BYTES - delta - M.MEMORY_COMPACT_RECEIPT_MAX_BYTES + extra;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes) VALUES ('other',${id(972)},'{}','{}',${filler})`;
+      if (extra) {
+        const failure = yield* store
+          .transact(store.writeHubAdminTx({ record, expectedStage: null }))
+          .pipe(Effect.flip);
+        assert.strictEqual(failure._tag, "MemoryCapacityError");
+        assert.isUndefined(yield* store.transact(store.readHubAdminTx(record.requestId)));
+      } else {
+        yield* store.transact(store.writeHubAdminTx({ record, expectedStage: null }));
+        assert.isDefined(yield* store.transact(store.readHubAdminTx(record.requestId)));
+      }
+      const counters = yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata'`;
+      assert.strictEqual(
+        counters[0]!.value,
+        M.MEMORY_PERMANENT_METADATA_MAX_BYTES + extra - (extra ? delta : 0),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "protects the thirty-day revert inputs and collects covered canonical history after expiry",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ticket, submission } = yield* seedSubmission;
+      for (const n of [3, 4, 5]) {
+        const op = yield* store.readOperation(space, M.MemoryOperationId.make(id(n)));
+        if (!op) throw new Error("fixture");
+        const ledger = yield* store.transact(
+          store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome: n === 5 ? "conflicted" : "accepted",
+            now: 0,
+          }),
+        );
+        yield* store.apply({
+          ...decideMemoryOperation(
+            yield* store.loadAggregate(space, memory),
+            op,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+          receipt: ledger.entry.receipt,
+        });
+      }
+      const op = submission.operation;
+      if (op.kind !== "resolve") throw new Error("fixture");
+      const appliedAt = Date.parse(op.resolution.appliedAtUtc);
+      const expiresAt = Date.parse(op.resolution.revertDeadlineUtc);
+      const ledger = yield* store.transact(
+        store.appendHubEntryTx({
+          operation: op,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "accepted",
+          resolutionApproval: {
+            resolutionId: op.resolution.resolutionId,
+            appliedAtUtc: op.resolution.appliedAtUtc,
+            revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+          },
+          now: appliedAt,
+        }),
+      );
+      yield* store.apply({
+        ...decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          op,
+          Store.hubAdmission,
+          { kind: "allowed" },
+          undefined,
+          undefined,
+          0,
+        ),
+        receipt: ledger.entry.receipt,
+      });
+      const publish = (name: string, at: number, floor: number) =>
+        store.transact(
+          Effect.gen(function* () {
+            const handle = yield* store.prepareHubCheckpointTx({
+              authority: { ...leaseAuthority, now: Effect.succeed(at) },
+              checkpointId: name,
+              snapshotToken: name,
+              hubEnvironmentId: env,
+            });
+            yield* store.publishCheckpointAndFloorTx({
+              memorySpaceId: space,
+              checkpointId: name,
+              expectedFloor: floor,
+              nextFloor: handle.checkpointSequence,
+              now: at,
+            });
+            return handle.checkpointSequence;
+          }),
+        );
+      const floor = yield* publish("revert-protected", expiresAt - 1, 0);
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: floor,
+          now: expiresAt - 1,
+          limit: 100,
+        }),
+      );
+      for (const revisionId of op.resolution.inputRevisionIds)
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_revisions r JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.revision_id=${revisionId}`)
+            .length,
+          1,
+        );
+      const nextFloor = yield* publish(
+        "revert-expired",
+        expiresAt + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+        floor,
+      );
+      yield* store.transact(
+        store.purgeHubTransientTx({
+          memorySpaceId: space,
+          now: expiresAt + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: nextFloor,
+          now: expiresAt + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+      for (const revisionId of op.resolution.inputRevisionIds)
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${revisionId}`)
+            .length,
+          0,
+        );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)
+          .length,
+        0,
+      );
+      assert.strictEqual((yield* store.readItem(space, memory))?.status, "active");
+      assert.strictEqual(
+        (yield* store.receipt(space, op.operationId))?.receipt.outcome,
+        "accepted",
+      );
+      assert.strictEqual(ticket.fencingToken, 1);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "shares required and pinned checkpoint reservation across spaces at equality and rejects plus one",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const other = M.MemorySpaceId.make(id(979));
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES - 1,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: other,
+          checkpointDeltaBytes: 0,
+          publishedPinnedDeltaBytes: 1,
+        }),
+      );
+      const failed = yield* store
+        .transact(
+          store.reserveHubCheckpointTx({
+            memorySpaceId: other,
+            checkpointDeltaBytes: 1,
+            publishedPinnedDeltaBytes: 0,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(failed._tag, "MemoryCapacityError");
+      assert.strictEqual((yield* store.transact(store.readHubUsageTx(other))).checkpointBytes, 0);
+      const counters = yield* sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_checkpoint'`;
+      assert.strictEqual(counters[0]!.value, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: space,
+          checkpointDeltaBytes: -1,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+      yield* store.transact(
+        store.reserveHubCheckpointTx({
+          memorySpaceId: other,
+          checkpointDeltaBytes: 1,
+          publishedPinnedDeltaBytes: 0,
+        }),
+      );
+    }).pipe(Effect.provide(live)),
+);
