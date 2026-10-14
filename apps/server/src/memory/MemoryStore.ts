@@ -587,6 +587,25 @@ const TicketRowSchema = Schema.Struct({
   submissionDigest: Schema.NullOr(digest),
   approval: Schema.NullOr(M.MemoryHubReceipt),
 });
+// SQL stores only immutable submission metadata; bodies live in purgeable payload rows.
+const HubAttemptReplay = Schema.Struct({
+  requestDigest: digest,
+  claimedAt: Schema.Int,
+  deadline: Schema.Int,
+  fencingToken: Schema.Int,
+});
+const StoredTicketRowSchema = Schema.Struct({
+  ...TicketRowSchema.fields,
+  submission: Schema.NullOr(
+    Schema.Struct({
+      protocolVersion: Schema.Literal(1),
+      memorySpaceId: M.MemorySpaceId,
+      holderEnvironmentId: M.EnvironmentId,
+      attemptId: M.MemoryOperationId,
+      operation: Metadata,
+    }),
+  ),
+});
 export type TicketRow = typeof TicketRowSchema.Type;
 export type TicketKey = { memorySpaceId: M.MemorySpaceId; attemptId: M.MemoryOperationId };
 export type TicketOwner = TicketKey & { owner: string; coordinatorEpoch: number; version: number };
@@ -748,6 +767,7 @@ export class MemoryStore extends Context.Service<
   {
     readonly transact: <A, E, R>(
       effect: Effect.Effect<A, E, R>,
+      options?: { requireOuter: boolean },
     ) => Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>>;
     readonly acquireSyncWorkTx: (input: {
       workId: string;
@@ -900,28 +920,46 @@ export class MemoryStore extends Context.Service<
       input: M.MemoryHubSourceReadRequestInput,
     ) => InTx<
       M.MemoryHubSourceReadRequestResult,
-      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError | M.MemoryHubError
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | MemoryCapacityError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
     >;
     readonly collectHubSourceReadsTx: (
       authority: HubAuthority,
       input: M.MemoryHubSourceReadCollectInput,
     ) => InTx<
       M.MemoryHubSourceReadCollectResult,
-      MemoryStorageError | MemoryStoreConflict | M.MemoryHubError
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
     >;
     readonly respondHubSourceReadTx: (
       authority: HubAuthority,
       input: M.MemoryHubSourceReadRespondInput,
     ) => InTx<
       M.MemoryHubSourceReadRespondResult,
-      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError | M.MemoryHubError
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | MemoryCapacityError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
     >;
     readonly resultHubSourceReadTx: (
       authority: HubAuthority,
       input: M.MemoryHubSourceReadResultInput,
     ) => InTx<
       M.MemoryHubSourceReadResultResult,
-      MemoryStorageError | MemoryStoreConflict | M.MemoryHubError
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
     >;
     readonly prepareHubCheckpointTx: (input: {
       authority: HubAuthority;
@@ -930,7 +968,12 @@ export class MemoryStore extends Context.Service<
       hubEnvironmentId: M.EnvironmentId;
     }) => InTx<
       HubCheckpointHandle,
-      MemoryStorageError | MemoryStoreConflict | MemoryCapacityError | M.MemoryHubError
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | MemoryCapacityError
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
     >;
     readonly readHubCheckpointPageTx: (input: {
       authority: HubAuthority;
@@ -938,7 +981,11 @@ export class MemoryStore extends Context.Service<
       cursor: string | null;
     }) => InTx<
       M.MemoryHubCheckpointPage,
-      MemoryStorageError | MemoryStoreConflict | M.MemoryHubError
+      | MemoryStorageError
+      | MemoryStoreConflict
+      | M.MemoryHubError
+      | M.MemoryHubUnauthorizedError
+      | M.MemoryHubForbiddenError
     >;
     readonly publishCheckpointAndFloorTx: (input: {
       memorySpaceId: M.MemorySpaceId;
@@ -1427,11 +1474,15 @@ const make = Effect.gen(function* () {
   const wake = PubSub.publish(wakes, undefined).pipe(Effect.asVoid);
   const transact = <A, E, R>(
     effect: Effect.Effect<A, E, R>,
+    options?: { requireOuter: boolean },
   ): Effect.Effect<A, E | MemoryStorageError, Exclude<R, Transaction>> =>
     Effect.gen(function* () {
       const existing = yield* Effect.serviceOption(Transaction);
-      if (Option.isSome(existing))
+      if (Option.isSome(existing)) {
+        if (options?.requireOuter)
+          return yield* new MemoryStorageError({ stage: "nested-admission", cause: undefined });
         return yield* Effect.provideService(effect, Transaction, existing.value);
+      }
       return yield* lane.withPermit(
         Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
@@ -2005,6 +2056,10 @@ const make = Effect.gen(function* () {
         // Forget syncs carry delete knowledge; a later purge of the same memory
         // (an expansion or retry) must not cancel an earlier forget's delivery.
         sql`UPDATE memory_outbox SET status='cancelled',payload_ref=NULL WHERE space=${space} AND memory_id=${current} AND status NOT IN ('completed','failed') AND NOT (kind='sync' AND json_extract(metadata_json,'$.kind')='forget')`,
+      );
+      yield* stored(
+        "purge-ticket-submission",
+        sql`UPDATE memory_outbox SET ticket_json=json_set(ticket_json,'$.submission',NULL,'$.state','terminal','$.owner',NULL,'$.ownedUntil',NULL,'$.version',sync_version+1),sync_version=sync_version+1,claimed_by=NULL,claimed_until=NULL,payload_ref=NULL WHERE space=${space} AND memory_id=${current} AND kind='resolve' AND ticket_json IS NOT NULL`,
       );
       yield* stored(
         "cancel-claims",
@@ -4970,17 +5025,51 @@ const make = Effect.gen(function* () {
     return rows.length === 1;
   });
   const claimCodec = codec(M.MemoryHubClaimInput);
-  const ticketRowCodec = codec(TicketRowSchema);
+  const storedTicketRowCodec = codec(StoredTicketRowSchema);
+  const encodeTicketRow = (row: TicketRow) =>
+    storedTicketRowCodec.encode({
+      ...row,
+      submission: row.submission
+        ? {
+            ...row.submission,
+            operation: metadataOf(row.submission.operation),
+          }
+        : null,
+    });
+  const decodeTicketRow = Effect.fnUntraced(function* (json: string) {
+    const row = yield* stored("ticket-decode", storedTicketRowCodec.decode(json, strict));
+    if (!row.submission) return { ...row, submission: null };
+    const bodies = yield* stored(
+      "ticket-body",
+      sql<{
+        body_json: string;
+      }>`SELECT body_json FROM memory_payloads WHERE space=${row.ticket.memorySpaceId} AND payload_ref=${`submission:${row.ticket.attemptId}`}`,
+    );
+    if (!bodies[0])
+      return yield* new MemoryStorageError({ stage: "ticket-payload", cause: undefined });
+    const submission = yield* stored(
+      "ticket-submission",
+      codec(M.MemoryHubApplyResolutionInput).decode(bodies[0].body_json, strict),
+    );
+    if (
+      hashText(M.encodeMemoryOperation(submission.operation)) !== row.submissionDigest ||
+      (yield* metadataCodec.encode(metadataOf(submission.operation))) !==
+        (yield* metadataCodec.encode(row.submission.operation))
+    )
+      return yield* new MemoryStorageError({ stage: "ticket-payload-identity", cause: undefined });
+    return { ...row, submission };
+  });
   const prepareClaimAttemptTx: MemoryStore["Service"]["prepareClaimAttemptTx"] = Effect.fn(
     "MemoryStore.prepareClaimAttemptTx",
   )(function* (input) {
     yield* Transaction;
+    const now = yield* Clock.currentTimeMillis;
     const rows = yield* stored(
       "claim-prepare",
       sql<WorkRow & { sync_version: number; frozen_claim_json: string | null }>`
       SELECT o.* FROM memory_outbox o JOIN memory_items i ON i.space=o.space AND i.memory_id=o.memory_id
       WHERE o.id=${input.candidateId} AND o.space=${input.memorySpaceId} AND o.kind='claim' AND o.sync_version=${input.expectedGeneration}
-      AND o.status IN ('pending','retry','running') AND i.status='quarantined'
+      AND o.status IN ('pending','retry','running') AND o.next_attempt_at<=${now} AND i.status='quarantined'
       AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=i.space AND f.memory_id=i.memory_id)`,
     );
     const row = rows[0];
@@ -5030,11 +5119,9 @@ const make = Effect.gen(function* () {
         "ticket-recovery",
         sql<{
           ticket_json: string;
-        }>`SELECT ticket_json FROM memory_outbox WHERE kind='resolve' AND ticket_json IS NOT NULL AND json_extract(ticket_json,'$.state')!='terminal' AND json_extract(ticket_json,'$.nextAttemptAt')<=${input.now} AND (json_extract(ticket_json,'$.ownedUntil') IS NULL OR json_extract(ticket_json,'$.ownedUntil')<=${input.now}) ORDER BY next_attempt_at,id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
+        }>`SELECT ticket_json FROM memory_outbox WHERE kind='resolve' AND status NOT IN ('cancelled','completed','failed') AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) AND NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_outbox.space AND t.memory_id=memory_outbox.memory_id) AND ticket_json IS NOT NULL AND json_extract(ticket_json,'$.state')!='terminal' AND json_extract(ticket_json,'$.nextAttemptAt')<=${input.now} AND (json_extract(ticket_json,'$.ownedUntil') IS NULL OR json_extract(ticket_json,'$.ownedUntil')<=${input.now}) ORDER BY next_attempt_at,id LIMIT ${Math.max(0, Math.min(input.limit, M.MEMORY_PAGE_MAX_ITEMS))}`,
       );
-      return yield* Effect.forEach(rows, (row) =>
-        stored("ticket-decode", ticketRowCodec.decode(row.ticket_json, strict)),
-      );
+      return yield* Effect.forEach(rows, (row) => decodeTicketRow(row.ticket_json));
     });
   const ticketId = (key: TicketKey) => `resolve:${key.memorySpaceId}:${key.attemptId}`;
   const readTicket = Effect.fnUntraced(function* (key: TicketKey) {
@@ -5042,15 +5129,14 @@ const make = Effect.gen(function* () {
       "ticket-read",
       sql<{
         ticket_json: string | null;
-      }>`SELECT ticket_json FROM memory_outbox WHERE id=${ticketId(key)}`,
+      }>`SELECT ticket_json FROM memory_outbox WHERE id=${ticketId(key)} AND status NOT IN ('cancelled','completed','failed') AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents f WHERE f.space=memory_outbox.space AND f.memory_id=memory_outbox.memory_id) AND NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_outbox.space AND t.memory_id=memory_outbox.memory_id)`,
     );
-    return rows[0]?.ticket_json
-      ? yield* stored("ticket-decode", ticketRowCodec.decode(rows[0].ticket_json, strict))
-      : null;
+    return rows[0]?.ticket_json ? yield* decodeTicketRow(rows[0].ticket_json) : null;
   });
   const ownedTicket = Effect.fnUntraced(function* (o: TicketOwner, now: number) {
     const row = yield* readTicket(o);
     return row &&
+      row.state !== "terminal" &&
       row.version === o.version &&
       row.owner === o.owner &&
       row.coordinatorEpoch === o.coordinatorEpoch &&
@@ -5066,7 +5152,7 @@ const make = Effect.gen(function* () {
   ) {
     const changed = yield* stored(
       "ticket-write",
-      sql`UPDATE memory_outbox SET ticket_json=${yield* ticketRowCodec.encode(row)},sync_version=${row.version},next_attempt_at=${row.nextAttemptAt} WHERE id=${ticketId(key)} AND sync_version=${expectedVersion} RETURNING id`,
+      sql`UPDATE memory_outbox SET ticket_json=${yield* encodeTicketRow(row)},sync_version=${row.version},next_attempt_at=${row.nextAttemptAt} WHERE id=${ticketId(key)} AND sync_version=${expectedVersion} RETURNING id`,
     );
     return changed.length ? row : null;
   });
@@ -5153,6 +5239,22 @@ const make = Effect.gen(function* () {
       )
         return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
       if (row.submission) return row;
+      const op = submission.operation;
+      if (op.kind !== "resolve")
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const payloadRef = `submission:${row.ticket.attemptId}`;
+      const body = yield* codec(M.MemoryHubApplyResolutionInput).encode(submission);
+      const usage = yield* storeUsageForRevert(op.memorySpaceId);
+      if (usage.bytes + new TextEncoder().encode(body).length > M.MEMORY_WORK_MAX_PAYLOAD_BYTES)
+        return yield* new MemoryStoreConflict({ code: "capacity_exceeded" });
+      yield* stored(
+        "submission-body",
+        sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json,purge_eligible_after) VALUES (${op.memorySpaceId},${payloadRef},${op.memoryId},${body},'[]',${Date.parse(row.ticket.attemptDeadlineHubTime) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS})`,
+      );
+      yield* stored(
+        "submission-ref",
+        sql`UPDATE memory_outbox SET payload_ref=${payloadRef} WHERE id=${ticketId(input.ownership)} AND sync_version=${row.version}`,
+      );
       const updated = yield* writeTicket(
         input.ownership,
         {
@@ -5527,28 +5629,13 @@ const make = Effect.gen(function* () {
     );
     return rows[0];
   });
-  // Authorization failures are mapped to the frozen source port's safe domain channel.
   const authorizeSource = Effect.fnUntraced(function* (
     authority: HubAuthority,
     space: M.MemorySpaceId,
   ) {
     yield* Transaction;
-    yield* authority.reauthorize.pipe(
-      Effect.catchTags({
-        MemoryHubUnauthorizedError: () =>
-          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
-        MemoryHubForbiddenError: () =>
-          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
-      }),
-    );
-    const member = yield* requireHubMemberTx(authority.principal).pipe(
-      Effect.catchTags({
-        MemoryHubUnauthorizedError: () =>
-          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
-        MemoryHubForbiddenError: () =>
-          Effect.fail(new M.MemoryHubError({ code: "identity_mismatch" })),
-      }),
-    );
+    yield* authority.reauthorize;
+    const member = yield* requireHubMemberTx(authority.principal);
     if (member.memorySpaceId !== space)
       return yield* new M.MemoryHubError({ code: "space_mismatch" });
     return { member, now: yield* authority.now };
@@ -6643,6 +6730,25 @@ const make = Effect.gen(function* () {
       if (r.memorySpaceId !== space || r.holderEnvironmentId !== member.environmentId)
         return yield* new M.MemoryHubForbiddenError({});
       if (action.kind === "claim") {
+        const requestDigest = hashText(yield* claimCodec.encode(action.request));
+        const attempts = yield* stored(
+          "hub-attempt-replay",
+          sql<{
+            record_json: string;
+            memory_id: string;
+          }>`SELECT record_json,memory_id FROM memory_import_keys WHERE space=${space} AND key_kind='hub_attempt' AND key=${r.attemptId}`,
+        );
+        const attempt = attempts[0]
+          ? yield* codec(HubAttemptReplay).decode(attempts[0].record_json, strict)
+          : null;
+        if (attempt) {
+          if (attempts[0]!.memory_id !== memoryId || attempt.requestDigest !== requestDigest)
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          if (attempt.deadline <= now)
+            return yield* new M.MemoryHubError({ code: "lease_expired" });
+          if (lease?.attemptId !== r.attemptId || lease.fencingToken !== attempt.fencingToken)
+            return yield* new M.MemoryHubError({ code: "fenced" });
+        }
         if (lease?.attemptId === r.attemptId) {
           if (
             Date.parse(lease.expiresAtHubTime) <= now ||
@@ -6674,7 +6780,23 @@ const make = Effect.gen(function* () {
           !current.conflicts.some((c) => c.conflictId === r.conflictId && c.status !== "resolved")
         )
           return yield* new M.MemoryHubError({ code: "conflict_changed" });
+        const count = yield* stored(
+          "hub-attempt-count",
+          sql<{
+            count: number;
+          }>`SELECT count(*) AS count FROM memory_import_keys WHERE space=${space} AND key_kind='hub_attempt'`,
+        );
+        if (count[0]!.count >= M.MEMORY_DEDUP_MAX_RECEIPTS)
+          return yield* new MemoryCapacityError({
+            dimension: "receipts",
+            limit: M.MEMORY_DEDUP_MAX_RECEIPTS,
+          });
         token = highest + 1;
+        // Permanent bounded guard survives release, invalidate and replacement. Details remain transient.
+        yield* stored(
+          "hub-attempt-first",
+          sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hub_attempt',${r.attemptId},${memoryId},${yield* codec(HubAttemptReplay).encode({ requestDigest, claimedAt: now, deadline: now + M.MEMORY_RESOLUTION_ATTEMPT_MAX_MS, fencingToken: token })})`,
+        );
         const iso = (time: number) =>
           M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(time)));
         next = {
