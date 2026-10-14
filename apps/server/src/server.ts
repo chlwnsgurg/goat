@@ -5,6 +5,7 @@ import { MemoryAdministrationToolkit } from "./mcp/toolkits/memoryAdministration
 import * as Context from "effect/Context";
 import * as Ref from "effect/Ref";
 import * as MemorySnapshot from "./memory/MemorySnapshot.ts";
+import * as MemorySnapshotBinding from "./memory/MemorySnapshotBinding.ts";
 import * as MemoryStore from "./memory/MemoryStore.ts";
 import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
@@ -680,6 +681,7 @@ const layerMemorySync = layerMemorySyncStarted.pipe(
 );
 
 export const layerMemorySnapshot = MemorySnapshot.layer;
+export const provideMemorySnapshot = MemorySnapshotBinding.provide;
 const layerMemorySnapshotWithDependencies = layerMemorySnapshot.pipe(
   Layer.provide(layerMemorySync),
   Layer.provide(layerMemoryService),
@@ -937,8 +939,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // hydration adds their default instances to `providerInstances` on boot.
-  Layer.provideMerge(layerMemorySnapshotWithDependencies),
-  Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+  (application) =>
+    provideMemorySnapshot(
+      application,
+      ProviderInstanceRegistryHydration.layer,
+      layerMemorySnapshotWithDependencies,
+    ),
   Layer.provideMerge(
     Layer.mergeAll(
       AntigravityInstallation.AntigravityInstallation.layer,
