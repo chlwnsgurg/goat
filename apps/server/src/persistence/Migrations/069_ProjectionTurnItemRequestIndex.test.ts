@@ -30,7 +30,10 @@ it.effect(
         ('approval', 'thread', 'node', 'command', 'pending', '2026-10-14', '{}')
     `;
 
-      assert.deepStrictEqual(yield* runMigrations(), [[69, "ProjectionTurnItemRequestIndex"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [69, "ProjectionTurnItemRequestIndex"],
+        [70, "Memory"],
+      ]);
       yield* ProjectionTurnItemRequestIndex;
       assert.deepStrictEqual(yield* runMigrations(), []);
 
