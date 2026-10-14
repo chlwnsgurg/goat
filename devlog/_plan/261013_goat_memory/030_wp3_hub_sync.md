@@ -610,6 +610,12 @@ identity whose create operation is an unknown-ID forget (deleted receipt, tombst
 identity), and a rejected compact receipt with no accepted canonical effect, carried as a
 body-free operationId record for replay and dedup without identity or fence. Every other
 identity/fence requirement stays. This lands as its own contract commit inside L1.
+The MemoryHubEntry metadata arm also carries an optional compactReceipt so a device that first
+learns of a resolve or revert from a body-free entry can decide report ownership. When present,
+the codec requires it to match the receipt (operationId, outcome, operationKind, resolutionId,
+resolutionApproval); the hub producer always fills it for resolve and revert entries; ACK, pull
+and checkpoint use the same guard and resolutionReportId rule. This is an integrity check, not
+replica re-admission (M20).
 Do not change MemoryOperation, canonical digest or apply input. Project new approved times
 from validated receipt approval, never operation submission timestamps.
 
@@ -1255,3 +1261,4 @@ IDs remain governed by 000 M1–M20, not by a restored historical appendix.
 | rev 11b: R2 codec/local revert; A2 quota consumer | §4.3, §6, §10–12: measured versioned binary maximum/headroom, old-row accounting/mixed decode, local device-time guard removal and SyncWorkCandidate.work.id test consumers.                     |
 | rev 11c: A3 #1 claim retirement                   | §4, §5.1, §6, §11: only definitive outcomes retire a frozen claim via transitionResolutionTicketTx retireClaim CAS and bump generation; uncertain submissions replay; retire-then-Q fixture.     |
 | rev 11d: L1 coordinator decisions                 | §4, §4.3: auth errors on source relay and checkpoint page ports; checkpoint validation accepts forget-created identities and refusal-only receipts.                                              |
+| rev 11e: L1 report guard transport                | §4.3: optional compactReceipt on the metadata entry arm, matched against the receipt, used for first-receipt report ownership.                                                                   |
