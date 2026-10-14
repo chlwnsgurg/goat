@@ -68,6 +68,9 @@ export class MemoryService extends Context.Service<
       input: M.MemoryUpsertInput,
       permit: Permit,
     ) => Effect.Effect<Store.StoredReceipt, MemoryServiceError>;
+    readonly retryForgetExpansion: (
+      intent: Store.PendingForgetIntent,
+    ) => Effect.Effect<void, MemoryServiceError>;
     readonly forget: (
       input: M.MemoryForgetInput,
       permit: Permit,
@@ -323,7 +326,11 @@ const make = Effect.gen(function* () {
         yield* permit;
         const old = yield* store.receipt(op.memorySpaceId, op.operationId);
         if (old) {
-          if (old.operationDigest !== digest)
+          if (
+            old.operationDigest !== digest &&
+            (admission.kind !== "localIntent" ||
+              old.receipt.forgetExpansion?.requestDigest !== digest)
+          )
             return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
           return old;
         }
@@ -484,6 +491,52 @@ const make = Effect.gen(function* () {
                 }),
               )
               .pipe(Effect.andThen(Effect.fail(error))),
+        }),
+      );
+  });
+
+  const retryForgetExpansion = Effect.fn("MemoryService.retryForgetExpansion")(function* (
+    intent: Store.PendingForgetIntent,
+  ) {
+    const original = yield* store.readOperation(intent.memorySpaceId, intent.operationId);
+    if (
+      !original ||
+      original.kind !== "forget" ||
+      memoryOperationDigest(original) !== intent.operationDigest
+    )
+      return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+    const operationId = M.MemoryOperationId.make(
+      memoryStableUuid(`${intent.operationId}:${intent.attempts}:retry`),
+    );
+    const operation: M.MemoryOperation = {
+      ...original,
+      operationId,
+      tombstone: { ...original.tombstone, deleteOperationId: operationId },
+    };
+    yield* store
+      .transact(
+        Effect.gen(function* () {
+          const current = yield* store.loadAggregate(intent.memorySpaceId, intent.memoryId);
+          if (current.identity) yield* requireScope(current.identity.scope);
+          const decision = yield* decide(current, operation, Store.localIntent);
+          const receipt = {
+            ...decision.receipt,
+            forgetRetryOf: {
+              operationId: intent.operationId,
+              operationDigest: intent.operationDigest!,
+            },
+          };
+          // Failed retries retain one bounded intent and the original rejection, not another event per sweep.
+          yield* quota.withAdmission(
+            { operation, admission: Store.localIntent, environmentId, receipt },
+            store.apply({ ...decision, receipt }),
+          );
+        }),
+      )
+      .pipe(
+        Effect.catchTags({
+          MemoryCapacityError: (error) =>
+            store.preserveForgetIntent(intent).pipe(Effect.andThen(Effect.fail(error))),
         }),
       );
   });
@@ -967,6 +1020,7 @@ const make = Effect.gen(function* () {
     changes,
     upsert,
     forget,
+    retryForgetExpansion,
     revertResolution,
     read,
     list,

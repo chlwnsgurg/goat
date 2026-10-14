@@ -41,6 +41,7 @@ export class MemoryCapacityError extends Schema.TaggedError<MemoryCapacityError>
   {
     dimension: Schema.String,
     limit: Schema.Int,
+    current: Schema.optionalKey(Schema.Int),
   },
 ) {
   override get message() {
@@ -286,7 +287,6 @@ export const memorySuppressionRecords = (t: M.MemoryTombstone): M.MemorySuppress
 export type MemoryDecision = {
   readonly operation: M.MemoryOperation;
   readonly operationDigest: string;
-  readonly admittedForget?: M.MemoryTombstone;
   readonly admission: MemoryAdmissionContext;
   readonly receipt: M.MemoryHubReceipt | M.MemoryMutationReceipt;
   readonly item?: M.MemoryItem;
@@ -617,14 +617,10 @@ export class MemoryStore extends Context.Service<
     readonly operationMetadataBytes: (
       operation: M.MemoryOperation,
     ) => Effect.Effect<number, MemoryStorageError>;
-    readonly settleForgetFragment: (input: {
-      readonly operation: Extract<M.MemoryOperation, { kind: "forget" }>;
-      readonly operationDigest: string;
-      readonly fragment: M.MemoryTombstone;
-      readonly keys: number;
-      readonly bytes: number;
-      readonly status: "accepted" | "rejected";
-    }) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
+    readonly settleForgetExpansion: (
+      space: M.MemorySpaceId,
+      result: StoredReceipt,
+    ) => Effect.Effect<StoredReceipt, MemoryStorageError | MemoryStoreConflict>;
     readonly firstForgetReservation: (
       operation: M.MemoryOperation,
     ) => Effect.Effect<{ bytes: number; keys: number }, MemoryStorageError>;
@@ -1566,7 +1562,7 @@ const make = Effect.gen(function* () {
           );
         }
         if (accepted && op.kind === "forget") {
-          const t = decision.admittedForget ?? op.tombstone;
+          const t = op.tombstone;
           yield* stored(
             "tombstone",
             sql`INSERT INTO memory_tombstones (space,memory_id,delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json) VALUES (${op.memorySpaceId},${op.memoryId},${t.deleteOperationId},${t.deletingEnvironmentId},${Date.parse(t.deletedAtUtc)},${yield* sourceKeysCodec.encode(t.suppressedSourceKeys)},${yield* contentCodec.encode(t.suppressedContent)},${yield* exclusionsCodec.encode(t.sourceExclusions)}) ON CONFLICT(space,memory_id) DO NOTHING`,
@@ -1977,17 +1973,22 @@ const make = Effect.gen(function* () {
         const previous = original[0]
           ? yield* receiptCodec.decode(original[0].receipt_json, strict)
           : undefined;
+        const acknowledged = {
+          ...result,
+          ...(previous?.forgetExpansion ? { forgetExpansion: previous.forgetExpansion } : {}),
+          ...(previous?.forgetRetryOf ? { forgetRetryOf: previous.forgetRetryOf } : {}),
+        };
         if (
           previous &&
           "hubSequence" in previous &&
           previous.hubSequence !== null &&
-          (yield* receiptCodec.encode(previous)) !== (yield* receiptCodec.encode(result))
+          (yield* receiptCodec.encode(previous)) !== (yield* receiptCodec.encode(acknowledged))
         )
           return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
         if (previous && !("hubSequence" in previous))
           yield* stored(
             "ack-settle",
-            sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(result)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
+            sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(acknowledged)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
           );
         yield* finishWork(id, result.outcome === "rejected" ? "failed" : "completed", result);
         if (result.outcome === "rejected")
@@ -2005,7 +2006,13 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const intent = yield* stored("pending-forget-codec", decodePendingForget(input, strict));
         const existing = yield* readPending(intent.memorySpaceId, intent.memoryId);
-        if (existing) return;
+        if (existing) {
+          yield* stored(
+            "pending-forget-retry",
+            sql`UPDATE memory_pending_forget_intents SET attempts=min(attempts+1,2147483647),last_failure_code=${intent.lastFailureCode} WHERE space=${intent.memorySpaceId} AND memory_id=${intent.memoryId}`,
+          );
+          return;
+        }
         const counts = yield* stored(
           "pending-forget-count",
           sql<{ count: number }>`SELECT count(*) AS count FROM memory_pending_forget_intents`,
@@ -2077,6 +2084,42 @@ const make = Effect.gen(function* () {
   const pendingForgetIntents = Effect.fn("MemoryStore.pendingForgetIntents")(function* (
     limit: number,
   ) {
+    // A full intent table must not roll back a reserved basic deletion. Recover its independently
+    // rejected excess operation into a free bounded slot before scheduling retries.
+    const counts = yield* stored(
+      "pending-forget-slots",
+      sql<{ count: number }>`SELECT count(*) AS count FROM memory_pending_forget_intents`,
+    );
+    const slots = Math.min(limit, M.MEMORY_PENDING_FORGET_INTENTS_MAX - (counts[0]?.count ?? 0));
+    if (slots > 0) {
+      const deferred = yield* stored(
+        "deferred-forget-intents",
+        sql<{
+          space: string;
+          memory_id: string;
+          operation_id: string;
+          operation_digest: string;
+          requested_at: string;
+        }>`SELECT e.memory_space_id AS space,e.memory_id,e.operation_id,e.operation_digest,json_extract(e.metadata_json,'$.tombstone.deletedAtUtc') AS requested_at
+        FROM memory_events e WHERE e.kind='forget' AND json_extract(e.receipt_json,'$.outcome')='rejected'
+        AND json_extract(e.receipt_json,'$.failureCode')='capacity_exceeded'
+        AND EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=e.memory_space_id AND t.memory_id=e.memory_id)
+        AND NOT EXISTS (SELECT 1 FROM memory_pending_forget_intents p WHERE p.space=e.memory_space_id AND p.memory_id=e.memory_id)
+        AND NOT EXISTS (SELECT 1 FROM (SELECT memory_space_id AS space,receipt_json FROM memory_events UNION ALL SELECT space,receipt_json FROM memory_compact_receipts) r WHERE r.space=e.memory_space_id AND json_extract(r.receipt_json,'$.forgetRetryOf.operationId')=e.operation_id AND json_extract(r.receipt_json,'$.outcome')!='rejected')
+        ORDER BY e.sequence LIMIT ${slots}`,
+      );
+      for (const row of deferred)
+        yield* preserveForgetIntent({
+          memorySpaceId: M.MemorySpaceId.make(row.space),
+          memoryId: M.MemoryId.make(row.memory_id),
+          operationId: M.MemoryOperationId.make(row.operation_id),
+          operationDigest: row.operation_digest,
+          requestedAtUtc: M.MemoryUtcTimestamp.make(row.requested_at),
+          attempts: 0,
+          lastFailureCode: "capacity_exceeded",
+          submissionState: "rejected",
+        }).pipe(Effect.catchTags({ MemoryCapacityError: () => Effect.void }));
+    }
     const rows = yield* stored(
       "pending-forget-list",
       sql`SELECT space AS memorySpaceId,memory_id AS memoryId,operation_id AS operationId,requested_at_utc AS requestedAtUtc,attempts,last_failure_code AS lastFailureCode,operation_digest AS operationDigest,submission_state AS submissionState FROM memory_pending_forget_intents ORDER BY requested_at_utc,space,memory_id LIMIT ${Math.min(limit, M.MEMORY_PENDING_FORGET_INTENTS_MAX)}`,
@@ -2586,6 +2629,7 @@ const make = Effect.gen(function* () {
             return yield* new MemoryCapacityError({
               dimension: charge.dimension,
               limit: charge.limit,
+              current: value,
             });
           admitted.push({ charge, value });
           pending.set(key, value);
@@ -3508,34 +3552,18 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const settleForgetFragment = Effect.fn("MemoryStore.settleForgetFragment")(function* (input: {
-    operation: Extract<M.MemoryOperation, { kind: "forget" }>;
-    operationDigest: string;
-    fragment: M.MemoryTombstone;
-    keys: number;
-    bytes: number;
-    status: "accepted" | "rejected";
-  }) {
-    const op = input.operation;
-    const original = yield* receipt(op.memorySpaceId, op.operationId);
-    if (!original || original.operationDigest !== input.operationDigest)
+  const settleForgetExpansion = Effect.fn("MemoryStore.settleForgetExpansion")(function* (
+    space: M.MemorySpaceId,
+    result: StoredReceipt,
+  ) {
+    const original = yield* receipt(space, result.receipt.operationId);
+    if (!original || original.operationDigest !== result.operationDigest)
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-    const fragmentDigest = hashText(M.encodeMemoryOperation({ ...op, tombstone: input.fragment }));
-    // Fixed-size fragment disposition belongs to the reserved deletion core, not the excess payload.
     yield* stored(
-      "forget-fragment-disposition",
-      sql`UPDATE memory_tombstones SET fragment_status=${input.status},fragment_operation_id=${op.operationId},fragment_operation_digest=${input.operationDigest},fragment_digest=${fragmentDigest},fragment_keys=${input.keys},fragment_bytes=${input.bytes} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
+      "forget-expansion-result",
+      sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(result.receipt)} WHERE memory_space_id=${space} AND operation_id=${result.receipt.operationId}`,
     );
-    if (input.status === "rejected") return;
-    const t = op.tombstone;
-    yield* writeSuppressions(input.fragment);
-    yield* stored(
-      "forget-fragment-union",
-      sql`UPDATE memory_tombstones SET suppressed_source_keys_json=${yield* sourceKeysCodec.encode(t.suppressedSourceKeys)},suppressed_content_json=${yield* contentCodec.encode(t.suppressedContent)},source_exclusions_json=${yield* exclusionsCodec.encode(t.sourceExclusions)} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
-    );
-    const current = yield* readItem(op.memorySpaceId, op.memoryId);
-    if (current?.item.status === "forgotten")
-      yield* putItem({ ...current.item, tombstone: t }, [], yield* nextWatermark(op.memorySpaceId));
+    return result;
   });
   const readForgetReservation = Effect.fn("MemoryStore.readForgetReservation")(function* (
     space: M.MemorySpaceId,
@@ -4106,7 +4134,7 @@ const make = Effect.gen(function* () {
     reserve,
     usage,
     readForgetReservation,
-    settleForgetFragment,
+    settleForgetExpansion,
     firstForgetReservation,
     operationMetadataBytes: (operation) =>
       Effect.map(

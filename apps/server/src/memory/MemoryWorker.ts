@@ -168,6 +168,52 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.mapError(workerError));
   });
+  const summaryEvidenceValid = Effect.fn("MemoryWorker.summaryEvidenceValid")(function* (
+    work: Store.MemoryWork,
+    payload: M.MemoryPayload,
+  ) {
+    if (work.metadata.kind !== "summary") return false;
+    const meta = work.metadata;
+    const records = yield* store.readSuppressions(
+      M.MemorySpaceId.make(
+        work.space.startsWith("_local:") ? Service.memoryStableUuid(work.space) : work.space,
+      ),
+      meta.memoryId,
+    );
+    for (const evidence of payload.evidence) {
+      if (evidence.origin === "model") continue;
+      if (
+        !evidence.sourceThread ||
+        !evidence.watermark ||
+        evidence.sourceThread.environmentId !== environmentId ||
+        evidence.sourceThread.threadId !== meta.sourceThread.threadId
+      )
+        return false;
+      const ids = [...new Set(evidence.messageIds)];
+      if (
+        records.some(
+          (r) =>
+            r.kind === "sourceExclusion" &&
+            r.exclusion.sourceThread.environmentId === environmentId &&
+            r.exclusion.sourceThread.threadId === meta.sourceThread.threadId &&
+            r.exclusion.messageIds.some((id) => ids.includes(id)),
+        )
+      )
+        return false;
+      const eligible = yield* query(sql<{ count: number }>`
+        SELECT count(*) AS count FROM orchestration_events e
+        WHERE e.application_event_version=2 AND e.aggregate_kind='thread' AND e.stream_id=${meta.sourceThread.threadId}
+        AND e.event_type='message.updated' AND e.sequence<=${evidence.watermark.throughSequence}
+        AND json_extract(e.payload_json,'$.id') IN (SELECT value FROM json_each(${yield* query(encodeIds(ids))}))
+        AND coalesce(json_extract(e.payload_json,'$.streaming'),0)=0 AND trim(json_extract(e.payload_json,'$.text'))!=''
+        AND json_extract(e.payload_json,'$.role') IN ('user','assistant')
+        AND NOT EXISTS (SELECT 1 FROM orchestration_events n WHERE n.application_event_version=2 AND n.aggregate_kind='thread' AND n.stream_id=e.stream_id AND n.event_type='message.updated' AND json_extract(n.payload_json,'$.id')=json_extract(e.payload_json,'$.id') AND n.sequence>e.sequence)
+        AND (CASE WHEN json_extract(e.payload_json,'$.runId') IS NULL THEN '' ELSE coalesce((SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') ORDER BY r.sequence DESC LIMIT 1),'') END)!='rolled_back'
+        AND (json_extract(e.payload_json,'$.role')='user' OR (SELECT json_extract(r.payload_json,'$.status') FROM orchestration_events r WHERE r.application_event_version=2 AND r.aggregate_kind='thread' AND r.stream_id=e.stream_id AND r.event_type IN ('run.created','run.updated') AND json_extract(r.payload_json,'$.id')=json_extract(e.payload_json,'$.runId') ORDER BY r.sequence DESC LIMIT 1)='completed')`);
+      if (eligible[0]?.count !== ids.length) return false;
+    }
+    return payload.evidence.some((e) => e.origin !== "model" && e.messageIds.length > 0);
+  });
   const catchUp = Effect.fn("MemoryWorker.catchUp")(function* () {
     const now = yield* Clock.currentTimeMillis;
     const watermark = yield* store.readThreadHookWatermark();
@@ -377,7 +423,7 @@ const make = Effect.gen(function* () {
       if (work.metadata.kind !== "summary" || !work.memoryId)
         return yield* new MemoryWorkerError({ code: "unsupported_operation" });
       const meta = work.metadata;
-      const source = yield* readSource(work);
+      let source = yield* readSource(work);
       const existingReceipt = work.space.startsWith("_local:")
         ? undefined
         : yield* store.receipt(M.MemorySpaceId.make(work.space), meta.operationId);
@@ -391,7 +437,7 @@ const make = Effect.gen(function* () {
       if (current?.tombstone || current?.pendingForget)
         return yield* new MemoryWorkerError({ code: "forgotten" });
       // Reserve input space for the bounded previous payload, including its evidence.
-      const previousSummary = work.space.startsWith("_local:")
+      let previousSummary = work.space.startsWith("_local:")
         ? yield* store.readLocalSummaryPayload(
             environmentId,
             `${environmentId}:${meta.sourceThread.threadId}:summary`,
@@ -401,34 +447,58 @@ const make = Effect.gen(function* () {
           )?.payload ?? undefined);
       if (previousSummary && scanMemoryValue(previousSummary).kind !== "allowed")
         return yield* new MemoryWorkerError({ code: "secret_detected" });
+      let sourceWork = work;
+      if (previousSummary && !(yield* summaryEvidenceValid(work, previousSummary))) {
+        previousSummary = undefined;
+        sourceWork = { ...work, metadata: { ...meta, fromSequence: 0 } };
+        source = yield* readSource(sourceWork);
+      }
+      const recheckSource = Effect.gen(function* () {
+        yield* readSource(work);
+        if (previousSummary && !(yield* summaryEvidenceValid(work, previousSummary)))
+          return yield* new MemoryWorkerError({ code: "source_invalidated" });
+      });
       const generated = yield* Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "memory-generation-" });
-          const input = yield* query(
-            decodeInput(
-              {
-                cwd,
-                sourceThread: meta.sourceThread,
-                sourceWatermark: meta.sourceWatermark,
-                messages: source.messages,
-                ...(previousSummary ? { previousSummary } : {}),
-                modelSelection: meta.modelSelection,
-              },
-              strict,
-            ),
-          );
-          if (!generation.generateMemorySummary)
-            return yield* new MemoryWorkerError({ code: "unsupported_operation" });
-          const output = yield* generation
-            .generateMemorySummary(input)
-            .pipe(
-              Effect.mapError((cause) => new MemoryWorkerError({ code: safeCode(cause), cause })),
+          while (true) {
+            const input = yield* query(
+              decodeInput(
+                {
+                  cwd,
+                  sourceThread: meta.sourceThread,
+                  sourceWatermark: source.watermark,
+                  messages: source.messages,
+                  ...(previousSummary ? { previousSummary } : {}),
+                  modelSelection: meta.modelSelection,
+                },
+                strict,
+              ),
             );
-          if (!M.validateMemoryGenerationResult(input, output.result))
-            return yield* new MemoryWorkerError({ code: "invalid_output" });
-          if (scanMemoryValue(output.result).kind !== "allowed")
-            return yield* new MemoryWorkerError({ code: "secret_detected" });
-          return { input, output };
+            if (!generation.generateMemorySummary)
+              return yield* new MemoryWorkerError({ code: "unsupported_operation" });
+            const output = yield* generation
+              .generateMemorySummary(input)
+              .pipe(
+                Effect.mapError((cause) => new MemoryWorkerError({ code: safeCode(cause), cause })),
+              );
+            if (!M.validateMemoryGenerationResult(input, output.result))
+              return yield* new MemoryWorkerError({ code: "invalid_output" });
+            if (scanMemoryValue(output.result).kind !== "allowed")
+              return yield* new MemoryWorkerError({ code: "secret_detected" });
+            if (source.watermark.throughSequence >= meta.sourceWatermark.throughSequence)
+              return { input, output };
+            previousSummary = {
+              text: output.result.text,
+              evidence: output.result.evidence,
+              derivedFromMemoryRevisions: [],
+            };
+            sourceWork = {
+              ...work,
+              metadata: { ...meta, fromSequence: source.watermark.throughSequence },
+            };
+            source = yield* readSource(sourceWork);
+          }
         }),
       );
       if (work.space.startsWith("_local:")) {
@@ -439,7 +509,7 @@ const make = Effect.gen(function* () {
           return yield* new MemoryWorkerError({ code: "identity_mismatch" });
         yield* store.transact(
           Effect.gen(function* () {
-            yield* readSource(work);
+            yield* recheckSource;
             const owner = yield* store.readWork(work.id);
             if (
               owner?.status !== "running" ||
@@ -484,9 +554,9 @@ const make = Effect.gen(function* () {
           input: generated.input,
           generated: generated.output,
           expectedHeads: current!.heads,
-          recheckSource: readSource(work).pipe(
+          recheckSource: recheckSource.pipe(
             Effect.asVoid,
-            Effect.mapError((cause) => new Store.MemoryStoreConflict({ code: cause.code })),
+            Effect.mapError((cause) => new Store.MemoryStoreConflict({ code: safeCode(cause) })),
           ),
         });
     });
@@ -589,6 +659,14 @@ const make = Effect.gen(function* () {
       yield* service.reconnectParked(op).pipe(Effect.catch(() => Effect.succeed(false)));
     for (const pending of yield* store.pendingForgetIntents(100)) {
       const aggregate = yield* store.loadAggregate(pending.memorySpaceId, pending.memoryId);
+      if (
+        aggregate.tombstone &&
+        pending.submissionState === "rejected" &&
+        pending.operationDigest
+      ) {
+        yield* service.retryForgetExpansion(pending).pipe(Effect.catch(() => Effect.void));
+        continue;
+      }
       if (aggregate.tombstone) {
         yield* store.settleForgetIntent(pending.memorySpaceId, pending.memoryId);
         continue;

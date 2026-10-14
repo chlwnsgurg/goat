@@ -1174,13 +1174,35 @@ export type MemoryContextCandidates = Pick<
   "memorySpaceId" | "projectionWatermark" | "items"
 >;
 
+const MemoryForgetRetry = struct({
+  operationId: MemoryOperationId,
+  operationDigest: digest,
+});
+
+const MemoryForgetExpansion = struct({
+  requestDigest: digest,
+  operationId: MemoryOperationId,
+  operationDigest: digest,
+  status: Schema.Literals(["accepted", "pending", "rejected"]),
+});
+
 export const MemoryMutationReceipt = struct({
   operationId: MemoryOperationId,
   memoryId: MemoryId,
-  outcome: Schema.Literals(["accepted", "noop", "conflicted", "deleted"]),
+  outcome: Schema.Literals(["accepted", "noop", "conflicted", "deleted", "rejected"]),
+  failureCode: Schema.optionalKey(MemoryFailureCode),
+  capacity: Schema.optionalKey(MemoryCapacityExceeded),
+  forgetExpansion: Schema.optionalKey(MemoryForgetExpansion),
+  forgetRetryOf: Schema.optionalKey(MemoryForgetRetry),
   revisionId: Schema.NullOr(MemoryRevisionId),
   pendingSync: Schema.Boolean,
-});
+}).check(
+  Schema.makeFilter(
+    (v) =>
+      (v.outcome === "rejected") === (v.failureCode !== undefined) &&
+      (v.failureCode === "capacity_exceeded") === (v.capacity !== undefined),
+  ),
+);
 export type MemoryMutationReceipt = typeof MemoryMutationReceipt.Type;
 
 export const MemoryRevertStatus = Schema.Literals([
@@ -1846,6 +1868,8 @@ export interface MemoryHubPrincipal {
 }
 
 export const MemoryHubReceipt = struct({
+  forgetExpansion: Schema.optionalKey(MemoryForgetExpansion),
+  forgetRetryOf: Schema.optionalKey(MemoryForgetRetry),
   operationId: MemoryOperationId,
   memoryId: MemoryId,
   operationDigest: digest,

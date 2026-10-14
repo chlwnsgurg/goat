@@ -8,6 +8,7 @@ import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
+import { memoryOperationDigest } from "./MemoryDecider.ts";
 import * as DateTime from "effect/DateTime";
 import * as TestClock from "effect/testing/TestClock";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -363,20 +364,31 @@ describe("MemoryQuotaService", () => {
         const filler =
           M.MEMORY_PERMANENT_METADATA_MAX_BYTES -
           used.permanentBytes -
-          (bytes - held.bytes) +
+          (bytes - held.bytes) -
+          M.MEMORY_COMPACT_RECEIPT_MAX_BYTES +
           extra;
         yield* sql`UPDATE memory_identity_ledger SET reserve_bytes=${filler} WHERE memory_id=${id(900)}`;
       }
-      const result = yield* quota.commit(decision(op), env, Effect.void);
-      assert.strictEqual(result.operationDigest, hash);
+      const request = { ...decision(op), operationDigest: memoryOperationDigest(op) };
+      const result = yield* quota.commit(request, env, Effect.void);
       assert.strictEqual(result.receipt.outcome, "deleted");
+      const expansion = result.receipt.forgetExpansion;
+      if (!expansion) throw new Error("Missing expansion disposition");
+      assert.strictEqual(expansion.requestDigest, request.operationDigest);
+      assert.strictEqual(expansion.status, extra ? "rejected" : "accepted");
+      assert.notStrictEqual(expansion.operationId, op.operationId);
+      const additional = (yield* store.readOperation(space, expansion.operationId))!;
+      const additionalReceipt = (yield* store.receipt(space, expansion.operationId))!;
+      assert.strictEqual(additionalReceipt.operationDigest, memoryOperationDigest(additional));
+      assert.strictEqual(additionalReceipt.receipt.outcome, extra ? "rejected" : "deleted");
+      if (extra) assert.strictEqual(additionalReceipt.receipt.failureCode, "capacity_exceeded");
       const retained = yield* store.readSuppressions(space, memory);
       assert.strictEqual(retained.length, extra ? 1 : 300);
       assert.isTrue(
         retained.some(
-          (record) =>
-            record.kind === "sourceExclusion" &&
-            record.exclusion.messageIds.includes(M.MessageId.make("message-0-0")),
+          (r) =>
+            r.kind === "sourceExclusion" &&
+            r.exclusion.messageIds.includes(M.MessageId.make("message-0-0")),
         ),
       );
       assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
@@ -385,24 +397,83 @@ describe("MemoryQuotaService", () => {
           .length,
         0,
       );
-      const disposition = (yield* sql<{
-        status: string;
-        operation_id: string;
-        operation_digest: string;
-        keys: number;
-      }>`SELECT fragment_status AS status,fragment_operation_id AS operation_id,fragment_operation_digest AS operation_digest,fragment_keys AS keys FROM memory_tombstones WHERE space=${space} AND memory_id=${memory}`)[0]!;
-      assert.deepStrictEqual(disposition, {
-        status: extra ? "rejected" : "accepted",
-        operation_id: op.operationId,
-        operation_digest: hash,
-        keys: 299,
-      });
-      assert.strictEqual(
-        M.encodeMemoryOperation((yield* store.readOperation(space, op.operationId))!),
-        M.encodeMemoryOperation(op),
+      const canonical = (yield* store.readOperation(space, op.operationId))!;
+      if (canonical.kind !== "forget") throw new Error("Fixture kind");
+      assert.strictEqual(Store.memorySuppressionRecords(canonical.tombstone).length, 1);
+      assert.strictEqual(result.operationDigest, memoryOperationDigest(canonical));
+      assert.deepStrictEqual(yield* quota.commit(request, env, Effect.void), result);
+      assert.deepStrictEqual(
+        yield* quota.commit(
+          { ...decision(additional), operationDigest: expansion.operationDigest },
+          env,
+          Effect.void,
+        ),
+        additionalReceipt,
       );
-      assert.deepStrictEqual(yield* quota.commit(decision(op), env, Effect.void), result);
       assert.strictEqual((yield* store.readSuppressions(space, memory)).length, retained.length);
+      const synced = yield* store.dueWork(0, 100);
+      assert.strictEqual(
+        synced.some((w) => w.id === `sync:${space}:${expansion.operationId}`),
+        !extra,
+      );
+      // A different space stands in for the receiving store; only approved canonical operations cross the wire.
+      const replicaSpace = M.MemorySpaceId.make(id(901));
+      const replicaOp = {
+        ...canonical,
+        memorySpaceId: replicaSpace,
+        tombstone: { ...canonical.tombstone, memorySpaceId: replicaSpace },
+      };
+      const replicaDigest = memoryOperationDigest(replicaOp);
+      yield* quota.commit(
+        {
+          operation: replicaOp,
+          operationDigest: replicaDigest,
+          admission: Store.approvedReplica,
+          receipt: {
+            operationId: replicaOp.operationId,
+            memoryId: memory,
+            operationDigest: replicaDigest,
+            outcome: "deleted",
+            hubSequence: 1,
+          },
+        },
+        env,
+        Effect.void,
+      );
+      assert.strictEqual((yield* store.readSuppressions(replicaSpace, memory)).length, 1);
+      if (extra) {
+        const pending = (yield* store.pendingForgetIntents(10))[0]!;
+        assert.strictEqual(pending.operationId, expansion.operationId);
+        assert.strictEqual(pending.operationDigest, expansion.operationDigest);
+        // Make capacity available, then submit the same excess under a fresh retry ID.
+        yield* sql`DELETE FROM memory_import_keys WHERE key_kind='fixture'`;
+        yield* sql`UPDATE memory_identity_ledger SET reserve_bytes=0 WHERE memory_id=${id(900)}`;
+        if (additional.kind !== "forget") throw new Error("Fixture kind");
+        const retryId = M.MemoryOperationId.make(id(902));
+        const retry = {
+          ...additional,
+          operationId: retryId,
+          tombstone: { ...additional.tombstone, deleteOperationId: retryId },
+        };
+        const retried = yield* quota.commit(
+          {
+            ...decision(retry),
+            operationDigest: memoryOperationDigest(retry),
+            receipt: {
+              ...decision(retry).receipt,
+              forgetRetryOf: {
+                operationId: expansion.operationId,
+                operationDigest: expansion.operationDigest,
+              },
+            },
+          },
+          env,
+          Effect.void,
+        );
+        assert.strictEqual(retried.receipt.outcome, "deleted");
+        assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 300);
+        assert.deepStrictEqual(yield* store.pendingForgetIntents(10), []);
+      }
       const counters = yield* store.counters(space);
       assert.strictEqual(
         counters.find((counter) => counter.dimension === "import_source_items")?.value,

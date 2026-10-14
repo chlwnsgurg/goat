@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Store from "./MemoryStore.ts";
+import { memoryOperationDigest } from "./MemoryDecider.ts";
 
 export class MemoryQuotaService extends Context.Service<
   MemoryQuotaService,
@@ -43,6 +44,7 @@ const receiptJson = Schema.encodeEffect(
 const resolutionPayloadJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryResolutionPayload));
 const payloadJson = Schema.encodeEffect(Schema.fromJsonString(M.MemoryPayload));
 const suppressionJson = Schema.encodeEffect(Schema.fromJsonString(M.MemorySuppressionRecord));
+const capacityDimensionDecode = Schema.decodeUnknownEffect(M.MemoryCapacityDimension);
 const sampleDecode = Schema.decodeUnknownEffect(M.MemoryStorageSample);
 const growthDecode = Schema.decodeUnknownEffect(M.MemoryStorageGrowth);
 const utf8 = (text: string) => new TextEncoder().encode(text).length;
@@ -318,7 +320,7 @@ const make = Effect.gen(function* () {
             live_payload_bytes: usage.environmentLiveBytes,
             history: usage.environmentHistoryBytes,
           };
-          for (const entry of [...charges]) {
+          for (const entry of charges.slice()) {
             const current = baselines[entry.dimension];
             if (current !== undefined)
               charges.push({ ...entry, space: `_environment:${input.environmentId}`, current });
@@ -334,179 +336,255 @@ const make = Effect.gen(function* () {
         return yield* commit;
       }),
     );
-  const commit = Effect.fn("MemoryQuotaService.commit")(function* <E, R>(
-    decision: Store.MemoryDecision,
-    environmentId: M.EnvironmentId,
-    permit: Effect.Effect<void, E, R>,
-  ) {
-    return yield* store.transact(
-      Effect.gen(function* () {
-        yield* permit;
-        const op = decision.operation;
-        const aggregate = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
-        const identity = decision.identity ??
-          aggregate.identity ?? {
-            memorySpaceId: op.memorySpaceId,
-            memoryId: op.memoryId,
-            scope: op.kind === "forget" ? { kind: "user" as const } : op.revision.scope,
-            creatingEnvironmentId: op.originEnvironmentId,
-            createOperationId: op.operationId,
-            createdAtUtc:
-              op.kind === "forget" ? op.tombstone.deletedAtUtc : op.revision.createdAtUtc,
-          };
-        if (
-          op.kind === "forget" &&
-          aggregate.identity &&
-          !aggregate.tombstone &&
-          decision.receipt.outcome !== "rejected" &&
-          !(yield* store.receipt(op.memorySpaceId, op.operationId))
-        ) {
-          const reservation = yield* store.readForgetReservation(op.memorySpaceId, op.memoryId);
-          const records = Store.memorySuppressionRecords(op.tombstone);
-          const reservedKeys = new Set<string>();
-          for (const { revision, payload } of aggregate.revisions) {
-            const { sourceThread, sourceWatermark } = revision.provenance;
-            if (!sourceThread || !sourceWatermark) continue;
-            for (const messageId of new Set((payload?.evidence ?? []).flatMap((e) => e.messageIds)))
-              reservedKeys.add(
-                "sourceExclusion:" +
-                  (yield* exclusionJson({
-                    sourceThread,
-                    sourceWatermark,
-                    messageIds: [messageId],
-                  }).pipe(Effect.mapError(storageError))),
-              );
+  const commit: MemoryQuotaService["Service"]["commit"] = Effect.fn("MemoryQuotaService.commit")(
+    function* <E, R>(
+      decision: Store.MemoryDecision,
+      environmentId: M.EnvironmentId,
+      permit: Effect.Effect<void, E, R>,
+    ) {
+      return yield* store.transact(
+        Effect.gen(function* () {
+          yield* permit;
+          const op = decision.operation;
+          const replay = yield* store.receipt(op.memorySpaceId, op.operationId);
+          if (replay) {
+            if (
+              replay.operationDigest !== decision.operationDigest &&
+              (decision.admission.kind !== "localIntent" ||
+                replay.receipt.forgetExpansion?.requestDigest !== decision.operationDigest)
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
+            return replay;
           }
-          const unique = new Map<string, number>();
-          for (const record of records) {
-            const key =
-              record.kind + ":" + (yield* keyOf(record).pipe(Effect.mapError(storageError)));
-            unique.set(
-              key,
-              utf8(yield* suppressionJson(record).pipe(Effect.mapError(storageError))),
-            );
-          }
-          const selected = new Set<string>();
-          let baseBytes = 0;
-          // Reserved source evidence wins over optional expansion of the delete request.
-          for (const [key, bytes] of [...unique].sort(
-            ([a], [b]) => Number(reservedKeys.has(b)) - Number(reservedKeys.has(a)),
-          )) {
-            if (selected.size < reservation.keys && baseBytes + bytes <= reservation.bytes) {
-              selected.add(key);
-              baseBytes += bytes;
+          const aggregate = yield* store.loadAggregate(op.memorySpaceId, op.memoryId);
+          const identity = decision.identity ??
+            aggregate.identity ?? {
+              memorySpaceId: op.memorySpaceId,
+              memoryId: op.memoryId,
+              scope: op.kind === "forget" ? { kind: "user" as const } : op.revision.scope,
+              creatingEnvironmentId: op.originEnvironmentId,
+              createOperationId: op.operationId,
+              createdAtUtc:
+                op.kind === "forget" ? op.tombstone.deletedAtUtc : op.revision.createdAtUtc,
+            };
+          if (
+            op.kind === "forget" &&
+            decision.admission.kind === "localIntent" &&
+            aggregate.identity &&
+            !aggregate.tombstone &&
+            decision.receipt.outcome !== "rejected" &&
+            !(yield* store.receipt(op.memorySpaceId, op.operationId))
+          ) {
+            const reservation = yield* store.readForgetReservation(op.memorySpaceId, op.memoryId);
+            const records = Store.memorySuppressionRecords(op.tombstone);
+            const reservedKeys = new Set<string>();
+            for (const { revision, payload } of aggregate.revisions) {
+              const { sourceThread, sourceWatermark } = revision.provenance;
+              if (!sourceThread || !sourceWatermark) continue;
+              for (const messageId of new Set(
+                (payload?.evidence ?? []).flatMap((e) => e.messageIds),
+              ))
+                reservedKeys.add(
+                  "sourceExclusion:" +
+                    (yield* exclusionJson({
+                      sourceThread,
+                      sourceWatermark,
+                      messageIds: [messageId],
+                    }).pipe(Effect.mapError(storageError))),
+                );
             }
-          }
-          const fragment = (included: ReadonlySet<string>) =>
-            Effect.gen(function* () {
-              const sourceKeys: M.MemorySourceKey[] = [];
-              const content: M.MemoryContentSuppression[] = [];
-              const exclusions: M.MemorySourceExclusion[] = [];
-              for (const sourceKey of op.tombstone.suppressedSourceKeys)
-                if (
-                  included.has(
-                    "sourceKey:" +
-                      (yield* sourceKeyJson(sourceKey).pipe(Effect.mapError(storageError))),
-                  )
-                )
-                  sourceKeys.push(sourceKey);
-              for (const value of op.tombstone.suppressedContent)
-                if (
-                  included.has(
-                    "content:" + (yield* contentJson(value).pipe(Effect.mapError(storageError))),
-                  )
-                )
-                  content.push(value);
-              for (const exclusion of op.tombstone.sourceExclusions) {
-                const messageIds: M.MessageId[] = [];
-                for (const messageId of exclusion.messageIds)
+            const unique = new Map<string, number>();
+            for (const record of records) {
+              const key =
+                record.kind + ":" + (yield* keyOf(record).pipe(Effect.mapError(storageError)));
+              unique.set(
+                key,
+                utf8(yield* suppressionJson(record).pipe(Effect.mapError(storageError))),
+              );
+            }
+            const selected = new Set<string>();
+            let baseBytes = 0;
+            // Reserved source evidence wins over optional expansion of the delete request.
+            for (const [key, bytes] of [...unique].sort(
+              ([a], [b]) => Number(reservedKeys.has(b)) - Number(reservedKeys.has(a)),
+            )) {
+              if (selected.size < reservation.keys && baseBytes + bytes <= reservation.bytes) {
+                selected.add(key);
+                baseBytes += bytes;
+              }
+            }
+            const fragment = (included: ReadonlySet<string>) =>
+              Effect.gen(function* () {
+                const sourceKeys: M.MemorySourceKey[] = [];
+                const content: M.MemoryContentSuppression[] = [];
+                const exclusions: M.MemorySourceExclusion[] = [];
+                for (const sourceKey of op.tombstone.suppressedSourceKeys)
                   if (
                     included.has(
-                      "sourceExclusion:" +
-                        (yield* exclusionJson({ ...exclusion, messageIds: [messageId] }).pipe(
-                          Effect.mapError(storageError),
-                        )),
+                      "sourceKey:" +
+                        (yield* sourceKeyJson(sourceKey).pipe(Effect.mapError(storageError))),
                     )
                   )
-                    messageIds.push(messageId);
-                if (messageIds.length) exclusions.push({ ...exclusion, messageIds });
-              }
-              return {
-                ...op.tombstone,
-                suppressedSourceKeys: sourceKeys,
-                suppressedContent: content,
-                sourceExclusions: exclusions,
+                    sourceKeys.push(sourceKey);
+                for (const value of op.tombstone.suppressedContent)
+                  if (
+                    included.has(
+                      "content:" + (yield* contentJson(value).pipe(Effect.mapError(storageError))),
+                    )
+                  )
+                    content.push(value);
+                for (const exclusion of op.tombstone.sourceExclusions) {
+                  const messageIds: M.MessageId[] = [];
+                  for (const messageId of exclusion.messageIds)
+                    if (
+                      included.has(
+                        "sourceExclusion:" +
+                          (yield* exclusionJson({ ...exclusion, messageIds: [messageId] }).pipe(
+                            Effect.mapError(storageError),
+                          )),
+                      )
+                    )
+                      messageIds.push(messageId);
+                  if (messageIds.length) exclusions.push({ ...exclusion, messageIds });
+                }
+                return {
+                  ...op.tombstone,
+                  suppressedSourceKeys: sourceKeys,
+                  suppressedContent: content,
+                  sourceExclusions: exclusions,
+                };
+              });
+            const excess = new Set([...unique.keys()].filter((key) => !selected.has(key)));
+            if (excess.size) {
+              const base = yield* fragment(selected);
+              const hex = memoryOperationDigest(op);
+              const extraId = M.MemoryOperationId.make(
+                `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`,
+              );
+              const extra: Extract<M.MemoryOperation, { kind: "forget" }> = {
+                ...op,
+                operationId: extraId,
+                expectedHeads: [],
+                tombstone: { ...(yield* fragment(excess)), deleteOperationId: extraId },
               };
-            });
-          const base = yield* fragment(selected);
-          const result = yield* withAdmission(
+              const baseOp = { ...op, tombstone: base };
+              const expansion = {
+                requestDigest: decision.operationDigest,
+                operationId: extraId,
+                operationDigest: memoryOperationDigest(extra),
+                status: "pending" as const,
+              };
+              const baseDecision = {
+                ...decision,
+                identity,
+                operation: baseOp,
+                operationDigest: memoryOperationDigest(baseOp),
+                receipt: { ...decision.receipt, forgetExpansion: expansion },
+              };
+              const result = yield* withAdmission(
+                {
+                  operation: baseOp,
+                  admission: decision.admission,
+                  environmentId,
+                  receipt: baseDecision.receipt,
+                },
+                store.apply(baseDecision),
+              );
+              const extraResult = yield* commit(
+                {
+                  operation: extra,
+                  operationDigest: expansion.operationDigest,
+                  admission: decision.admission,
+                  receipt: {
+                    operationId: extraId,
+                    memoryId: op.memoryId,
+                    outcome: "deleted",
+                    revisionId: null,
+                    pendingSync: true,
+                  },
+                },
+                environmentId,
+                permit,
+              );
+              return yield* store.settleForgetExpansion(op.memorySpaceId, {
+                ...result,
+                receipt: {
+                  ...result.receipt,
+                  forgetExpansion: {
+                    ...expansion,
+                    status: extraResult.receipt.outcome === "rejected" ? "rejected" : "accepted",
+                  },
+                },
+              });
+            }
+          }
+          return yield* withAdmission(
             {
-              operation: { ...op, tombstone: base },
+              operation: op,
               admission: decision.admission,
               environmentId,
               receipt: decision.receipt,
             },
-            store.apply({ ...decision, identity, admittedForget: base }),
+            store.apply(
+              decision.receipt.outcome === "rejected" ? decision : { ...decision, identity },
+            ),
+          ).pipe(
+            Effect.catchTags({
+              MemoryCapacityError: (error) => {
+                if (
+                  op.kind !== "forget" ||
+                  !aggregate.tombstone ||
+                  decision.admission.kind !== "localIntent"
+                )
+                  return Effect.fail(error);
+                return Effect.gen(function* () {
+                  const rejected = yield* store.apply({
+                    ...decision,
+                    receipt: {
+                      ...decision.receipt,
+                      operationId: op.operationId,
+                      memoryId: op.memoryId,
+                      outcome: "rejected",
+                      revisionId: null,
+                      pendingSync: false,
+                      failureCode: "capacity_exceeded",
+                      capacity: {
+                        code: "capacity_exceeded",
+                        dimension: yield* capacityDimensionDecode(error.dimension).pipe(
+                          Effect.mapError(storageError),
+                        ),
+                        current: Math.max(0, error.current ?? error.limit),
+                        limit: error.limit,
+                        reclaimable: 0,
+                      },
+                    },
+                  });
+                  yield* store
+                    .preserveForgetIntent({
+                      memorySpaceId: op.memorySpaceId,
+                      memoryId: op.memoryId,
+                      operationId: op.operationId,
+                      requestedAtUtc: op.tombstone.deletedAtUtc,
+                      attempts: 0,
+                      lastFailureCode: "capacity_exceeded",
+                      operationDigest: decision.operationDigest,
+                      submissionState: "rejected",
+                    })
+                    .pipe(
+                      Effect.catchTags({
+                        // The bounded rejection event is recoverable when an intent slot becomes free.
+                        MemoryCapacityError: () => Effect.void,
+                      }),
+                    );
+                  return rejected;
+                });
+              },
+            }),
           );
-          const excess = new Set([...unique.keys()].filter((key) => !selected.has(key)));
-          if (!excess.size) return result;
-          const extra = yield* fragment(excess);
-          const bytes = [...excess].reduce((sum, key) => sum + unique.get(key)!, 0);
-          const usage = yield* store.usage(op.memorySpaceId, aggregate.identity.scope);
-          const charges: Store.MemoryQuotaCharge[] = [
-            {
-              space: op.memorySpaceId,
-              dimension: "import_source_items",
-              scopeKey: "space",
-              current: usage.keys,
-              delta: excess.size,
-              limit: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
-            },
-            {
-              space: op.memorySpaceId,
-              dimension: "permanent_metadata",
-              scopeKey: "space",
-              current: usage.permanentBytes,
-              delta: bytes,
-              limit: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
-            },
-          ];
-          if (decision.admission.kind !== "hubAdmission")
-            charges.push({
-              ...charges[1]!,
-              space: `_environment:${environmentId}`,
-              current: usage.environmentPermanentBytes,
-            });
-          const status = yield* store
-            .reserve(decision.admission, charges)
-            .pipe(
-              Effect.as("accepted" as const),
-              Effect.catchTags({ MemoryCapacityError: () => Effect.succeed("rejected" as const) }),
-            );
-          yield* store.settleForgetFragment({
-            operation: op,
-            operationDigest: decision.operationDigest,
-            fragment: extra,
-            keys: excess.size,
-            bytes,
-            status,
-          });
-          return result;
-        }
-        return yield* withAdmission(
-          {
-            operation: op,
-            admission: decision.admission,
-            environmentId,
-            receipt: decision.receipt,
-          },
-          store.apply(
-            decision.receipt.outcome === "rejected" ? decision : { ...decision, identity },
-          ),
-        );
-      }),
-    );
-  });
+        }),
+      );
+    },
+  );
   const readStorageGrowth = Effect.fn("MemoryQuotaService.readStorageGrowth")(function* (
     environmentId: M.EnvironmentId,
   ) {

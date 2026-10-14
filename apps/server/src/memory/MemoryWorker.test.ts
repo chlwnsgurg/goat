@@ -18,6 +18,7 @@ import * as Events from "../orchestration-v2/EventSink.ts";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
+import { decideMemoryOperation } from "./MemoryDecider.ts";
 import * as Service from "./MemoryService.ts";
 import * as Maintenance from "./MemoryFtsMaintenance.ts";
 import * as Worker from "./MemoryWorker.ts";
@@ -122,6 +123,8 @@ const encodeMessage = Schema.encodeSync(
 const decodeMessage = Schema.decodeUnknownEffect(
   Schema.fromJsonString(M.OrchestrationV2ConversationMessageJson),
 );
+const decodeOperation = Schema.decodeUnknownEffect(M.MemoryOperation);
+const decodeRun = Schema.decodeUnknownEffect(Schema.fromJsonString(M.OrchestrationV2RunJson));
 const encodeRun = Schema.encodeSync(Schema.fromJsonString(M.OrchestrationV2RunJson));
 const seed = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -337,6 +340,92 @@ describe("MemoryWorker", () => {
       ),
     );
   });
+  it.effect("retries rejected forget excess without replaying the basic deletion", () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const quota = yield* Quota.MemoryQuotaService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: M.MemoryOperationId.make(id(1700)),
+          expectedHeads: [],
+          baseBoundary: null,
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: { text: "synthetic memory", evidence: [], derivedFromMemoryRevisions: [] },
+        },
+        Effect.void,
+      );
+      const aggregate = yield* store.loadAggregate(space, memoryId);
+      const operation = yield* decodeOperation({
+        protocolVersion: 1,
+        kind: "forget",
+        memorySpaceId: space,
+        memoryId,
+        operationId: id(1701),
+        originEnvironmentId: environmentId,
+        expectedHeads: aggregate.heads,
+        tombstone: {
+          memorySpaceId: space,
+          memoryId,
+          deleteOperationId: id(1701),
+          deletingEnvironmentId: environmentId,
+          deletedAtUtc: now,
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [
+            {
+              sourceThread: { environmentId, threadId },
+              sourceWatermark: { fromEventId: id(1702), toEventId: id(1703), throughSequence: 1 },
+              messageIds: ["excess-message"],
+            },
+          ],
+        },
+      });
+      const used = yield* store.usage(space, { kind: "user" });
+      const filler = M.MEMORY_IMPORT_MAX_SOURCE_ITEMS - used.keys;
+      yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${filler}) INSERT INTO memory_import_keys (space,key_kind,key,memory_id,record_json) SELECT ${space},'fixture',CAST(v AS TEXT),${id(1799)},'{}' FROM n`;
+      // Exhaust intent slots as well; the basic deletion still commits and its rejected excess is recoverable.
+      const intentLimit = M.MEMORY_PENDING_FORGET_INTENTS_MAX;
+      yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${intentLimit}) INSERT INTO memory_pending_forget_intents (space,memory_id,operation_id,requested_at_utc,attempts,last_failure_code,operation_digest,submission_state) SELECT ${space},printf('00000000-0000-4000-8000-%012d',10000+v),printf('00000000-0000-4000-8000-%012d',20000+v),${now},0,'capacity_exceeded',NULL,'unsubmitted' FROM n`;
+      const decision = decideMemoryOperation(aggregate, operation, Store.localIntent, {
+        kind: "allowed",
+      });
+      const result = yield* quota.commit(decision, environmentId, Effect.void);
+      assert.strictEqual(result.receipt.outcome, "deleted");
+      assert.strictEqual(result.receipt.forgetExpansion?.status, "rejected");
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_pending_forget_intents WHERE memory_id=${memoryId}`)
+          .length,
+        0,
+      );
+      yield* sql`DELETE FROM memory_pending_forget_intents WHERE memory_id!=${memoryId}`;
+      const intent = (yield* store.pendingForgetIntents(10))[0]!;
+      yield* (yield* Worker.MemoryWorker).sweepDue();
+      const failedRetryId = M.MemoryOperationId.make(
+        Service.memoryStableUuid(`${intent.operationId}:0:retry`),
+      );
+      assert.strictEqual(yield* store.receipt(space, failedRetryId), undefined);
+      assert.strictEqual((yield* store.pendingForgetIntents(10))[0]?.attempts, 1);
+      yield* sql`DELETE FROM memory_import_keys WHERE key_kind='fixture'`;
+      yield* (yield* Worker.MemoryWorker).sweepDue();
+      const retryId = M.MemoryOperationId.make(
+        Service.memoryStableUuid(`${intent.operationId}:1:retry`),
+      );
+      const retry = (yield* store.receipt(space, retryId))!;
+      assert.strictEqual(retry.receipt.outcome, "deleted");
+      assert.deepStrictEqual(retry.receipt.forgetRetryOf, {
+        operationId: intent.operationId,
+        operationDigest: intent.operationDigest,
+      });
+      assert.deepStrictEqual(yield* store.pendingForgetIntents(10), []);
+      assert.strictEqual((yield* store.readSuppressions(space, memoryId)).length, 1);
+      assert.deepStrictEqual(yield* quota.commit(decision, environmentId, Effect.void), result);
+    }).pipe(Effect.provide(live())),
+  );
   it.effect.each([false, true])(
     "preserves earlier chunks and later updates (local=%s)",
     (local) => {
@@ -403,6 +492,78 @@ describe("MemoryWorker", () => {
           ),
         ),
       );
+    },
+  );
+  it.effect.each([false, true])(
+    "rebuilds cumulative summaries after a prior run is rolled back (local=%s)",
+    (local) => {
+      const inputs: M.GenerateMemorySummaryInput[] = [];
+      return Effect.gen(function* () {
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const worker = yield* Worker.MemoryWorker;
+        const store = yield* Store.MemoryStore;
+        const earlyMessageRow = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+        const earlyMessage = yield* decodeMessage(earlyMessageRow.payload_json);
+        yield* sql`UPDATE orchestration_events SET sequence=3 WHERE sequence=2`;
+        yield* sql`INSERT INTO orchestration_events VALUES (2,${id(1299)},${threadId},'message.updated',${encodeMessage({ ...earlyMessage, id: M.MessageId.make("survivor"), runId: null })},${now},2,'thread')`;
+        yield* worker.sweepDue();
+        assert.include(
+          inputs[0]!.messages.map((m) => m.messageId),
+          M.MessageId.make("message"),
+        );
+        const messageRow = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+        const message = yield* decodeMessage(messageRow.payload_json);
+        const runRow = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=3`)[0]!;
+        const run = yield* decodeRun(runRow.payload_json);
+        yield* sql`INSERT INTO orchestration_events VALUES (4,${id(1300)},${threadId},'run.updated',${encodeRun({ ...run, status: "rolled_back" })},${now},2,'thread')`;
+        const nextRunId = M.RunId.make("run-b");
+        // Force regeneration to cross the bounded 100-message chunk.
+        for (let index = 0; index < 101; index++) {
+          yield* sql`INSERT INTO orchestration_events VALUES (${index + 5},${id(1400 + index)},${threadId},'message.updated',${encodeMessage({ ...message, id: M.MessageId.make(`run-b-${index}`), runId: nextRunId })},${now},2,'thread')`;
+        }
+        yield* sql`INSERT INTO orchestration_events VALUES (106,${id(1600)},${threadId},'run.updated',${encodeRun({ ...run, id: nextRunId, userMessageId: M.MessageId.make("run-b-0"), status: "completed" })},${now},2,'thread')`;
+        // The hook itself is bounded to 100 events per sweep.
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        yield* worker.sweepDue();
+        assert.strictEqual(inputs[1]!.previousSummary, undefined);
+        assert.isTrue(inputs.slice(1).every((input) => input.messages.length <= 100));
+        assert.isFalse(
+          inputs
+            .slice(1)
+            .some(
+              (input) =>
+                input.messages.some((m) => m.messageId === "message") ||
+                input.previousSummary?.text.includes("message"),
+            ),
+        );
+        const summaryId = M.MemoryId.make(
+          Service.memoryStableUuid(`${environmentId}:${threadId}:summary`),
+        );
+        const aggregate = local ? undefined : yield* store.loadAggregate(space, summaryId);
+        const final = local
+          ? yield* store.readLocalSummaryPayload(
+              environmentId,
+              `${environmentId}:${threadId}:summary`,
+            )
+          : aggregate?.revisions.find((pair) => pair.revision.revisionId === aggregate.heads[0])
+              ?.payload;
+        if (!final) throw new Error("Missing rebuilt summary");
+        assert.notInclude(final.text, "message");
+        assert.include(final.text, "run-b-100");
+        const evidenceIds = new Set(final.evidence.flatMap((e) => e.messageIds));
+        assert.isFalse(evidenceIds.has(M.MessageId.make("message")));
+        assert.isTrue(evidenceIds.has(M.MessageId.make("survivor")));
+        assert.strictEqual(evidenceIds.size, 102);
+      }).pipe(Effect.provide(live(false, (input) => inputs.push(input), local)));
     },
   );
   it.effect("revisits consolidation at exactly 24 hours after extracting turns", () =>
