@@ -257,9 +257,36 @@ export type MemoryAncestry = {
   readonly retentionFloor: number;
   readonly parents: ReadonlyArray<MemoryParentState>;
 };
+/** Expanded wire exclusions are stored and admitted per message. */
+export const memorySuppressionRecords = (t: M.MemoryTombstone): M.MemorySuppressionRecord[] => [
+  ...t.suppressedSourceKeys.map((sourceKey) => ({
+    memorySpaceId: t.memorySpaceId,
+    memoryId: t.memoryId,
+    deleteOperationId: t.deleteOperationId,
+    kind: "sourceKey" as const,
+    sourceKey,
+  })),
+  ...t.suppressedContent.map((content) => ({
+    memorySpaceId: t.memorySpaceId,
+    memoryId: t.memoryId,
+    deleteOperationId: t.deleteOperationId,
+    kind: "content" as const,
+    content,
+  })),
+  ...t.sourceExclusions.flatMap((exclusion) =>
+    exclusion.messageIds.map((messageId) => ({
+      memorySpaceId: t.memorySpaceId,
+      memoryId: t.memoryId,
+      deleteOperationId: t.deleteOperationId,
+      kind: "sourceExclusion" as const,
+      exclusion: { ...exclusion, messageIds: [messageId] },
+    })),
+  ),
+];
 export type MemoryDecision = {
   readonly operation: M.MemoryOperation;
   readonly operationDigest: string;
+  readonly admittedForget?: M.MemoryTombstone;
   readonly admission: MemoryAdmissionContext;
   readonly receipt: M.MemoryHubReceipt | M.MemoryMutationReceipt;
   readonly item?: M.MemoryItem;
@@ -590,6 +617,14 @@ export class MemoryStore extends Context.Service<
     readonly operationMetadataBytes: (
       operation: M.MemoryOperation,
     ) => Effect.Effect<number, MemoryStorageError>;
+    readonly settleForgetFragment: (input: {
+      readonly operation: Extract<M.MemoryOperation, { kind: "forget" }>;
+      readonly operationDigest: string;
+      readonly fragment: M.MemoryTombstone;
+      readonly keys: number;
+      readonly bytes: number;
+      readonly status: "accepted" | "rejected";
+    }) => Effect.Effect<void, MemoryStorageError | MemoryStoreConflict>;
     readonly firstForgetReservation: (
       operation: M.MemoryOperation,
     ) => Effect.Effect<{ bytes: number; keys: number }, MemoryStorageError>;
@@ -1374,6 +1409,17 @@ const make = Effect.gen(function* () {
       );
     }
   });
+  const writeSuppressions = Effect.fnUntraced(function* (t: M.MemoryTombstone) {
+    const records = memorySuppressionRecords(t);
+    for (const record of records) {
+      const json = yield* stored("suppression-codec", suppressionCodec.encode(record));
+      // Unique canonical encoded keys keep the permanent union outside bounded wire fragments.
+      yield* stored(
+        "suppression",
+        sql`INSERT INTO memory_import_keys (space,key_kind,key,memory_id,record_json) VALUES (${t.memorySpaceId},${record.kind},${hashText(yield* suppressionKeyCodec.encode(record.kind === "sourceKey" ? { kind: record.kind, value: record.sourceKey } : record.kind === "content" ? { kind: record.kind, value: record.content } : { kind: record.kind, value: record.exclusion }))},${t.memoryId},${json}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
+      );
+    }
+  });
   const applyDecision = Effect.fn("MemoryStore.applyDecision")(function* (
     decision: MemoryDecision,
     expectedGeneration?: number,
@@ -1520,44 +1566,12 @@ const make = Effect.gen(function* () {
           );
         }
         if (accepted && op.kind === "forget") {
-          const t = op.tombstone;
+          const t = decision.admittedForget ?? op.tombstone;
           yield* stored(
             "tombstone",
             sql`INSERT INTO memory_tombstones (space,memory_id,delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json) VALUES (${op.memorySpaceId},${op.memoryId},${t.deleteOperationId},${t.deletingEnvironmentId},${Date.parse(t.deletedAtUtc)},${yield* sourceKeysCodec.encode(t.suppressedSourceKeys)},${yield* contentCodec.encode(t.suppressedContent)},${yield* exclusionsCodec.encode(t.sourceExclusions)}) ON CONFLICT(space,memory_id) DO NOTHING`,
           );
-          const records: M.MemorySuppressionRecord[] = [
-            ...t.suppressedSourceKeys.map((sourceKey) => ({
-              memorySpaceId: t.memorySpaceId,
-              memoryId: t.memoryId,
-              deleteOperationId: t.deleteOperationId,
-              kind: "sourceKey" as const,
-              sourceKey,
-            })),
-            ...t.suppressedContent.map((content) => ({
-              memorySpaceId: t.memorySpaceId,
-              memoryId: t.memoryId,
-              deleteOperationId: t.deleteOperationId,
-              kind: "content" as const,
-              content,
-            })),
-            ...t.sourceExclusions.flatMap((exclusion) =>
-              exclusion.messageIds.map((messageId) => ({
-                memorySpaceId: t.memorySpaceId,
-                memoryId: t.memoryId,
-                deleteOperationId: t.deleteOperationId,
-                kind: "sourceExclusion" as const,
-                exclusion: { ...exclusion, messageIds: [messageId] },
-              })),
-            ),
-          ];
-          for (const record of records) {
-            const json = yield* stored("suppression-codec", suppressionCodec.encode(record));
-            // Unique canonical encoded keys keep the permanent union outside bounded wire fragments.
-            yield* stored(
-              "suppression",
-              sql`INSERT INTO memory_import_keys (space,key_kind,key,memory_id,record_json) VALUES (${op.memorySpaceId},${record.kind},${hashText(yield* suppressionKeyCodec.encode(record.kind === "sourceKey" ? { kind: record.kind, value: record.sourceKey } : record.kind === "content" ? { kind: record.kind, value: record.content } : { kind: record.kind, value: record.exclusion }))},${op.memoryId},${json}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
-            );
-          }
+          yield* writeSuppressions(t);
           const item: M.MemoryItem = {
             memorySpaceId: op.memorySpaceId,
             memoryId: op.memoryId,
@@ -2554,6 +2568,8 @@ const make = Effect.gen(function* () {
   ) {
     return yield* transact(
       Effect.gen(function* () {
+        const admitted: Array<{ charge: MemoryQuotaCharge; value: number }> = [];
+        const pending = new Map<string, number>();
         for (const charge of charges) {
           const rows = yield* stored(
             "quota",
@@ -2561,7 +2577,8 @@ const make = Effect.gen(function* () {
               value: number;
             }>`SELECT value FROM memory_quota_counters WHERE space=${charge.space} AND dimension=${charge.dimension} AND scope_key=${charge.scopeKey}`,
           );
-          const value = (charge.current ?? rows[0]?.value ?? 0) + charge.delta;
+          const key = `${charge.space}:${charge.dimension}:${charge.scopeKey}`;
+          const value = (charge.current ?? pending.get(key) ?? rows[0]?.value ?? 0) + charge.delta;
           if (
             value < 0 ||
             (context.kind !== "approvedReplica" && charge.delta > 0 && value > charge.limit)
@@ -2570,6 +2587,10 @@ const make = Effect.gen(function* () {
               dimension: charge.dimension,
               limit: charge.limit,
             });
+          admitted.push({ charge, value });
+          pending.set(key, value);
+        }
+        for (const { charge, value } of admitted) {
           yield* stored(
             "quota-write",
             sql`INSERT INTO memory_quota_counters (space,dimension,scope_key,value) VALUES (${charge.space},${charge.dimension},${charge.scopeKey},${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=excluded.value`,
@@ -3487,6 +3508,35 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const settleForgetFragment = Effect.fn("MemoryStore.settleForgetFragment")(function* (input: {
+    operation: Extract<M.MemoryOperation, { kind: "forget" }>;
+    operationDigest: string;
+    fragment: M.MemoryTombstone;
+    keys: number;
+    bytes: number;
+    status: "accepted" | "rejected";
+  }) {
+    const op = input.operation;
+    const original = yield* receipt(op.memorySpaceId, op.operationId);
+    if (!original || original.operationDigest !== input.operationDigest)
+      return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const fragmentDigest = hashText(M.encodeMemoryOperation({ ...op, tombstone: input.fragment }));
+    // Fixed-size fragment disposition belongs to the reserved deletion core, not the excess payload.
+    yield* stored(
+      "forget-fragment-disposition",
+      sql`UPDATE memory_tombstones SET fragment_status=${input.status},fragment_operation_id=${op.operationId},fragment_operation_digest=${input.operationDigest},fragment_digest=${fragmentDigest},fragment_keys=${input.keys},fragment_bytes=${input.bytes} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
+    );
+    if (input.status === "rejected") return;
+    const t = op.tombstone;
+    yield* writeSuppressions(input.fragment);
+    yield* stored(
+      "forget-fragment-union",
+      sql`UPDATE memory_tombstones SET suppressed_source_keys_json=${yield* sourceKeysCodec.encode(t.suppressedSourceKeys)},suppressed_content_json=${yield* contentCodec.encode(t.suppressedContent)},source_exclusions_json=${yield* exclusionsCodec.encode(t.sourceExclusions)} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId}`,
+    );
+    const current = yield* readItem(op.memorySpaceId, op.memoryId);
+    if (current?.item.status === "forgotten")
+      yield* putItem({ ...current.item, tombstone: t }, [], yield* nextWatermark(op.memorySpaceId));
+  });
   const readForgetReservation = Effect.fn("MemoryStore.readForgetReservation")(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
@@ -4056,6 +4106,7 @@ const make = Effect.gen(function* () {
     reserve,
     usage,
     readForgetReservation,
+    settleForgetFragment,
     firstForgetReservation,
     operationMetadataBytes: (operation) =>
       Effect.map(

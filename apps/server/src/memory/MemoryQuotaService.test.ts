@@ -287,7 +287,6 @@ describe("MemoryQuotaService", () => {
       });
       yield* quota.commit(decision(op), env, Effect.void);
       assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
-      assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
     }).pipe(Effect.provide(services)),
   );
   it.effect.each([
@@ -300,7 +299,34 @@ describe("MemoryQuotaService", () => {
       const store = yield* Store.MemoryStore;
       const quota = yield* Quota.MemoryQuotaService;
       const sql = yield* SqlClient.SqlClient;
-      yield* quota.commit(decision(), env, Effect.void);
+      const initial = operation();
+      if (initial.kind === "forget") throw new Error("Fixture kind");
+      const sourceThread = { environmentId: env, threadId: "thread-0" };
+      const sourceWatermark = { fromEventId: id(100), toEventId: id(101), throughSequence: 1 };
+      yield* quota.commit(
+        decision(
+          decodeOperation({
+            ...initial,
+            revision: {
+              ...initial.revision,
+              provenance: { environmentId: env, sourceThread, sourceWatermark },
+            },
+            payload: {
+              ...initial.payload,
+              evidence: [
+                {
+                  origin: "thread",
+                  sourceThread,
+                  watermark: sourceWatermark,
+                  messageIds: ["message-0-0"],
+                },
+              ],
+            },
+          }),
+        ),
+        env,
+        Effect.void,
+      );
       const base = forget();
       if (base.kind !== "forget") throw new Error("Fixture kind");
       const op = decodeOperation({
@@ -341,12 +367,46 @@ describe("MemoryQuotaService", () => {
           extra;
         yield* sql`UPDATE memory_identity_ledger SET reserve_bytes=${filler} WHERE memory_id=${id(900)}`;
       }
-      const result = yield* Effect.exit(quota.commit(decision(op), env, Effect.void));
-      assert.strictEqual(result._tag, extra ? "Failure" : "Success");
-      assert.strictEqual((yield* store.readSuppressions(space, memory)).length, extra ? 0 : 300);
+      const result = yield* quota.commit(decision(op), env, Effect.void);
+      assert.strictEqual(result.operationDigest, hash);
+      assert.strictEqual(result.receipt.outcome, "deleted");
+      const retained = yield* store.readSuppressions(space, memory);
+      assert.strictEqual(retained.length, extra ? 1 : 300);
+      assert.isTrue(
+        retained.some(
+          (record) =>
+            record.kind === "sourceExclusion" &&
+            record.exclusion.messageIds.includes(M.MessageId.make("message-0-0")),
+        ),
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
       assert.strictEqual(
-        (yield* store.loadAggregate(space, memory)).item?.status,
-        extra ? "active" : "forgotten",
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND memory_id=${memory}`)
+          .length,
+        0,
+      );
+      const disposition = (yield* sql<{
+        status: string;
+        operation_id: string;
+        operation_digest: string;
+        keys: number;
+      }>`SELECT fragment_status AS status,fragment_operation_id AS operation_id,fragment_operation_digest AS operation_digest,fragment_keys AS keys FROM memory_tombstones WHERE space=${space} AND memory_id=${memory}`)[0]!;
+      assert.deepStrictEqual(disposition, {
+        status: extra ? "rejected" : "accepted",
+        operation_id: op.operationId,
+        operation_digest: hash,
+        keys: 299,
+      });
+      assert.strictEqual(
+        M.encodeMemoryOperation((yield* store.readOperation(space, op.operationId))!),
+        M.encodeMemoryOperation(op),
+      );
+      assert.deepStrictEqual(yield* quota.commit(decision(op), env, Effect.void), result);
+      assert.strictEqual((yield* store.readSuppressions(space, memory)).length, retained.length);
+      const counters = yield* store.counters(space);
+      assert.strictEqual(
+        counters.find((counter) => counter.dimension === "import_source_items")?.value,
+        (yield* store.usage(space, { kind: "user" })).keys,
       );
     }).pipe(Effect.provide(services)),
   );

@@ -76,6 +76,12 @@ export default Effect.gen(function* () {
     suppressed_source_keys_json TEXT NOT NULL,
     suppressed_content_json TEXT NOT NULL,
     source_exclusions_json TEXT NOT NULL,
+    fragment_status TEXT CHECK(fragment_status IN ('accepted','rejected')),
+    fragment_operation_id TEXT,
+    fragment_operation_digest TEXT,
+    fragment_digest TEXT,
+    fragment_keys INTEGER,
+    fragment_bytes INTEGER,
     PRIMARY KEY(space,memory_id)
   )`;
   yield* sql`CREATE TABLE IF NOT EXISTS memory_conflicts (

@@ -201,31 +201,7 @@ const make = Effect.gen(function* () {
             ).pipe(Effect.mapError(storageError)),
           );
           const t = op.tombstone;
-          const records: M.MemorySuppressionRecord[] = [
-            ...t.suppressedSourceKeys.map((sourceKey) => ({
-              memorySpaceId: t.memorySpaceId,
-              memoryId: t.memoryId,
-              deleteOperationId: t.deleteOperationId,
-              kind: "sourceKey" as const,
-              sourceKey,
-            })),
-            ...t.suppressedContent.map((content) => ({
-              memorySpaceId: t.memorySpaceId,
-              memoryId: t.memoryId,
-              deleteOperationId: t.deleteOperationId,
-              kind: "content" as const,
-              content,
-            })),
-            ...t.sourceExclusions.flatMap((exclusion) =>
-              exclusion.messageIds.map((messageId) => ({
-                memorySpaceId: t.memorySpaceId,
-                memoryId: t.memoryId,
-                deleteOperationId: t.deleteOperationId,
-                kind: "sourceExclusion" as const,
-                exclusion: { ...exclusion, messageIds: [messageId] },
-              })),
-            ),
-          ];
+          const records = Store.memorySuppressionRecords(t);
           let newKeys = 0,
             newBytes = 0;
           for (const record of records) {
@@ -378,6 +354,145 @@ const make = Effect.gen(function* () {
             createdAtUtc:
               op.kind === "forget" ? op.tombstone.deletedAtUtc : op.revision.createdAtUtc,
           };
+        if (
+          op.kind === "forget" &&
+          aggregate.identity &&
+          !aggregate.tombstone &&
+          decision.receipt.outcome !== "rejected" &&
+          !(yield* store.receipt(op.memorySpaceId, op.operationId))
+        ) {
+          const reservation = yield* store.readForgetReservation(op.memorySpaceId, op.memoryId);
+          const records = Store.memorySuppressionRecords(op.tombstone);
+          const reservedKeys = new Set<string>();
+          for (const { revision, payload } of aggregate.revisions) {
+            const { sourceThread, sourceWatermark } = revision.provenance;
+            if (!sourceThread || !sourceWatermark) continue;
+            for (const messageId of new Set((payload?.evidence ?? []).flatMap((e) => e.messageIds)))
+              reservedKeys.add(
+                "sourceExclusion:" +
+                  (yield* exclusionJson({
+                    sourceThread,
+                    sourceWatermark,
+                    messageIds: [messageId],
+                  }).pipe(Effect.mapError(storageError))),
+              );
+          }
+          const unique = new Map<string, number>();
+          for (const record of records) {
+            const key =
+              record.kind + ":" + (yield* keyOf(record).pipe(Effect.mapError(storageError)));
+            unique.set(
+              key,
+              utf8(yield* suppressionJson(record).pipe(Effect.mapError(storageError))),
+            );
+          }
+          const selected = new Set<string>();
+          let baseBytes = 0;
+          // Reserved source evidence wins over optional expansion of the delete request.
+          for (const [key, bytes] of [...unique].sort(
+            ([a], [b]) => Number(reservedKeys.has(b)) - Number(reservedKeys.has(a)),
+          )) {
+            if (selected.size < reservation.keys && baseBytes + bytes <= reservation.bytes) {
+              selected.add(key);
+              baseBytes += bytes;
+            }
+          }
+          const fragment = (included: ReadonlySet<string>) =>
+            Effect.gen(function* () {
+              const sourceKeys: M.MemorySourceKey[] = [];
+              const content: M.MemoryContentSuppression[] = [];
+              const exclusions: M.MemorySourceExclusion[] = [];
+              for (const sourceKey of op.tombstone.suppressedSourceKeys)
+                if (
+                  included.has(
+                    "sourceKey:" +
+                      (yield* sourceKeyJson(sourceKey).pipe(Effect.mapError(storageError))),
+                  )
+                )
+                  sourceKeys.push(sourceKey);
+              for (const value of op.tombstone.suppressedContent)
+                if (
+                  included.has(
+                    "content:" + (yield* contentJson(value).pipe(Effect.mapError(storageError))),
+                  )
+                )
+                  content.push(value);
+              for (const exclusion of op.tombstone.sourceExclusions) {
+                const messageIds: M.MessageId[] = [];
+                for (const messageId of exclusion.messageIds)
+                  if (
+                    included.has(
+                      "sourceExclusion:" +
+                        (yield* exclusionJson({ ...exclusion, messageIds: [messageId] }).pipe(
+                          Effect.mapError(storageError),
+                        )),
+                    )
+                  )
+                    messageIds.push(messageId);
+                if (messageIds.length) exclusions.push({ ...exclusion, messageIds });
+              }
+              return {
+                ...op.tombstone,
+                suppressedSourceKeys: sourceKeys,
+                suppressedContent: content,
+                sourceExclusions: exclusions,
+              };
+            });
+          const base = yield* fragment(selected);
+          const result = yield* withAdmission(
+            {
+              operation: { ...op, tombstone: base },
+              admission: decision.admission,
+              environmentId,
+              receipt: decision.receipt,
+            },
+            store.apply({ ...decision, identity, admittedForget: base }),
+          );
+          const excess = new Set([...unique.keys()].filter((key) => !selected.has(key)));
+          if (!excess.size) return result;
+          const extra = yield* fragment(excess);
+          const bytes = [...excess].reduce((sum, key) => sum + unique.get(key)!, 0);
+          const usage = yield* store.usage(op.memorySpaceId, aggregate.identity.scope);
+          const charges: Store.MemoryQuotaCharge[] = [
+            {
+              space: op.memorySpaceId,
+              dimension: "import_source_items",
+              scopeKey: "space",
+              current: usage.keys,
+              delta: excess.size,
+              limit: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+            },
+            {
+              space: op.memorySpaceId,
+              dimension: "permanent_metadata",
+              scopeKey: "space",
+              current: usage.permanentBytes,
+              delta: bytes,
+              limit: M.MEMORY_PERMANENT_METADATA_MAX_BYTES,
+            },
+          ];
+          if (decision.admission.kind !== "hubAdmission")
+            charges.push({
+              ...charges[1]!,
+              space: `_environment:${environmentId}`,
+              current: usage.environmentPermanentBytes,
+            });
+          const status = yield* store
+            .reserve(decision.admission, charges)
+            .pipe(
+              Effect.as("accepted" as const),
+              Effect.catchTags({ MemoryCapacityError: () => Effect.succeed("rejected" as const) }),
+            );
+          yield* store.settleForgetFragment({
+            operation: op,
+            operationDigest: decision.operationDigest,
+            fragment: extra,
+            keys: excess.size,
+            bytes,
+            status,
+          });
+          return result;
+        }
         return yield* withAdmission(
           {
             operation: op,
