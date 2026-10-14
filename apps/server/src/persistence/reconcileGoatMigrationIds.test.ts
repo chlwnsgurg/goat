@@ -80,6 +80,7 @@ describe("GOAT migration ids", () => {
   );
   it.effect("reconciles Memory by stable name after upstream claims its old ID", () =>
     Effect.gen(function* () {
+      assert.deepStrictEqual(migrationManifest.at(-1), [70, "Memory"]);
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`INSERT INTO memory_quota_counters VALUES ('fixture','live','user',7)`;

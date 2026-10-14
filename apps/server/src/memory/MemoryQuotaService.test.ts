@@ -5,8 +5,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
-import judgmentMigration from "../persistence/Migrations/072_MemoryJudgmentRetention.ts";
-import reservationMigration from "../persistence/Migrations/071_MemoryForgetReservations.ts";
 import migration from "../persistence/Migrations/070_Memory.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
@@ -266,11 +264,10 @@ describe("MemoryQuotaService", () => {
         assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 100);
       }).pipe(Effect.provide(services)),
   );
-  it.effect("backfills first-delete slots when upgrading an existing memory ledger", () =>
+  it.effect("reserves first-delete slots in a fresh memory ledger", () =>
     Effect.gen(function* () {
       const quota = yield* Quota.MemoryQuotaService;
       const store = yield* Store.MemoryStore;
-      const sql = yield* SqlClient.SqlClient;
       const base = operation();
       if (base.kind === "forget") throw new Error("Fixture kind");
       const sourceThread = { environmentId: env, threadId: "thread" };
@@ -289,10 +286,7 @@ describe("MemoryQuotaService", () => {
         },
       });
       yield* quota.commit(decision(op), env, Effect.void);
-      yield* sql`ALTER TABLE memory_identity_ledger DROP COLUMN reserve_keys`;
-      yield* reservationMigration;
       assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
-      yield* reservationMigration;
       assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
     }).pipe(Effect.provide(services)),
   );
@@ -438,15 +432,6 @@ describe("MemoryQuotaService", () => {
         Effect.void,
       );
       const expires = Date.parse(now) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS;
-      assert.strictEqual(
-        (yield* sql<{
-          expiry: number;
-        }>`SELECT purge_eligible_after AS expiry FROM memory_payloads WHERE payload_ref=${op.resolution.judgmentRef}`)[0]!
-          .expiry,
-        expires,
-      );
-      yield* sql`UPDATE memory_payloads SET purge_eligible_after=NULL WHERE payload_ref=${op.resolution.judgmentRef}`;
-      yield* judgmentMigration;
       assert.strictEqual(
         (yield* sql<{
           expiry: number;
