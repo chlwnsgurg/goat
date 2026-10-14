@@ -652,7 +652,20 @@ export const makeAdministrator = Effect.gen(function* () {
           preparedSuccessors = [];
         }
         if (record.stage === "prepared") {
-          // The same-request retry already owns its durable recovery pointer.
+          // A historical prepared intent can have no recovery binding. Validate
+          // its immutable pointer before retiring any other request's pointer.
+          if (record.action.action === "configure") {
+            if (record.action.settings.mode === "hub") {
+              if (record.action.settings.memorySpaceId === null || record.secretName === null)
+                return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+            } else if (superseded || preparedSuccessors.length > 0) {
+              const saved = record.secretName?.match(/^memory-hub-internal-(.+)$/)?.[1];
+              if (!saved) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+              yield* decodeMemorySpaceId(saved).pipe(
+                Effect.mapError(() => new M.MemoryHubError({ code: "bootstrap_required" })),
+              );
+            }
+          }
           if (superseded || preparedSuccessors.length > 0)
             yield* tx(
               permit,

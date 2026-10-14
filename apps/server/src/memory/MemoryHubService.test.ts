@@ -1629,166 +1629,290 @@ const successorStops = [
 ] as const;
 
 it.effect.each(
-  (["hub", "disabled"] as const).flatMap((mode) => successorStops.map((stop) => ({ mode, stop }))),
-)("successor binding survives $mode $stop and a fresh request after restart", ({ mode, stop }) =>
-  Effect.gen(function* () {
-    const original = yield* interruptedHub;
-    if (
-      !("action" in original) ||
-      original.action.action !== "configure" ||
-      original.action.settings.mode !== "hub" ||
-      original.action.settings.memorySpaceId === null
-    )
-      throw new Error("expected published original binding");
-    const allocated = original.action.settings.memorySpaceId;
-    yield* (yield* Settings.MemoryHubSettingsTransitions).applyMemoryHubTransition(
-      {
-        requestId: M.MemoryOperationId.make(id(9200)),
-        expectedVersion: 0,
-        settings: { mode: "disabled" },
-      },
-      Effect.void,
-    );
-    const successor: M.MemoryHubSettingsUpdateInput = {
-      requestId: M.MemoryOperationId.make(id(9201)),
-      expectedVersion: 1,
-      action: "configure",
-      settings: mode === "hub" ? { mode, memorySpaceId: null } : { mode },
-    };
-    const store = yield* Store.MemoryStore;
-    const backend = yield* Hub.MemoryHubAdminSettings;
-    const prepared = yield* Ref.make(false);
-    const interrupted = yield* Hub.makeAdministrator.pipe(
-      Effect.provideService(Store.MemoryStore, {
-        ...store,
-        writeHubAdminTx: (input) => {
-          if (input.record.requestId !== successor.requestId || input.expectedStage !== null)
-            return store.writeHubAdminTx(input);
-          if (stop === "before prepared commit") return Effect.interrupt;
-          return store.writeHubAdminTx(input).pipe(Effect.tap(() => Ref.set(prepared, true)));
-        },
-        // Interrupt only AFTER the real transaction returned: retirement and the
-        // successor intent have committed, unlike a write-boundary rollback test.
-        transact: (effect) =>
-          store
-            .transact(effect)
-            .pipe(
-              Effect.tap(() =>
-                Ref.get(prepared).pipe(
-                  Effect.flatMap((saved) =>
-                    saved && stop === "after prepared commit" ? Effect.interrupt : Effect.void,
-                  ),
-                ),
-              ),
-            ),
-      }),
-      Effect.provideService(Hub.MemoryHubAdminSettings, {
-        ...backend,
-        apply: (record, permit) => {
-          if (record.requestId !== successor.requestId) return backend.apply(record, permit);
-          if (stop === "after activation before settings apply") return Effect.interrupt;
-          return backend
-            .apply(record, permit)
-            .pipe(
-              Effect.tap(() => (stop === "after settings apply" ? Effect.interrupt : Effect.void)),
-            );
-        },
-      }),
-    );
-    const stopped = yield* interrupted.update(successor, Effect.void).pipe(Effect.exit);
-    assert.strictEqual(stopped._tag, "Failure");
-    const saved = yield* store.transact(store.readHubAdminTx(successor.requestId));
-    const retired = yield* store.transact(store.readHubAdminTx(firstHub.requestId));
-    assert.strictEqual(
-      retired?.stage,
-      stop === "before prepared commit" ? "activated" : "acknowledged",
-    );
-    if (stop === "before prepared commit") assert.isUndefined(saved);
-    else {
-      assert.strictEqual(saved?.stage, stop === "after prepared commit" ? "prepared" : "activated");
-      assert.strictEqual(saved?.secretName, original.secretName);
-    }
-    yield* Effect.gen(function* () {
-      const restartedStore = yield* Store.MemoryStore;
-      const admin = yield* Hub.makeAdministrator;
-      const settings = yield* Hub.MemoryHubAdminSettings;
-      const next: M.MemoryHubSettingsUpdateInput = {
-        ...firstHub,
-        requestId: M.MemoryOperationId.make(id(9202)),
-        expectedVersion: (yield* settings.read).version,
-      };
-      if (stop === "after prepared commit") {
-        const denied = yield* admin
-          .update(next, Effect.fail(new M.MemoryHubForbiddenError({})))
-          .pipe(Effect.flip);
-        assert.strictEqual(denied._tag, "MemoryHubForbiddenError");
-        const stale = yield* admin
-          .update({ ...next, expectedVersion: 0 }, Effect.void)
-          .pipe(Effect.flip);
-        assert.strictEqual(stale._tag, "MemoryStoreConflict");
-        assert.deepStrictEqual(
-          yield* restartedStore.transact(restartedStore.readHubAdminTx(successor.requestId)),
-          saved,
-        );
-      }
-      // An activated operation can still own the current revision. Reconcile its
-      // successful CAS first, then retry C against the newly observed revision.
-      if (stop === "after activation before settings apply") {
-        const changed = yield* admin.update(next, Effect.void).pipe(Effect.flip);
-        assert.strictEqual(changed._tag, "MemoryStoreConflict");
-        if (changed._tag === "MemoryStoreConflict")
-          assert.strictEqual(changed.code, "revision_changed");
-        assert.strictEqual((yield* settings.read).version, 2);
-      }
-      const result = yield* admin.update(
-        { ...next, expectedVersion: (yield* settings.read).version },
-        Effect.void,
-      );
-      const sql = yield* SqlClient.SqlClient;
-      assert.strictEqual(
-        (yield* sql<{
-          count: number;
-        }>`SELECT count(*) AS count FROM memory_compaction_state WHERE published=1`)[0]?.count,
-        1,
-      );
-      assert.strictEqual(
-        (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_members`)[0]?.count,
-        1,
-      );
-      assert.strictEqual(readySpace(result), allocated);
-      yield* assertPublished(allocated);
-      const disabled = yield* admin.update(
+  (["hub", "disabled"] as const).flatMap((mode) => [
+    ...successorStops.map((stop) => ({ mode, stop, legacyMode: null, retryLegacy: false })),
+    ...(["hub", "hub-no-reference", "disabled", "member"] as const).flatMap((legacyMode) =>
+      [false, true].map((retryLegacy) => ({
+        mode,
+        stop: "after prepared commit" as const,
+        legacyMode,
+        retryLegacy,
+      })),
+    ),
+  ]),
+)(
+  "successor binding survives $mode $stop and a fresh request after restart (legacy=$legacyMode retry=$retryLegacy)",
+  ({ mode, stop, legacyMode, retryLegacy }) =>
+    Effect.gen(function* () {
+      const original = yield* interruptedHub;
+      if (
+        !("action" in original) ||
+        original.action.action !== "configure" ||
+        original.action.settings.mode !== "hub" ||
+        original.action.settings.memorySpaceId === null
+      )
+        throw new Error("expected published original binding");
+      const allocated = original.action.settings.memorySpaceId;
+      yield* (yield* Settings.MemoryHubSettingsTransitions).applyMemoryHubTransition(
         {
-          requestId: M.MemoryOperationId.make(id(9203)),
-          expectedVersion: result.view.version,
-          action: "configure",
+          requestId: M.MemoryOperationId.make(id(9200)),
+          expectedVersion: 0,
           settings: { mode: "disabled" },
         },
         Effect.void,
       );
-      yield* Effect.gen(function* () {
-        const reenabled = yield* (yield* Hub.makeAdministrator).update(
-          {
-            ...firstHub,
-            requestId: M.MemoryOperationId.make(id(9204)),
-            expectedVersion: disabled.view.version,
+      const successor: M.MemoryHubSettingsUpdateInput = {
+        requestId: M.MemoryOperationId.make(id(9201)),
+        expectedVersion: 1,
+        action: "configure",
+        settings: mode === "hub" ? { mode, memorySpaceId: null } : { mode },
+      };
+      const store = yield* Store.MemoryStore;
+      const legacyRetry: M.MemoryHubSettingsUpdateInput = {
+        ...firstHub,
+        requestId: M.MemoryOperationId.make(id(30000)),
+        expectedVersion: 1,
+        settings:
+          legacyMode === "disabled"
+            ? { mode: "disabled" }
+            : legacyMode === "member"
+              ? {
+                  mode: "member",
+                  endpoint: "https://synthetic.invalid",
+                  hubEnvironmentId: otherEnv,
+                  secretName: "synthetic-member-reference",
+                  memorySpaceId: allocated,
+                }
+              : {
+                  mode: "hub",
+                  memorySpaceId: legacyMode === "hub-no-reference" ? allocated : null,
+                },
+      };
+      if (legacyMode !== null) {
+        // R already exists outside the bounded sweep before B is prepared. These
+        // are historical intents, not new requests or rewritten persisted actions.
+        yield* store.transact(
+          Effect.gen(function* () {
+            for (const n of [...Array.from({ length: 256 }, (_, index) => 10000 + index), 30000]) {
+              const action: M.MemoryHubSettingsUpdateInput =
+                n === 30000
+                  ? legacyRetry
+                  : { ...firstHub, requestId: M.MemoryOperationId.make(id(n)), expectedVersion: 1 };
+              yield* store.writeHubAdminTx({
+                record: {
+                  requestId: action.requestId,
+                  requestDigest: NodeCrypto.createHash("sha256")
+                    .update(yield* encodeHubAdminRequest(action))
+                    .digest("hex"),
+                  expectedVersion: 1,
+                  action,
+                  stage: "prepared",
+                  memberVersion: null,
+                  result: null,
+                  secretName: null,
+                },
+                expectedStage: null,
+              });
+            }
+          }),
+        );
+      }
+      const backend = yield* Hub.MemoryHubAdminSettings;
+      const prepared = yield* Ref.make(false);
+      const interrupted = yield* Hub.makeAdministrator.pipe(
+        Effect.provideService(Store.MemoryStore, {
+          ...store,
+          writeHubAdminTx: (input) => {
+            if (input.record.requestId !== successor.requestId || input.expectedStage !== null)
+              return store.writeHubAdminTx(input);
+            if (stop === "before prepared commit") return Effect.interrupt;
+            return store.writeHubAdminTx(input).pipe(Effect.tap(() => Ref.set(prepared, true)));
           },
+          // Interrupt only AFTER the real transaction returned: retirement and the
+          // successor intent have committed, unlike a write-boundary rollback test.
+          transact: (effect) =>
+            store
+              .transact(effect)
+              .pipe(
+                Effect.tap(() =>
+                  Ref.get(prepared).pipe(
+                    Effect.flatMap((saved) =>
+                      saved && stop === "after prepared commit" ? Effect.interrupt : Effect.void,
+                    ),
+                  ),
+                ),
+              ),
+        }),
+        Effect.provideService(Hub.MemoryHubAdminSettings, {
+          ...backend,
+          apply: (record, permit) => {
+            if (record.requestId !== successor.requestId) return backend.apply(record, permit);
+            if (stop === "after activation before settings apply") return Effect.interrupt;
+            return backend
+              .apply(record, permit)
+              .pipe(
+                Effect.tap(() =>
+                  stop === "after settings apply" ? Effect.interrupt : Effect.void,
+                ),
+              );
+          },
+        }),
+      );
+      const stopped = yield* interrupted.update(successor, Effect.void).pipe(Effect.exit);
+      assert.strictEqual(stopped._tag, "Failure");
+      const saved = yield* store.transact(store.readHubAdminTx(successor.requestId));
+      const retired = yield* store.transact(store.readHubAdminTx(firstHub.requestId));
+      assert.strictEqual(
+        retired?.stage,
+        stop === "before prepared commit" ? "activated" : "acknowledged",
+      );
+      if (stop === "before prepared commit") assert.isUndefined(saved);
+      else {
+        assert.strictEqual(
+          saved?.stage,
+          stop === "after prepared commit" ? "prepared" : "activated",
+        );
+        assert.strictEqual(saved?.secretName, original.secretName);
+      }
+      const legacyBefore =
+        legacyMode === null
+          ? undefined
+          : yield* store.transact(store.readHubAdminTx(legacyRetry.requestId));
+      if (legacyMode !== null) assert.strictEqual(legacyBefore?.stage, "prepared");
+      const legacyResult = retryLegacy
+        ? yield* (yield* Hub.makeAdministrator).update(legacyRetry, Effect.void).pipe(Effect.result)
+        : null;
+      const successorAfterRetry = yield* store.transact(store.readHubAdminTx(successor.requestId));
+      const legacyAfterRetry =
+        legacyMode === null
+          ? undefined
+          : yield* store.transact(store.readHubAdminTx(legacyRetry.requestId));
+      yield* Effect.gen(function* () {
+        const restartedStore = yield* Store.MemoryStore;
+        const admin = yield* Hub.makeAdministrator;
+        const settings = yield* Hub.MemoryHubAdminSettings;
+        const next: M.MemoryHubSettingsUpdateInput = {
+          ...firstHub,
+          requestId: M.MemoryOperationId.make(id(9202)),
+          expectedVersion: (yield* settings.read).version,
+        };
+        if (stop === "after prepared commit") {
+          const denied = yield* admin
+            .update(next, Effect.fail(new M.MemoryHubForbiddenError({})))
+            .pipe(Effect.flip);
+          assert.strictEqual(denied._tag, "MemoryHubForbiddenError");
+          const stale = yield* admin
+            .update({ ...next, expectedVersion: 0 }, Effect.void)
+            .pipe(Effect.flip);
+          assert.strictEqual(stale._tag, "MemoryStoreConflict");
+          assert.deepStrictEqual(
+            yield* restartedStore.transact(restartedStore.readHubAdminTx(successor.requestId)),
+            successorAfterRetry,
+          );
+        }
+        // An activated operation can still own the current revision. Reconcile its
+        // successful CAS first, then retry C against the newly observed revision.
+        if (stop === "after activation before settings apply") {
+          const changed = yield* admin.update(next, Effect.void).pipe(Effect.flip);
+          assert.strictEqual(changed._tag, "MemoryStoreConflict");
+          if (changed._tag === "MemoryStoreConflict")
+            assert.strictEqual(changed.code, "revision_changed");
+          assert.strictEqual((yield* settings.read).version, 2);
+        }
+        const result = yield* admin.update(
+          { ...next, expectedVersion: (yield* settings.read).version },
           Effect.void,
         );
-        assert.strictEqual(readySpace(reenabled), allocated);
-        yield* assertPublished(allocated);
-        const freshSql = yield* SqlClient.SqlClient;
+        const sql = yield* SqlClient.SqlClient;
         assert.strictEqual(
-          (yield* freshSql<{
+          (yield* sql<{
             count: number;
           }>`SELECT count(*) AS count FROM memory_compaction_state WHERE published=1`)[0]?.count,
           1,
         );
         assert.strictEqual(
-          (yield* freshSql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_members`)[0]
+          (yield* sql<{ count: number }>`SELECT count(*) AS count FROM memory_hub_members`)[0]
             ?.count,
           1,
         );
+        if (legacyMode !== null) assert.deepStrictEqual(successorAfterRetry, saved);
+        if (retryLegacy) {
+          assert.strictEqual(legacyResult?._tag, "Failure");
+          if (legacyResult?._tag === "Failure") {
+            assert.strictEqual(legacyResult.failure._tag, "MemoryHubError");
+            if (legacyResult.failure._tag === "MemoryHubError")
+              assert.strictEqual(legacyResult.failure.code, "bootstrap_required");
+          }
+          assert.deepStrictEqual(legacyAfterRetry, legacyBefore);
+        }
+        assert.strictEqual(readySpace(result), allocated);
+        yield* assertPublished(allocated);
+        const disabled = yield* admin.update(
+          {
+            requestId: M.MemoryOperationId.make(id(9203)),
+            expectedVersion: result.view.version,
+            action: "configure",
+            settings: { mode: "disabled" },
+          },
+          Effect.void,
+        );
+        yield* Effect.gen(function* () {
+          const reenabled = yield* (yield* Hub.makeAdministrator).update(
+            {
+              ...firstHub,
+              requestId: M.MemoryOperationId.make(id(9204)),
+              expectedVersion: disabled.view.version,
+            },
+            Effect.void,
+          );
+          assert.strictEqual(readySpace(reenabled), allocated);
+          yield* assertPublished(allocated);
+          const freshSql = yield* SqlClient.SqlClient;
+          assert.strictEqual(
+            (yield* freshSql<{
+              count: number;
+            }>`SELECT count(*) AS count FROM memory_compaction_state WHERE published=1`)[0]?.count,
+            1,
+          );
+          assert.strictEqual(
+            (yield* freshSql<{
+              count: number;
+            }>`SELECT count(*) AS count FROM memory_hub_members`)[0]?.count,
+            1,
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(
+              Layer.mergeAll(Store.layer, Settings.layer).pipe(
+                Layer.provideMerge(Persistence.layerConfig),
+              ),
+            ),
+          ),
+        );
+        if (saved && "action" in saved) {
+          const terminal = yield* restartedStore.transact(
+            restartedStore.readHubAdminTx(successor.requestId),
+          );
+          assert.strictEqual(terminal?.secretName, saved.secretName);
+          if (stop === "after prepared commit") {
+            assert.strictEqual(terminal?.stage, "acknowledged");
+            assert.isNull(terminal?.result);
+            assert.isTrue(terminal && "action" in terminal);
+            if (terminal && "action" in terminal) {
+              assert.deepStrictEqual(terminal.action, saved.action);
+              assert.strictEqual(terminal.requestDigest, saved.requestDigest);
+            }
+            const refusal = yield* admin.update(successor, Effect.void).pipe(Effect.flip);
+            assert.strictEqual(refusal._tag, "MemoryHubError");
+            if (refusal._tag === "MemoryHubError")
+              assert.strictEqual(refusal.code, "revision_changed");
+            assert.isFalse(
+              (yield* admin.pending(Effect.void)).some(
+                (item) => item.requestId === successor.requestId,
+              ),
+            );
+          } else assert.strictEqual(terminal?.stage, "ready");
+        }
       }).pipe(
         Effect.provide(
           Layer.fresh(
@@ -1798,40 +1922,7 @@ it.effect.each(
           ),
         ),
       );
-      if (saved && "action" in saved) {
-        const terminal = yield* restartedStore.transact(
-          restartedStore.readHubAdminTx(successor.requestId),
-        );
-        assert.strictEqual(terminal?.secretName, saved.secretName);
-        if (stop === "after prepared commit") {
-          assert.strictEqual(terminal?.stage, "acknowledged");
-          assert.isNull(terminal?.result);
-          assert.isTrue(terminal && "action" in terminal);
-          if (terminal && "action" in terminal) {
-            assert.deepStrictEqual(terminal.action, saved.action);
-            assert.strictEqual(terminal.requestDigest, saved.requestDigest);
-          }
-          const refusal = yield* admin.update(successor, Effect.void).pipe(Effect.flip);
-          assert.strictEqual(refusal._tag, "MemoryHubError");
-          if (refusal._tag === "MemoryHubError")
-            assert.strictEqual(refusal.code, "revision_changed");
-          assert.isFalse(
-            (yield* admin.pending(Effect.void)).some(
-              (item) => item.requestId === successor.requestId,
-            ),
-          );
-        } else assert.strictEqual(terminal?.stage, "ready");
-      }
-    }).pipe(
-      Effect.provide(
-        Layer.fresh(
-          Layer.mergeAll(Store.layer, Settings.layer).pipe(
-            Layer.provideMerge(Persistence.layerConfig),
-          ),
-        ),
-      ),
-    );
-  }).pipe(Effect.provide(bootstrapDependencies)),
+    }).pipe(Effect.provide(bootstrapDependencies)),
 );
 
 it.effect(
