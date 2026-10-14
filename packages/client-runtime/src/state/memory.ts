@@ -32,6 +32,7 @@ import { createEnvironmentSessionAtoms } from "./session.ts";
 
 export interface MemoryExposure {
   readonly ready: boolean;
+  readonly connection: object | null;
   readonly epoch: object;
   readonly versions: ReadonlyMap<MemoryId, object>;
   readonly forgotten: ReadonlySet<MemoryId>;
@@ -39,7 +40,7 @@ export interface MemoryExposure {
 
 /** Body-free state. Epoch identity also fences replies from a prior subscription. */
 export function emptyMemoryExposure(): MemoryExposure {
-  return { ready: false, epoch: {}, versions: new Map(), forgotten: new Set() };
+  return { ready: false, connection: null, epoch: {}, versions: new Map(), forgotten: new Set() };
 }
 
 export function applyMemoryChange(
@@ -145,13 +146,23 @@ export function createMemoryEnvironmentAtoms<R, E>(
               ),
             ),
           ),
-        );
+        ).pipe(Stream.map((state) => ({ ...state, connection: prepared.value })));
       })
       .pipe(Atom.setIdleTTL(0));
     return Atom.make((get) => {
-      // Do not expose AsyncResult's previous value during a reconnect/error.
+      const connection = get(sessions.preparedConnectionValueAtom(environmentId));
+      const allowed = get(readPermissions.permissionAtom(environmentId));
+      const registered = get(catalogValueAtom).entries.get(environmentId)?.enabled;
       const result = get(streamAtom);
-      return result._tag === "Success" && !result.waiting ? result.value : unavailable;
+      // Stream atoms remain waiting while live. Match the connection identity
+      // instead of treating that flag as a pending unary request.
+      return allowed &&
+        registered &&
+        Option.isSome(connection) &&
+        result._tag === "Success" &&
+        result.value.connection === connection.value
+        ? result.value
+        : unavailable;
     }).pipe(Atom.setIdleTTL(0));
   });
   const exposureAtom = (target: MemoryTarget) => exposureFamily(environmentRpcKey(target));
@@ -230,7 +241,6 @@ export function createMemoryEnvironmentAtoms<R, E>(
         if (
           !allowed ||
           result._tag !== "Success" ||
-          result.waiting ||
           // Page/search output is invalidated by any body-free signal.
           result.value.before !== current
         )
