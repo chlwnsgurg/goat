@@ -678,6 +678,85 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
       ),
   );
 
+  it.effect.each(
+    memoryOperations.flatMap((operation) =>
+      [
+        "round trip",
+        "mixed executable tool",
+        "mixed MCP tool",
+        "unmatched result",
+        "failed result",
+        "permission denial",
+      ].map((scenario) => ({ operation, scenario })),
+    ),
+  )("$operation handles StructuredOutput $scenario", ({ operation, scenario }) => {
+    const structured_output = {
+      ...memoryOutput,
+      ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic" } : {}),
+    };
+    return withFakeClaudeEnv(
+      {
+        memoryRunnerContext: memoryContext,
+        output: JSON.stringify([
+          {
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  name: "StructuredOutput",
+                  id: "structured",
+                  input: structured_output,
+                },
+                ...(scenario.startsWith("mixed")
+                  ? [
+                      {
+                        type: "tool_use",
+                        name: scenario === "mixed MCP tool" ? "mcp__synthetic__run" : "Bash",
+                        id: "executable",
+                        input: {},
+                      },
+                    ]
+                  : []),
+              ],
+            },
+          },
+          {
+            type: "user",
+            message: {
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: scenario === "unmatched result" ? "other" : "structured",
+                  is_error: scenario === "failed result",
+                  content: "Structured output recorded",
+                },
+              ],
+            },
+          },
+          {
+            type: "result",
+            structured_output,
+            permission_denials:
+              scenario === "permission denial" ? [{ tool_name: "StructuredOutput" }] : [],
+          },
+        ]),
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const run =
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary);
+          if (scenario === "round trip") {
+            expect((yield* run).result.text).toBe(memoryOutput.text);
+          } else {
+            expect((yield* Effect.flip(run)).cause).toMatchObject({ code: "invalid_output" });
+          }
+        }),
+    );
+  });
+
   it.effect.each(memoryOperations)("rejects forged authority JSON for %s", (operation) =>
     withFakeClaudeEnv(
       {
