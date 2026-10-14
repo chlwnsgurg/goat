@@ -39,7 +39,7 @@ const make = Effect.sync(() => {
     if (!entry) return;
     if (entry.timer) yield* Fiber.interrupt(entry.timer);
     yield* entry.release;
-  });
+  }, Effect.uninterruptible);
   const retain = Effect.fnUntraced(function* (input: {
     bytes: number;
     release: Effect.Effect<void>;
@@ -61,7 +61,7 @@ const make = Effect.sync(() => {
           Effect.gen(function* () {
             const expired = yield* remove(id);
             if (expired) yield* expired.release;
-          }),
+          }).pipe(Effect.uninterruptible),
         ),
         Effect.interruptible,
         Effect.forkIn(scope),

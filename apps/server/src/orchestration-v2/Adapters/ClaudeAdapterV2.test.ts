@@ -3452,18 +3452,75 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     }).pipe(Effect.provide(layerAdapterTest)),
   );
 
-  it.effect.each(["refresh", "tamper", "offer", "prior-success"] as const)(
+  it.effect.each(["ttl", "terminal"] as const)(
+    "releases the legacy Claude turn input body (%s)",
+    (mode) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const base = makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("legacy-body"),
+            text: "work",
+            attachments: [],
+          });
+          const snapshot = wp4Memory();
+          yield* harness.runtime.startTurn({ ...base, memoryContext: snapshot });
+          yield* harness.offerAndWait({
+            ...harness.offeredMessages[0]!,
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const cache = yield* MemoryDerivedCache.MemoryDerivedCache;
+          assert.equal((yield* cache.usage).owners, 1);
+          if (mode === "ttl") {
+            yield* TestClock.adjust(M.MEMORY_DERIVED_CACHE_TTL_MS);
+            assert.deepEqual(yield* cache.usage, { bytes: 0, owners: 0 });
+            yield* harness.runtime.steerTurn({
+              threadId: base.threadId,
+              runId: base.runId,
+              providerThread: base.providerThread,
+              providerTurnId: (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeTurnId: `turn:${base.attemptId}`,
+              }),
+              message: { ...base.message, text: "after expiry" },
+            });
+            assert.notInclude(
+              JSON.stringify(harness.offeredMessages[1]!.message.content),
+              "external_goat_memory",
+            );
+          }
+          yield* harness.offerAndWait(
+            makeResultFrame({ uuid: "legacy-body-terminal", result: "done" }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+          assert.deepEqual(yield* cache.usage, { bytes: 0, owners: 0 });
+        }),
+      ).pipe(Effect.provide(layerAdapterTest)),
+  );
+
+  it.effect.each(["refresh", "tamper", "offer", "prior-success", "concurrent-offer"] as const)(
     "settles an abort after a rejected memory steer (%s)",
     (failure) =>
       Effect.scoped(
         Effect.gen(function* () {
           let steerOffers = 0;
+          const offersEntered = yield* Queue.unbounded<void>();
+          const failOffers = yield* Deferred.make<void>();
           const harness = yield* makeWakeHarnessWithOptions({
-            offer: (message) =>
-              message.priority === "now" &&
-              (failure === "offer" || (failure === "prior-success" && ++steerOffers === 2))
+            offer: (message) => {
+              if (message.priority !== "now") return Effect.void;
+              if (failure === "concurrent-offer")
+                return Queue.offer(offersEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(failOffers)),
+                  Effect.andThen(Effect.die("fixture concurrent offer failure")),
+                );
+              return failure === "offer" || (failure === "prior-success" && ++steerOffers === 2)
                 ? Effect.die("fixture offer failure")
-                : Effect.void,
+                : Effect.void;
+            },
           });
           const entered = yield* Deferred.make<void>();
           const release = yield* Deferred.make<void>();
@@ -3483,7 +3540,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 if (!steering) return wp4Memory();
                 yield* Deferred.succeed(entered, undefined);
                 yield* Deferred.await(release);
-                if (failure === "refresh") return yield* Effect.die("fixture refresh failure");
+                if (failure === "refresh")
+                  return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                    threadId: base.threadId,
+                    providerThreadId: base.providerThread.id,
+                    runId: base.runId,
+                  });
                 return failure === "tamper"
                   ? { ...wp4Memory(), renderedText: "tampered" }
                   : wp4Memory();
@@ -3521,7 +3584,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             })
             .pipe(Effect.exit, Effect.forkChild);
           yield* Deferred.await(entered);
+          const concurrent =
+            failure === "concurrent-offer"
+              ? yield* harness.runtime.steerTurn(steerInput).pipe(Effect.exit, Effect.forkChild)
+              : undefined;
           yield* Deferred.succeed(release, undefined);
+          if (concurrent) {
+            yield* Queue.take(offersEntered);
+            yield* Queue.take(offersEntered);
+            yield* Deferred.succeed(failOffers, undefined);
+            assert.isTrue(Exit.isFailure(yield* Fiber.join(concurrent)));
+          }
           assert.isTrue(Exit.isFailure(yield* Fiber.join(steer)));
           assert.equal(harness.offeredMessages.length, failure === "prior-success" ? 2 : 1);
           yield* harness.offerAndWait(
@@ -3537,6 +3610,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               makeResultFrame({ uuid: "successful-steer-result", result: "done" }),
             );
           }
+          assert.equal(yield* Queue.size(harness.terminalReceipts), 1);
           const terminal = yield* Queue.take(harness.terminalReceipts);
           assert.equal(terminal.status, failure === "prior-success" ? "completed" : "interrupted");
           // Terminal cleared the active turn; the next ordinary prompt is admitted.

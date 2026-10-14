@@ -3531,7 +3531,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           >(),
         );
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        const steeredTurns = yield* Ref.make(new Map<OrchestrationV2ProviderTurn["id"], symbol>());
+        const steeredTurns = yield* Ref.make(
+          new Map<OrchestrationV2ProviderTurn["id"], ReadonlySet<symbol>>(),
+        );
+        const successfulSteer = Symbol();
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         if (adapterOptions.mcpCredentialRotations)
           yield* adapterOptions.mcpCredentialRotations.pipe(
@@ -8680,9 +8683,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               goalsByNativeThread.set(nativeThreadId, turnInput.providerThread.goal ?? null);
             }
             const context: ActiveClaudeTurnContext = {
-              input: turnInput.refreshMemoryContext
-                ? withoutMemoryBody(turnInput)
-                : { ...turnInput },
+              input:
+                turnInput.refreshMemoryContext || nativeControl || promptUuid === null
+                  ? withoutMemoryBody(turnInput)
+                  : { ...turnInput },
               nativeThreadId,
               nativeTurnId,
               nativeMessageCursor: null,
@@ -9004,21 +9008,28 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               skillNames: yield* userInvocableSkillNames(currentTurn.input.runtimePolicy.cwd),
             });
             const admitted = yield* withFreshMemory(userMessage, currentTurn.input);
-            const previousSteer = (yield* Ref.get(steeredTurns)).get(turnInput.providerTurnId);
             const marker = Symbol();
             yield* Ref.update(steeredTurns, (current) =>
-              new Map(current).set(turnInput.providerTurnId, marker),
-            );
-            yield* existing.query.offer(admitted).pipe(
-              Effect.onError(() =>
-                Ref.update(steeredTurns, (current) => {
-                  if (current.get(turnInput.providerTurnId) !== marker) return current;
-                  const next = new Map(current);
-                  if (previousSteer) next.set(turnInput.providerTurnId, previousSteer);
-                  else next.delete(turnInput.providerTurnId);
-                  return next;
-                }),
+              new Map(current).set(
+                turnInput.providerTurnId,
+                new Set(current.get(turnInput.providerTurnId)).add(marker),
               ),
+            );
+            const settleSteer = (accepted: boolean) =>
+              Ref.update(steeredTurns, (current) => {
+                const markers = current.get(turnInput.providerTurnId);
+                if (!markers?.has(marker)) return current;
+                const remaining = new Set(markers);
+                remaining.delete(marker);
+                if (accepted) remaining.add(successfulSteer);
+                const next = new Map(current);
+                if (remaining.size) next.set(turnInput.providerTurnId, remaining);
+                else next.delete(turnInput.providerTurnId);
+                return next;
+              });
+            yield* existing.query.offer(admitted).pipe(
+              Effect.tap(() => settleSteer(true)),
+              Effect.onError(() => settleSteer(false)),
             );
           },
           (effect, turnInput) =>
