@@ -98,23 +98,39 @@ const make = Effect.gen(function* () {
     a.project.projectId === b.project.projectId &&
     encodeBinding(a.binding ?? null) === encodeBinding(b.binding ?? null) &&
     a.watermark === b.watermark;
+  // Association metadata owns no bodies; adapters own the returned snapshot lifetime.
+  const associations = new WeakMap<M.MemoryContextSnapshot, symbol>();
   const entries = new Map<
-    M.MemoryContextSnapshot,
-    { view: View; epoch: number; expires: number; bytes: number }
+    symbol,
+    {
+      view: View;
+      epoch: number;
+      expires: number;
+      bytes: number;
+      selected: ReadonlyArray<{
+        memoryId: M.MemoryId;
+        revisionId: M.MemoryRevisionId;
+        scopeKey: string;
+      }>;
+    }
   >();
   let cacheBytes = 0;
-  const remove = (snapshot: M.MemoryContextSnapshot) => {
-    const entry = entries.get(snapshot);
+  const removeEntry = (key: symbol) => {
+    const entry = entries.get(key);
     if (entry) cacheBytes -= entry.bytes;
-    entries.delete(snapshot);
+    entries.delete(key);
+  };
+  const remove = (snapshot: M.MemoryContextSnapshot) => {
+    const key = associations.get(snapshot);
+    if (key) removeEntry(key);
+    associations.delete(snapshot);
   };
   const sweep = (now: number) => {
-    for (const [snapshot, entry] of entries) if (entry.expires <= now) remove(snapshot);
+    for (const [key, entry] of entries) if (entry.expires <= now) removeEntry(key);
   };
   const invalidate = (threadId: M.ThreadId) =>
     Effect.sync(() => {
-      for (const [snapshot, entry] of entries)
-        if (entry.view.threadId === threadId) remove(snapshot);
+      for (const [key, entry] of entries) if (entry.view.threadId === threadId) removeEntry(key);
     });
   const permits = (policy: MemorySnapshotPolicy, expected: MemorySnapshotPolicy) =>
     policy.grant !== "none" && policy.policyEpoch === expected.policyEpoch;
@@ -176,18 +192,25 @@ const make = Effect.gen(function* () {
       });
       if (!snapshot) return undefined;
       const bytes = yield* Effect.try({
-        try: () => new TextEncoder().encode(encodeSnapshot(snapshot)).length,
+        try: () => 2 * new TextEncoder().encode(encodeSnapshot(snapshot)).length,
         catch: (cause) => new MemorySnapshotError({ cause }),
       });
       const now = yield* Clock.currentTimeMillis;
       sweep(now);
       while (cacheBytes + bytes > M.MEMORY_DERIVED_CACHE_MAX_BYTES && entries.size)
-        remove(entries.keys().next().value!);
-      entries.set(snapshot, {
+        removeEntry(entries.keys().next().value!);
+      const key = Symbol();
+      associations.set(snapshot, key);
+      entries.set(key, {
         view,
         epoch: policy.policyEpoch,
         expires: now + M.MEMORY_DERIVED_CACHE_TTL_MS,
         bytes,
+        selected: snapshot.items.map((item) => ({
+          memoryId: item.memoryId,
+          revisionId: item.revisionId,
+          scopeKey: encodeScope(item.scope),
+        })),
       });
       cacheBytes += bytes;
       return snapshot;
@@ -205,7 +228,8 @@ const make = Effect.gen(function* () {
         try: () => Renderer.validateMemoryContext(snapshot),
         catch: (cause) => new MemorySnapshotError({ cause }),
       });
-      const entry = entries.get(snapshot);
+      const key = associations.get(snapshot);
+      const entry = key ? entries.get(key) : undefined;
       const clear = () => {
         remove(snapshot);
         return undefined;
@@ -216,6 +240,18 @@ const make = Effect.gen(function* () {
         entry.view.runId !== execution.runId
       )
         return clear();
+      if (
+        snapshot.items.length !== entry.selected.length ||
+        snapshot.items.some((item, index) => {
+          const original = entry.selected[index]!;
+          return (
+            item.memoryId !== original.memoryId ||
+            item.revisionId !== original.revisionId ||
+            encodeScope(item.scope) !== original.scopeKey
+          );
+        })
+      )
+        return clear();
       const policy = yield* currentPolicy;
       if (!permits(policy, { grant: "read", policyEpoch: entry.epoch })) return clear();
       const view = yield* capture(execution.threadId);
@@ -223,16 +259,16 @@ const make = Effect.gen(function* () {
       if (!view || !sameView({ ...entry.view, watermark: view.watermark }, view)) return clear();
       const current = yield* service.readContextRevisions(
         snapshot.memorySpaceId,
-        snapshot.items.map((i) => i.memoryId),
+        entry.selected.map((i) => i.memoryId),
         Effect.void,
       );
       if (current.projectionWatermark !== view.watermark) return clear();
-      const survivors = snapshot.items.filter((original) =>
-        current.items.some(
+      const survivors = entry.selected.flatMap((original) =>
+        current.items.filter(
           (item) =>
             item.memoryId === original.memoryId &&
             item.revisionId === original.revisionId &&
-            encodeScope(item.scope) === encodeScope(original.scope),
+            encodeScope(item.scope) === original.scopeKey,
         ),
       );
       if (
@@ -247,12 +283,23 @@ const make = Effect.gen(function* () {
       });
       if (!restored) return clear();
       const bytes = yield* Effect.try({
-        try: () => new TextEncoder().encode(encodeSnapshot(restored)).length,
+        try: () => 2 * new TextEncoder().encode(encodeSnapshot(restored)).length,
         catch: (cause) => new MemorySnapshotError({ cause }),
       });
       while (cacheBytes + bytes > M.MEMORY_DERIVED_CACHE_MAX_BYTES && entries.size)
-        remove(entries.keys().next().value!);
-      entries.set(restored, { ...entry, view, bytes });
+        removeEntry(entries.keys().next().value!);
+      const restoredKey = Symbol();
+      associations.set(restored, restoredKey);
+      entries.set(restoredKey, {
+        ...entry,
+        view,
+        bytes,
+        selected: restored.items.map((item) => ({
+          memoryId: item.memoryId,
+          revisionId: item.revisionId,
+          scopeKey: encodeScope(item.scope),
+        })),
+      });
       cacheBytes += bytes;
       return restored;
     },

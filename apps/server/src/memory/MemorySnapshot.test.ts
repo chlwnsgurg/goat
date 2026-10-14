@@ -289,3 +289,38 @@ it.effect("skips whole oversized facts and packs Unicode within both native-fram
     assert.isUndefined(yield* snapshot.revalidate(selected!, { threadId, runId }, f.currentPolicy));
   }).pipe(Effect.provide(f.live));
 });
+it.effect(
+  "restores authoritative selected text and rejects replacement of the original selection",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const snapshot = yield* Snapshot.MemorySnapshot;
+      const service = yield* Service.MemoryService;
+      yield* project;
+      yield* service.upsert(input(2), Effect.void);
+      const selected = yield* snapshot.forThread(threadId, f.policy(), f.currentPolicy);
+      const alteredText = selected!.items.map((item) => ({
+        ...item,
+        text: "synthetic altered data",
+      }));
+      Object.assign(selected!, {
+        items: alteredText,
+        renderedText: Renderer.renderMemoryContext(alteredText),
+      });
+      const restored = yield* snapshot.revalidate(selected!, { threadId, runId }, f.currentPolicy);
+      assert.strictEqual(restored!.items[0]!.text, input(2).payload.text);
+      yield* service.upsert(input(3), Effect.void);
+      const replacement = (yield* service.readContextCandidates(
+        { memorySpaceId: space, limit: 100, includeQuarantined: true },
+        Effect.void,
+      )).items.filter((i) => i.memoryId === id(3));
+      Object.assign(restored!, {
+        items: replacement,
+        renderedText: Renderer.renderMemoryContext(replacement),
+      });
+      assert.isUndefined(
+        yield* snapshot.revalidate(restored!, { threadId, runId }, f.currentPolicy),
+      );
+    }).pipe(Effect.provide(f.live));
+  },
+);

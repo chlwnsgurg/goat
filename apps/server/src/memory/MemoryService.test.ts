@@ -142,6 +142,14 @@ describe("MemoryService hub admission", () => {
         assert.deepStrictEqual(aggregate.heads, [M.MemoryRevisionId.make(id(91))]);
         assert.strictEqual(aggregate.revisions[0]?.payload?.text, "synthetic remote memory");
         assert.strictEqual(aggregate.item?.pendingSync, false);
+        const coverage = yield* store.searchCoverage({
+          memorySpaceId: space,
+          scope: { kind: "user" },
+          limit: 100,
+        });
+        assert.isTrue(coverage.ready);
+        assert.strictEqual(coverage.eligible, 1);
+        assert.strictEqual(coverage.textBytes, new TextEncoder().encode(op.payload.text).length);
         assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 1);
       }).pipe(Effect.provide(live)),
   );
