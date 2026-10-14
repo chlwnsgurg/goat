@@ -1,3 +1,4 @@
+import { WsRpcGroup, WS_METHODS } from "./rpc.ts";
 import { MemoryTaskGrantCeilingField } from "./memory.ts";
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
@@ -94,10 +95,33 @@ describe("persisted task memory ceiling", () => {
     const codec = Schema.Struct({ memoryGrantCeiling: MemoryTaskGrantCeilingField });
     expect(Schema.decodeUnknownSync(codec)({})).toEqual({ memoryGrantCeiling: "none" });
     expect(Schema.encodeSync(codec)({})).toEqual({ memoryGrantCeiling: "none" });
-    for (const memoryGrantCeiling of ["none", "read", "read_write"])
+    for (const memoryGrantCeiling of ["none", "read", "read_write"] as const) {
       expect(Schema.decodeUnknownSync(codec)({ memoryGrantCeiling })).toEqual({
         memoryGrantCeiling,
       });
+      expect(Schema.encodeSync(codec)({ memoryGrantCeiling })).toEqual({ memoryGrantCeiling });
+      const json = Schema.fromJsonString(ScheduledTask);
+      const task = Schema.decodeUnknownSync(ScheduledTask)({ ...row, memoryGrantCeiling });
+      const encoded = Schema.encodeSync(json)(task);
+      expect(JSON.parse(encoded).memoryGrantCeiling).toBe(memoryGrantCeiling);
+      expect(Schema.decodeUnknownSync(json)(encoded).memoryGrantCeiling).toBe(memoryGrantCeiling);
+    }
+    const rpc = WsRpcGroup.requests.get(WS_METHODS.scheduledTasksUpsert)!;
+    const decodeRpc = Schema.decodeUnknownSync(Schema.fromJsonString(rpc.payloadSchema));
+    const publicInput = {
+      title: row.title,
+      prompt: row.prompt,
+      enabled: true,
+      schedule: row.schedule,
+      projectId: row.projectId,
+      workspaceStrategy: row.workspaceStrategy,
+      modelSelection: row.modelSelection,
+      runtimeMode: row.runtimeMode,
+      interactionMode: row.interactionMode,
+    };
+    expect(decodeRpc(JSON.stringify(publicInput))).toHaveProperty("title", row.title);
+    for (const memoryGrantCeiling of ["none", "read", "read_write"])
+      expect(() => decodeRpc(JSON.stringify({ ...publicInput, memoryGrantCeiling }))).toThrow();
     expect(() => Schema.decodeUnknownSync(codec)({ memoryGrantCeiling: "full-access" })).toThrow();
   });
 });
