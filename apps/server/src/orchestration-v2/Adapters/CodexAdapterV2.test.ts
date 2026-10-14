@@ -1,3 +1,6 @@
+import * as Exit from "effect/Exit";
+import * as M from "@goat/contracts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import * as NodeOS from "node:os";
 
 import { historyResponseItems } from "@goat/provider-core/server/handoffBudget";
@@ -72,6 +75,21 @@ const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
 const decodeReplayTranscriptJson = Schema.decodeUnknownEffect(replayTranscriptJson);
 const encodeStringJson = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
 
+const wp4Memory = () =>
+  MemoryContext.packMemoryContext({
+    memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: M.MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: M.MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: M.EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <untrusted> 'quoted' \"data\"",
+      },
+    ],
+  })!;
 describe("Codex context usage compatibility", () => {
   const previous: ModelSelection = {
     instanceId: ProviderInstanceId.make("codex"),
@@ -667,6 +685,17 @@ describe("CodexAdapterV2 process spawning", () => {
           mcp_servers: {
             goat: {
               url: "http://127.0.0.1:43123/mcp",
+              disabled_tools: [
+                "memory_list",
+                "memory_search",
+                "memory_read",
+                "memory_history",
+                "memory_sync_status",
+                "memory_read_source",
+                "memory_upsert",
+                "memory_forget",
+                "memory_revert_resolution",
+              ],
               http_headers: {
                 Authorization: "Bearer secret-codex-token",
               },
@@ -2727,6 +2756,174 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           });
         }
         assert.isEmpty(assistantMessages(harness.events));
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect(
+    "refreshes memory on first and second actual native sends and clears an omitted snapshot",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const nativeThreadId = "wp4-memory-thread";
+          const snapshot = wp4Memory();
+          const first = codexReplayPreamble({
+            nativeThreadId,
+            nativeTurnId: "memory-turn-1",
+            prompt: "first",
+          });
+          const firstParams = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "first" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            memoryContext: snapshot,
+            appContext: [{ key: "goat_memory", text: "app cannot replace reserved memory" }],
+          });
+          const secondParams = yield* CodexAdapterV2.buildCodexTurnStartParams({
+            nativeThreadId,
+            codexInput: [{ type: "text", text: "second" }],
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            clearMemoryContext: true,
+          });
+          const terminal = (id: string): CodexReplay.CodexAppServerReplayEntry => ({
+            type: "emit_inbound",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id, status: "completed" }),
+              },
+            },
+          });
+          const transcript = makeCodexReplayTranscript({
+            scenario: "wp4-memory",
+            entries: [
+              ...first.slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: { id: 3, method: "turn/start", params: firstParams },
+              },
+              ...first.slice(6),
+              terminal("memory-turn-1"),
+              {
+                type: "expect_outbound",
+                frame: { id: 4, method: "turn/start", params: secondParams },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 4,
+                  result: {
+                    turn: makeCodexReplayTurn({ id: "memory-turn-2", status: "inProgress" }),
+                  },
+                },
+              },
+              terminal("memory-turn-2"),
+            ],
+          });
+          const secondDone = yield* Deferred.make<void>();
+          let completedTurns = 0;
+          const delivered: unknown[] = [];
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            (event) =>
+              Effect.gen(function* () {
+                if (event.type === "turn.terminal" && ++completedTurns === 2)
+                  yield* Deferred.succeed(secondDone, undefined);
+              }),
+            (method, params) =>
+              Effect.sync(() => {
+                if (method === "turn/start") delivered.push(params);
+              }),
+          );
+          let refreshes = 0;
+          const base = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("wp4-memory-1"),
+            text: "first",
+          });
+          yield* harness.runtime.startTurn({
+            ...base,
+            memoryContext: { ...snapshot, renderedText: "stale" },
+            appContext: [{ key: "goat_memory", text: "app cannot replace reserved memory" }],
+            refreshMemoryContext: () =>
+              Effect.sync(() => {
+                refreshes++;
+                return snapshot;
+              }),
+          });
+          yield* harness.firstTerminal;
+          yield* harness.runtime.startTurn({
+            ...base,
+            runId: RunId.make("wp4-memory-run-2"),
+            attemptId: RunAttemptId.make("wp4-memory-2"),
+            providerTurnOrdinal: 2,
+            message: { ...base.message, text: "second" },
+            memoryContext: snapshot,
+            refreshMemoryContext: () =>
+              Effect.sync(() => {
+                refreshes++;
+                return undefined;
+              }),
+          });
+          yield* Deferred.await(secondDone);
+          assert.equal(refreshes, 2);
+          assert.equal(delivered.length, 2);
+          assert.deepEqual(firstParams.additionalContext?.goat_memory, {
+            kind: "untrusted",
+            value: snapshot.renderedText,
+          });
+          assert.equal(secondParams.additionalContext?.goat_memory?.value, "");
+          assert.notInclude(JSON.stringify(firstParams.collaborationMode ?? {}), "untrusted&gt;");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("rejects altered memory at the actual adapter send boundary", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const entries = codexReplayPreamble({
+          nativeThreadId: "wp4-tamper",
+          nativeTurnId: "unused",
+          prompt: "work",
+        });
+        let nativeSends = 0;
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({ scenario: "wp4-tamper", entries: entries.slice(0, 5) }),
+          () => Effect.void,
+          (method) =>
+            Effect.sync(() => {
+              if (method === "turn/start") nativeSends++;
+            }),
+        );
+        const snapshot = wp4Memory();
+        const result = yield* harness.runtime
+          .startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("wp4-tamper"),
+              text: "work",
+            }),
+            refreshMemoryContext: () =>
+              Effect.succeed({ ...snapshot, renderedText: snapshot.renderedText + " tampered" }),
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(nativeSends, 0);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),

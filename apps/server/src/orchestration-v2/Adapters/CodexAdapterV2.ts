@@ -1,3 +1,7 @@
+import type { RunId } from "@goat/contracts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
+import * as MemorySnapshot from "../../memory/MemorySnapshot.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@goat/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -712,6 +716,9 @@ export function buildCodexTurnStartParams(input: {
   readonly deviceToolsAvailable?: boolean;
   /** ChatGPT token sharing does not accept service tiers. */
   readonly omitServiceTier?: boolean;
+  readonly memoryContext?: ProviderAdapter.ProviderAdapterV2TurnInput["memoryContext"];
+  readonly clearMemoryContext?: boolean;
+  readonly memoryTools?: McpProviderSession.MemoryToolAvailability;
   /** What the thread's MCP Apps want the agent to know (`ui/update-model-context`). */
   readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
 }) {
@@ -743,10 +750,9 @@ export function buildCodexTurnStartParams(input: {
     // context: Codex renders it as quoted user-side input, never as developer
     // instructions. Codex resends it only when it changes.
     const appContext = Object.fromEntries(
-      (input.appContext ?? []).map((entry) => [
-        entry.key,
-        { kind: "untrusted" as const, value: entry.text },
-      ]),
+      (input.appContext ?? [])
+        .filter((entry) => entry.key !== "goat_memory")
+        .map((entry) => [entry.key, { kind: "untrusted" as const, value: entry.text }]),
     );
     const goatContext =
       input.hasGoatMcp === true
@@ -755,13 +761,29 @@ export function buildCodexTurnStartParams(input: {
             {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
+              ...(input.memoryTools ? { memory: input.memoryTools } : {}),
             },
           )
         : undefined;
+    const memoryContext =
+      input.memoryContext === undefined
+        ? input.clearMemoryContext
+          ? { goat_memory: { kind: "untrusted" as const, value: "" } }
+          : {}
+        : {
+            goat_memory: {
+              kind: "untrusted" as const,
+              value: (yield* Effect.try(() =>
+                MemoryContext.validateMemoryContext(input.memoryContext),
+              )).renderedText,
+            },
+          };
     const additionalContext =
-      goatContext === undefined && Object.keys(appContext).length === 0
+      goatContext === undefined &&
+      Object.keys(appContext).length === 0 &&
+      Object.keys(memoryContext).length === 0
         ? undefined
-        : { ...goatContext, ...appContext };
+        : { ...goatContext, ...appContext, ...memoryContext };
     const collaborationMode: CodexSchema.ClientRequest__CollaborationMode | undefined =
       input.runtimePolicy.interactionMode !== "plan" && developerInstructions === undefined
         ? undefined
@@ -1329,6 +1351,14 @@ export function codexThreadRuntimeParams(input: {
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
   const { mcpSession } = input;
+  const memory = McpProviderSession.memoryToolAvailability(mcpSession);
+  const disabledMemoryTools = [
+    ...(!memory.read
+      ? ["memory_list", "memory_search", "memory_read", "memory_history", "memory_sync_status"]
+      : []),
+    ...(!memory.source ? ["memory_read_source"] : []),
+    ...(!memory.write ? ["memory_upsert", "memory_forget", "memory_revert_resolution"] : []),
+  ];
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
@@ -1340,6 +1370,7 @@ export function codexThreadRuntimeParams(input: {
             mcp_servers: {
               goat: {
                 url: mcpSession.endpoint,
+                disabled_tools: disabledMemoryTools,
                 http_headers: {
                   Authorization: mcpSession.authorizationHeader,
                 },
@@ -1675,6 +1706,11 @@ const layer: Layer.Layer<
 );
 
 export interface CodexAdapterV2Options {
+  /** L5 supplies the manager's scoped credential publication stream. */
+  readonly mcpCredentialRotations?: Stream.Stream<{
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+  }>;
   readonly instanceId: ProviderInstanceId;
   readonly settings: CodexSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -1706,6 +1742,22 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const memorySnapshots = Option.getOrUndefined(
+    yield* Effect.serviceOption(MemorySnapshot.MemorySnapshot),
+  );
+  const memoryRegistry = Option.getOrUndefined(
+    yield* Effect.serviceOption(McpSessionRegistry.McpSessionRegistry),
+  );
+  const currentMemoryPolicy = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const config = yield* mcpSessions.read(threadId);
+      return config && memoryRegistry?.currentMemoryPolicy
+        ? ((yield* memoryRegistry.currentMemoryPolicy(config.providerSessionId)) ?? {
+            grant: "none" as const,
+            policyEpoch: -1,
+          })
+        : { grant: "none" as const, policyEpoch: -1 };
+    });
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
@@ -1740,6 +1792,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
+        const memoryByThread = new Map<
+          string,
+          {
+            snapshot: NonNullable<ProviderAdapter.ProviderAdapterV2TurnInput["memoryContext"]>;
+            threadId: ThreadId;
+            runId: RunId;
+            generation: number;
+          }
+        >();
+        let memoryGeneration = 0;
+        const restoredCompactions = new Set<string>();
+        const restorePermit = yield* Semaphore.make(1);
+        const credentialsByThread = new Map<string, string>();
         const additionalContextByThread = yield* Ref.make(
           new Map<
             string,
@@ -1748,10 +1813,38 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         // Codex drops client developer messages during compaction but only
         // resends additionalContext when it changes. Restore the current entries.
-        const restoreAdditionalContext = (threadId: string) =>
+        const restoreAdditionalContext = (threadId: string, compactionId: string) =>
           Effect.gen(function* () {
-            const context = (yield* Ref.get(additionalContextByThread)).get(threadId);
-            if (!context) return;
+            const cachedContext = (yield* Ref.get(additionalContextByThread)).get(threadId);
+            if (!cachedContext) return;
+            const context = { ...cachedContext };
+            const selected = memoryByThread.get(threadId);
+            const restoreKey = `${threadId}:${compactionId}:${selected?.generation ?? memoryGeneration}`;
+            if (restoredCompactions.has(restoreKey)) return;
+            delete context.goat_memory;
+            if (selected && memorySnapshots) {
+              const snapshot = yield* memorySnapshots
+                .revalidate(
+                  selected.snapshot,
+                  { threadId: selected.threadId, runId: selected.runId },
+                  currentMemoryPolicy(selected.threadId),
+                )
+                .pipe(
+                  Effect.catch(() =>
+                    Effect.logWarning("Codex memory restoration unavailable.").pipe(
+                      Effect.as(undefined),
+                    ),
+                  ),
+                );
+              if (memoryByThread.get(threadId) !== selected) return;
+              if (snapshot) {
+                const validated = yield* Effect.try(() =>
+                  MemoryContext.validateMemoryContext(snapshot),
+                );
+                context.goat_memory = { kind: "untrusted", value: validated.renderedText };
+              } else memoryByThread.delete(threadId);
+            } else memoryByThread.delete(threadId);
+            if (Object.keys(context).length === 0) return;
             yield* client.request("thread/inject_items", {
               threadId,
               // Restored as Codex sent them: application context as developer
@@ -1775,13 +1868,28 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     },
               ),
             });
+            restoredCompactions.add(restoreKey);
+            if (restoredCompactions.size > 256)
+              restoredCompactions.delete(restoredCompactions.values().next().value!);
           }).pipe(
+            restorePermit.withPermits(1),
             Effect.timeout("10 seconds"),
-            Effect.catch((cause) =>
-              Effect.logWarning("Failed to restore Codex additional context after compaction.", {
-                cause,
+            Effect.catch(() =>
+              Effect.logWarning("Failed to restore Codex additional context after compaction."),
+            ),
+          );
+        if (adapterOptions.mcpCredentialRotations)
+          yield* adapterOptions.mcpCredentialRotations.pipe(
+            Stream.runForEach((rotation) =>
+              Effect.gen(function* () {
+                if (rotation.providerInstanceId !== adapterOptions.instanceId) return;
+                for (const [nativeId, selected] of memoryByThread)
+                  if (selected.threadId === rotation.threadId) memoryByThread.delete(nativeId);
+                if (memorySnapshots) yield* memorySnapshots.invalidate(rotation.threadId);
+                // Attachment refresh is serialized with the next ordinary start. Existing stale tokens are denied immediately.
               }),
             ),
+            Effect.forkIn(scope),
           );
         const initialized = yield* Ref.make(false);
         // Threads share this app-server, and Codex rejects a second
@@ -4809,7 +4917,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (payload.item.type === "contextCompaction")
               // The notification callback runs on the input reader. Let it read
               // the injection response while the session-scoped request waits.
-              yield* restoreAdditionalContext(payload.threadId).pipe(
+              yield* restoreAdditionalContext(payload.threadId, payload.item.id).pipe(
                 Effect.forkIn(scope, { startImmediately: true }),
               );
             if (
@@ -6368,9 +6476,41 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           Effect.gen(function* () {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
+            if (mcpSession && credentialsByThread.get(threadId) !== mcpSession.providerSessionId) {
+              // Reconfigure the same native conversation; stale credentials are already denied by the registry.
+              yield* client.raw.request("thread/resume", {
+                threadId,
+                excludeTurns: true,
+                ...codexThreadRuntimeParams({
+                  mcpSession,
+                  modelSelection: turnInput.modelSelection,
+                  runtimePolicy: turnInput.runtimePolicy,
+                }),
+              });
+              credentialsByThread.set(threadId, mcpSession.providerSessionId);
+            }
+            const memoryContext = turnInput.refreshMemoryContext
+              ? yield* turnInput.refreshMemoryContext()
+              : turnInput.memoryContext;
+            const clearMemoryContext = memoryByThread.has(threadId);
+            memoryByThread.delete(threadId);
+            const validatedMemory =
+              memoryContext === undefined
+                ? undefined
+                : yield* Effect.try(() => MemoryContext.validateMemoryContext(memoryContext));
+            if (validatedMemory)
+              memoryByThread.set(threadId, {
+                snapshot: memoryContext!,
+                threadId: turnInput.threadId,
+                runId: turnInput.runId,
+                generation: ++memoryGeneration,
+              });
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
               codexInput,
+              memoryContext: validatedMemory,
+              clearMemoryContext,
+              memoryTools: McpProviderSession.memoryToolAvailability(mcpSession),
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,
               hasGoatMcp: mcpSession !== undefined,
@@ -6648,14 +6788,23 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             ensureInitialized.pipe(
               Effect.andThen(mcpSessions.read(threadInput.threadId)),
               Effect.flatMap((mcpSession) =>
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    mcpSession,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
-                  }),
-                ),
+                client
+                  .request(
+                    "thread/start",
+                    codexThreadRuntimeParams({
+                      mcpSession,
+                      modelSelection: threadInput.modelSelection,
+                      runtimePolicy: threadInput.runtimePolicy,
+                    }),
+                  )
+                  .pipe(
+                    Effect.tap((response) =>
+                      Effect.sync(() => {
+                        if (mcpSession)
+                          credentialsByThread.set(response.thread.id, mcpSession.providerSessionId);
+                      }),
+                    ),
+                  ),
               ),
               Effect.map((response): OrchestrationV2ProviderThread =>
                 providerThreadFromCodexThread({
@@ -6717,6 +6866,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
+              const resumedMcp = yield* readMcpSession(
+                threadInput.threadId ?? threadInput.providerThread.appThreadId,
+              );
+              if (resumedMcp) credentialsByThread.set(nativeThreadId, resumedMcp.providerSessionId);
               // Codex follows a resume with a goal snapshot notification; the
               // run's first turn writes it if it differs from the stored goal.
               return {
@@ -6748,6 +6901,28 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const threadId = yield* getNativeThreadId(turnInput.providerThread);
               yield* Ref.update(pendingRootTurns, (current) =>
                 new Map(current).set(threadId, turnInput),
+              );
+              const previous = (yield* Ref.get(additionalContextByThread)).get(threadId);
+              const fresh = turnInput.refreshMemoryContext
+                ? yield* turnInput.refreshMemoryContext()
+                : turnInput.memoryContext;
+              memoryByThread.delete(threadId);
+              const context = { ...previous };
+              delete context.goat_memory;
+              if (fresh) {
+                const validated = yield* Effect.try(() =>
+                  MemoryContext.validateMemoryContext(fresh),
+                );
+                memoryByThread.set(threadId, {
+                  snapshot: fresh,
+                  threadId: turnInput.threadId,
+                  runId: turnInput.runId,
+                  generation: ++memoryGeneration,
+                });
+                context.goat_memory = { kind: "untrusted", value: validated.renderedText };
+              }
+              yield* Ref.update(additionalContextByThread, (current) =>
+                new Map(current).set(threadId, context),
               );
               // Cleared on interrupt too, as startTurn does: an interrupted start
               // must not adopt the native turn that a late turn/started reports.
@@ -6882,6 +7057,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           unloadThread: (unloadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
+              memoryByThread.delete(nativeThreadId);
+              credentialsByThread.delete(nativeThreadId);
+              yield* Ref.update(additionalContextByThread, (current) => {
+                const next = new Map(current);
+                next.delete(nativeThreadId);
+                return next;
+              });
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
             }).pipe(
               Effect.mapError((cause) =>
@@ -6897,6 +7079,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           interruptTurn: (requestedInput) =>
             Effect.gen(function* () {
               const nativeThreadId = requestedInput.providerThread.nativeThreadRef?.nativeId;
+              if (nativeThreadId) memoryByThread.delete(nativeThreadId);
+              if (memorySnapshots && requestedInput.providerThread.appThreadId)
+                yield* memorySnapshots.invalidate(requestedInput.providerThread.appThreadId);
               const retryHold = nativeThreadId == null ? undefined : retryHolds.get(nativeThreadId);
               if (
                 nativeThreadId != null &&

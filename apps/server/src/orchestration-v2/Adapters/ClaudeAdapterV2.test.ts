@@ -1,3 +1,5 @@
+import * as M from "@goat/contracts";
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 // @effect-diagnostics nodeBuiltinImport:off -- workflow fixtures use files and the fake Claude CLI uses Node streams
 import * as NodeEvents from "node:events";
 import * as NodeFS from "node:fs";
@@ -687,7 +689,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     assert.notEqual(fullAccessKey, detachedKey);
   });
 
-  it("invalidates live-query reuse when MCP credentials rotate", () => {
+  it("preserves live-query reuse when MCP credentials rotate", () => {
     const threadId = ThreadId.make("thread-claude-mcp-credential-rotation");
     const mcpSession = mcpSessionFor(threadId);
     const queryPolicy = ClaudeAdapterV2.claudeRuntimeQueryPolicyForRuntimePolicy(
@@ -709,7 +711,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
         readOnlySandbox: false,
       }),
     );
-    assert.notEqual(rotatedKey, initialKey);
+    assert.equal(rotatedKey, initialKey);
   });
 
   it("matches the read-only allowlist to the orchestrator toolkit annotations", () => {
@@ -13629,4 +13631,197 @@ describe("ClaudeAdapterV2 query message stream", () => {
       assert.isTrue(closed);
     }),
   );
+});
+
+const wp4Memory = () =>
+  MemoryContext.packMemoryContext({
+    memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000099"),
+    projectionWatermark: 1,
+    items: [
+      {
+        memoryId: M.MemoryId.make("00000000-0000-4000-8000-000000000001"),
+        revisionId: M.MemoryRevisionId.make("00000000-0000-4000-8000-000000000002"),
+        scope: { kind: "user" },
+        provenance: { environmentId: M.EnvironmentId.make("fixture") },
+        assertionKind: "fact",
+        text: "& <untrusted> 'quoted' \"data\"",
+      },
+    ],
+  })!;
+
+describe("Claude WP4 memory delivery", () => {
+  it.effect("refreshes both message builders and credentials while retaining the live query", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "goat-wp4-claude-",
+        });
+        const offers: SDKUserMessage[] = [];
+        const registrations: unknown[] = [];
+        const opened: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions[] = [];
+        let closes = 0;
+        const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: {},
+          attachmentsDir,
+          fileSystem,
+          path: yield* Path.Path,
+          crypto: yield* Crypto.Crypto,
+          idAllocator,
+          queryRunner: {
+            allocateSessionId: Effect.succeed("wp4-claude-native"),
+            open: (input) =>
+              Effect.sync(() => {
+                opened.push(input.options);
+                return {
+                  messages: Stream.never,
+                  offer: (message) =>
+                    Effect.sync(() => {
+                      offers.push(message);
+                    }),
+                  setMcpServers: (servers) =>
+                    Effect.sync(() => {
+                      registrations.push(servers);
+                    }),
+                  setModel: () => Effect.void,
+                  setPermissionMode: () => Effect.void,
+                  stopTask: () => Effect.void,
+                  interrupt: Effect.void,
+                  close: Effect.sync(() => {
+                    closes++;
+                  }),
+                } satisfies ClaudeAdapterV2.ClaudeAgentSdkQuerySession;
+              }),
+            forkSession: () => Effect.die("unused"),
+            subagentLaunchToolUseId: () => Effect.succeed(null),
+            assertComplete: Effect.void,
+          },
+        });
+        const threadId = ThreadId.make("wp4-claude");
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const config: McpProviderSession.McpProviderSessionConfig = {
+          environmentId: EnvironmentId.make("fixture"),
+          threadId,
+          providerSessionId: "first-credential",
+          providerInstanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer fixture-first",
+          browserToolsAvailable: false,
+          grantedScopes: ["memory:read", "memory:write", "orchestration:read"],
+        };
+        yield* sessions.set(config);
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("wp4-claude-session"),
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const base = makeClaudeTestTurnInput({
+          threadId,
+          providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("wp4-claude-1"),
+          text: "first",
+          attachments: [],
+        });
+        const snapshot = wp4Memory();
+        let refreshes = 0;
+        const refreshMemoryContext = () =>
+          Effect.sync(() => {
+            refreshes++;
+            return snapshot;
+          });
+        yield* runtime.startTurn({ ...base, refreshMemoryContext });
+        assert.equal(offers.length, 1);
+        assert.include(JSON.stringify(offers[0]?.message.content), "&lt;untrusted&gt;");
+        assert.notInclude(JSON.stringify(opened[0]?.systemPrompt), "&lt;untrusted&gt;");
+        assert.isDefined(offers[0]?.uuid);
+        // Steer uses the other real builder and retains its priority/effort behavior.
+        yield* runtime.steerTurn({
+          runId: base.runId,
+          threadId,
+          providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${base.attemptId}`,
+          }),
+          message: { ...base.message, text: "steer" },
+        });
+        assert.equal(offers[1]?.priority, "now");
+        assert.include(JSON.stringify(offers[1]?.message.content), "&lt;untrusted&gt;");
+        yield* sessions.set({
+          ...config,
+          providerSessionId: "second-credential",
+          authorizationHeader: "Bearer fixture-second",
+          grantedScopes: [],
+        });
+        yield* runtime.startTurn({
+          ...base,
+          providerTurnOrdinal: 2,
+          attemptId: RunAttemptId.make("wp4-claude-2"),
+          message: { ...base.message, text: "second" },
+          memoryContext: snapshot,
+          refreshMemoryContext: () =>
+            Effect.sync(() => {
+              refreshes++;
+              return undefined;
+            }),
+        });
+        assert.equal(opened.length, 1);
+        assert.equal(closes, 0);
+        assert.equal(registrations.length, 1);
+        assert.include(JSON.stringify(registrations), "fixture-second");
+        assert.notInclude(JSON.stringify(offers[2]?.message.content), "external_goat_memory");
+        const rejected = yield* runtime
+          .startTurn({
+            ...base,
+            attemptId: RunAttemptId.make("wp4-claude-tamper"),
+            refreshMemoryContext: () => Effect.succeed({ ...snapshot, renderedText: "tampered" }),
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(rejected));
+        assert.equal(offers.length, 3);
+        assert.equal(refreshes, 3);
+        yield* runtime.compactThread!({
+          ...base,
+          attemptId: RunAttemptId.make("wp4-claude-compact"),
+          refreshMemoryContext: () => Effect.die("native control must not refresh"),
+        });
+        assert.equal(offers.length, 4);
+        assert.notInclude(JSON.stringify(offers[3]?.message.content), "external_goat_memory");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+  it("preapproves the six granted reads and never any memory write on read-only policy", () => {
+    const session: McpProviderSession.McpProviderSessionConfig = {
+      environmentId: EnvironmentId.make("fixture"),
+      threadId: ThreadId.make("fixture"),
+      providerSessionId: "fixture",
+      providerInstanceId: ProviderInstanceId.make("claude"),
+      endpoint: "http://127.0.0.1:1/mcp",
+      authorizationHeader: "Bearer fixture",
+      browserToolsAvailable: false,
+      grantedScopes: ["memory:read", "memory:write", "orchestration:read"],
+    };
+    const overrides = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: session,
+      readOnlySandbox: true,
+    });
+    for (const tool of ClaudeAdapterV2.CLAUDE_MEMORY_READ_TOOLS)
+      assert.include(overrides.allowedTools ?? [], tool);
+    for (const tool of ClaudeAdapterV2.CLAUDE_MEMORY_WRITE_TOOLS)
+      assert.notInclude(overrides.allowedTools ?? [], tool);
+  });
 });

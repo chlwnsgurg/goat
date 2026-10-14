@@ -1,3 +1,4 @@
+import * as MemoryContext from "@goat/provider-core/server/memoryContext";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
   dynamicToolTitle,
@@ -377,6 +378,10 @@ export interface ClaudeAgentSdkQuerySession {
   readonly setModel: (model: string) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly setPermissionMode: (
     mode: PermissionMode,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  /** Replaces credentials over the existing SDK control channel without restarting work. */
+  readonly setMcpServers?: (
+    servers: NonNullable<ClaudeQueryOptions["mcpServers"]>,
   ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly stopTask: (taskId: string) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly interrupt: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
@@ -794,6 +799,15 @@ export const layerQueryRunner: Layer.Layer<
                 }),
               ),
             ),
+          setMcpServers: (servers) =>
+            Effect.tryPromise({
+              try: async () => {
+                const result = await queryRuntime.setMcpServers(servers);
+                if (Object.keys(result.errors).length > 0)
+                  throw new Error("MCP registration unavailable.");
+              },
+              catch: (cause) => queryRunnerError(cause, "setMcpServers"),
+            }),
           setModel: (model) =>
             Effect.tryPromise({
               try: () => queryRuntime.setModel(model),
@@ -1051,6 +1065,8 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
+        "\n\n" +
+        MemoryContext.MEMORY_DATA_BOUNDARY_REMINDER +
         (input.mcpServers === undefined ? "" : GOAT_ORCHESTRATION_INSTRUCTIONS),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
@@ -1099,6 +1115,20 @@ export const CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
 // delegate_task mode=wait) legitimately block for up to an hour
 // (MAX_WAIT_TIMEOUT_MS in OrchestratorMcpService), so the budget sits just
 // above that and the server's own wait timeout is what ends a long call.
+export const CLAUDE_MEMORY_READ_TOOLS = [
+  "mcp__goat__memory_list",
+  "mcp__goat__memory_search",
+  "mcp__goat__memory_read",
+  "mcp__goat__memory_history",
+  "mcp__goat__memory_sync_status",
+  "mcp__goat__memory_read_source",
+] as const;
+export const CLAUDE_MEMORY_WRITE_TOOLS = [
+  "mcp__goat__memory_upsert",
+  "mcp__goat__memory_forget",
+  "mcp__goat__memory_revert_resolution",
+] as const;
+
 export const CLAUDE_GOAT_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 
 // The SDK's `allowedTools` only pre-approves tool calls; availability is the
@@ -1148,11 +1178,27 @@ export function claudeMcpQueryOverrides(input: {
   if (session === undefined) {
     return input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools };
   }
+  const memory = McpProviderSession.memoryToolAvailability(session);
+  const memoryReadTools = memory.read
+    ? CLAUDE_MEMORY_READ_TOOLS.filter(
+        (name) => name !== "mcp__goat__memory_read_source" || memory.source,
+      )
+    : [];
   const mcpAllowedTools = input.readOnlySandbox
-    ? CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS
+    ? [...CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS, ...memoryReadTools]
     : [CLAUDE_GOAT_MCP_TOOL_WILDCARD];
   return {
-    allowedTools: Array.from(new Set([...(input.allowedTools ?? []), ...mcpAllowedTools])),
+    allowedTools: Array.from(
+      new Set([
+        ...(input.allowedTools ?? []).filter(
+          (tool) =>
+            !input.readOnlySandbox ||
+            !tool.startsWith("mcp__goat__") ||
+            mcpAllowedTools.includes(tool),
+        ),
+        ...mcpAllowedTools,
+      ]),
+    ),
     mcpServers: {
       goat: {
         type: "http",
@@ -1808,7 +1854,7 @@ function claudeRuntimeQueryPolicyKey(policy: ClaudeRuntimeQueryPolicy): string {
 export function claudeEffectiveQueryPolicyKey(
   queryPolicy: ClaudeRuntimeQueryPolicy,
   mcpOverrides: {
-    readonly allowedTools?: ReadonlyArray<string>;
+    readonly allowedTools?: ReadonlyArray<string> | undefined;
     readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
     readonly mcpEnvironment?: Readonly<Record<string, string>>;
   },
@@ -1820,7 +1866,12 @@ export function claudeEffectiveQueryPolicyKey(
         ? {}
         : { allowedTools: mcpOverrides.allowedTools }),
     }),
-    mcpServers: mcpOverrides.mcpServers,
+    mcpServers: Object.fromEntries(
+      Object.entries(mcpOverrides.mcpServers ?? {}).map(([name, config]) => [
+        name,
+        { ...config, ...("headers" in config ? { headers: undefined } : {}) },
+      ]),
+    ),
     mcpEnvironment: mcpOverrides.mcpEnvironment,
   });
 }
@@ -3019,6 +3070,7 @@ interface ClaudeLiveQueryContext {
   readonly nativeThreadId: string;
   readonly query: ClaudeAgentSdkQuerySession;
   readonly queryPolicyKey: string;
+  mcpCredentialId: string | undefined;
   readonly selectionKey: string;
   readonly closed: Deferred.Deferred<void, never>;
   // Retained for process-exit cleanup even when its last turn failed.
@@ -3352,6 +3404,11 @@ export function claudeProposedPlan(input: unknown): string | null {
 }
 
 export interface ClaudeAdapterV2Options {
+  /** L5 supplies the manager's scoped credential publication stream. */
+  readonly mcpCredentialRotations?: Stream.Stream<{
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+  }>;
   readonly instanceId: ProviderInstanceId;
   readonly settings: ClaudeSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -3451,6 +3508,42 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
+        if (adapterOptions.mcpCredentialRotations)
+          yield* adapterOptions.mcpCredentialRotations.pipe(
+            Stream.runForEach((rotation) =>
+              Effect.gen(function* () {
+                if (
+                  rotation.providerInstanceId !== adapterOptions.instanceId ||
+                  rotation.threadId !== input.threadId
+                )
+                  return;
+                const existing = yield* Ref.get(queryContext);
+                if (!existing || existing.stopping) return;
+                const config = yield* mcpSessions.read(rotation.threadId);
+                if (existing.mcpCredentialId === config?.providerSessionId) return;
+                if (!existing.query.setMcpServers) {
+                  yield* Effect.logWarning("Claude MCP credential refresh unavailable.");
+                  return;
+                }
+                const overrides = claudeMcpQueryOverrides({
+                  mcpSession: config,
+                  readOnlySandbox: false,
+                });
+                yield* existing.query.setMcpServers(overrides.mcpServers ?? {}).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      existing.mcpCredentialId = config?.providerSessionId;
+                    }),
+                  ),
+                  Effect.catch(() =>
+                    Effect.logWarning("Claude MCP credential refresh unavailable."),
+                  ),
+                );
+              }),
+            ),
+            Effect.forkScoped,
+          );
+
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         // Claude 5 task tools edit one list per native session, across turns.
@@ -8224,8 +8317,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           nativeThreadId: string,
         ) {
           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
+          const mcpSession = yield* mcpSessions.read(turnInput.threadId);
           const mcpOverrides = claudeMcpQueryOverrides({
-            mcpSession: yield* mcpSessions.read(turnInput.threadId),
+            mcpSession,
             readOnlySandbox:
               sandboxPolicyKindForClaudeRuntimePolicy(turnInput.runtimePolicy) === "readOnly",
             environment: adapterOptions.environment,
@@ -8233,7 +8327,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ? {}
               : { allowedTools: queryPolicy.allowedTools }),
           });
-          const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, mcpOverrides);
+          const queryPolicyKey = claudeEffectiveQueryPolicyKey(queryPolicy, {
+            ...mcpOverrides,
+            allowedTools: mcpOverrides.allowedTools?.filter(
+              (tool) => !tool.startsWith("mcp__goat__memory_"),
+            ),
+          });
           const compiledSelection = compileClaudeModelSelection(turnInput.modelSelection);
           const resumeSessionAt = yield* getNativeConversationHeadId(turnInput.providerThread);
           const existing = yield* Ref.get(queryContext);
@@ -8252,6 +8351,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             existing.queryPolicyKey === queryPolicyKey &&
             existing.selectionKey === compiledSelection.queryIdentity
           ) {
+            if (existing.mcpCredentialId !== mcpSession?.providerSessionId) {
+              if (!existing.query.setMcpServers)
+                return yield* queryRunnerError(
+                  "MCP credential refresh unavailable.",
+                  "setMcpServers",
+                );
+              yield* existing.query.setMcpServers(mcpOverrides.mcpServers ?? {});
+              existing.mcpCredentialId = mcpSession?.providerSessionId;
+            }
             // Claude can switch its own mode mid-session (EnterPlanMode), and
             // a denied ExitPlanMode leaves it there. Put the live process back
             // in the thread's mode before the next prompt.
@@ -8377,6 +8485,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeThreadId,
             query: querySession,
             queryPolicyKey,
+            mcpCredentialId: mcpSession?.providerSessionId,
             selectionKey: compiledSelection.queryIdentity,
             closed,
             lastTurn: null,
@@ -8441,8 +8550,32 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           return context;
         });
 
+        const withFreshMemory = Effect.fnUntraced(function* (
+          message: SDKUserMessage,
+          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+        ) {
+          const snapshot = turnInput.refreshMemoryContext
+            ? yield* turnInput.refreshMemoryContext()
+            : turnInput.memoryContext;
+          if (snapshot === undefined) return message;
+          const text = yield* Effect.try(() => MemoryContext.memoryContextText(snapshot));
+          const content = message.message.content;
+          return {
+            ...message,
+            message: {
+              ...message.message,
+              content: [
+                ...(typeof content === "string"
+                  ? [{ type: "text" as const, text: content }]
+                  : content),
+                { type: "text" as const, text },
+              ],
+            },
+          } satisfies SDKUserMessage;
+        });
+
         const startTurn = Effect.fn("ClaudeAdapterV2.startTurn")(
-          function* (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) {
+          function* (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput, nativeControl = false) {
             const startedAt = yield* DateTime.now;
             const nativeThreadId = yield* getNativeThreadId(turnInput.providerThread);
             const nativeTurnId = `turn:${turnInput.attemptId}`;
@@ -8565,7 +8698,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // afterwards with correct attribution.
               // Counted only here, so a turn that failed to start does not age reports.
               yield* startUserTurnForWakeReports(nativeThreadId);
-              yield* querySession.query.offer(userMessage);
+              yield* querySession.query.offer(
+                nativeControl ? userMessage : yield* withFreshMemory(userMessage, turnInput),
+              );
               return;
             }
             // Transcript reads suspend replay. Hold live SDK frames until the whole
@@ -8658,7 +8793,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               }),
             );
           },
-          (effect, turnInput) =>
+          (effect, turnInput, _nativeControl = false) =>
             effect.pipe(
               Effect.mapError(
                 (cause) =>
@@ -8800,7 +8935,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               next.add(turnInput.providerTurnId);
               return next;
             });
-            yield* existing.query.offer(userMessage);
+            yield* existing.query.offer(yield* withFreshMemory(userMessage, currentTurn.input));
           },
           (effect, turnInput) =>
             effect.pipe(
@@ -8964,10 +9099,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ),
           startTurn,
           compactThread: (turnInput) =>
-            startTurn({
-              ...turnInput,
-              message: { ...turnInput.message, text: "/compact" },
-            }),
+            startTurn(
+              {
+                ...turnInput,
+                message: { ...turnInput.message, text: "/compact" },
+              },
+              true,
+            ),
           steerTurn,
           stopTask: ({ providerThread, taskId }) =>
             Effect.gen(function* () {
