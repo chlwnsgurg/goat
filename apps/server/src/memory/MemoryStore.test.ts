@@ -4999,10 +4999,63 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.strictEqual(after.status, "quarantined");
     assert.deepStrictEqual(after.heads, claim.conflictHeadSet);
     const heads = yield* store.readResolutionHeads({
+      expectedGeneration: after.generation,
+      maxItems: 100,
+      maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
       memorySpaceId: space,
       memoryId: memory,
       heads: claim.conflictHeadSet,
     });
+    for (const budget of [
+      {
+        expectedGeneration: after.generation + 1,
+        maxItems: 100,
+        maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+      },
+      {
+        expectedGeneration: after.generation,
+        maxItems: 1,
+        maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
+      },
+      { expectedGeneration: after.generation, maxItems: 100, maxBytes: 1 },
+    ]) {
+      assert.strictEqual(
+        (yield* store
+          .readResolutionHeads({
+            memorySpaceId: space,
+            memoryId: memory,
+            heads: claim.conflictHeadSet,
+            ...budget,
+          })
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+    }
+    const exactBytes = new TextEncoder().encode(JSON.stringify(heads)).length;
+    assert.deepStrictEqual(
+      yield* store.readResolutionHeads({
+        memorySpaceId: space,
+        memoryId: memory,
+        heads: claim.conflictHeadSet,
+        expectedGeneration: after.generation,
+        maxItems: 2,
+        maxBytes: exactBytes,
+      }),
+      heads,
+    );
+    assert.strictEqual(
+      (yield* store
+        .readResolutionHeads({
+          memorySpaceId: space,
+          memoryId: memory,
+          heads: claim.conflictHeadSet,
+          expectedGeneration: after.generation,
+          maxItems: 2,
+          maxBytes: exactBytes - 1,
+        })
+        .pipe(Effect.flip))._tag,
+      "MemoryStoreConflict",
+    );
     assert.strictEqual(heads.length, 2);
     assert.isTrue(heads.every((h) => h.payload !== null));
     const plan = yield* sql<{
@@ -5018,6 +5071,9 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.strictEqual(
       (yield* store
         .readResolutionHeads({
+          expectedGeneration: after.generation,
+          maxItems: 100,
+          maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
           memorySpaceId: space,
           memoryId: memory,
           heads: [M.MemoryRevisionId.make(id(20000))],
@@ -5029,6 +5085,9 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.deepStrictEqual(yield* store.readResolutionSnapshot(space, memory), after);
     assert.isTrue(
       (yield* store.readResolutionHeads({
+        expectedGeneration: after.generation,
+        maxItems: 100,
+        maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
         memorySpaceId: space,
         memoryId: memory,
         heads: claim.conflictHeadSet,
@@ -5039,6 +5098,9 @@ it.effect("resolution snapshot SQL rows and bytes stay constant as history grows
     assert.strictEqual(
       (yield* store
         .readResolutionHeads({
+          expectedGeneration: after.generation,
+          maxItems: 100,
+          maxBytes: M.MEMORY_DEFERRED_SWEEP_MAX_BYTES,
           memorySpaceId: space,
           memoryId: memory,
           heads: claim.conflictHeadSet,
@@ -5886,6 +5948,11 @@ it.effect("review-r11 stale claim hold can overwrite a reacquired owner in same 
     assert.isTrue(yield* store.claimCandidate(c.id, 2, 2));
     const overwritten = yield* store.transact(store.holdClaimCandidateTx({ ...stale, now: 3 }));
     assert.isFalse(overwritten);
+    assert.isTrue(
+      yield* store.transact(
+        store.holdClaimCandidateTx({ ...stale, now: 3, expectedAttempt: c.attempt + 2 }),
+      ),
+    );
   }).pipe(Effect.provide(live)),
 );
 

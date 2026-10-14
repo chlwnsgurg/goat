@@ -1238,6 +1238,9 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       memoryId: M.MemoryId;
       heads: readonly M.MemoryRevisionId[];
+      expectedGeneration: number;
+      maxItems: number;
+      maxBytes: number;
     }) => Effect.Effect<MemoryAggregate["revisions"], MemoryStorageError | MemoryStoreConflict>;
     readonly loadAggregate: (
       space: M.MemorySpaceId,
@@ -1997,14 +2000,30 @@ const make = Effect.gen(function* () {
       fence: row.fence_json ? yield* fenceCodec.decode(row.fence_json, strict) : undefined,
     };
   });
+  const resolutionHeadsCodec = codec(
+    Schema.Array(
+      Schema.Struct({
+        revision: M.MemoryRevision,
+        payload: Schema.NullOr(M.MemoryPayload),
+      }),
+    ),
+  );
   const readResolutionHeads: MemoryStore["Service"]["readResolutionHeads"] = Effect.fn(
     "MemoryStore.readResolutionHeads",
   )(function* (input) {
     // Generation input is restricted to the current frontier, never the revision history.
     // The existing conflict set carries the bound; reject unbounded caller selections.
     if (
+      !Number.isSafeInteger(input.expectedGeneration) ||
+      input.expectedGeneration < 0 ||
+      !Number.isSafeInteger(input.maxItems) ||
+      input.maxItems < 1 ||
+      input.maxItems > M.MEMORY_PAGE_MAX_ITEMS ||
+      !Number.isSafeInteger(input.maxBytes) ||
+      input.maxBytes < 1 ||
+      input.maxBytes > M.MEMORY_DEFERRED_SWEEP_MAX_BYTES ||
       input.heads.length === 0 ||
-      input.heads.length > M.MEMORY_PAGE_MAX_ITEMS ||
+      input.heads.length > input.maxItems ||
       new Set(input.heads).size !== input.heads.length
     )
       return yield* new MemoryStoreConflict({ code: "invalid_output" });
@@ -2012,6 +2031,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const snapshot = yield* readResolutionSnapshot(input.memorySpaceId, input.memoryId);
         if (
+          snapshot.generation !== input.expectedGeneration ||
           snapshot.tombstone ||
           snapshot.pendingForget ||
           snapshot.status !== "quarantined" ||
@@ -2027,6 +2047,20 @@ const make = Effect.gen(function* () {
           !sameHeadSet(snapshot.heads, input.heads)
         )
           return yield* new MemoryStoreConflict({ code: "conflict_changed" });
+        // Check selected payload lengths at the PK boundary before loading bodies. This reads
+        // only the requested frontier, irrespective of revision history. The final budget is
+        // the UTF-8 JSON encoding of the returned revision/payload array (including metadata).
+        const sizes = yield* stored(
+          "resolution-head-byte-budget",
+          sql<{
+            bytes: number;
+          }>`SELECT coalesce(sum(coalesce(length(CAST(p.body_json AS BLOB)),0)),0) AS bytes
+          FROM json_each(${yield* headsCodec.encode(input.heads)}) selected CROSS JOIN memory_revisions r
+          LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+          WHERE r.space=${input.memorySpaceId} AND r.revision_id=selected.value AND r.memory_id=${input.memoryId}`,
+        );
+        if ((sizes[0]?.bytes ?? 0) > input.maxBytes)
+          return yield* new MemoryStoreConflict({ code: "invalid_output" });
         const rows = yield* stored(
           "resolution-heads",
           sql<{
@@ -2045,7 +2079,7 @@ const make = Effect.gen(function* () {
         );
         if (rows.length !== input.heads.length)
           return yield* new MemoryStoreConflict({ code: "missing_parent" });
-        return yield* Effect.forEach(rows, (row) =>
+        const result = yield* Effect.forEach(rows, (row) =>
           Effect.gen(function* () {
             const revision = yield* stored(
               "revision-codec",
@@ -2071,6 +2105,13 @@ const make = Effect.gen(function* () {
             };
           }),
         );
+        if (
+          new TextEncoder().encode(
+            yield* stored("resolution-head-encoding", resolutionHeadsCodec.encode(result)),
+          ).length > input.maxBytes
+        )
+          return yield* new MemoryStoreConflict({ code: "invalid_output" });
+        return result;
       }),
     );
   });
