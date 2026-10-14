@@ -2265,8 +2265,14 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               driver: CursorAgentSdk.CURSOR_PROVIDER,
               nativeTurnId: sdkRun.runId,
             });
+            // SDK turn state owns routing/policy only, never an admission snapshot or closure.
+            const {
+              memoryContext: _memoryContext,
+              refreshMemoryContext: _refreshMemoryContext,
+              ...turnOwner
+            } = turnInput;
             context = {
-              input: turnInput,
+              input: turnOwner,
               run: sdkRun,
               providerTurnId,
               startedAt,
