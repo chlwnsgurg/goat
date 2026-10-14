@@ -5362,3 +5362,152 @@ it.effect("renewed ticket expiry persists only for the same owned lease and CAS 
     assert.strictEqual(key.attemptId, recovery.ticket.attemptId);
   }).pipe(Effect.provide(live)),
 );
+
+it.effect(
+  "retires only a correlated definitive rejection while preserving uncertain and accepted submissions",
+  () =>
+    Effect.gen(function* () {
+      const { store, sql, ticket, ownership, key, submission } = yield* seedSubmission;
+      yield* store.recoverClaimCandidates(0);
+      const candidate = (yield* store.readDueClaimCandidates(1, 0, space))[0]!;
+      const frozen = M.MemoryHubClaimInput.make({
+        protocolVersion: 1,
+        memorySpaceId: space,
+        memoryId: memory,
+        holderEnvironmentId: env,
+        conflictId: ticket.conflictId,
+        conflictHeadSet: ticket.conflictHeadSet,
+        attemptId: ticket.attemptId,
+        frozenDefaultModelSelection: ticket.frozenDefaultModelSelection,
+      });
+      yield* sql`UPDATE memory_outbox SET frozen_claim_json=${JSON.stringify(frozen)} WHERE id=${candidate.id}`;
+      const submitted = yield* store.transact(
+        store.persistResolutionSubmissionTx({
+          ownership,
+          submission,
+          digest: memoryOperationDigest(submission.operation),
+        }),
+      );
+      const owner = { ...ownership, version: submitted.version };
+      const rejection: M.MemoryHubReceipt = {
+        operationId: submission.operation.operationId,
+        memoryId: memory,
+        operationDigest: memoryOperationDigest(submission.operation),
+        outcome: "rejected",
+        hubSequence: null,
+        failureCode: "fenced",
+      };
+      const input = {
+        ownership: owner,
+        candidateId: candidate.id,
+        expectedGeneration: 0,
+        rejection,
+        now: 1,
+        nextAttemptAt: 2,
+      };
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.retireRejectedSubmissionTx({
+              ...input,
+              rejection: { ...rejection, operationId: M.MemoryOperationId.make(id(30000)) },
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.retireRejectedSubmissionTx({
+              ...input,
+              rejection: { ...rejection, operationDigest: "b".repeat(64) },
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+      assert.isNull(
+        yield* store.transact(
+          store.retireRejectedSubmissionTx({ ...input, expectedGeneration: 1 }),
+        ),
+      );
+      const uncertain = yield* sql<{
+        ticket_json: string;
+        frozen_claim_json: string;
+      }>`SELECT ticket_json,(SELECT frozen_claim_json FROM memory_outbox WHERE id=${candidate.id}) AS frozen_claim_json FROM memory_outbox WHERE id=${`resolve:${space}:${ticket.attemptId}`}`;
+      assert.isNotNull(JSON.parse(uncertain[0]!.ticket_json).submission);
+      assert.isNotNull(uncertain[0]!.frozen_claim_json);
+      yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* store.retireRejectedSubmissionTx(input);
+            return yield* Effect.fail("rollback");
+          }),
+        )
+        .pipe(Effect.exit);
+      const next = yield* store.transact(store.retireRejectedSubmissionTx(input));
+      assert.strictEqual(next?.state, "terminal");
+      assert.strictEqual(next?.approval?.outcome, "rejected");
+      assert.isNull(next?.submission);
+      assert.isNull(yield* store.transact(store.retireRejectedSubmissionTx(input)));
+      const retired = yield* sql<{
+        frozen_claim_json: string | null;
+        sync_version: number;
+      }>`SELECT frozen_claim_json,sync_version FROM memory_outbox WHERE id=${candidate.id}`;
+      assert.isNull(retired[0]!.frozen_claim_json);
+      assert.strictEqual(retired[0]!.sync_version, 1);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE space=${space} AND payload_ref=${`submission:${ticket.attemptId}`}`)
+          .length,
+        0,
+      );
+      // A separate attempt already carrying an accepted approval must never retire.
+      const approvedTicket = { ...ticket, attemptId: M.MemoryOperationId.make(id(30100)) };
+      yield* store.persistResolutionTicket(approvedTicket);
+      const approvedKey = { ...key, attemptId: approvedTicket.attemptId };
+      const approvedOwner = yield* store.transact(
+        store.acquireResolutionTicketTx({
+          key: approvedKey,
+          expectedVersion: 0,
+          owner: "accepted",
+          coordinatorEpoch: 1,
+          now: 0,
+          ownedUntil: 100,
+        }),
+      );
+      if (!approvedOwner) throw new Error("fixture");
+      const approval: M.MemoryHubReceipt = { ...rejection, outcome: "accepted", hubSequence: 1 };
+      const approved = yield* store.transact(
+        store.transitionResolutionTicketTx({
+          ownership: {
+            ...approvedKey,
+            owner: "accepted",
+            coordinatorEpoch: 1,
+            version: approvedOwner.version,
+          },
+          nextState: "approved",
+          now: 1,
+          ownedUntil: 100,
+          nextAttemptAt: 1,
+          approval,
+        }),
+      );
+      assert.strictEqual(
+        (yield* store
+          .transact(
+            store.retireRejectedSubmissionTx({
+              ...input,
+              ownership: {
+                ...approvedKey,
+                owner: "accepted",
+                coordinatorEpoch: 1,
+                version: approved!.version,
+              },
+            }),
+          )
+          .pipe(Effect.flip))._tag,
+        "MemoryStoreConflict",
+      );
+    }).pipe(Effect.provide(live)),
+);
