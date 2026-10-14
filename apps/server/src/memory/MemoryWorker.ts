@@ -190,7 +190,7 @@ const make = Effect.gen(function* () {
       AND (EXISTS (SELECT 1 FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated' AND m.sequence<=e.sequence AND m.sequence>coalesce((SELECT max(json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')) FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id),0)) OR (
       EXISTS (SELECT 1 FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated' AND m.sequence<=e.sequence AND m.sequence>coalesce((SELECT max(json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')) FROM memory_outbox o WHERE o.kind='consolidate' AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id),0))
       AND ${now}-coalesce((SELECT max(json_extract(o.metadata_json,'$.completedAt')) FROM memory_outbox o WHERE o.kind='consolidate' AND o.status='completed' AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND json_extract(o.metadata_json,'$.sourceWatermark.throughSequence')>=coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),0)),(SELECT min(CAST((julianday(m.occurred_at)-2440587.5)*86400000 AS INTEGER)) FROM orchestration_events m WHERE m.application_event_version=2 AND m.aggregate_kind='thread' AND m.stream_id=e.stream_id AND m.event_type='message.updated'))>=86400000))
-      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status IN ('pending','running','retry') AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),json_extract(o.metadata_json,'$.sourceWatermark.throughSequence'))=e.sequence)
+      AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.kind IN ('summary','consolidate') AND o.status IN ('pending','running','retry','failed') AND json_extract(o.metadata_json,'$.sourceThread.environmentId')=${environmentId} AND json_extract(o.metadata_json,'$.sourceThread.threadId')=e.stream_id AND coalesce(json_extract(o.metadata_json,'$.observedThroughSequence'),json_extract(o.metadata_json,'$.sourceWatermark.throughSequence'))=e.sequence)
       ORDER BY e.sequence LIMIT 100`);
     if (!rows.length && !continuations.length) return;
     const snapshot = yield* query(settings.getSettings);
@@ -287,7 +287,17 @@ const make = Effect.gen(function* () {
             const chunk = yield* readSource(candidate).pipe(
               Effect.catchTags({
                 MemoryWorkerError: (error) =>
-                  error.code === "source_invalidated" ? Effect.succeed(null) : Effect.fail(error),
+                  error.code === "source_invalidated"
+                    ? Effect.succeed(null)
+                    : Effect.succeed({
+                        messages: [],
+                        // Persist a work item so execute owns failure reporting and retry policy.
+                        watermark: {
+                          fromEventId: M.EventId.make(source[0]!.event_id),
+                          toEventId: M.EventId.make(row.event_id),
+                          throughSequence: row.sequence,
+                        },
+                      }),
               }),
             );
             if (!chunk || candidate.metadata.kind !== "summary") continue;

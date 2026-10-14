@@ -257,6 +257,52 @@ describe("MemoryWorker", () => {
       );
     }).pipe(Effect.provide(live())),
   );
+  it.effect(
+    "isolates a secret source while normal work, deferred repair and maintenance continue",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const sql = yield* SqlClient.SqlClient;
+        const store = yield* Store.MemoryStore;
+        const worker = yield* Worker.MemoryWorker;
+        const source = (yield* sql<{
+          payload_json: string;
+        }>`SELECT payload_json FROM orchestration_events WHERE sequence=1`)[0]!;
+        const message = yield* decodeMessage(source.payload_json);
+        const secret = encodeMessage({ ...message, text: "sk-" + "A".repeat(32) });
+        yield* sql`UPDATE orchestration_events SET payload_json=${secret} WHERE sequence=1`;
+        const normalThread = M.ThreadId.make("normal-thread");
+        yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (${normalThread},NULL)`;
+        yield* sql`INSERT INTO orchestration_events VALUES (3,${id(20)},${normalThread},'message.updated',${encodeMessage({ ...message, threadId: normalThread })},${now},2,'thread')`;
+        yield* sql`INSERT INTO orchestration_events SELECT 4,${id(21)},${normalThread},event_type,payload_json,occurred_at,application_event_version,aggregate_kind FROM orchestration_events WHERE sequence=2`;
+        yield* worker.sweepDue();
+        assert.strictEqual(yield* store.readThreadHookWatermark(), 4);
+        const reports = yield* store.pendingReports(100);
+        assert.strictEqual(reports.length, 1);
+        assert.strictEqual(reports[0]!.failureCode, "secret_detected");
+        const normalId = M.MemoryId.make(
+          Service.memoryStableUuid(`${environmentId}:${normalThread}:summary`),
+        );
+        assert.strictEqual((yield* store.loadAggregate(space, normalId)).item?.status, "active");
+        yield* worker.sweepDue();
+        assert.strictEqual((yield* store.pendingReports(100)).length, 1);
+        const normal = yield* store.loadAggregate(space, normalId);
+        assert.strictEqual(
+          normal.item?.localAvailability.reasons.includes("scanner_pending"),
+          false,
+        );
+        assert.strictEqual(
+          normal.item?.localAvailability.reasons.includes("index_unavailable"),
+          false,
+        );
+        const quota = yield* Quota.MemoryQuotaService;
+        assert.isNotNull((yield* quota.readStorageGrowth(environmentId)).current);
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_outbox WHERE kind='summary' AND status='failed'`).length,
+          1,
+        );
+      }).pipe(Effect.provide(live())),
+  );
   it.effect("filters streaming and system messages before applying the chunk limit", () => {
     const batches: string[][] = [];
     return Effect.gen(function* () {
