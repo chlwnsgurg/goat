@@ -357,7 +357,11 @@ readHubCheckpointPageTx: (input: {
   authority: HubAuthority;
   snapshotToken: string;
   cursor: string | null;
-}) => InTx<M.MemoryHubCheckpointPage, PortError | M.MemoryHubError>;
+}) =>
+  InTx<
+    M.MemoryHubCheckpointPage,
+    PortError | M.MemoryHubError | M.MemoryHubUnauthorizedError | M.MemoryHubForbiddenError
+  >;
 readHubRetentionTx: (space: Space) => InTx<HubRetention>;
 publishCheckpointAndFloorTx: (input: {
   memorySpaceId: Space;
@@ -380,14 +384,27 @@ purgeHubTransientTx: (input: {
   limit: number;
 }) => InTx<{ removedRows: number; cleanupPending: boolean }>;
 // Four distinct typed SQL ports; each is called under HubService's outer transaction.
+// A post-lock membership or scope failure surfaces as the auth errors so transport keeps 401/403.
 requestHubSourceReadTx: (authority: HubAuthority, input: M.MemoryHubSourceReadRequestInput) =>
-  InTx<M.MemoryHubSourceReadRequestResult, AdmissionError | M.MemoryHubError>;
+  InTx<
+    M.MemoryHubSourceReadRequestResult,
+    AdmissionError | M.MemoryHubError | M.MemoryHubUnauthorizedError | M.MemoryHubForbiddenError
+  >;
 collectHubSourceReadsTx: (authority: HubAuthority, input: M.MemoryHubSourceReadCollectInput) =>
-  InTx<M.MemoryHubSourceReadCollectResult, PortError | M.MemoryHubError>;
+  InTx<
+    M.MemoryHubSourceReadCollectResult,
+    PortError | M.MemoryHubError | M.MemoryHubUnauthorizedError | M.MemoryHubForbiddenError
+  >;
 respondHubSourceReadTx: (authority: HubAuthority, input: M.MemoryHubSourceReadRespondInput) =>
-  InTx<M.MemoryHubSourceReadRespondResult, AdmissionError | M.MemoryHubError>;
+  InTx<
+    M.MemoryHubSourceReadRespondResult,
+    AdmissionError | M.MemoryHubError | M.MemoryHubUnauthorizedError | M.MemoryHubForbiddenError
+  >;
 resultHubSourceReadTx: (authority: HubAuthority, input: M.MemoryHubSourceReadResultInput) =>
-  InTx<M.MemoryHubSourceReadResultResult, PortError | M.MemoryHubError>;
+  InTx<
+    M.MemoryHubSourceReadResultResult,
+    PortError | M.MemoryHubError | M.MemoryHubUnauthorizedError | M.MemoryHubForbiddenError
+  >;
 readRecoverableResolutionTickets: (input: { now: number; limit: number }) =>
   Effect.Effect<readonly TicketRow[], StorageError>;
 acquireResolutionTicketTx: (input: {
@@ -588,6 +605,11 @@ metadata and receipt. Exact 30 days is an approval-boundary invariant: enforce w
 creates resolutionApproval and when a receiver validates it before approval projection
 through ACK/pull/checkpoint. Keep MemoryResolution's storage/decode schema unchanged
 (`revertDeadlineUtc >= appliedAtUtc`); never add exact-interval validation to aggregate decode.
+validateMemoryCheckpointRecords also accepts the two identities WP2 actually produces: an
+identity whose create operation is an unknown-ID forget (deleted receipt, tombstone-only
+identity), and a rejected compact receipt with no accepted canonical effect, carried as a
+body-free operationId record for replay and dedup without identity or fence. Every other
+identity/fence requirement stays. This lands as its own contract commit inside L1.
 Do not change MemoryOperation, canonical digest or apply input. Project new approved times
 from validated receipt approval, never operation submission timestamps.
 
@@ -1232,3 +1254,4 @@ IDs remain governed by 000 M1–M20, not by a restored historical appendix.
 | rev 11b: R2 G-4 frozen claim recovery             | §4–4.1, §5.1, §6, §10–11: persist/return full MemoryHubClaimInput; saved claim replay precedes current-default checks; P→Q/null crash fixture.                                                   |
 | rev 11b: R2 codec/local revert; A2 quota consumer | §4.3, §6, §10–12: measured versioned binary maximum/headroom, old-row accounting/mixed decode, local device-time guard removal and SyncWorkCandidate.work.id test consumers.                     |
 | rev 11c: A3 #1 claim retirement                   | §4, §5.1, §6, §11: only definitive outcomes retire a frozen claim via transitionResolutionTicketTx retireClaim CAS and bump generation; uncertain submissions replay; retire-then-Q fixture.     |
+| rev 11d: L1 coordinator decisions                 | §4, §4.3: auth errors on source relay and checkpoint page ports; checkpoint validation accepts forget-created identities and refusal-only receipts.                                              |
