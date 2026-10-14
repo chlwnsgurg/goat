@@ -292,6 +292,13 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
   const schema = yield* sql<{ type: string; name: string; sql: string }>`
     SELECT type, name, sql FROM src.sqlite_master
     WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'`;
+  const tableKinds = yield* sql<{ name: string; type: string }>`PRAGMA src.table_list`;
+  const shadowTables = new Set(
+    tableKinds.filter((row) => row.type === "shadow").map((row) => row.name),
+  );
+  const virtualTables = new Set(
+    tableKinds.filter((row) => row.type === "virtual").map((row) => row.name),
+  );
   const threadColumns = yield* sql<{ name: string; notnull: number }>`
     SELECT m.name, c."notnull" FROM src.sqlite_master m, pragma_table_info(m.name, 'src') c
     WHERE m.type = 'table' AND c.name = 'thread_id'`;
@@ -312,7 +319,9 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
     writableColumns.set(column.table_name, names);
   }
   const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
-  const tables = schema.filter((entry) => entry.type === "table");
+  // Creating a virtual table creates its shadow storage. Copy its logical rows once,
+  // preserving rowids used by the memory index, rather than replaying shadow DDL.
+  const tables = schema.filter((entry) => entry.type === "table" && !shadowTables.has(entry.name));
   const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
 
   yield* sql.withTransaction(
@@ -341,7 +350,9 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
               : `WHERE thread_id IN (SELECT thread_id FROM copied_threads)${nullable ? " OR thread_id IS NULL" : ""}`;
         const columns = writableColumns.get(name) ?? [];
         if (columns.length === 0) continue;
-        const columnList = columns.map(quoteIdent).join(", ");
+        const columnList = (virtualTables.has(name) ? ["rowid", ...columns] : columns)
+          .map(quoteIdent)
+          .join(", ");
         const quoted = quoteIdent(name);
         yield* sql.unsafe(
           `INSERT INTO main.${quoted} (${columnList}) SELECT ${columnList} FROM src.${quoted} ${filter}`,
@@ -351,7 +362,8 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
       yield* sql`DELETE FROM main.sqlite_sequence`;
       yield* sql`INSERT INTO main.sqlite_sequence SELECT name, seq FROM src.sqlite_sequence`;
       for (const entry of schema) {
-        if (entry.type !== "table") yield* sql.unsafe(entry.sql).unprepared;
+        if (entry.type !== "table" && !shadowTables.has(entry.name))
+          yield* sql.unsafe(entry.sql).unprepared;
       }
     }),
   );

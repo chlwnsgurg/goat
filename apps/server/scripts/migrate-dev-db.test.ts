@@ -29,6 +29,7 @@ const createFixtureSource = Effect.fn("createMigrateDevDbFixtureSource")(functio
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
+      yield* sql`INSERT INTO memory_items_fts (rowid, body) VALUES (42, 'synthetic searchable memory')`;
 
       yield* sql`INSERT INTO projection_projects
         (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
@@ -123,6 +124,10 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         result.databasePath,
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
+          assert.deepStrictEqual(
+            yield* sql`SELECT rowid, body FROM memory_items_fts WHERE memory_items_fts MATCH 'searchable'`,
+            [{ rowid: 42, body: "synthetic searchable memory" }],
+          );
           const threads = yield* sql<{ thread_id: string }>`
             SELECT thread_id FROM orchestration_v2_projection_threads ORDER BY thread_id`;
           const events = yield* sql<{ stream_id: string }>`
