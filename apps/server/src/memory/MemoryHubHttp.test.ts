@@ -201,3 +201,31 @@ it("disabled hub, future protocol, excess keys and streamed oversize have safe s
     await disabled.dispose();
   }
 });
+
+it("malformed UTF-8 inside a JSON envelope is refused before service work", async () => {
+  const { handler, dispose } = HttpRouter.toWebHandler(app(), { disableLogger: true });
+  try {
+    const bytes = new TextEncoder().encode(
+      JSON.stringify({
+        protocolVersion: 1,
+        memorySpaceId: space,
+        environmentId: member,
+        operations: [],
+      }),
+    );
+    const marker = new TextEncoder().encode(member)[0]!;
+    const position = bytes.lastIndexOf(marker);
+    bytes[position] = 255;
+    const response = await handler(
+      new Request(`https://hub.invalid${M.MEMORY_HUB_PATHS.push}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: bytes,
+      }),
+      Context.empty(),
+    );
+    expect(response.status).toBe(400);
+  } finally {
+    await dispose();
+  }
+});

@@ -2342,8 +2342,15 @@ it.effect(
       };
       assert.strictEqual((yield* transitions.applyMemoryHubTransition(input, permit)).version, 1);
       const retry = yield* Effect.result(transitions.applyMemoryHubTransition(input, permit));
-      assert.strictEqual(retry._tag, "Failure");
-      assert.strictEqual(checks, 2);
+      assert.strictEqual(retry._tag, "Success");
+      const otherRequest = yield* Effect.result(
+        transitions.applyMemoryHubTransition(
+          { ...input, requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000100") },
+          permit,
+        ),
+      );
+      assert.strictEqual(otherRequest._tag, "Failure");
+      assert.strictEqual(checks, 3);
       const persisted = yield* decodeServerSettingsJson(
         yield* fs.readFileString(config.settingsPath),
       );
@@ -2433,4 +2440,42 @@ it.effect(
         assert.strictEqual(result.failure._tag, "MemoryHubForbiddenError");
       assert.strictEqual((yield* service.getSettings).memoryHubVersion, 0);
     }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect(
+  "the L2 administration port uses one lock and replays a persisted request after restart",
+  () =>
+    Effect.gen(function* () {
+      const admin = yield* ServerSettingsModule.MemoryHubAdminSettings;
+      const record = {
+        requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000080"),
+        requestDigest: "a".repeat(64),
+        expectedVersion: 0,
+        stage: "activated" as const,
+        action: {
+          requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000080"),
+          expectedVersion: 0,
+          action: "configure" as const,
+          settings: { mode: "disabled" as const },
+        },
+        secretName: null,
+        result: null,
+        memberVersion: null,
+      };
+      const result = yield* admin.withLock(admin.apply(record, Effect.void));
+      assert.strictEqual(result.view.version, 1);
+      // New settings service, same real filesystem/secret/SQLite dependencies.
+      const restarted = yield* Effect.gen(function* () {
+        const recovered = yield* ServerSettingsModule.MemoryHubAdminSettings;
+        return yield* recovered.withLock(recovered.apply(record, Effect.void));
+      }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
+      assert.deepStrictEqual(restarted, result);
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateSettings({ standingInstructions: "kept" });
+      assert.deepStrictEqual(yield* admin.withLock(admin.apply(record, Effect.void)), result);
+      const unsafe = yield* Effect.result(admin.apply(record, Effect.void));
+      assert.strictEqual(unsafe._tag, "Failure");
+    }).pipe(
+      Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
+    ),
 );

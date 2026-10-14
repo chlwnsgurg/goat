@@ -160,7 +160,11 @@ const route = <I, IE, O, OE>(
         bytes.set(chunk, offset);
         offset += chunk.length;
       }
-      const raw = yield* decodeJson(new TextDecoder().decode(bytes)).pipe(
+      const text = yield* Effect.try({
+        try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        catch: () => new InvalidEnvelope({ status: 400 }),
+      });
+      const raw = yield* decodeJson(text).pipe(
         Effect.mapError(() => new InvalidEnvelope({ status: 400 })),
       );
       if (
@@ -210,7 +214,7 @@ export const layer = Layer.mergeAll(
     M.MEMORY_HUB_PATHS.applyResolution,
     M.MemoryHubApplyResolutionInput,
     M.MemoryHubReceipt,
-    131072,
+    256 * 1024 + M.MEMORY_PAGE_MAX_UTF8_BYTES,
     (s, p, i) => s.applyResolution(i, p),
   ),
   route(

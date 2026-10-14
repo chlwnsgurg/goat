@@ -64,19 +64,19 @@ export class MemoryHubClient extends Context.Service<
       connection: HubConnection,
       input: M.MemoryHubReleaseInput,
     ) => Effect.Effect<M.MemoryHubReleaseResult, HubClientFailure>;
-    readonly sourceReadRequest: (
+    readonly requestSourceRead: (
       connection: HubConnection,
       input: M.MemoryHubSourceReadRequestInput,
     ) => Effect.Effect<M.MemoryHubSourceReadRequestResult, HubClientFailure>;
-    readonly sourceReadCollect: (
+    readonly collectSourceReads: (
       connection: HubConnection,
       input: M.MemoryHubSourceReadCollectInput,
     ) => Effect.Effect<M.MemoryHubSourceReadCollectResult, HubClientFailure>;
-    readonly sourceReadRespond: (
+    readonly respondSourceRead: (
       connection: HubConnection,
       input: M.MemoryHubSourceReadRespondInput,
     ) => Effect.Effect<M.MemoryHubSourceReadRespondResult, HubClientFailure>;
-    readonly sourceReadResult: (
+    readonly resultSourceRead: (
       connection: HubConnection,
       input: M.MemoryHubSourceReadResultInput,
     ) => Effect.Effect<M.MemoryHubSourceReadResultResult, HubClientFailure>;
@@ -129,7 +129,11 @@ const make = Effect.gen(function* () {
       bytes.set(chunk, offset);
       offset += chunk.length;
     }
-    return yield* decodeJson(new TextDecoder().decode(bytes)).pipe(
+    const text = yield* Effect.try({
+      try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      catch: () => new M.MemoryHubError({ code: "invalid_output" }),
+    });
+    return yield* decodeJson(text).pipe(
       Effect.mapError(() => new M.MemoryHubError({ code: "invalid_output" })),
     );
   });
@@ -293,22 +297,22 @@ const make = Effect.gen(function* () {
         o.operationDigest === memoryOperationDigest(i.operation),
     ),
     release: call(M.MEMORY_HUB_PATHS.release, M.MemoryHubReleaseInput, M.MemoryHubReleaseResult),
-    sourceReadRequest: call(
+    requestSourceRead: call(
       M.MEMORY_HUB_PATHS.sourceReadRequest,
       M.MemoryHubSourceReadRequestInput,
       M.MemoryHubSourceReadRequestResult,
     ),
-    sourceReadCollect: call(
+    collectSourceReads: call(
       M.MEMORY_HUB_PATHS.sourceReadCollect,
       M.MemoryHubSourceReadCollectInput,
       M.MemoryHubSourceReadCollectResult,
     ),
-    sourceReadRespond: call(
+    respondSourceRead: call(
       M.MEMORY_HUB_PATHS.sourceReadRespond,
       M.MemoryHubSourceReadRespondInput,
       M.MemoryHubSourceReadRespondResult,
     ),
-    sourceReadResult: call(
+    resultSourceRead: call(
       M.MEMORY_HUB_PATHS.sourceReadResult,
       M.MemoryHubSourceReadResultInput,
       M.MemoryHubSourceReadResultResult,

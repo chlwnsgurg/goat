@@ -77,7 +77,7 @@ it.effect("preflight identity/protocol/redirect failures never forward a credent
       };
       const result = yield* Effect.result(
         client
-          .sourceReadCollect(connection, input)
+          .collectSourceReads(connection, input)
           .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch)),
       );
       assert.strictEqual(result._tag, "Failure");
@@ -103,7 +103,7 @@ it.effect("401 and 403 remain distinct and are never retried", () =>
       };
       const result = yield* Effect.result(
         client
-          .sourceReadCollect(connection, input)
+          .collectSourceReads(connection, input)
           .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch)),
       );
       assert.strictEqual(result._tag, "Failure");
@@ -128,7 +128,7 @@ it.effect("unavailable retries identical input after clock-driven backoff", () =
       bodies.push(init?.body);
       return bodies.length === 1 ? json({}, 503) : json({ requests: [] });
     };
-    const program = client.sourceReadCollect(connection, input);
+    const program = client.collectSourceReads(connection, input);
     // Network milestone, then TestClock drives the retry schedule; no wall-clock sleep.
     const markedFetch: typeof globalThis.fetch = async (url, init) => {
       const response = await fetch(url, init);
@@ -143,7 +143,7 @@ it.effect("unavailable retries identical input after clock-driven backoff", () =
     yield* TestClock.adjust("250 millis");
     assert.deepStrictEqual(yield* Fiber.join(fiber), { requests: [] });
     assert.strictEqual(bodies.length, 2);
-    assert.strictEqual(bodies[0], bodies[1]);
+    assert.deepStrictEqual(bodies[0], bodies[1]);
   }).pipe(Effect.provide(live)),
 );
 
@@ -160,7 +160,7 @@ it.effect("late old-epoch responses are discarded after settings change", () =>
       await release.promise;
       return json({ requests: [] });
     };
-    const fiber = yield* Effect.result(client.sourceReadCollect(connection, input)).pipe(
+    const fiber = yield* Effect.result(client.collectSourceReads(connection, input)).pipe(
       Effect.provideService(FetchHttpClient.Fetch, fetch),
       Effect.forkChild,
     );
@@ -187,6 +187,7 @@ it.effect("unsupported route, bad schema, and oversized response stop without re
     const client = yield* Client.MemoryHubClient;
     for (const [response, code] of [
       [json({}, 404), "route_unavailable"],
+      [json({ _tag: "MemoryHubError", code: "hub_disabled" }, 503), "hub_disabled"],
       [json({ requests: [], extra: true }), "invalid_output"],
       [new Response("x".repeat(1048577)), "payload_too_large"],
     ] as const) {
@@ -198,7 +199,7 @@ it.effect("unsupported route, bad schema, and oversized response stop without re
       };
       const result = yield* Effect.result(
         client
-          .sourceReadCollect(connection, input)
+          .collectSourceReads(connection, input)
           .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch)),
       );
       assert.strictEqual(result._tag, "Failure");
@@ -225,7 +226,7 @@ it.effect("the total request deadline interrupts stalled network work", () =>
         });
       });
     };
-    const fiber = yield* Effect.result(client.sourceReadCollect(connection, input)).pipe(
+    const fiber = yield* Effect.result(client.collectSourceReads(connection, input)).pipe(
       Effect.provideService(FetchHttpClient.Fetch, fetch),
       Effect.forkChild,
     );
@@ -342,10 +343,10 @@ it.effect("every typed hub call refuses an unavailable route without credential 
       client.renew(connection, renew),
       client.applyResolution(connection, apply),
       client.release(connection, release),
-      client.sourceReadRequest(connection, source),
-      client.sourceReadCollect(connection, input),
-      client.sourceReadRespond(connection, respond),
-      client.sourceReadResult(connection, sourceResult),
+      client.requestSourceRead(connection, source),
+      client.collectSourceReads(connection, input),
+      client.respondSourceRead(connection, respond),
+      client.resultSourceRead(connection, sourceResult),
     ];
     const destinations: string[] = [];
     const fetch: typeof globalThis.fetch = async (url, init) => {
@@ -362,5 +363,57 @@ it.effect("every typed hub call refuses an unavailable route without credential 
         assert.strictEqual(result.failure.code, "route_unavailable");
     }
     assert.deepStrictEqual(destinations, Object.values(M.MEMORY_HUB_PATHS));
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("repeated transient failure stops after two retries", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const client = yield* Client.MemoryHubClient;
+    const milestones = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>());
+    let posts = 0;
+    const fetch: typeof globalThis.fetch = async (_url, init) => {
+      if (init?.method === "GET") return json(descriptor);
+      const milestone = milestones[posts++];
+      if (milestone) Deferred.doneUnsafe(milestone, Effect.void);
+      return json({}, 503);
+    };
+    const fiber = yield* Effect.result(client.collectSourceReads(connection, input)).pipe(
+      Effect.provideService(FetchHttpClient.Fetch, fetch),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(milestones[0]!);
+    yield* TestClock.adjust("250 millis");
+    yield* Deferred.await(milestones[1]!);
+    yield* TestClock.adjust("500 millis");
+    yield* Deferred.await(milestones[2]!);
+    const result = yield* Fiber.join(fiber);
+    assert.strictEqual(result._tag, "Failure");
+    assert.strictEqual(posts, 3);
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("a configured loopback HTTP hub passes the same pinned preflight", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const transitions = yield* Settings.MemoryHubSettingsTransitions;
+    const { epoch: _epoch, ...configured } = connection;
+    const settings = {
+      ...configured,
+      endpoint: M.MemoryHubEndpoint.make("http://127.0.0.1:12345"),
+    };
+    yield* transitions.applyMemoryHubTransition(
+      { requestId: M.MemoryOperationId.make(id(97)), expectedVersion: 1, settings },
+      Effect.void,
+    );
+    const client = yield* Client.MemoryHubClient;
+    const fetch: typeof globalThis.fetch = async (_url, init) =>
+      init?.method === "GET" ? json(descriptor) : json({ requests: [] });
+    assert.deepStrictEqual(
+      yield* client
+        .collectSourceReads({ ...settings, epoch: 2 }, input)
+        .pipe(Effect.provideService(FetchHttpClient.Fetch, fetch)),
+      { requests: [] },
+    );
   }).pipe(Effect.provide(live)),
 );
