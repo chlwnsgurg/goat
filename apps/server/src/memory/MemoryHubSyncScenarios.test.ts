@@ -983,7 +983,13 @@ it.effect(
     Effect.gen(function* () {
       const c = yield* cluster();
       c.h.setDescriptorHealthy(false);
-      yield* c.a.sync.syncOnce;
+      const held = yield* Effect.result(c.a.sync.syncOnce);
+      assert.strictEqual(held._tag, "Failure");
+      if (held._tag === "Failure") {
+        assert.strictEqual(held.failure._tag, "MemoryHubError");
+        if (held.failure._tag === "MemoryHubError")
+          assert.strictEqual(held.failure.code, "unsupported_protocol");
+      }
       const retry = () =>
         c.a.run(
           Store.MemoryStore.use((store) =>
