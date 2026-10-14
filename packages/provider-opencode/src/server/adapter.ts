@@ -2957,37 +2957,38 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 Effect.orElseSucceed(() => []),
               )).find((entry) => entry.name === match[1])
             : undefined;
-          if (!command) {
-            const currentMcp =
-              memoryInput === undefined ? undefined : yield* mcpSessions.read(memoryInput.threadId);
-            if (
-              memoryInput !== undefined &&
-              !connection.external &&
-              (currentMcp?.authorizationHeader !== installedMcpSession?.authorizationHeader ||
-                currentMcp?.endpoint !== installedMcpSession?.endpoint)
-            ) {
-              if (currentMcp === undefined) {
-                yield* sdkCall("mcp.disconnect", { name: "goat" }, (signal) =>
-                  client.mcp.disconnect({ name: "goat" }, { signal }),
-                );
-              } else {
-                yield* sdkCall("mcp.add", { name: "goat" }, (signal) =>
-                  client.mcp.add(
-                    {
-                      name: "goat",
-                      config: {
-                        type: "remote",
-                        url: currentMcp.endpoint,
-                        headers: { Authorization: currentMcp.authorizationHeader },
-                        oauth: false,
-                      },
+          const currentMcp =
+            memoryInput === undefined ? undefined : yield* mcpSessions.read(memoryInput.threadId);
+          if (
+            memoryInput !== undefined &&
+            !connection.external &&
+            (currentMcp?.authorizationHeader !== installedMcpSession?.authorizationHeader ||
+              currentMcp?.endpoint !== installedMcpSession?.endpoint)
+          ) {
+            if (currentMcp === undefined) {
+              yield* sdkCall("mcp.disconnect", { name: "goat" }, (signal) =>
+                client.mcp.disconnect({ name: "goat" }, { signal }),
+              );
+            } else {
+              yield* sdkCall("mcp.add", { name: "goat" }, (signal) =>
+                client.mcp.add(
+                  {
+                    name: "goat",
+                    config: {
+                      type: "remote",
+                      url: currentMcp.endpoint,
+                      headers: { Authorization: currentMcp.authorizationHeader },
+                      oauth: false,
                     },
-                    { signal },
-                  ),
-                );
-              }
-              installedMcpSession = currentMcp;
+                  },
+                  { signal },
+                ),
+              );
             }
+            installedMcpSession = currentMcp;
+          }
+          // Native workspace commands accept file parts only, so snapshots stay on prompts.
+          if (!command) {
             const snapshot =
               memoryInput === undefined
                 ? undefined

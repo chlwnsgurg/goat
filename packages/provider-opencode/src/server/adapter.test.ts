@@ -1404,6 +1404,132 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
+  it.effect.each(["remove", "replace"] as const)(
+    "WP4 C-1 reconciles MCP before workspace command %s without snapshot refresh",
+    (change) =>
+      Effect.gen(function* () {
+        const suffix = `command-memory-${change}`;
+        const sessionId = `native-${suffix}`;
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const config = {
+          environmentId: EnvironmentId.make("fixture"),
+          threadId: ThreadId.make(`thread-opencode-${suffix}`),
+          providerSessionId: `session-opencode-${suffix}`,
+          providerInstanceId: ProviderInstanceId.make(`opencode-${suffix}`),
+          endpoint: "http://fixture.invalid/a",
+          authorizationHeader: "Bearer synthetic-command",
+          browserToolsAvailable: false,
+          grantedScopes: ["memory:read"] as const,
+        };
+        yield* sessions.set(config);
+        const operations: string[] = [];
+        const commands = yield* Queue.unbounded<{ messageID: string; parts: unknown[] }>();
+        const nativeEvents = asyncEventStream();
+        let refreshes = 0;
+        const prompts: Array<{ messageID: string; system?: string }> = [];
+        const harness = yield* makeOpenCodeRuntimeHarness(
+          suffix,
+          sessionId,
+          {
+            event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+            command: { list: async () => ({ data: [{ name: "review" }] }) },
+            mcp: {
+              add: async (input: { config: { url: string } }) => {
+                operations.push(`add:${input.config.url}`);
+                return { data: true };
+              },
+              disconnect: async () => {
+                operations.push("disconnect");
+                return { data: true };
+              },
+            },
+            session: {
+              create: async () => ({ data: { id: sessionId, time: { created: 1, updated: 1 } } }),
+              command: async (input: { messageID: string; parts: unknown[] }) => {
+                operations.push("command");
+                Queue.offerUnsafe(commands, input);
+                return { data: true };
+              },
+              promptAsync: async (input: { messageID: string; system?: string }) => {
+                prompts.push(input);
+                return { data: true };
+              },
+            },
+          },
+          {
+            external: false,
+            memory: {
+              refreshMemoryContext: () =>
+                Effect.sync(() => {
+                  refreshes++;
+                  return wp4Snapshot();
+                }),
+            },
+          },
+        );
+        assert.deepEqual(operations, ["add:http://fixture.invalid/a"]);
+        if (change === "remove") yield* sessions.clear(config.threadId);
+        else yield* sessions.set({ ...config, endpoint: "http://fixture.invalid/b" });
+        const terminal = yield* harness.runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        const start = yield* harness.startTurn("/review staged changes").pipe(Effect.forkScoped);
+        const call = yield* Queue.take(commands);
+        assert.deepEqual(operations, [
+          "add:http://fixture.invalid/a",
+          change === "remove" ? "disconnect" : "add:http://fixture.invalid/b",
+          "command",
+        ]);
+        assert.equal(refreshes, 0);
+        assert.deepEqual(call.parts, []);
+        assert.notInclude(JSON.stringify(call), "external_goat_memory");
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "message.updated",
+            properties: {
+              sessionID: sessionId,
+              info: {
+                id: call.messageID,
+                sessionID: sessionId,
+                role: "user",
+                time: { created: 1 },
+              },
+            },
+          }),
+        );
+        yield* Fiber.join(start);
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "session.status",
+            properties: {
+              sessionID: sessionId,
+              status: { type: "busy" },
+            },
+          }),
+        );
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "session.status",
+            properties: {
+              sessionID: sessionId,
+              status: { type: "idle" },
+            },
+          }),
+        );
+        yield* Fiber.join(terminal);
+        assert.equal(prompts.length, 0);
+        yield* harness.startTurn("ordinary after command");
+        assert.equal(refreshes, 1);
+        assert.include(prompts[0]?.system ?? "", memoryContextText(wp4Snapshot()));
+        assert.include(prompts[0]?.system ?? "", `read=${change === "replace"}`);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      ),
+  );
+
   it.effect("admits a native command on its user receipt before generation completes", () =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
