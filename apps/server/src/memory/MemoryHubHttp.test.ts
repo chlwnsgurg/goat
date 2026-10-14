@@ -143,6 +143,8 @@ it.each([
   [new M.MemoryHubError({ code: "unsupported_protocol" }), 426],
   [new M.MemoryHubError({ code: "hub_disabled" }), 503],
   [new M.MemoryHubError({ code: "payload_too_large" }), 413],
+  [new Store.MemoryStoreConflict({ code: "unsupported_protocol" }), 426],
+  [new Store.MemoryStoreConflict({ code: "lease_expired" }), 409],
 ] as const)("maps service %s to %i without private error details", async (error, status) => {
   const { handler, dispose } = HttpRouter.toWebHandler(app(error), { disableLogger: true });
   try {
@@ -157,7 +159,9 @@ it.each([
     );
     expect(response.status).toBe(status);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.text()).not.toContain(credential);
+    const safe = await response.text();
+    expect(safe).not.toContain(credential);
+    if (error._tag === "MemoryStoreConflict") expect(JSON.parse(safe).code).toBe(error.code);
   } finally {
     await dispose();
   }

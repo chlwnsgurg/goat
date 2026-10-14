@@ -93,7 +93,7 @@ const failureResponse = (error: HubFailure | InvalidEnvelope) => {
   if (error._tag === "MemoryStorageError")
     return failureResponse(new M.MemoryHubError({ code: "storage_failed" }));
   if (error._tag === "MemoryStoreConflict")
-    return failureResponse(new M.MemoryHubError({ code: "revision_changed" }));
+    return failureResponse(new M.MemoryHubError({ code: error.code }));
   if (error._tag === "MemoryCapacityError")
     return failureResponse(new M.MemoryHubError({ code: "capacity_exceeded" }));
   const status =
