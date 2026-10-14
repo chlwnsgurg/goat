@@ -362,6 +362,7 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
     if (attached) {
       scopes = [];
       yield* sessions.set(config(scopes));
+      const runtimeCount = launchServers.length;
       const replacement = yield* runtime.rollbackThread({
         providerThread: thread,
         providerThreadTurns: [],
@@ -371,10 +372,9 @@ export const acpMemoryDelivery = (kind: "acp" | "grok" | "antigravity", attached
           appRunOrdinal: 0,
         },
       });
-      assert.notEqual(
-        replacement.providerThread.nativeThreadRef?.nativeId,
-        thread.nativeThreadRef?.nativeId,
-      );
+      // The fixture process reuses mock-session-1; a newly created conversation
+      // must reset claims even when the runtime recycles its native identifier.
+      assert.equal(launchServers.length, runtimeCount + 1);
       thread = replacement.providerThread;
       yield* runtime.startTurn(input(7));
       yield* runtime.events.pipe(

@@ -6276,6 +6276,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               prepareClaimableTerminalEnvironment(yield* readMcpContext(input.threadId));
               return yield* startAcpRuntime(input.threadId);
             });
+        if (input.initialNativeThreadId !== started.sessionId) {
+          memoryToolClaims.delete(started.sessionId);
+        }
         yield* Ref.set(activeSessionId, started.sessionId);
         yield* Ref.set(activeSessionSetup, started);
         rememberTerminalEnvironment(started.sessionId, runtimeMcpContext!);
@@ -8009,6 +8012,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     rollbackInput.providerThread.appThreadId,
                     (candidate, mcpContext) =>
                       Effect.gen(function* () {
+                        // Rollback created a new conversation, even if a runtime reuses its ID.
+                        memoryToolClaims.delete(candidate.sessionId);
                         rememberTerminalEnvironment(candidate.sessionId, mcpContext);
                         yield* Ref.set(runtimeRestartRequired, false);
                         yield* Ref.set(activeSessionId, candidate.sessionId);
@@ -8108,6 +8113,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     acpMcpActivation(mcpContext),
                   );
                   yield* refreshRuntimeMcpBridge(mcpContext);
+                  memoryToolClaims.delete(forked.sessionId);
                   rememberTerminalEnvironment(forked.sessionId, mcpContext);
                   yield* Ref.set(activeSessionId, forked.sessionId);
                   yield* Ref.set(activeSessionSetup, forked);

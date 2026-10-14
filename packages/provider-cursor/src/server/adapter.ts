@@ -2110,6 +2110,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             threadId: openInput.threadId,
             providerSessionId: input.providerSessionId,
           });
+          if (openInput.operation === "create") memoryToolClaims.delete(sdkSession.agentId);
           const next = {
             cwd: openInput.runtimePolicy.cwd,
             nativeThreadId: sdkSession.agentId,
