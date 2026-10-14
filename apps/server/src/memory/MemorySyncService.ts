@@ -345,6 +345,11 @@ const make = Effect.gen(function* () {
   const runClaimedResolution = Effect.fn("MemorySyncService.runClaimedResolution")(function* (
     r: Route,
     initial: Store.TicketRow,
+    candidate: {
+      candidateId: string;
+      expectedGeneration: number;
+      expectedAttempt: number;
+    } | null,
   ) {
     let row = initial;
     let currentLease = initial.ticket;
@@ -644,10 +649,31 @@ const make = Effect.gen(function* () {
     yield* execute.pipe(
       Effect.tapError((error) =>
         Effect.gen(function* () {
-          definitiveFailure = !row.submission && !transient(error);
+          definitiveFailure = !row.submission && !row.approval && !transient(error);
           if (row.approval || row.state === "terminal") return;
           yield* ensureEpoch(r.settings.memoryHubVersion);
           const now = yield* Clock.currentTimeMillis;
+          const permanentClass = holdClass(error);
+          if (definitiveFailure && ["authorization", "identity"].includes(permanentClass)) {
+            // A stale/protected pair must not fall back to ticket-only hold or retirement.
+            // The candidate acquisition lineage was captured with ticket ownership.
+            failureRecorded = true;
+            const held = yield* store.transact(
+              Effect.gen(function* () {
+                yield* ensureEpoch(r.settings.memoryHubVersion);
+                if (!candidate) return null;
+                return yield* store.holdResolutionAttemptTx({
+                  ownership: ownership(row),
+                  ...candidate,
+                  now,
+                  failureCode: failureCode(error),
+                  holdClass: permanentClass,
+                });
+              }),
+            );
+            if (held) row = held;
+            return;
+          }
           const failed = yield* store.transact(
             Effect.gen(function* () {
               const saved = yield* store.failResolutionTicketTx({
@@ -739,16 +765,35 @@ const make = Effect.gen(function* () {
     yield* Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
-        const acquired = yield* store.transact(
-          store.acquireResolutionTicketTx({
-            key: { memorySpaceId: saved.ticket.memorySpaceId, attemptId: saved.ticket.attemptId },
-            expectedVersion: saved.version,
-            owner,
-            coordinatorEpoch: r.settings.memoryHubVersion,
-            now,
-            ownedUntil: now + 60000,
+        const attempt = yield* store.transact(
+          Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+            const candidate = yield* store.findClaimCandidate({
+              memorySpaceId: saved.ticket.memorySpaceId,
+              attemptId: saved.ticket.attemptId,
+            });
+            const ticket = yield* store.acquireResolutionTicketTx({
+              key: { memorySpaceId: saved.ticket.memorySpaceId, attemptId: saved.ticket.attemptId },
+              expectedVersion: saved.version,
+              owner,
+              coordinatorEpoch: r.settings.memoryHubVersion,
+              now,
+              ownedUntil: now + 60000,
+            });
+            return {
+              ticket,
+              candidate:
+                candidate?.metadata.kind === "claim"
+                  ? {
+                      candidateId: candidate.id,
+                      expectedGeneration: candidate.metadata.generation ?? 0,
+                      expectedAttempt: candidate.attempt,
+                    }
+                  : null,
+            };
           }),
         );
+        const acquired = attempt.ticket;
         if (!acquired) {
           executions.delete(saved.ticket.memoryId);
           return;
@@ -772,7 +817,7 @@ const make = Effect.gen(function* () {
           executions.delete(saved.ticket.memoryId);
           return;
         }
-        const fiber = yield* restore(runClaimedResolution(r, acquired)).pipe(
+        const fiber = yield* restore(runClaimedResolution(r, acquired, attempt.candidate)).pipe(
           Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)),
           Effect.ensuring(
             Effect.sync(() => {

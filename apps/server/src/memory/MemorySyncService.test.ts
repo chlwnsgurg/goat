@@ -4273,3 +4273,164 @@ it.effect.each([
       );
     }),
 );
+
+it.effect.each([
+  ["authorization", true, false],
+  ["authorization", false, false],
+  ["identity", true, false],
+  ["identity", false, false],
+  ["authorization", true, true],
+  ["authorization", false, true],
+  ["identity", true, true],
+  ["identity", false, true],
+] as const)(
+  "permanent ticket refusal pairs %s holds (released=%s, parallel=%s) across restart and matching rearm",
+  ([holdClass, released, parallel]) =>
+    Effect.gen(function* () {
+      const events = yield* PubSub.bounded<{
+        memorySpaceId: M.MemorySpaceId;
+        holdClass: Store.MemoryHoldClass;
+      }>(4);
+      const held = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      const resumed = yield* Deferred.make<M.ResolveMemoryConflictInput>();
+      let lease: M.MemoryResolutionLease | undefined;
+      let renews = 0;
+      let claims = 0;
+      let generations = 0;
+      let refused = false;
+      const client = peer({
+        claim: (_c, { protocolVersion: _protocol, ...claim }) =>
+          Effect.sync(() => {
+            claims++;
+            lease = {
+              ...claim,
+              fencingToken: 1,
+              claimedAtHubTime: timestamp,
+              expiresAtHubTime: "1970-01-01T00:02:00.000Z",
+              attemptDeadlineHubTime: "1970-01-01T00:10:00.000Z",
+            };
+            return lease;
+          }),
+        renew: () =>
+          Effect.gen(function* () {
+            renews++;
+            if (!refused && (!parallel || renews === 2)) {
+              refused = true;
+              return yield* holdClass === "authorization"
+                ? new M.MemoryHubUnauthorizedError({})
+                : new M.MemoryHubError({ code: "identity_mismatch" });
+            }
+            return lease!;
+          }),
+        release: () => Deferred.succeed(held, undefined).pipe(Effect.as({ released })),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.gen(function* () {
+            generations++;
+            if (parallel && generations === 1) yield* Deferred.succeed(entered, undefined);
+            else yield* Deferred.succeed(resumed, input);
+            return yield* Effect.never;
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* conflict();
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          const first = yield* Sync.MemorySyncService;
+          yield* first.syncOnce;
+          if (parallel) {
+            yield* Deferred.await(entered);
+            yield* TestClock.adjust("30 seconds");
+          }
+          yield* Deferred.await(held);
+          yield* first.shutdown;
+          const pair = yield* sql<{
+            id: string;
+            kind: string;
+            hold_class: string | null;
+            next_attempt_at: number;
+            frozen_claim_json: string | null;
+            ticket_json: string | null;
+            attempt: number;
+          }>`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`;
+          assert.strictEqual(pair.length, 2);
+          for (const row of pair) {
+            assert.strictEqual(row.hold_class, holdClass);
+            assert.strictEqual(row.next_attempt_at, Number.MAX_SAFE_INTEGER);
+          }
+          assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+          const frozen = pair.find((row) => row.kind === "claim")!;
+          const attemptId = lease!.attemptId;
+          const base = yield* Sync.MemorySyncRuntime;
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const restarted = yield* Sync.MemorySyncService;
+              yield* restarted.start;
+              yield* TestClock.adjust("30 seconds");
+              yield* restarted.syncOnce;
+              assert.deepStrictEqual(
+                yield* sql`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`,
+                pair,
+              );
+              yield* PubSub.publish(events, {
+                memorySpaceId: space,
+                holdClass:
+                  holdClass === "authorization"
+                    ? ("identity" as const)
+                    : ("authorization" as const),
+              });
+              yield* restarted.syncOnce;
+              assert.deepStrictEqual(
+                yield* sql`SELECT id,kind,hold_class,next_attempt_at,frozen_claim_json,ticket_json,attempt FROM memory_outbox WHERE kind IN ('claim','resolve') ORDER BY id`,
+                pair,
+              );
+              assert.strictEqual(claims, 1);
+              yield* PubSub.publish(events, { memorySpaceId: space, holdClass });
+              const input = yield* Deferred.await(resumed);
+              yield* restarted.syncOnce;
+              assert.deepStrictEqual(input.modelSelection, selection);
+              assert.strictEqual(claims, 1);
+              assert.strictEqual(generations, parallel ? 2 : 1);
+              const resumedCandidate = yield* store.findClaimCandidate({
+                memorySpaceId: space,
+                attemptId,
+              });
+              assert.strictEqual(resumedCandidate?.id, frozen.id);
+              assert.strictEqual(resumedCandidate?.attempt, frozen.attempt);
+              assert.strictEqual(
+                (yield* sql<{
+                  frozen_claim_json: string;
+                }>`SELECT frozen_claim_json FROM memory_outbox WHERE id=${frozen.id}`)[0]
+                  ?.frozen_claim_json,
+                frozen.frozen_claim_json,
+              );
+              for (const row of pair) assert.isNull((yield* store.readWorkHold(row.id))?.holdClass);
+              const ticket = (yield* sql<{
+                attemptId: string;
+                model: string;
+              }>`SELECT json_extract(ticket_json,'$.ticket.attemptId') AS attemptId,json_extract(ticket_json,'$.ticket.frozenDefaultModelSelection') AS model FROM memory_outbox WHERE id=${`resolve:${space}:${attemptId}`}`)[0];
+              assert.strictEqual(ticket?.attemptId, attemptId);
+              assert.deepStrictEqual(JSON.parse(ticket!.model), selection);
+              assert.strictEqual((yield* store.pendingReports(100)).length, 0);
+              yield* restarted.shutdown;
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(
+                    Layer.succeed(Sync.MemorySyncRuntime, {
+                      ...base,
+                      rearmEvents: Stream.fromPubSub(events),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);
