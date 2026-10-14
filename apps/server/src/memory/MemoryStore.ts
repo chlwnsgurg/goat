@@ -4492,6 +4492,8 @@ const make = Effect.gen(function* () {
           });
         }
         const orphan = yield* sweep("orphan", "memory_outbox");
+        // Bound inspected history before filtering kinds. Unrelated rows still
+        // advance the frozen cursor but never reach the work metadata decoder.
         const work = yield* stored(
           "claim-gone",
           sql<{
