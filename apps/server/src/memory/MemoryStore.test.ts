@@ -2124,6 +2124,71 @@ describe("MemoryStore hub administration", () => {
     }).pipe(Effect.provide(live)),
   );
   it.effect(
+    "configure publishes the initial empty checkpoint and internal membership atomically",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const first: Store.AdminRecord = {
+          requestId: M.MemoryOperationId.make(id(220)),
+          requestDigest: hash,
+          expectedVersion: 0,
+          stage: "prepared",
+          action: {
+            action: "configure",
+            requestId: M.MemoryOperationId.make(id(220)),
+            expectedVersion: 0,
+            settings: { mode: "hub", memorySpaceId: space },
+          },
+          secretName: null,
+          result: null,
+          memberVersion: null,
+        };
+        yield* store.transact(store.writeHubAdminTx({ record: first, expectedStage: null }));
+        const activation = {
+          requestId: first.requestId,
+          requestDigest: hash,
+          memorySpaceId: space,
+          environmentId: env,
+          expectedCredentialVersion: null,
+          next: { credentialDigest: hash, credentialVersion: 1 },
+          now: 0,
+        };
+        yield* store
+          .transact(
+            Effect.gen(function* () {
+              yield* store.activateHubMemberTx(activation);
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            }),
+          )
+          .pipe(Effect.flip);
+        assert.isUndefined(yield* store.readHubMember(space, env));
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_compaction_state WHERE published=1`).length,
+          0,
+        );
+        const member = yield* store.transact(store.activateHubMemberTx(activation));
+        assert.strictEqual(member.status, "active");
+        const published = yield* sql<{
+          published: number;
+          checkpoint_id: string;
+        }>`SELECT published,checkpoint_id FROM memory_compaction_state WHERE space=${space}`;
+        assert.strictEqual(published[0]!.published, 1);
+        const bytes = yield* store.transact(store.readHubUsageTx(space));
+        assert.isAbove(bytes.checkpointBytes, 0);
+        assert.strictEqual(bytes.liveHandles, 0);
+        const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+        assert.deepStrictEqual(
+          yield* fresh.transact(fresh.activateHubMemberTx(activation)),
+          member,
+        );
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE reason='hub_snapshot'`).length,
+          1,
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
     "bootstrap cannot become ready before the matching canonical checkpoint is published",
     () =>
       Effect.gen(function* () {

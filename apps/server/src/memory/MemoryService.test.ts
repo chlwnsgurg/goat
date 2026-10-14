@@ -920,3 +920,82 @@ it.effect.each(["accepted", "rejected"] as const)(
         );
     }).pipe(Effect.provide(live)),
 );
+
+describe("body-free hub metadata report ownership", () => {
+  it.effect.each([true, false])(
+    "uses the compact guard on first receive and restart: local owner %s",
+    (localOwner) =>
+      Effect.gen(function* () {
+        const service = yield* Service.MemoryService;
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const owner = localOwner ? environmentId : M.EnvironmentId.make("foreign-owner");
+        const operationId = M.MemoryOperationId.make(id(880));
+        const resolutionId = M.MemoryResolutionId.make(id(881));
+        const receipt: M.MemoryHubReceipt = {
+          operationId,
+          memoryId,
+          operationDigest: "a".repeat(64),
+          outcome: "accepted",
+          hubSequence: 1,
+          resolutionApproval: {
+            resolutionId,
+            appliedAtUtc: "2026-10-14T00:00:00.000Z",
+            revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+          },
+        };
+        const reportId = Store.resolutionReportId(space, operationId, resolutionId);
+        const compact: M.MemoryCompactReceipt = {
+          memorySpaceId: space,
+          originEnvironmentId: owner,
+          operationKind: "resolve",
+          receipt,
+          revisionId: M.MemoryRevisionId.make(id(882)),
+          resolutionId,
+          revertsResolutionId: null,
+          attemptId: operationId,
+          fencingToken: 1,
+          reportGuard: {
+            reportId,
+            resolvingEnvironmentId: owner,
+            resolutionId,
+            outcome: "resolved",
+          },
+        };
+        const entry: M.MemoryHubEntry = {
+          kind: "metadata",
+          operationKind: "resolve",
+          resolutionId,
+          receipt,
+          memoryId,
+          hubSequence: 1,
+          compactReceipt: compact,
+        };
+        const settlement = {
+          memorySpaceId: space,
+          hubEnvironmentId: M.EnvironmentId.make("hub"),
+          localEnvironmentId: environmentId,
+          entry,
+        };
+        yield* store.transact(service.settleHubEntryTx(settlement));
+        yield* store.transact(service.settleHubEntryTx(settlement));
+        const reports = yield* service.pendingReports(100);
+        assert.strictEqual(reports.length, Number(localOwner));
+        if (localOwner) assert.strictEqual(reports[0]!.reportId, reportId);
+        assert.strictEqual(
+          (yield* sql`SELECT 1 FROM memory_compact_receipts WHERE report_key=${reportId}`).length,
+          1,
+        );
+        assert.strictEqual((yield* sql`SELECT 1 FROM memory_payloads`).length, 0);
+        const fresh = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
+        const replay = yield* fresh.transact(fresh.readHubReceiptTx(space, operationId));
+        assert.strictEqual(replay?.entry.kind, "metadata");
+        if (replay?.entry.kind === "metadata")
+          assert.deepStrictEqual(replay.entry.compactReceipt, compact);
+        yield* fresh.transact(
+          fresh.reconcileResolutionReportTx({ record: compact, localEnvironmentId: environmentId }),
+        );
+        assert.strictEqual((yield* fresh.pendingReports(100)).length, Number(localOwner));
+      }).pipe(Effect.provide(live)),
+  );
+});

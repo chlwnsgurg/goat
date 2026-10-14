@@ -45,4 +45,150 @@ export default Effect.gen(function* () {
     (SELECT e.operation_digest FROM memory_events e WHERE e.memory_space_id=memory_outbox.space AND e.operation_id=json_extract(memory_outbox.metadata_json,'$.operationId'))
   ) WHERE kind IN ('sync','revert_intent')`;
   yield* sql`CREATE INDEX memory_outbox_sync_due ON memory_outbox(space,kind,status,next_attempt_at,claimed_until)`;
+  yield* sql`ALTER TABLE memory_outbox ADD COLUMN terminal_at INTEGER`;
+  const counterSpace = "_hub_global";
+  // Seed once from the upgrade snapshot. Every later row delta is maintained by SQLite in its writer transaction.
+  const receiptBytes = 336;
+  const privateInventory = [
+    [
+      "memory_hub_members",
+      "length(CAST(space AS BLOB))+length(CAST(environment AS BLOB))+length(CAST(credential_digest AS BLOB))+length(CAST(credential_version AS TEXT))+length(CAST(status AS BLOB))+coalesce(length(CAST(joined_at AS TEXT)),0)",
+    ],
+    [
+      "memory_hub_leases",
+      "length(CAST(space AS BLOB))+length(CAST(memory_id AS BLOB))+length(CAST(highest_token AS TEXT))+coalesce(length(CAST(lease_json AS BLOB)),0)",
+    ],
+    [
+      "memory_hub_source_reads",
+      "length(CAST(locator_json AS BLOB))+length(CAST(request_digest AS BLOB))+coalesce(length(CAST(response_digest AS BLOB)),0)",
+    ],
+    [
+      "memory_hub_retention",
+      "coalesce(length(CAST(boundary_json AS BLOB)),0)+length(CAST(handles_json AS BLOB))+coalesce(length(CAST(compaction_json AS BLOB)),0)",
+    ],
+    [
+      "memory_outbox",
+      "coalesce(length(CAST(admin_json AS BLOB)),0)+coalesce(length(CAST(ticket_json AS BLOB)),0)+coalesce(length(CAST(frozen_claim_json AS BLOB)),0)",
+    ],
+    [
+      "memory_report_outbox",
+      "length(CAST(report_id AS BLOB))+length(CAST(operation_id AS BLOB))+length(CAST(resolving_environment_id AS BLOB))+coalesce(length(CAST(resolution_id AS BLOB)),0)+coalesce(length(CAST(report_thread_json AS BLOB)),0)+32",
+    ],
+  ] as const;
+  const privateTotal = privateInventory
+    .map(([table, expression]) => `(SELECT coalesce(sum(${expression}),0) FROM ${table})`)
+    .join("+");
+  const canonicalTotal = `(SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+(SELECT coalesce(sum(coalesce(length(compact_blob),length(CAST(compact_json AS BLOB)))),0) FROM memory_compact_receipts)+(SELECT count(*)*${receiptBytes} FROM memory_events e WHERE NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE c.space=e.memory_space_id AND c.operation_id=e.operation_id))+(SELECT count(*)*${receiptBytes} FROM memory_identity_ledger i WHERE NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id))`;
+  const guardKinds =
+    "('hub_attempt','hub_checkpoint_token','ticket_terminal','hub_admin','report_delivered')";
+  const counts = [
+    ["hub_metadata", `${canonicalTotal}+${privateTotal}`],
+    ["hub_private_metadata", privateTotal],
+    [
+      "hub_receipts",
+      `(SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger i WHERE NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=i.space AND t.memory_id=i.memory_id))+(SELECT count(*) FROM memory_import_keys WHERE key_kind IN ${guardKinds})`,
+    ],
+    ["hub_ids", "(SELECT count(*) FROM memory_identity_ledger)"],
+    [
+      "hub_keys",
+      "(SELECT count(*) FROM memory_import_keys)+(SELECT coalesce(sum(reserve_keys),0) FROM memory_identity_ledger)",
+    ],
+  ] as const;
+  for (const [dimension, expression] of counts)
+    yield* sql.unsafe(
+      `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT ?,?,'',${expression}`,
+      [counterSpace, dimension],
+    );
+  const delta = (dimension: string, expression: string) =>
+    `UPDATE memory_quota_counters SET value=value+(${expression}) WHERE space='${counterSpace}' AND dimension='${dimension}' AND scope_key='';`;
+  const install = (table: string, insert: string, update: string, remove: string) =>
+    Effect.gen(function* () {
+      for (const [action, body] of [
+        ["INSERT", insert],
+        ["UPDATE", update],
+        ["DELETE", remove],
+      ] as const)
+        yield* sql.unsafe(
+          `CREATE TRIGGER ${table}_hub_account_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN ${body} END`,
+        );
+    });
+  for (const [table, expression] of privateInventory) {
+    const qualify = (prefix: string) =>
+      expression.replace(
+        /\b(space|environment|credential_digest|credential_version|status|joined_at|memory_id|highest_token|lease_json|locator_json|request_digest|response_digest|boundary_json|handles_json|compaction_json|admin_json|ticket_json|frozen_claim_json|report_id|operation_id|resolving_environment_id|resolution_id|report_thread_json)\b/g,
+        `${prefix}.$1`,
+      );
+    const charge = (value: string) =>
+      delta("hub_metadata", value) + delta("hub_private_metadata", value);
+    yield* install(
+      table,
+      charge(qualify("NEW")),
+      charge(`${qualify("NEW")}-(${qualify("OLD")})`),
+      charge(`-(${qualify("OLD")})`),
+    );
+  }
+  const identityCharge = (prefix: string) =>
+    `${prefix}.reserve_bytes+CASE WHEN NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=${prefix}.space AND t.memory_id=${prefix}.memory_id) THEN ${receiptBytes} ELSE 0 END`;
+  const identityCount = (prefix: string) =>
+    `CASE WHEN NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=${prefix}.space AND t.memory_id=${prefix}.memory_id) THEN 1 ELSE 0 END`;
+  yield* install(
+    "memory_identity_ledger",
+    delta("hub_metadata", identityCharge("NEW")) +
+      delta("hub_receipts", identityCount("NEW")) +
+      delta("hub_ids", "1") +
+      delta("hub_keys", "NEW.reserve_keys"),
+    delta("hub_metadata", "NEW.reserve_bytes-OLD.reserve_bytes") +
+      delta("hub_keys", "NEW.reserve_keys-OLD.reserve_keys"),
+    delta("hub_metadata", `-(${identityCharge("OLD")})`) +
+      delta("hub_receipts", `-(${identityCount("OLD")})`) +
+      delta("hub_ids", "-1") +
+      delta("hub_keys", "-OLD.reserve_keys"),
+  );
+  const tombstoneCharge = (prefix: string) =>
+    `CASE WHEN EXISTS(SELECT 1 FROM memory_identity_ledger i WHERE i.space=${prefix}.space AND i.memory_id=${prefix}.memory_id) THEN 1 ELSE 0 END`;
+  yield* install(
+    "memory_tombstones",
+    delta("hub_metadata", `-${receiptBytes}*(${tombstoneCharge("NEW")})`) +
+      delta("hub_receipts", `-(${tombstoneCharge("NEW")})`),
+    delta("hub_metadata", "0"),
+    delta("hub_metadata", `${receiptBytes}*(${tombstoneCharge("OLD")})`) +
+      delta("hub_receipts", tombstoneCharge("OLD")),
+  );
+  const eventOnly = (prefix: string) =>
+    `CASE WHEN NOT EXISTS(SELECT 1 FROM memory_compact_receipts c WHERE c.space=${prefix}.memory_space_id AND c.operation_id=${prefix}.operation_id) THEN 1 ELSE 0 END`;
+  yield* install(
+    "memory_events",
+    delta("hub_metadata", `${receiptBytes}*(${eventOnly("NEW")})`) +
+      delta("hub_receipts", eventOnly("NEW")),
+    delta("hub_metadata", "0"),
+    delta("hub_metadata", `-${receiptBytes}*(${eventOnly("OLD")})`) +
+      delta("hub_receipts", `-(${eventOnly("OLD")})`),
+  );
+  const compactBytes = (prefix: string) =>
+    `coalesce(length(${prefix}.compact_blob),length(CAST(${prefix}.compact_json AS BLOB)))`;
+  const compactOnly = (prefix: string) =>
+    `CASE WHEN NOT EXISTS(SELECT 1 FROM memory_events e WHERE e.memory_space_id=${prefix}.space AND e.operation_id=${prefix}.operation_id) THEN 1 ELSE 0 END`;
+  yield* install(
+    "memory_compact_receipts",
+    delta("hub_metadata", `${compactBytes("NEW")}-${receiptBytes}*(1-(${compactOnly("NEW")}))`) +
+      delta("hub_receipts", compactOnly("NEW")),
+    delta("hub_metadata", `${compactBytes("NEW")}-${compactBytes("OLD")}`),
+    delta("hub_metadata", `-${compactBytes("OLD")}+${receiptBytes}*(1-(${compactOnly("OLD")}))`) +
+      delta("hub_receipts", `-(${compactOnly("OLD")})`),
+  );
+  const guardCount = (prefix: string) =>
+    `CASE WHEN ${prefix}.key_kind IN ${guardKinds} THEN 1 ELSE 0 END`;
+  yield* install(
+    "memory_import_keys",
+    delta("hub_metadata", "length(CAST(NEW.record_json AS BLOB))") +
+      delta("hub_receipts", guardCount("NEW")) +
+      delta("hub_keys", "1"),
+    delta(
+      "hub_metadata",
+      "length(CAST(NEW.record_json AS BLOB))-length(CAST(OLD.record_json AS BLOB))",
+    ) + delta("hub_receipts", `${guardCount("NEW")}-${guardCount("OLD")}`),
+    delta("hub_metadata", "-length(CAST(OLD.record_json AS BLOB))") +
+      delta("hub_receipts", `-(${guardCount("OLD")})`) +
+      delta("hub_keys", "-1"),
+  );
 });
