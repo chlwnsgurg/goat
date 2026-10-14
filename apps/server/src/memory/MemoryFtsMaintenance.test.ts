@@ -95,7 +95,7 @@ describe("MemoryFtsMaintenance", () => {
         mergeFts: () => Effect.succeed(false),
       });
       const maintenance = yield* Fts.MemoryFtsMaintenance.pipe(
-        Effect.provide(Fts.layer),
+        Effect.provide(Layer.fresh(Fts.layer)),
         Effect.provideService(Store.MemoryStore, probe),
       );
       const state = yield* maintenance.cycle(env);

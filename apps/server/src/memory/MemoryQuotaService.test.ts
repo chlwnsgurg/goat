@@ -411,7 +411,7 @@ describe("MemoryQuotaService", () => {
         additionalReceipt,
       );
       assert.strictEqual((yield* store.readSuppressions(space, memory)).length, retained.length);
-      const synced = yield* store.dueWork(0, 100);
+      const synced = yield* store.readEligibleOutbox(space, 0, 100);
       assert.strictEqual(
         synced.some((w) => w.id === `sync:${space}:${expansion.operationId}`),
         !extra,
@@ -604,9 +604,14 @@ describe("MemoryQuotaService", () => {
         revisionId: op.revision.revisionId,
         resolutionId: op.resolution.resolutionId,
         revertsResolutionId: null,
-        attemptId: null,
+        attemptId: op.operationId,
         fencingToken: op.fencingToken,
-        reportGuard: null,
+        reportGuard: {
+          reportId: hash,
+          resolvingEnvironmentId: env,
+          resolutionId: op.resolution.resolutionId,
+          outcome: "resolved",
+        },
       });
       yield* sql`DELETE FROM memory_events WHERE operation_id=${op.operationId}`;
       assert.strictEqual(yield* store.prunePayloads(expires, 100), 1);

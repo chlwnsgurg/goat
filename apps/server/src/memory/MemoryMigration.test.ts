@@ -70,7 +70,7 @@ describe("Memory migration", () => {
     Effect.gen(function* () {
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
-      yield* sql`INSERT INTO memory_tombstones VALUES ('fixture','memory','op','env',0,'[]','[]','[]')`;
+      yield* sql`INSERT INTO memory_tombstones (space,memory_id,delete_operation_id,deleting_environment_id,deleted_at,suppressed_source_keys_json,suppressed_content_json,source_exclusions_json) VALUES ('fixture','memory','op','env',0,'[]','[]','[]')`;
       yield* sql`DELETE FROM orchestration_v2_projection_threads`;
       assert.strictEqual((yield* sql`SELECT * FROM memory_tombstones`).length, 1);
     }).pipe(Effect.provide(database)),
