@@ -4935,6 +4935,7 @@ it.effect(
           runtimePolicy,
           memoryGrantCeiling: null,
         });
+        assert.equal((yield* admission.currentPolicy(threadId)).grant, "read_write");
         yield* Queue.take(changes);
         const initialAdapterRotation = yield* Queue.take(adapterChanges);
         assert.equal(initialAdapterRotation.threadId, threadId);
