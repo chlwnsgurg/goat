@@ -115,9 +115,8 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
           if (!removal) return current;
           const policy = M.MemoryOwnerSourceReadPolicy.make({
             ...current.policy,
-            removals: current.policy.removals.map((r) =>
-              r === removal ? { ...r, state: "acknowledged" as const, ack } : r,
-            ),
+            ownerPolicyEpoch: current.policy.ownerPolicyEpoch + 1,
+            removals: current.policy.removals.filter((r) => r !== removal),
             enrollments: current.policy.enrollments.map((e) =>
               e.state === "pending" &&
               M.matchesMemorySourceReadRevokeAck({ ...e, removalEpoch: e.removalEpoch }, ack)
@@ -125,7 +124,7 @@ const environment = (label: "H" | "A" | "B", resolve?: Resolve) =>
                     memorySpaceId: e.memorySpaceId,
                     ownerEnvironmentId: e.ownerEnvironmentId,
                     requesterEnvironmentId: e.requesterEnvironmentId,
-                    ownerPolicyEpoch: e.ownerPolicyEpoch,
+                    ownerPolicyEpoch: current.policy.ownerPolicyEpoch + 1,
                     state: "active" as const,
                   }
                 : e,
@@ -1291,7 +1290,12 @@ it.effect.each([false, true])(
       assert.deepStrictEqual(before.policy.allowedRequesterEnvironmentIds, []);
       yield* c.owner.sync.syncOnce;
       const after = yield* Ref.get(c.owner.sourcePolicy);
-      assert.strictEqual(after.policy.removals[0]?.state, "acknowledged");
+      assert.deepStrictEqual(after.policy.removals, []);
+      assert.isAbove(after.policy.ownerPolicyEpoch, before.policy.ownerPolicyEpoch);
+      assert.strictEqual(
+        after.policy.enrollments[0]?.ownerPolicyEpoch,
+        after.policy.ownerPolicyEpoch,
+      );
       assert.deepStrictEqual(after.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
       yield* Deferred.succeed(gate, undefined);
       const outcome = yield* Fiber.join(fiber);
@@ -1394,7 +1398,8 @@ it.effect(
       c.owner.setSourceAckFault(false);
       yield* c.owner.sync.syncOnce;
       const acknowledged = yield* Ref.get(c.owner.sourcePolicy);
-      assert.strictEqual(acknowledged.policy.removals[0]?.state, "acknowledged");
+      assert.deepStrictEqual(acknowledged.policy.removals, []);
+      assert.isAbove(acknowledged.policy.ownerPolicyEpoch, pending.policy.ownerPolicyEpoch);
       assert.strictEqual(acknowledged.policy.enrollments[0]?.state, "active");
       assert.deepStrictEqual(acknowledged.policy.allowedRequesterEnvironmentIds, [c.a.identity]);
       yield* Deferred.succeed(gate, undefined);
