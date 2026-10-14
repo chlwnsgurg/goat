@@ -12,6 +12,18 @@
  */
 import {
   DEFAULT_SERVER_SETTINGS,
+  MemoryOwnerSourceReadPolicy,
+  MEMORY_HUB_MAX_MEMBERS,
+  type MemoryHubDisableInput,
+  type MemoryHubDisableResult,
+  MemoryOwnerSourceReadPolicyUpdateInput,
+  MemorySourceReadRevokeAck,
+  matchesMemorySourceReadRevokeAck,
+  MemoryRpcError,
+  type MemoryOwnerSourceReadPolicyView,
+  type MemoryOwnerEnrollment,
+  type MemoryOwnerRemoval,
+  type EnvironmentId,
   MemoryHubSettings,
   MemorySpaceId,
   MemoryHubError,
@@ -68,6 +80,7 @@ import {
   fallbackTextGenerationModelSelection,
   isModelSelectionProviderEnabled,
 } from "@goat/shared/serverSettings";
+import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import type * as MemoryStore from "./memory/MemoryStore.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import {
@@ -214,7 +227,16 @@ function ensureProviderInstanceMutationAllowed(
 /** Used before any generic settings side effect, including device-host normalization. */
 export const rejectMemoryHubSettingsPatch = (patch: unknown, settingsPath: string) =>
   Effect.try({
-    try: () => assertNoMemoryHubSettingsPatch(patch),
+    try: () => {
+      assertNoMemoryHubSettingsPatch(patch);
+      if (
+        patch !== null &&
+        typeof patch === "object" &&
+        (Object.hasOwn(patch, "memoryOwnerSourceReadPolicy") ||
+          Object.hasOwn(patch, "memoryOwnerSourceReadPolicyVersion"))
+      )
+        throw new Error("Memory owner policy requires a dedicated transition.");
+    },
     catch: (cause) => new ServerSettingsError({ settingsPath, operation: "normalize", cause }),
   });
 
@@ -335,6 +357,308 @@ const makeMemoryProviderPolicy = Effect.gen(function* () {
   } satisfies MemoryProviderCommittedPolicy["Service"];
   return { publish, service };
 });
+
+/** Disable-only administration seam. Credential installation remains in Sync's existing service. */
+export class MemoryHubAdministration extends Context.Service<
+  MemoryHubAdministration,
+  {
+    readonly disableHub: (
+      input: MemoryHubDisableInput,
+      permit: import("./memory/MemoryAccess.ts").MemoryPermit,
+    ) => Effect.Effect<MemoryHubDisableResult, MemoryRpcError>;
+  }
+>()("goat/serverSettings/MemoryHubAdministration") {}
+
+export interface MemoryOwnerSourceReadCommitted {
+  readonly policy: MemoryOwnerSourceReadPolicy;
+  readonly version: number;
+}
+
+export class MemoryOwnerSourceReadCommittedPolicy extends Context.Service<
+  MemoryOwnerSourceReadCommittedPolicy,
+  {
+    readonly read: Effect.Effect<MemoryOwnerSourceReadCommitted>;
+    readonly changes: Effect.Effect<
+      Stream.Stream<MemoryOwnerSourceReadCommitted>,
+      never,
+      Scope.Scope
+    >;
+    readonly recordRevokeAck: (
+      ack: MemorySourceReadRevokeAck,
+    ) => Effect.Effect<MemoryOwnerSourceReadCommitted, ServerSettingsError | MemoryRpcError>;
+  }
+>()("goat/serverSettings/MemoryOwnerSourceReadCommittedPolicy") {}
+
+export class MemoryOwnerSourceReadPolicyAdministration extends Context.Service<
+  MemoryOwnerSourceReadPolicyAdministration,
+  {
+    readonly get: (
+      permit: Effect.Effect<void, MemoryRpcError>,
+    ) => Effect.Effect<MemoryOwnerSourceReadPolicyView, MemoryRpcError>;
+    readonly update: (
+      input: MemoryOwnerSourceReadPolicyUpdateInput,
+      permit: Effect.Effect<void, MemoryRpcError>,
+    ) => Effect.Effect<MemoryOwnerSourceReadPolicyView, ServerSettingsError | MemoryRpcError>;
+  }
+>()("goat/serverSettings/MemoryOwnerSourceReadPolicyAdministration") {}
+
+const ownerView = ({
+  policy,
+  version,
+}: MemoryOwnerSourceReadCommitted): MemoryOwnerSourceReadPolicyView => ({
+  policy,
+  version,
+  revocationPropagation: policy.removals.some((r) => r.state === "pending")
+    ? "pending"
+    : "acknowledged",
+});
+const ownerProjection = (settings: ServerSettings): MemoryOwnerSourceReadCommitted => ({
+  policy: settings.memoryOwnerSourceReadPolicy,
+  version: settings.memoryOwnerSourceReadPolicyVersion,
+});
+const decodeOwnerPolicy = Schema.decodeUnknownEffect(MemoryOwnerSourceReadPolicy);
+const encodeOwnerCommitted = Schema.encodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({ policy: MemoryOwnerSourceReadPolicy, version: Schema.Int }),
+  ),
+);
+const decodeOwnerUpdate = Schema.decodeUnknownEffect(MemoryOwnerSourceReadPolicyUpdateInput);
+const decodeOwnerAck = Schema.decodeUnknownEffect(MemorySourceReadRevokeAck);
+const ownerInvalid = () => new MemoryRpcError({ code: "invalid_output" });
+const ownerPairKey = (
+  p: Pick<MemoryOwnerEnrollment, "memorySpaceId" | "ownerEnvironmentId" | "requesterEnvironmentId">,
+) => JSON.stringify([p.memorySpaceId, p.ownerEnvironmentId, p.requesterEnvironmentId]);
+
+const makeOwnerPolicyPublication = Effect.gen(function* () {
+  const freeze = (value: MemoryOwnerSourceReadCommitted): MemoryOwnerSourceReadCommitted =>
+    Object.freeze({
+      version: value.version,
+      policy: Object.freeze({
+        ...value.policy,
+        allowedRequesterEnvironmentIds: Object.freeze([
+          ...value.policy.allowedRequesterEnvironmentIds,
+        ]),
+        removals: Object.freeze(
+          value.policy.removals.map((r) =>
+            Object.freeze(
+              r.state === "acknowledged" ? { ...r, ack: Object.freeze({ ...r.ack }) } : { ...r },
+            ),
+          ),
+        ),
+        enrollments: Object.freeze(value.policy.enrollments.map((e) => Object.freeze({ ...e }))),
+      }),
+    });
+  const current = yield* Ref.make(freeze(ownerProjection(DEFAULT_SERVER_SETTINGS)));
+  const changes = yield* PubSub.sliding<MemoryOwnerSourceReadCommitted>(1);
+  let initialized = false;
+  const publish = (value: MemoryOwnerSourceReadCommitted) =>
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const previous = yield* Ref.get(current);
+        initialized = true;
+        if (encodeOwnerCommitted(previous) === encodeOwnerCommitted(value)) return;
+        const next = freeze(value);
+        yield* Ref.set(current, next);
+        yield* PubSub.publish(changes, next);
+      }),
+    );
+  return {
+    read: Ref.get(current),
+    publish,
+    // File watchers cannot bypass CAS, regress epochs or install enrollments.
+    initialize: (settings: ServerSettings) =>
+      Effect.suspend(() => (initialized ? Effect.void : publish(ownerProjection(settings)))),
+    changes: Effect.gen(function* () {
+      const subscription = yield* PubSub.subscribe(changes);
+      const snapshot = yield* Ref.get(current);
+      return Stream.make(snapshot).pipe(Stream.concat(Stream.fromSubscription(subscription)));
+    }),
+  };
+});
+
+// Retire acknowledged pairs only after retaining every fence in the monotone epoch.
+// Active enrollments without a removal are valid; pending barriers must survive.
+const normalizeOwnerPolicy = (policy: MemoryOwnerSourceReadPolicy) => ({
+  ...policy,
+  ownerPolicyEpoch: policy.removals.reduce(
+    (epoch, removal) =>
+      removal.state === "acknowledged" ? Math.max(epoch, removal.ack.revokedThroughEpoch) : epoch,
+    policy.ownerPolicyEpoch,
+  ),
+  removals: policy.removals.filter((removal) => removal.state === "pending"),
+});
+
+const transitionOwnerPolicy = (
+  current: MemoryOwnerSourceReadCommitted,
+  input: MemoryOwnerSourceReadPolicyUpdateInput,
+  space: MemorySpaceId | null,
+  owner: EnvironmentId,
+) =>
+  Effect.gen(function* () {
+    const value = yield* decodeOwnerUpdate(input).pipe(Effect.mapError(ownerInvalid));
+    if (value.expectedVersion !== current.version)
+      return yield* new MemoryRpcError({ code: "revision_changed" });
+    const previous = normalizeOwnerPolicy(current.policy);
+    const wanted = new Set(value.allowedRequesterEnvironmentIds);
+    const enrollments: MemoryOwnerEnrollment[] = [];
+    const removals: MemoryOwnerRemoval[] = [...previous.removals];
+    let epoch = previous.ownerPolicyEpoch;
+    const advance = () => ++epoch;
+    for (const enrollment of previous.enrollments) {
+      // Space changes never carry an enrollment into another pair implicitly.
+      if (
+        wanted.has(enrollment.requesterEnvironmentId) &&
+        enrollment.memorySpaceId === space &&
+        enrollment.ownerEnvironmentId === owner
+      ) {
+        enrollments.push(enrollment);
+      } else if (enrollment.state === "active") {
+        const removal: MemoryOwnerRemoval = {
+          memorySpaceId: enrollment.memorySpaceId,
+          ownerEnvironmentId: enrollment.ownerEnvironmentId,
+          requesterEnvironmentId: enrollment.requesterEnvironmentId,
+          removalEpoch: advance(),
+          state: "pending",
+        };
+        const index = removals.findIndex((r) => ownerPairKey(r) === ownerPairKey(removal));
+        if (index < 0) removals.push(removal);
+        else removals[index] = removal;
+      }
+    }
+    let enrolling = false;
+    for (const requesterEnvironmentId of wanted) {
+      if (enrollments.some((e) => e.requesterEnvironmentId === requesterEnvironmentId)) continue;
+      if (space === null) return yield* new MemoryRpcError({ code: "bootstrap_required" });
+      const pair = { memorySpaceId: space, ownerEnvironmentId: owner, requesterEnvironmentId };
+      const removal = removals.find((r) => ownerPairKey(r) === ownerPairKey(pair));
+      enrolling = true;
+      const ownerPolicyEpoch = advance();
+      enrollments.push(
+        removal?.state === "pending"
+          ? { ...pair, ownerPolicyEpoch, state: "pending", removalEpoch: removal.removalEpoch }
+          : { ...pair, ownerPolicyEpoch, state: "active" },
+      );
+    }
+    // Reserve a removal slot for every committed enrollment, including pending ones.
+    // Revocation only moves an existing pair into removals and cannot grow this union.
+    const reserved = new Set([...removals, ...enrollments].map(ownerPairKey)).size;
+    if (enrolling && reserved > MEMORY_HUB_MAX_MEMBERS)
+      return yield* new MemoryRpcError({
+        code: "capacity_exceeded",
+        capacity: {
+          code: "capacity_exceeded",
+          dimension: "members",
+          current: reserved,
+          limit: MEMORY_HUB_MAX_MEMBERS,
+          reclaimable: 0,
+        },
+      });
+    const policy = yield* decodeOwnerPolicy({
+      allowedRequesterEnvironmentIds: [
+        ...new Set(
+          enrollments.filter((e) => e.state === "active").map((e) => e.requesterEnvironmentId),
+        ),
+      ],
+      ownerPolicyEpoch: epoch,
+      removals,
+      enrollments,
+    }).pipe(Effect.mapError(ownerInvalid));
+    return { policy, version: current.version + 1 };
+  });
+
+const acknowledgeOwnerPolicy = (
+  current: MemoryOwnerSourceReadCommitted,
+  ack: MemorySourceReadRevokeAck,
+) =>
+  Effect.gen(function* () {
+    const value = yield* decodeOwnerAck(ack).pipe(Effect.mapError(ownerInvalid));
+    const match = current.policy.removals.find(
+      (r) => r.state === "pending" && matchesMemorySourceReadRevokeAck(r, value),
+    );
+    if (!match) return current;
+    const previous = normalizeOwnerPolicy(current.policy);
+    let epoch = Math.max(previous.ownerPolicyEpoch, value.revokedThroughEpoch);
+    const enrollments = previous.enrollments.map((e): MemoryOwnerEnrollment => {
+      if (e.state !== "pending" || ownerPairKey(e) !== ownerPairKey(match)) return e;
+      return {
+        memorySpaceId: e.memorySpaceId,
+        ownerEnvironmentId: e.ownerEnvironmentId,
+        requesterEnvironmentId: e.requesterEnvironmentId,
+        ownerPolicyEpoch: ++epoch,
+        state: "active",
+      };
+    });
+    const policy = yield* decodeOwnerPolicy({
+      ...previous,
+      ownerPolicyEpoch: epoch,
+      allowedRequesterEnvironmentIds: [
+        ...new Set(
+          enrollments.filter((e) => e.state === "active").map((e) => e.requesterEnvironmentId),
+        ),
+      ],
+      enrollments,
+      removals: previous.removals.filter((r) => r !== match),
+    }).pipe(Effect.mapError(ownerInvalid));
+    return { policy, version: current.version + 1 };
+  });
+
+// All mutations share the settings semaphore; publication happens in the commit owner.
+const ownerPolicyServices = (
+  publication: Effect.Success<typeof makeOwnerPolicyPublication>,
+  identity: Option.Option<ServerEnvironment.ServerEnvironmentIdentity["Service"]>,
+  withLock: MemoryHubAdminSettings["Service"]["withLock"],
+  getSettings: Effect.Effect<ServerSettings, ServerSettingsError>,
+  persist: (
+    update: (settings: ServerSettings) => Effect.Effect<ServerSettings, MemoryRpcError>,
+  ) => Effect.Effect<ServerSettings, ServerSettingsError | MemoryRpcError>,
+) => {
+  const commit = (next: MemoryOwnerSourceReadCommitted) =>
+    persist((settings) =>
+      Effect.succeed({
+        ...settings,
+        memoryOwnerSourceReadPolicy: next.policy,
+        memoryOwnerSourceReadPolicyVersion: next.version,
+      }),
+    ).pipe(Effect.andThen(publication.read));
+  return {
+    committed: {
+      read: publication.read,
+      changes: publication.changes,
+      recordRevokeAck: (ack: MemorySourceReadRevokeAck) =>
+        withLock(
+          Effect.gen(function* () {
+            const current = yield* publication.read;
+            const next = yield* acknowledgeOwnerPolicy(current, ack);
+            return next === current ? current : yield* commit(next);
+          }),
+        ),
+    } satisfies MemoryOwnerSourceReadCommittedPolicy["Service"],
+    administration: {
+      get: (permit: Effect.Effect<void, MemoryRpcError>) =>
+        permit.pipe(Effect.andThen(publication.read), Effect.map(ownerView)),
+      update: (
+        input: MemoryOwnerSourceReadPolicyUpdateInput,
+        permit: Effect.Effect<void, MemoryRpcError>,
+      ) =>
+        withLock(
+          Effect.gen(function* () {
+            yield* permit;
+            if (Option.isNone(identity)) return yield* new MemoryRpcError({ code: "unavailable" });
+            const settings = yield* getSettings;
+            const owner = yield* identity.value.getEnvironmentId;
+            const next = yield* transitionOwnerPolicy(
+              yield* publication.read,
+              input,
+              settings.memoryHub.mode === "disabled" ? null : settings.memoryHub.memorySpaceId,
+              owner,
+            );
+            yield* permit;
+            return ownerView(yield* commit(next));
+          }),
+        ),
+    } satisfies MemoryOwnerSourceReadPolicyAdministration["Service"],
+  };
+};
 
 const HubSettingsLock = Context.Reference<boolean>("goat/serverSettings/HubSettingsLock", {
   defaultValue: () => false,
@@ -480,6 +804,9 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
     });
     const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
     const providerPolicy = yield* makeMemoryProviderPolicy;
+    const ownerPublication = yield* makeOwnerPolicyPublication;
+    yield* ownerPublication.initialize(initialSettings);
+    const ownerIdentity = yield* Effect.serviceOption(ServerEnvironment.ServerEnvironmentIdentity);
     yield* providerPolicy.publish(initialSettings.enableAgentMemoryAccess);
     const writeSemaphore = yield* Semaphore.make(1);
     const hubMarkerRef = yield* Ref.make<HubTransitionMarker | null>(null);
@@ -497,6 +824,7 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
           Effect.uninterruptible(
             Ref.set(currentSettingsRef, nextSettings).pipe(
               Effect.andThen(providerPolicy.publish(nextSettings.enableAgentMemoryAccess)),
+              Effect.andThen(ownerPublication.publish(ownerProjection(nextSettings))),
             ),
           ),
         ),
@@ -534,7 +862,16 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         Effect.map((next) => ({ settings: next.memoryHub, version: next.memoryHubVersion })),
       );
 
+    const ownerServices = ownerPolicyServices(
+      ownerPublication,
+      ownerIdentity,
+      (effect) => writeSemaphore.withPermits(1)(effect),
+      getSettings,
+      updateTestSettingsLocked,
+    );
     return {
+      committedOwnerPolicy: ownerServices.committed,
+      ownerPolicyAdministration: ownerServices.administration,
       start: Effect.void,
       ready: Effect.void,
       getSettings,
@@ -583,6 +920,8 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         adminSettings: MemoryHubAdminSettings["Service"];
         committedHubSettings: MemoryHubCommittedSettings["Service"];
         committedProviderPolicy: MemoryProviderCommittedPolicy["Service"];
+        committedOwnerPolicy: MemoryOwnerSourceReadCommittedPolicy["Service"];
+        ownerPolicyAdministration: MemoryOwnerSourceReadPolicyAdministration["Service"];
       };
   });
 
@@ -594,6 +933,8 @@ export function layerTest(
 ): Layer.Layer<
   | ServerSettingsService
   | MemoryHubCommittedSettings
+  | MemoryOwnerSourceReadCommittedPolicy
+  | MemoryOwnerSourceReadPolicyAdministration
   | MemoryHubAdminSettings
   | MemoryHubSettingsTransitions,
   ServerSettingsError
@@ -817,6 +1158,7 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
 
 // Values under these keys are compared as a whole — never stripped field-by-field.
 const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
+  "memoryOwnerSourceReadPolicy",
   "backgroundActivity",
   "automaticGitFetchInterval",
   "providerHealthRefreshInterval",
@@ -956,6 +1298,8 @@ const make = Effect.gen(function* () {
   const writeSemaphore = yield* Semaphore.make(1);
   const hubMarkerRef = yield* Ref.make<HubTransitionMarker | null>(null);
   const providerPolicy = yield* makeMemoryProviderPolicy;
+  const ownerPublication = yield* makeOwnerPolicyPublication;
+  const ownerIdentity = yield* Effect.serviceOption(ServerEnvironment.ServerEnvironmentIdentity);
   const committedHubRef = yield* Ref.make<MemoryHubSettingsView>({
     settings: DEFAULT_SERVER_SETTINGS.memoryHub,
     version: DEFAULT_SERVER_SETTINGS.memoryHubVersion,
@@ -1021,6 +1365,7 @@ const make = Effect.gen(function* () {
         );
         return false;
       }
+      yield* ownerPublication.initialize(decoded.value);
       yield* publishCommittedHub(decoded.value);
       yield* providerPolicy.publish(decoded.value.enableAgentMemoryAccess);
       return true;
@@ -1063,6 +1408,7 @@ const make = Effect.gen(function* () {
               Effect.tap(() =>
                 publishCommittedHub(settings).pipe(
                   Effect.andThen(providerPolicy.publish(settings.enableAgentMemoryAccess)),
+                  Effect.andThen(ownerPublication.publish(ownerProjection(settings))),
                 ),
               ),
               Effect.uninterruptible,
@@ -1162,6 +1508,8 @@ const make = Effect.gen(function* () {
         yield* providerPolicy.publish(DEFAULT_SERVER_SETTINGS.enableAgentMemoryAccess);
       else settingsFileTrusted = false;
     }
+    yield* ownerPublication.initialize(settings);
+    const committedOwner = yield* ownerPublication.read;
     const committedProviderPolicy = yield* providerPolicy.service.read;
 
     const committedHub = yield* Ref.get(committedHubRef);
@@ -1177,6 +1525,8 @@ const make = Effect.gen(function* () {
       enableAgentMemoryAccess: committedProviderPolicy.enableAgentMemoryAccess,
       memoryHub: committedHub.settings,
       memoryHubVersion: committedHub.version,
+      memoryOwnerSourceReadPolicy: committedOwner.policy,
+      memoryOwnerSourceReadPolicyVersion: committedOwner.version,
     };
 
     const providerHistory = yield* sql<{
@@ -1666,7 +2016,16 @@ const make = Effect.gen(function* () {
     yield* Deferred.succeed(startedDeferred, undefined).pipe(Effect.orDie);
   });
 
+  const ownerServices = ownerPolicyServices(
+    ownerPublication,
+    ownerIdentity,
+    (effect) => writeSemaphore.withPermits(1)(effect),
+    getSettingsFromCache,
+    updateSettingsWhileLocked,
+  );
   return {
+    committedOwnerPolicy: ownerServices.committed,
+    ownerPolicyAdministration: ownerServices.administration,
     start,
     ready: Deferred.await(startedDeferred),
     getSettings: getSettingsFromCache.pipe(
@@ -1712,6 +2071,8 @@ const make = Effect.gen(function* () {
       adminSettings: MemoryHubAdminSettings["Service"];
       committedHubSettings: MemoryHubCommittedSettings["Service"];
       committedProviderPolicy: MemoryProviderCommittedPolicy["Service"];
+      committedOwnerPolicy: MemoryOwnerSourceReadCommittedPolicy["Service"];
+      ownerPolicyAdministration: MemoryOwnerSourceReadPolicyAdministration["Service"];
     };
 });
 
@@ -1721,12 +2082,16 @@ const settingsLayers = (
       adminSettings: MemoryHubAdminSettings["Service"];
       committedHubSettings: MemoryHubCommittedSettings["Service"];
       committedProviderPolicy: MemoryProviderCommittedPolicy["Service"];
+      committedOwnerPolicy: MemoryOwnerSourceReadCommittedPolicy["Service"];
+      ownerPolicyAdministration: MemoryOwnerSourceReadPolicyAdministration["Service"];
     },
 ) =>
   Layer.mergeAll(
     Layer.succeed(ServerSettingsService, service),
     Layer.succeed(MemoryHubCommittedSettings, service.committedHubSettings),
     Layer.succeed(MemoryProviderCommittedPolicy, service.committedProviderPolicy),
+    Layer.succeed(MemoryOwnerSourceReadCommittedPolicy, service.committedOwnerPolicy),
+    Layer.succeed(MemoryOwnerSourceReadPolicyAdministration, service.ownerPolicyAdministration),
     Layer.succeed(MemoryHubAdminSettings, service.adminSettings),
     Layer.succeed(MemoryHubSettingsTransitions, {
       applyMemoryHubTransition: service.applyMemoryHubTransition,

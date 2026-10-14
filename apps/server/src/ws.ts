@@ -1,3 +1,6 @@
+import * as MemoryService from "./memory/MemoryService.ts";
+import * as MemorySyncService from "./memory/MemorySyncService.ts";
+import { memoryError } from "./mcp/toolkits/memory/handlers.ts";
 import * as SshWorkspaceSync from "./sshRemote/SshWorkspaceSync.ts";
 import * as RemoteLaunchCatalog from "./remoteReports/RemoteLaunchCatalog.ts";
 import {
@@ -109,7 +112,9 @@ import {
   WS_METHODS,
   WsChannelRpcGroup,
   WsCoreRpcGroup,
-  WsRpcGroup,
+  MemoryMutationReceipt,
+  WsMemoryCoreRpcGroup,
+  WsMemoryAdministrationRpcGroup,
 } from "@goat/contracts";
 import { resolveServerBackgroundActivitySettings } from "@goat/shared/backgroundActivitySettings";
 import {
@@ -556,7 +561,8 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
-const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+const decodeMemoryMutationReceipt = Schema.decodeUnknownEffect(MemoryMutationReceipt);
+const ServerWsRpcGroup = RpcAuthorization.AuthorizedWsRpcGroup.middleware(RpcInstrumentation);
 // Handlers register per part of the group; see WsChannelRpcGroup.
 const ServerWsCoreRpcGroup = WsCoreRpcGroup.middleware(RpcInstrumentation);
 const ServerWsChannelRpcGroup = WsChannelRpcGroup.middleware(RpcInstrumentation);
@@ -1330,6 +1336,9 @@ const layerWsRpc = (
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const memory = yield* MemoryService.MemoryService;
+      const memorySync = yield* MemorySyncService.MemorySyncService;
+      const ownerPolicy = yield* ServerSettings.MemoryOwnerSourceReadPolicyAdministration;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1368,6 +1377,64 @@ const layerWsRpc = (
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
+      // Service permits are rechecked after waits and inside SQL; this is a token-free Ref read.
+      const memoryPermit = (
+        required: ReadonlyArray<import("@goat/contracts").AuthEnvironmentScope>,
+      ) =>
+        sessions.readActiveScopes(currentSessionId).pipe(
+          Effect.flatMap((live) =>
+            required.every((scope) => currentSession.scopes.includes(scope) && live.includes(scope))
+              ? Effect.void
+              : Effect.fail(new MemoryService.MemoryAccessError({ code: "unavailable" })),
+          ),
+          Effect.mapError(() => new MemoryService.MemoryAccessError({ code: "unavailable" })),
+        );
+      const memoryRead = memoryPermit(["memory:read"]);
+      const memoryWrite = memoryPermit(["memory:write"]);
+      const memorySource = memoryPermit(["memory:read", "orchestration:read"]);
+      const memorySettings = memoryPermit(["settings:write"]);
+      const ownerSettings = memorySettings.pipe(Effect.mapError(memoryError));
+      const memoryHandlers = WsMemoryCoreRpcGroup.middleware(RpcInstrumentation).of({
+        [WS_METHODS.memoryProjectBindingGet]: (input) =>
+          memory.getProjectBinding(input, memoryWrite).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryProjectBindingUpdate]: (input) =>
+          memory.updateProjectBinding(input, memoryWrite).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryChanges]: (input) =>
+          Stream.unwrap(memory.changes(input, memoryRead)).pipe(Stream.mapError(memoryError)),
+        [WS_METHODS.memorySearch]: (input) =>
+          memory.search(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryList]: (input) =>
+          memory.list(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryRead]: (input) =>
+          memory.read(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHistory]: (input) =>
+          memory.history(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memorySyncStatus]: (input) =>
+          memorySync.syncStatus(input, memoryRead).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryUpsert]: (input) =>
+          memory.upsert(input, memoryWrite).pipe(
+            Effect.flatMap((stored) => decodeMemoryMutationReceipt(stored.receipt)),
+            Effect.mapError(memoryError),
+          ),
+        [WS_METHODS.memoryForget]: (input) =>
+          memory.forget(input, memoryWrite).pipe(
+            Effect.flatMap((stored) => decodeMemoryMutationReceipt(stored.receipt)),
+            Effect.mapError(memoryError),
+          ),
+        [WS_METHODS.memoryRevertResolution]: (input) =>
+          memory.revertResolution(input, memoryWrite).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryReadSource]: (input) =>
+          memory.readSource(input, memorySource).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHubSettingsGet]: (input) =>
+          memorySync.getHubSettings(input, memorySettings).pipe(Effect.mapError(memoryError)),
+        [WS_METHODS.memoryHubSettingsUpdate]: (input) =>
+          memorySync.updateHubSettings(input, memorySettings).pipe(Effect.mapError(memoryError)),
+      });
+      const ownerHandlers = WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).of({
+        [WS_METHODS.memoryOwnerSourceReadPolicyGet]: () => ownerPolicy.get(ownerSettings),
+        [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: (input) =>
+          ownerPolicy.update(input, ownerSettings).pipe(Effect.mapError(memoryError)),
+      });
       const captureTaskMemoryCeiling = RpcAuthorization.captureRpcMemoryGrantCeiling({
         grantedScopes: currentSession.scopes,
         readOnly: false,
@@ -3288,6 +3355,8 @@ const layerWsRpc = (
           ),
       });
       return Layer.mergeAll(
+        WsMemoryCoreRpcGroup.middleware(RpcInstrumentation).toLayer(memoryHandlers),
+        WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).toLayer(ownerHandlers),
         ServerWsCoreRpcGroup.toLayer(handlers),
         ServerWsChannelRpcGroup.toLayer(channelHandlers),
       );

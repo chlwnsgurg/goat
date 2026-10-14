@@ -1,6 +1,14 @@
-import { WsRpcGroup } from "@goat/contracts";
+import {
+  WsRpcGroup as WsBaseRpcGroup,
+  WsMemoryCoreRpcGroup,
+  WsMemoryAdministrationRpcGroup,
+} from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import { RpcClient } from "effect/rpc";
+
+export const WsRpcGroup = WsBaseRpcGroup.merge(WsMemoryCoreRpcGroup).merge(
+  WsMemoryAdministrationRpcGroup,
+);
 
 export const makeWsRpcProtocolClient = RpcClient.make(WsRpcGroup);
 type RpcClientFactory = typeof makeWsRpcProtocolClient;

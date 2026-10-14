@@ -30,7 +30,9 @@ import {
   EnvironmentAuthorizationError,
   RpcScopeAuthorization,
   WS_METHODS,
-  WsRpcGroup,
+  WsRpcGroup as WsBaseRpcGroup,
+  WsMemoryCoreRpcGroup,
+  WsMemoryAdministrationRpcGroup,
 } from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -40,6 +42,12 @@ import type * as RpcGroup from "effect/rpc/RpcGroup";
 import { captureMemoryGrantCeiling } from "../memory/MemoryAccess.ts";
 
 import { DESKTOP_BOOTSTRAP_SUBJECT } from "./PairingGrantStore.ts";
+
+export const AuthorizedWsRpcGroup = WsBaseRpcGroup.merge(WsMemoryCoreRpcGroup).merge(
+  WsMemoryAdministrationRpcGroup,
+);
+
+const WsRpcGroup = WsBaseRpcGroup;
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -239,11 +247,36 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
+export const MEMORY_RPC_REQUIRED_SCOPES = {
+  [WS_METHODS.memoryProjectBindingGet]: "memory:write",
+  [WS_METHODS.memoryProjectBindingUpdate]: "memory:write",
+  [WS_METHODS.memoryChanges]: "memory:read",
+  [WS_METHODS.memorySearch]: "memory:read",
+  [WS_METHODS.memoryList]: "memory:read",
+  [WS_METHODS.memoryRead]: "memory:read",
+  [WS_METHODS.memoryHistory]: "memory:read",
+  [WS_METHODS.memorySyncStatus]: "memory:read",
+  [WS_METHODS.memoryUpsert]: "memory:write",
+  [WS_METHODS.memoryForget]: "memory:write",
+  [WS_METHODS.memoryRevertResolution]: "memory:write",
+  [WS_METHODS.memoryReadSource]: "memory:read",
+  [WS_METHODS.memoryHubSettingsGet]: "settings:write",
+  [WS_METHODS.memoryHubSettingsUpdate]: "settings:write",
+  [WS_METHODS.memoryOwnerSourceReadPolicyGet]: "settings:write",
+  [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: "settings:write",
+} as const satisfies Readonly<
+  Record<
+    RpcGroup.Rpcs<typeof WsMemoryCoreRpcGroup | typeof WsMemoryAdministrationRpcGroup>["_tag"],
+    AuthEnvironmentScope
+  >
+>;
+const installedScopes = { ...RPC_REQUIRED_SCOPES, ...MEMORY_RPC_REQUIRED_SCOPES };
+
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
-  if (!Object.hasOwn(RPC_REQUIRED_SCOPES, method)) {
+  if (!Object.hasOwn(installedScopes, method)) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
-  const requiredScope = RPC_REQUIRED_SCOPES[method as WsRpcMethod];
+  const requiredScope = installedScopes[method as keyof typeof installedScopes];
   if (requiredScope === undefined) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
@@ -299,13 +332,23 @@ const requiredScopesForRpcCall = (
   return [requiredScopeForRpcMethod(method)];
 };
 
+/** The same decision backs the middleware and its permission behavior fixtures. */
+export const authorizeRpcCall = (
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  method: string,
+  payload: unknown,
+) =>
+  Effect.suspend(() => {
+    const required = requiredScopesForRpcCall(method, payload);
+    const missing = required.find((scope) => !scopes.includes(scope));
+    return missing === undefined ? Effect.void : Effect.fail(rpcAuthorizationError(missing));
+  });
+
 /** Authorizes every RPC on one connection against that connection's session scopes. */
 export const layer = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
-  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
-    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
-    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
-    return requiredScope === undefined ? effect : Effect.fail(rpcAuthorizationError(requiredScope));
-  });
+  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) =>
+    authorizeRpcCall(scopes, rpc._tag, payload).pipe(Effect.andThen(effect)),
+  );
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */
 export const requiredScopeForDeviceList = (input: DeviceListInput): AuthEnvironmentScope =>

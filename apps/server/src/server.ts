@@ -1,3 +1,10 @@
+import * as Schema from "effect/Schema";
+import * as McpToolAccess from "./mcp/McpToolAccess.ts";
+import { invocationPermit, memoryError } from "./mcp/toolkits/memory/handlers.ts";
+import { MemoryAdministrationToolkit } from "./mcp/toolkits/memoryAdministration/tools.ts";
+import * as Context from "effect/Context";
+import * as Ref from "effect/Ref";
+import * as MemorySnapshot from "./memory/MemorySnapshot.ts";
 import * as MemoryStore from "./memory/MemoryStore.ts";
 import * as MemoryQuota from "./memory/MemoryQuotaService.ts";
 import * as MemoryService from "./memory/MemoryService.ts";
@@ -33,7 +40,13 @@ import * as NodeHttp from "node:http";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi, MemoryHubError, type RepositoryIdentity } from "@goat/contracts";
+import {
+  EnvironmentHttpApi,
+  MemoryHubError,
+  MemoryHubDisableInput,
+  MemoryHubDisableResult,
+  type RepositoryIdentity,
+} from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
@@ -252,6 +265,7 @@ const layerPtyAdapter = NodePtyAdapter.layer;
 
 const layerServerSettings = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
+  Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provideMerge(SqlitePersistence.layerConfig),
 );
 
@@ -478,8 +492,40 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
   Layer.provide(GoatProjectFileLoader.layer),
 );
 
+// Sync needs the core service at construction; source reads need Sync only at invocation.
+// The application owns this single binding so neither service constructs a second core.
+class MemorySourceReadBinding extends Context.Service<
+  MemorySourceReadBinding,
+  {
+    readonly readSource: MemoryService.MemorySourceReadAuthority["readSource"];
+    readonly bind: (sync: MemorySync.MemorySyncService["Service"]) => Effect.Effect<void>;
+  }
+>()("goat/server/MemorySourceReadBinding") {}
+const layerMemorySourceReadBinding = Layer.effect(
+  MemorySourceReadBinding,
+  Effect.gen(function* () {
+    const current = yield* Ref.make<MemorySync.MemorySyncService["Service"] | null>(null);
+    return MemorySourceReadBinding.of({
+      readSource: (input, permit) =>
+        Ref.get(current).pipe(
+          Effect.flatMap((sync) =>
+            sync === null
+              ? Effect.fail(new MemoryHubError({ code: "route_unavailable" }))
+              : sync.readSource(input, permit),
+          ),
+        ),
+      bind: (sync) => Ref.set(current, sync),
+    });
+  }),
+);
 const layerMemoryQuota = MemoryQuota.layer.pipe(Layer.provideMerge(MemoryStore.layer));
-const layerMemoryService = MemoryService.layer.pipe(
+const layerMemoryService = Layer.unwrap(
+  Effect.gen(function* () {
+    const binding = yield* MemorySourceReadBinding;
+    return MemoryService.layerWithSourceReadAuthority(binding.readSource);
+  }),
+).pipe(
+  Layer.provide(layerMemorySourceReadBinding),
   Layer.provideMerge(layerMemoryQuota),
   Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provide(layerRepositoryIdentityResolver),
@@ -619,15 +665,76 @@ const layerRegisteredMemoryHub = layerMemoryHubRoutes.pipe(
 export const layerMemorySyncStarted = Layer.effectDiscard(
   Effect.gen(function* () {
     const sync = yield* MemorySync.MemorySyncService;
+    const binding = yield* Effect.serviceOption(MemorySourceReadBinding);
+    if (Option.isSome(binding)) yield* binding.value.bind(sync);
     yield* sync.start;
   }),
 ).pipe(Layer.provideMerge(MemorySync.layer));
 
 const layerMemorySync = layerMemorySyncStarted.pipe(
+  Layer.provide(layerMemorySourceReadBinding),
   Layer.provideMerge(MemorySyncRuntimeLive.layer),
   Layer.provide(layerMemoryHub),
   Layer.provide(layerTextGeneration),
   Layer.provide(ServerEnvironment.layerIdentity),
+);
+
+export const layerMemorySnapshot = MemorySnapshot.layer;
+const layerMemorySnapshotWithDependencies = layerMemorySnapshot.pipe(
+  Layer.provide(layerMemorySync),
+  Layer.provide(layerMemoryService),
+  Layer.provide(layerMemoryQuota),
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provide(layerPersistence),
+);
+
+const decodeMemoryHubDisable = Schema.decodeUnknownEffect(MemoryHubDisableInput);
+const decodeMemoryHubDisabled = Schema.decodeUnknownEffect(MemoryHubDisableResult);
+export const layerMemoryHubAdministration = Layer.effect(
+  ServerSettings.MemoryHubAdministration,
+  Effect.gen(function* () {
+    const sync = yield* MemorySync.MemorySyncService;
+    return ServerSettings.MemoryHubAdministration.of({
+      disableHub: (input, permit) =>
+        decodeMemoryHubDisable(input).pipe(
+          Effect.flatMap((value) =>
+            sync.updateHubSettings(
+              { ...value, action: "configure", settings: { mode: "disabled" } },
+              permit,
+            ),
+          ),
+          Effect.flatMap((result) => decodeMemoryHubDisabled(result.view)),
+          Effect.mapError(memoryError),
+        ),
+    });
+  }),
+);
+
+// The application supplies the disable-only service; the toolkit cannot install credentials.
+const layerMemoryAdministrationToolkit = McpHttpServer.toolkitRegistration(
+  MemoryAdministrationToolkit,
+  McpToolAccess.toLayer(
+    MemoryAdministrationToolkit,
+    Effect.gen(function* () {
+      const service = yield* ServerSettings.MemoryHubAdministration;
+      return {
+        memory_hub_disable: McpToolAccess.writesWithCapability((input) =>
+          Effect.gen(function* () {
+            return yield* service.disableHub(
+              yield* decodeMemoryHubDisable(input),
+              yield* invocationPermit("settings"),
+            );
+          }).pipe(Effect.mapError(memoryError)),
+        ),
+      };
+    }),
+  ),
+).pipe(Layer.provide(layerMemoryHubAdministration));
+
+export const layerMemoryToolkits = Layer.mergeAll(
+  McpHttpServer.layerMemoryToolkit,
+  layerMemoryAdministrationToolkit,
 );
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(
@@ -830,6 +937,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // hydration adds their default instances to `providerInstances` on boot.
+  Layer.provideMerge(layerMemorySnapshotWithDependencies),
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
   Layer.provideMerge(
     Layer.mergeAll(
@@ -950,7 +1058,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // delegation targets through the same live adapter facade the V2
   // orchestrator uses, so MCP capability reporting can never drift from
   // what dispatch can actually serve.
-  McpHttpServer.layer.pipe(
+  Layer.mergeAll(McpHttpServer.layer, layerMemoryToolkits).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
