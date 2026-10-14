@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/070_Memory.ts";
+import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
@@ -74,7 +75,9 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration).pipe(Layer.provideMerge(database));
+const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
+  Layer.provideMerge(database),
+);
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const services = Quota.layer.pipe(Layer.provideMerge(live));
@@ -413,9 +416,9 @@ describe("MemoryQuotaService", () => {
       assert.strictEqual((yield* store.readSuppressions(space, memory)).length, retained.length);
       const synced = yield* store.readEligibleOutbox(space, 0, 100);
       // The base forget keeps its own delivery even after the expansion purges the memory.
-      assert.isTrue(synced.some((w) => w.id === `sync:${space}:${op.operationId}`));
+      assert.isTrue(synced.some((w) => w.work.id === `sync:${space}:${op.operationId}`));
       assert.strictEqual(
-        synced.some((w) => w.id === `sync:${space}:${expansion.operationId}`),
+        synced.some((w) => w.work.id === `sync:${space}:${expansion.operationId}`),
         !extra,
       );
       // A different space stands in for the receiving store; only approved canonical operations cross the wire.
@@ -475,7 +478,7 @@ describe("MemoryQuotaService", () => {
         assert.strictEqual(retried.receipt.outcome, "deleted");
         assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 300);
         assert.deepStrictEqual(yield* store.pendingForgetIntents(10), []);
-        const resynced = (yield* store.readEligibleOutbox(space, 0, 100)).map((w) => w.id);
+        const resynced = (yield* store.readEligibleOutbox(space, 0, 100)).map((w) => w.work.id);
         assert.includeMembers(resynced, [
           `sync:${space}:${op.operationId}`,
           `sync:${space}:${retryId}`,
@@ -564,6 +567,11 @@ describe("MemoryQuotaService", () => {
             outcome: "accepted",
             operationDigest: hash,
             hubSequence: 3,
+            resolutionApproval: {
+              resolutionId: op.resolution.resolutionId,
+              appliedAtUtc: op.resolution.appliedAtUtc,
+              revertDeadlineUtc: op.resolution.revertDeadlineUtc,
+            },
           },
         },
         env,
