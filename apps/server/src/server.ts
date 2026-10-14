@@ -754,6 +754,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // for the normal (on-delete) path.
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
+  // The same hub layer backs routes, descriptors and future L4 application consumers.
+  Layer.provideMerge(layerMemoryHub),
   // GOAT bot and channel input sit on top of orchestration and are shared by WS and MCP.
   // Same EventSink layer reference as orchestration, so memoization shares one instance.
   // Remote channel workers reach other machines through the same SshRemoteDispatch layer
