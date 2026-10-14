@@ -81,7 +81,10 @@ const environment = (label: "H" | "A" | "B") =>
         scope,
       );
       const server = Context.get(served, HttpServer.HttpServer);
-      return M.MemoryHubEndpoint.make(HttpServer.formatAddress(server.address));
+      // layerTest listens on a wildcard address; clients must use loopback.
+      const endpoint = new URL(HttpServer.formatAddress(server.address));
+      endpoint.hostname = "127.0.0.1";
+      return M.MemoryHubEndpoint.make(endpoint.origin);
     });
     const connection = run(
       Effect.gen(function* () {
