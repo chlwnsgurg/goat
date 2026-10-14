@@ -1,5 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  type ServerConfig,
+  MemorySpaceId,
   EnvironmentAuthorizationError,
   EnvironmentId,
   type RelayClientInstallProgressEvent,
@@ -33,6 +35,8 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   EnvironmentRpcRequestObserver,
   request,
+  requestGuarded,
+  RpcPermissionGuard,
   runStream,
   subscribe,
   subscribeDynamicWithSession,
@@ -681,5 +685,99 @@ describe("environment RPC", () => {
       expect(observations).toEqual(["input 1", "stream", "expected failure", "input 2", "defect"]);
       expect(observedDefects).toEqual([defect]);
     }),
+  );
+});
+
+describe("staged memory RPC", () => {
+  const memorySpaceId = MemorySpaceId.make("00000000-0000-4000-8000-000000000001");
+  it.effect("denies a raw memory subscription without a read grant", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      let opened = false;
+      const client = {
+        [WS_METHODS.memoryChanges]: () => {
+          opened = true;
+          return Stream.never;
+        },
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(
+        h.activeSession,
+        Option.some({
+          ...session(client),
+          initialConfig: Effect.succeed({
+            environment: { capabilities: { memory: { protocolVersion: 1 } } },
+          } as ServerConfig),
+        }),
+      );
+      const failure = yield* subscribe(WS_METHODS.memoryChanges, { memorySpaceId }).pipe(
+        Stream.runDrain,
+        Effect.flip,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+      );
+      expect(failure._tag).toBe("EnvironmentAuthorizationError");
+      expect(opened).toBe(false);
+    }),
+  );
+  it.effect(
+    "reports an absent staged method as unavailable instead of calling a different client",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session({} as WsRpcProtocolClient),
+            initialConfig: Effect.succeed({
+              environment: {
+                capabilities: { memory: { protocolVersion: 1, importProvider: true } },
+              },
+            } as ServerConfig),
+          }),
+        );
+        const failure = yield* requestGuarded(WS_METHODS.memoryImportProvider, {
+          memorySpaceId,
+          action: "discover",
+          format: "claude",
+        }).pipe(
+          Effect.flip,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        );
+        expect(failure._tag).toBe("EnvironmentRpcUnavailableError");
+      }),
+  );
+  it.effect(
+    "rejects import when the selected server does not advertise its import capability",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        let invoked = false;
+        const client = {
+          [WS_METHODS.memoryImportProvider]: () => {
+            invoked = true;
+            return Effect.succeed({ action: "discover", sources: [] });
+          },
+        } as unknown as WsRpcProtocolClient;
+        yield* SubscriptionRef.set(
+          h.activeSession,
+          Option.some({
+            ...session(client),
+            initialConfig: Effect.succeed({
+              environment: { capabilities: { memory: { protocolVersion: 1 } } },
+            } as ServerConfig),
+          }),
+        );
+        const failure = yield* requestGuarded(WS_METHODS.memoryImportProvider, {
+          memorySpaceId,
+          action: "discover",
+          format: "claude",
+        }).pipe(
+          Effect.flip,
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, h.supervisor),
+          Effect.provideService(RpcPermissionGuard, { authorize: () => Effect.void }),
+        );
+        expect(failure._tag).toBe("EnvironmentRpcUnavailableError");
+        expect(invoked).toBe(false);
+      }),
   );
 });
