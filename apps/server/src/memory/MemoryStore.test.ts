@@ -7186,7 +7186,7 @@ it.effect(
       yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at,hold_class)
       VALUES ('r18-legacy',${space},'sync','retry','{}',9007199254740991,NULL),
         ('r18-backoff',${space},'sync','retry','{}',10,'availability'),
-        ('r18-report',${space},'report','retry','{}',9007199254740991,'availability'),
+        ('r18-summary',${space},'summary','retry','{}',9007199254740991,'availability'),
         ('r18-foreign',${id(88888)},'sync','retry','{}',9007199254740991,'availability')`;
       assert.deepStrictEqual(yield* store.readPersistedHoldClasses(key), []);
       yield* sql`INSERT INTO memory_outbox(id,space,kind,status,metadata_json,next_attempt_at,hold_class)
