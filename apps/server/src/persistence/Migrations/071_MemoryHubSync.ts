@@ -45,6 +45,8 @@ export default Effect.gen(function* () {
     (SELECT e.operation_digest FROM memory_events e WHERE e.memory_space_id=memory_outbox.space AND e.operation_id=json_extract(memory_outbox.metadata_json,'$.operationId'))
   ) WHERE kind IN ('sync','revert_intent')`;
   yield* sql`CREATE INDEX memory_outbox_sync_due ON memory_outbox(space,kind,status,next_attempt_at,claimed_until)`;
+  // Only active resolve rows participate; completed history cannot enlarge the claim barrier.
+  yield* sql`CREATE INDEX memory_outbox_active_resolution ON memory_outbox(space,memory_id) WHERE kind='resolve' AND status IN ('pending','retry','running')`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN terminal_at INTEGER`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN hold_class TEXT CHECK(hold_class IN ('authorization','protocol','identity','availability'))`;
   yield* sql`ALTER TABLE memory_outbox ADD COLUMN failure_code TEXT CHECK(length(failure_code)<=64)`;
