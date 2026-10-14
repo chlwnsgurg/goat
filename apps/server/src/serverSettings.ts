@@ -1291,11 +1291,12 @@ const make = Effect.gen(function* () {
             return yield* Effect.failCause(writeExit.cause);
           }
           if (transition) yield* Ref.set(hubMarkerRef, transition);
+          // Once the file commits, cancellation must not leave the CAS cache or subscribers behind.
+          yield* Cache.set(settingsCache, cacheKey, next);
+          yield* emitChange(next);
           return materializedExit.value;
         }),
       );
-      yield* Cache.set(settingsCache, cacheKey, next);
-      yield* emitChange(next);
       return resolveTextGenerationProvider(materialized);
     });
 

@@ -186,7 +186,13 @@ const route = <I, IE, O, OE>(
   );
 };
 
-export const layer = Layer.mergeAll(
+/** Available only after all hub routes and their dependencies have been acquired. */
+export class MemoryHubHttpReady extends Context.Service<
+  MemoryHubHttpReady,
+  { readonly protocolVersion: typeof M.MEMORY_PROTOCOL_VERSION }
+>()("goat/memory/MemoryHubHttp/MemoryHubHttpReady") {}
+
+const routes = Layer.mergeAll(
   route(M.MEMORY_HUB_PATHS.join, M.MemoryHubJoinInput, M.MemoryHubJoinResult, 65536, (s, p, i) =>
     s.join(i, p),
   ),
@@ -253,3 +259,13 @@ export const layer = Layer.mergeAll(
     (s, p, i) => s.resultSourceRead(i, p),
   ),
 );
+
+export const layer = Layer.effect(
+  MemoryHubHttpReady,
+  Effect.gen(function* () {
+    yield* Auth.MemoryHubAuth;
+    yield* MemoryHubService;
+    yield* Settings.ServerSettingsService;
+    return MemoryHubHttpReady.of({ protocolVersion: M.MEMORY_PROTOCOL_VERSION });
+  }),
+).pipe(Layer.provideMerge(routes));

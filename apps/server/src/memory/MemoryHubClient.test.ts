@@ -89,6 +89,42 @@ it.effect("preflight identity/protocol/redirect failures never forward a credent
   }).pipe(Effect.provide(live)),
 );
 
+it.effect("missing hub advertisement stops before reading the credential or posting", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const secrets = yield* Secrets.ServerSecretStore;
+    let credentialReads = 0;
+    const observedSecrets = Secrets.ServerSecretStore.of({
+      ...secrets,
+      get: (name) => {
+        if (name === connection.secretName) credentialReads++;
+        return secrets.get(name);
+      },
+    });
+    const calls: string[] = [];
+    const fetch: typeof globalThis.fetch = async (_url, init) => {
+      calls.push(init?.method ?? "GET");
+      return json({ ...descriptor, capabilities: {} });
+    };
+    const result = yield* Effect.gen(function* () {
+      const client = yield* Client.MemoryHubClient;
+      return yield* Effect.result(client.collectSourceReads(connection, input));
+    }).pipe(
+      Effect.provide(Layer.fresh(Client.layer)),
+      Effect.provideService(Secrets.ServerSecretStore, observedSecrets),
+      Effect.provideService(FetchHttpClient.Fetch, fetch),
+    );
+    assert.strictEqual(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.strictEqual(result.failure._tag, "MemoryHubError");
+      if (result.failure._tag === "MemoryHubError")
+        assert.strictEqual(result.failure.code, "unsupported_protocol");
+    }
+    assert.strictEqual(credentialReads, 0);
+    assert.deepStrictEqual(calls, ["GET"]);
+  }).pipe(Effect.provide(live)),
+);
+
 it.effect("401 and 403 remain distinct and are never retried", () =>
   Effect.gen(function* () {
     yield* seed;

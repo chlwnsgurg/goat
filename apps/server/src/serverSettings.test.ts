@@ -21,6 +21,7 @@ import { createModelSelection } from "@goat/shared/model";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -2480,4 +2481,107 @@ it.effect(
     }).pipe(
       Effect.provide(layerServerSettingsWithSecrets().pipe(Layer.provideMerge(NodeServices.layer))),
     ),
+);
+
+it.effect(
+  "cancellation after hub rename preserves cache, publication, generic writes and restart replay",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const renamed = yield* Deferred.make<void>();
+      const releaseRename = yield* Deferred.make<void>();
+      let settingsPath: string | undefined;
+      let pauseRename = false;
+      const controlledFs = FileSystem.FileSystem.of({
+        ...fs,
+        rename: (from, to) =>
+          Effect.gen(function* () {
+            yield* fs.rename(from, to);
+            if (pauseRename && to === settingsPath) {
+              pauseRename = false;
+              yield* Deferred.succeed(renamed, undefined);
+              yield* Deferred.await(releaseRename);
+            }
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const transitions = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+        const config = yield* ServerConfig.ServerConfig;
+        settingsPath = config.settingsPath;
+        yield* service.getSettings;
+        const changes = yield* service.subscribeChanges;
+        const settings = yield* decodeHubSettings({
+          mode: "member",
+          secretName: "memory-hub-cancel-fixture",
+          endpoint: MemoryHubEndpoint.make("https://hub.invalid"),
+          hubEnvironmentId: EnvironmentId.make("synthetic-hub"),
+          memorySpaceId: MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+        });
+        const input = {
+          requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000081"),
+          expectedVersion: 0,
+          settings,
+        };
+        pauseRename = true;
+        const transition = yield* transitions
+          .applyMemoryHubTransition(input, Effect.void)
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(renamed);
+        // Issue the interruption synchronously while the real rename has committed and is gated.
+        yield* Effect.sync(() => transition.interruptUnsafe());
+        yield* Deferred.succeed(releaseRename, undefined);
+        assert.isTrue(Exit.hasInterrupts(yield* Fiber.await(transition)));
+        // No watcher, clock advancement, sleep or polling can repair the cache before this write.
+        const updated = yield* service.updateSettings({
+          standingInstructions: "after cancellation",
+        });
+        assert.deepStrictEqual(updated.memoryHub, settings);
+        assert.strictEqual(updated.memoryHubVersion, 1);
+        const published = yield* changes.pipe(Stream.take(2), Stream.runCollect);
+        assert.deepStrictEqual(
+          published.map((value) => value.memoryHub),
+          [settings, settings],
+        );
+        assert.deepStrictEqual(
+          published.map((value) => value.memoryHubVersion),
+          [1, 1],
+        );
+        const persisted = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepStrictEqual(persisted.memoryHub, settings);
+        assert.strictEqual(persisted.memoryHubVersion, 1);
+        assert.strictEqual(persisted.standingInstructions, "after cancellation");
+        yield* Effect.gen(function* () {
+          const recovered = yield* ServerSettingsModule.MemoryHubSettingsTransitions;
+          const publicService = yield* ServerSettingsModule.ServerSettingsService;
+          assert.isFalse(Object.hasOwn(yield* publicService.getSettings, "_memoryHubTransition"));
+          assert.deepStrictEqual(yield* recovered.applyMemoryHubTransition(input, Effect.void), {
+            settings,
+            version: 1,
+          });
+          assert.strictEqual(
+            (yield* publicService.getSettings).standingInstructions,
+            "after cancellation",
+          );
+          const competing = yield* Effect.result(
+            recovered.applyMemoryHubTransition(
+              {
+                ...input,
+                requestId: MemoryOperationId.make("00000000-0000-4000-8000-000000000082"),
+              },
+              Effect.void,
+            ),
+          );
+          assert.strictEqual(competing._tag, "Failure");
+        }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
+      }).pipe(
+        Effect.provide(
+          layerServerSettingsWithSecrets().pipe(
+            Layer.provideMerge(Layer.succeed(FileSystem.FileSystem, controlledFs)),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
 );

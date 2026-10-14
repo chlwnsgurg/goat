@@ -1,6 +1,5 @@
 import {
   EnvironmentId,
-  MEMORY_PROTOCOL_VERSION,
   ORCHESTRATION_PROTOCOL_VERSION,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
@@ -15,6 +14,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -27,6 +27,8 @@ import { readAgentActivityPublishingActive } from "../cloud/config.ts";
 import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
+import * as Settings from "../serverSettings.ts";
+import * as MemoryHubHttp from "../memory/MemoryHubHttp.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { detectServerEnvironmentMachineKind } from "./ServerEnvironmentMachine.ts";
@@ -192,6 +194,8 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const hubRoutes = yield* Effect.serviceOption(MemoryHubHttp.MemoryHubHttpReady);
+  const settings = yield* Effect.serviceOption(Settings.ServerSettingsService);
   const identity = yield* ServerEnvironmentIdentity;
   const hostPlatform = yield* HostProcess.Platform;
   const hostArchitecture = yield* HostProcess.Architecture;
@@ -227,7 +231,6 @@ export const make = Effect.gen(function* () {
     sshRuntimeProtocolVersion: SSH_RUNTIME_PROTOCOL_VERSION,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
-      memoryHubProtocolVersion: MEMORY_PROTOCOL_VERSION,
       repositoryIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,
@@ -290,16 +293,27 @@ export const make = Effect.gen(function* () {
     // The publish opt-in and relay link change at runtime (`t3 connect
     // publish`, the client settings toggle), so the capability is read per
     // descriptor request rather than baked in at startup.
-    getDescriptor: readAgentActivityPublishingActive(secrets).pipe(
-      Effect.map((agentActivityPublishing) => ({
+    getDescriptor: Effect.gen(function* () {
+      const agentActivityPublishing = yield* readAgentActivityPublishingActive(secrets);
+      const hubSettings = Option.isSome(settings)
+        ? yield* Effect.result(settings.value.getSettings)
+        : null;
+      const hubReady =
+        Option.isSome(hubRoutes) &&
+        hubSettings?._tag === "Success" &&
+        hubSettings.success.memoryHub.mode === "hub" &&
+        hubSettings.success.memoryHub.memorySpaceId !== null;
+      return {
         ...descriptor,
         capabilities: {
-          memoryHubProtocolVersion: MEMORY_PROTOCOL_VERSION,
           ...descriptor.capabilities,
+          ...(hubReady && Option.isSome(hubRoutes)
+            ? { memoryHubProtocolVersion: hubRoutes.value.protocolVersion }
+            : {}),
           agentActivityPublishing,
         },
-      })),
-    ),
+      };
+    }),
   });
 });
 
