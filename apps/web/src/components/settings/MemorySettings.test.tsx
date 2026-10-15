@@ -2121,3 +2121,22 @@ it("renders save failure, retries only on click and shows totals across chunks",
   expect(container.textContent).toContain("33 rejected");
   expect(container.textContent).toContain("2 chunks completed");
 });
+
+it("shows refused history without consuming the one-time revert slot", async () => {
+  await renderRevert({
+    ...retained,
+    revertResults: [
+      decodeRevert({
+        operationId: id(9),
+        memoryId: id(2),
+        resolutionId: id(6),
+        revertDeadlineUtc: resolution.revertDeadlineUtc,
+        status: "refused",
+        failureCode: "permission_denied",
+      }),
+    ],
+  });
+  expect(container.textContent).toContain("Last revert attempt was refused: permission denied");
+  expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
+  expect(state.calls).not.toHaveBeenCalled();
+});

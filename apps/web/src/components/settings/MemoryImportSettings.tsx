@@ -335,7 +335,7 @@ export function MemoryImportSettings({
           <Button
             size="sm"
             variant="ghost"
-            disabled={!busy}
+            disabled={!busy && progress?.phase !== "save_failed"}
             onClick={() => {
               workflow?.stop();
             }}
@@ -373,6 +373,8 @@ export function MemoryImportSettings({
               {progress.receipt.state === "partial"
                 ? "Partial import; some memories may have been applied."
                 : "Import results received across all chunks."}{" "}
+              {progress.totals.outcomes.created ?? 0} created,{" "}
+              {progress.totals.outcomes.revised ?? 0} updated,{" "}
               {progress.totals.outcomes.rejected ?? 0} rejected. Acceptance does not mean content is
               available on every device.
             </p>

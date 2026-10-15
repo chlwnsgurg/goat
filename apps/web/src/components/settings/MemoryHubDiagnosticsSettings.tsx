@@ -10,6 +10,7 @@ import { useState, useEffect, useRef } from "react";
 import { useEnvironment } from "../../state/environments";
 import { memoryEnvironment } from "../../state/memory";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import { Button } from "../ui/button";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
@@ -81,6 +82,11 @@ function Diagnostics({
   const reconcile = useAtomCommand(memoryEnvironment.hubReconcile, { reportFailure: false });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const permission = useRef({ canRead, allowed });
+  permission.current = { canRead, allowed };
+  useEffect(() => {
+    if (!canRead || !allowed) setMessage(null);
+  }, [canRead, allowed]);
   async function submit() {
     if (
       !canRead ||
@@ -103,6 +109,7 @@ function Diagnostics({
     });
     if (!mounted.current) return;
     setBusy(false);
+    if (!permission.current.canRead || !permission.current.allowed) return;
     setMessage(
       result._tag === "Success"
         ? "Reconcile accepted. Synchronization may still be in progress."
@@ -128,10 +135,12 @@ function Diagnostics({
         />
       ) : null}
       {canRead && diagnostics ? (
-        <details>
-          <summary>Settings details</summary>
-          <p>Settings version {diagnostics.version}</p>
-        </details>
+        <Collapsible>
+          <CollapsibleTrigger>Settings details</CollapsibleTrigger>
+          <CollapsiblePanel>
+            <p>Settings version {diagnostics.version}</p>
+          </CollapsiblePanel>
+        </Collapsible>
       ) : null}
       {error ? <p role="alert">Could not load hub diagnostics.</p> : null}
       {message ? <p role="status">{message}</p> : null}
