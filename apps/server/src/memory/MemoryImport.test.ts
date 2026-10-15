@@ -812,7 +812,6 @@ describe("MemoryImport settlement", () => {
             entry: {
               kind: "operation",
               hubSequence: receipt.hubSequence!,
-              memoryId,
               operation,
               receipt,
             },

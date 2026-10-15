@@ -108,6 +108,20 @@ it.effect(
       yield* insertDispatches;
       yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling='read'`;
       yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling='read'`;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys)
+        VALUES ('synthetic-lineage','synthetic-memory','{"identity":"preserve"}','{}',20000,0)`;
+      yield* sql`INSERT INTO memory_import_lineage VALUES ('synthetic-lineage','synthetic-memory','sourceKey','synthetic-key','{"kind":"sourceKey","fixture":"preserve"}')`;
+      const lineageState = Effect.gen(function* () {
+        return {
+          lineage:
+            yield* sql`SELECT rowid,* FROM memory_import_lineage ORDER BY space,memory_id,kind,key`,
+          identities:
+            yield* sql`SELECT rowid,* FROM memory_identity_ledger ORDER BY space,memory_id`,
+          counters:
+            yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+        };
+      });
+      const beforeLineage = yield* lineageState;
       // An upstream migration claims 73; the existing GOAT ceiling moves to 74.
       const incoming = [
         ...migrationEntries.filter(([id]) => id < 73),
@@ -151,5 +165,6 @@ it.effect(
         assert.strictEqual(columns.filter(({ name }) => name === "memory_grant_ceiling").length, 1);
       }
       assert.deepStrictEqual(yield* reconcileGoatMigrationIds(incoming), []);
+      assert.deepStrictEqual(yield* lineageState, beforeLineage);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
