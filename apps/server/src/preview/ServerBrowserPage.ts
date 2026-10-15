@@ -26,6 +26,10 @@ import { BrowserControlInterrupted } from "./SessionControl.ts";
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_SCREENSHOT_WIDTH = 1280;
+const MAX_FULL_PAGE_WIDTH = 3840;
+const MAX_FULL_PAGE_HEIGHT = 16_384;
+const MAX_FULL_PAGE_BYTES = 8 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 export const DIAGNOSTIC_BUFFER_LIMIT = 200;
 
 export class ServerBrowserOperationError extends Error {
@@ -219,10 +223,66 @@ export const captureViewport = async (
   return data;
 };
 
+// Bounds, PNG checks, and scale retries adapted from Emanuele-web04/synara @ 566efb1b1.
+// Copyright (c) 2026 Emanuele Di Pietro. MIT license; see the repository LICENSE.
+/** Captures at CSS resolution or lower without changing viewport, scroll, or emulation. */
+const captureFullPage = async (cdp: CDPSession) => {
+  const { cssContentSize } = await cdp.send("Page.getLayoutMetrics");
+  if (!Number.isFinite(cssContentSize.width) || !Number.isFinite(cssContentSize.height)) {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "The browser did not report valid document dimensions for a full-page screenshot.",
+    );
+  }
+  const width = Math.min(MAX_FULL_PAGE_WIDTH, Math.max(1, Math.ceil(cssContentSize.width)));
+  const height = Math.min(MAX_FULL_PAGE_HEIGHT, Math.max(1, Math.ceil(cssContentSize.height)));
+  const clipped = width < cssContentSize.width || height < cssContentSize.height;
+  // CSS clips and image pixels differ across native and emulated Retina tabs. Bound
+  // the actual PNG to the CSS clip so Retina captures cannot exceed CSS resolution.
+  for (const scale of [1, 0.75, 0.5, 0.25]) {
+    const { data } = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width, height, scale },
+    });
+    const byteLength = Buffer.byteLength(data, "base64");
+    if (byteLength > MAX_FULL_PAGE_BYTES) continue;
+    const header = Buffer.from(data.slice(0, 32), "base64");
+    if (
+      header.length < 24 ||
+      !header.subarray(0, 8).equals(PNG_SIGNATURE) ||
+      header.subarray(12, 16).toString("ascii") !== "IHDR"
+    ) {
+      throw new ServerBrowserOperationError(
+        "PreviewAutomationExecutionError",
+        "The browser returned an invalid full-page PNG. Try another snapshot.",
+      );
+    }
+    const imageWidth = header.readUInt32BE(16);
+    const imageHeight = header.readUInt32BE(20);
+    if (imageWidth < 1 || imageHeight < 1 || imageWidth > width || imageHeight > height) continue;
+    return {
+      mimeType: "image/png" as const,
+      data,
+      width: imageWidth,
+      height: imageHeight,
+      fullPage: true,
+      clipped,
+      byteLength,
+    };
+  }
+  throw new ServerBrowserOperationError(
+    "PreviewAutomationExecutionError",
+    "The full-page screenshot exceeds the 3840 × 16384 pixel or 8 MiB limit, even at reduced scale. Use a viewport snapshot instead.",
+  );
+};
+
 export const snapshot = async (input: {
   readonly page: Page;
   readonly cdp: CDPSession;
   readonly renderScale: number;
+  readonly fullPage?: boolean | undefined;
   readonly consoleEntries: ReadonlyArray<PreviewAutomationConsoleEntry>;
   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
@@ -232,7 +292,15 @@ export const snapshot = async (input: {
   const state = refsFor(input.page);
   invalidateRefs(input.page);
   const generation = state.generation;
-  const [page, tree, data] = await Promise.all([
+  const capture = input.fullPage
+    ? captureFullPage(input.cdp)
+    : captureViewport(input.page, input.cdp, { format: "png", scale }).then((data) => ({
+        mimeType: "image/png" as const,
+        data,
+        width: Math.round(viewport.width * input.renderScale * scale),
+        height: Math.round(viewport.height * input.renderScale * scale),
+      }));
+  const [page, tree, screenshot] = await Promise.all([
     input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
       Pick<
         PreviewAutomationSnapshot,
@@ -240,8 +308,12 @@ export const snapshot = async (input: {
       >
     >,
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureViewport(input.page, input.cdp, { format: "png", scale }),
-  ]);
+    capture,
+  ]).catch(async (cause: unknown) => {
+    // A failed semantic read must still drain CDP before the caller resumes live streams.
+    await capture.catch(constVoid);
+    throw cause;
+  });
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
       "PreviewAutomationExecutionError",
@@ -261,12 +333,7 @@ export const snapshot = async (input: {
     consoleEntries: [...input.consoleEntries],
     networkEntries: [...input.networkEntries],
     actionTimeline: [...input.actionTimeline],
-    screenshot: {
-      mimeType: "image/png",
-      data,
-      width: Math.round(viewport.width * input.renderScale * scale),
-      height: Math.round(viewport.height * input.renderScale * scale),
-    },
+    screenshot,
   };
 };
 

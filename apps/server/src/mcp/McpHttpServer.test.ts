@@ -454,6 +454,55 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
   ).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("saves full-page captures without replaying images and keeps clipping metadata", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const fullPage = {
+        ...snapshotResult,
+        screenshot: { ...snapshotResult.screenshot, fullPage: true, clipped: true, byteLength: 3 },
+      };
+      const inputs = yield* serveSnapshots("mcp-fullpage-client", fullPage);
+      const saved = yield* callSnapshot({ fullPage: true, save: true });
+      expect(saved.isError).toBe(false);
+      expect(inputs).toEqual([{ fullPage: true }]);
+      expect(saved.content.map((content) => content.type)).toEqual(["text"]);
+      expect(saved.structuredContent).toEqual({
+        url: snapshotResult.url,
+        screenshotPath: expect.any(String),
+        screenshot: {
+          mimeType: "image/png",
+          width: 10,
+          height: 5,
+          fullPage: true,
+          clipped: true,
+          byteLength: 3,
+        },
+      });
+      const metadata = saved.structuredContent as { readonly screenshotPath: string };
+      expect(Buffer.from(yield* fileSystem.readFile(metadata.screenshotPath)).toString()).toBe(
+        "png",
+      );
+      const image = yield* callSnapshot({ fullPage: true, includeImage: true });
+      expect(image.content.map((content) => content.type)).toContain("image");
+      expect(image.structuredContent).toMatchObject({
+        screenshot: { fullPage: true, clipped: true, byteLength: 3 },
+      });
+      expect(image.structuredContent).not.toHaveProperty("screenshot.data");
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects non-boolean fullPage before selecting a browser host", () =>
+  Effect.gen(function* () {
+    for (const fullPage of ["true", 1, null]) {
+      const result = yield* callSnapshot({ fullPage });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: { _tag: "AiError" } });
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("reports a tagged error when the screenshot cannot be saved", () =>
   Effect.scoped(
     Effect.gen(function* () {
