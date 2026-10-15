@@ -1032,6 +1032,11 @@ describe("MemoryImport M3c final fences", () => {
         yield* sql`SELECT * FROM memory_payloads ORDER BY space,payload_ref`,
         bodies,
       );
+      assert.strictEqual(
+        (yield* sql<{ value: number }>`SELECT value FROM memory_quota_counters
+        WHERE space='_hub_global' AND dimension='import_live_bytes'`)[0]?.value,
+        new TextEncoder().encode(rejected.candidate.payload.text).length,
+      );
       const op = yield* store.readOperation(space, p.selection.operationId);
       if (op?.kind !== "upsert") return assert.fail("expected alias intent");
       assert.deepStrictEqual(op.revision.parents, [targetRev]);
@@ -2180,6 +2185,24 @@ describe("MemoryImport physical-growth source harness", () => {
             const digest = (value: string) =>
               Service.memoryStableUuid(value).replaceAll("-", "").repeat(2);
             let allocation = 20000;
+            const footprint = Effect.gen(function* () {
+              return {
+                counters:
+                  yield* sql`SELECT * FROM memory_quota_counters ORDER BY space,dimension,scope_key`,
+                registrations:
+                  yield* sql`SELECT receipt_id,registration_json,completed_items_json FROM memory_import_receipts ORDER BY receipt_id`,
+                counts:
+                  yield* sql`SELECT (SELECT count(*) FROM memory_revisions) AS revisions,(SELECT count(*) FROM memory_payloads) AS bodies,
+                  (SELECT count(*) FROM memory_events) AS events,(SELECT count(*) FROM memory_outbox) AS work`,
+              };
+            });
+            const refusals: {
+              phase: string;
+              round: number;
+              dimension: string;
+              current: number | undefined;
+              limit: number;
+            }[] = [];
             const runRound = (phase: "seed" | "noop" | "change", round: number) =>
               Effect.gen(function* () {
                 if (phase === "change") {
@@ -2319,39 +2342,65 @@ describe("MemoryImport physical-growth source harness", () => {
                       { ...address, sourceId, by: "source" },
                       Effect.void,
                     ))!;
-                    yield* ports.commit(
-                      {
-                        registration: currentReg,
-                        registrationVersion: currentReg.version,
-                        batch,
-                        selection: batch.selections.find(
-                          (s) => s.operationId === selection.operationId,
-                        )!,
-                        candidate,
-                        previous,
-                        next,
-                        expectedHeads: target.heads,
-                        parents: previous?.accepted
-                          ? [previous.accepted.revisionId]
-                          : target.alias
-                            ? [target.alias.revision.revisionId]
-                            : [],
-                        projectBinding: null,
-                      },
-                      Effect.void,
-                    );
+                    const beforeCommit = phase === "change" ? yield* footprint : null;
+                    const committed = yield* ports
+                      .commit(
+                        {
+                          registration: currentReg,
+                          registrationVersion: currentReg.version,
+                          batch,
+                          selection: batch.selections.find(
+                            (s) => s.operationId === selection.operationId,
+                          )!,
+                          candidate,
+                          previous,
+                          next,
+                          expectedHeads: target.heads,
+                          parents: previous?.accepted
+                            ? [previous.accepted.revisionId]
+                            : target.alias
+                              ? [target.alias.revision.revisionId]
+                              : [],
+                          projectBinding: null,
+                        },
+                        Effect.void,
+                      )
+                      .pipe(
+                        Effect.catchTags({
+                          MemoryCapacityError: (error) =>
+                            Effect.gen(function* () {
+                              const refusal = {
+                                phase,
+                                round,
+                                dimension: error.dimension,
+                                current: error.current,
+                                limit: error.limit,
+                              };
+                              refusals.push(refusal);
+                              yield* Console.log(`WP5_GROWTH_REFUSAL ${encodeUnknown(refusal)}`);
+                              if (beforeCommit)
+                                assert.deepStrictEqual(yield* footprint, beforeCommit);
+                              return null;
+                            }),
+                        }),
+                      );
+                    if (committed === null) continue;
                     if (outcome !== "noop") {
                       const operation = (yield* store.readWorkOperation(
                         `sync:${space}:${selection.operationId}`,
                       ))!;
-                      const receipt = yield* store.transact(
-                        service.admitHubOperationTx({ authority, operation }),
-                      );
-                      assert.notStrictEqual(
-                        receipt.outcome,
-                        "rejected",
-                        encodeUnknown({ phase, round, index, receipt }),
-                      );
+                      const receipt = yield* service.admitHubOperation({ authority, operation });
+                      if (receipt.outcome === "rejected") {
+                        assert.strictEqual(
+                          receipt.failureCode,
+                          "capacity_exceeded",
+                          encodeUnknown({ phase, round, index, receipt }),
+                        );
+                        assert.isDefined(receipt.capacity);
+                        yield* Console.log(
+                          `WP5_GROWTH_HUB_REFUSAL ${encodeUnknown({ phase, round, index, capacity: receipt.capacity })}`,
+                        );
+                      }
                       yield* store.acknowledgeOutbox(
                         `sync:${space}:${selection.operationId}`,
                         receipt,
@@ -2529,8 +2578,8 @@ describe("MemoryImport physical-growth source harness", () => {
             const spread = (samples: readonly (typeof baseline)[]) =>
               Math.max(...samples.map((s) => s.usedBytes)) -
               Math.min(...samples.map((s) => s.usedBytes));
-            yield* Effect.logInfo(
-              `WP5_GROWTH_GATES ${encodeUnknown({ noopSpreadBytes: spread(noopSamples), rebuildSpreadBytes: spread(rebuildSamples.slice(8)), activeAfterChange: changed.counts.active, allowanceBytes: 1048576, packaged: "NOT_RUN" })}`,
+            yield* Console.log(
+              `WP5_GROWTH_GATES ${encodeUnknown({ noopSpreadBytes: spread(noopSamples), rebuildSpreadBytes: spread(rebuildSamples.slice(8)), activeAfterChange: changed.counts.active, refusals, allowanceBytes: 1048576, packaged: "NOT_RUN" })}`,
             );
             assert.strictEqual(
               changed.counts.active,

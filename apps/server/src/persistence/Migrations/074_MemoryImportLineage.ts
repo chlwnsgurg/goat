@@ -149,7 +149,7 @@ export default Effect.gen(function* () {
     `EXISTS(SELECT 1 FROM memory_import_receipts r WHERE r.space=${space} AND r.memory_id=${id} AND r.record_kind='item')`;
   const liveCount = (p: string) => `CASE WHEN ${p}.status!='forgotten' THEN 1 ELSE 0 END`;
   const liveBytes = (p: string) =>
-    `CASE WHEN ${p}.status='forgotten' THEN 0 ELSE (SELECT coalesce(sum(length(CAST(json_extract(b.body_json,'$.text') AS BLOB))),0) FROM json_each(${p}.heads_json) h JOIN memory_payloads b ON b.space=${p}.space AND b.payload_ref=h.value) END`;
+    `CASE WHEN ${p}.status='forgotten' THEN 0 ELSE (SELECT coalesce(sum(length(CAST(json_extract(b.body_json,'$.text') AS BLOB))),0) FROM memory_payloads b WHERE b.space=${p}.space AND b.payload_ref IN (SELECT v.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions v ON v.space=${p}.space AND v.revision_id=h.value)) END`;
   const liveDelta = (count: string, bytes: string, sign: number) =>
     counter("'_hub_global'", "import_live_items", `${sign}*(${count})`) +
     counter("'_hub_global'", "import_live_bytes", `${sign}*(${bytes})`);
