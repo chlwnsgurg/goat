@@ -7870,8 +7870,15 @@ it.effect.each(["fts", "substring"] as const)(
     }).pipe(Effect.provide(live)),
 );
 
-const missingCheckpointCases = ["hub_snapshot_bytes", "hub_snapshot_rows", "both"].flatMap(
-  (missing) => ["usage", "other-space-admission", "new-record"].map((path) => ({ missing, path })),
+const missingCheckpointCases = [
+  "hub_snapshot_bytes",
+  "hub_snapshot_rows",
+  "both",
+  "marker",
+  "marker-and-bytes",
+  "marker-and-rows",
+].flatMap((missing) =>
+  ["usage", "other-space-admission", "new-record"].map((path) => ({ missing, path })),
 );
 it.effect.each(missingCheckpointCases)(
   "rejects missing checkpoint totals $missing before $path and rolls back all writes",
@@ -7892,7 +7899,10 @@ it.effect.each(missingCheckpointCases)(
         1,
       );
       yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND
-        (dimension=${missing} OR (${missing}='both' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')))`;
+        (dimension=${missing} OR (${missing}='both' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows'))
+         OR (${missing} IN ('marker','marker-and-bytes','marker-and-rows') AND dimension='checkpoint_initialized')
+         OR (${missing}='marker-and-bytes' AND dimension='hub_snapshot_bytes')
+         OR (${missing}='marker-and-rows' AND dimension='hub_snapshot_rows'))`;
       // Snapshot every memory table, including row caches, counters, FTS and outbox.
       const inventory = Effect.gen(function* () {
         const tables = yield* sql<{
@@ -7975,6 +7985,10 @@ it.effect(
           { dimension: "hub_snapshot_bytes", value: 0 },
           { dimension: "hub_snapshot_rows", value: 0 },
         ],
+      );
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+        4096,
       );
       yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`;
       const failed = yield* store.transact(store.readHubUsageTx(space)).pipe(Effect.flip);

@@ -183,7 +183,7 @@ export default Effect.gen(function* () {
     END`);
   }
   // These indexes contain bounded aggregate/owner addresses, never corpus text.
-  yield* sql`CREATE INDEX memory_checkpoint_spaces ON memory_quota_counters(space) WHERE (dimension='hub_snapshot_rows' OR dimension='checkpoint_initialized') AND scope_key=''`;
+  yield* sql`CREATE INDEX memory_checkpoint_spaces ON memory_quota_counters(space) WHERE (dimension='hub_snapshot_rows' OR dimension='checkpoint_initialized' OR dimension='hub_snapshot_bytes') AND scope_key=''`;
   yield* sql`CREATE INDEX memory_suppression_owner ON memory_import_keys(space,memory_id) WHERE key_kind IN ('sourceKey','content','sourceExclusion')`;
   // Invalidation keys use only the existing quota counter PK, and are drained
   // synchronously inside the writer transaction before admission/publication/commit.

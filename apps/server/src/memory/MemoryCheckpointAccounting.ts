@@ -26,13 +26,16 @@ export class CheckpointAccountingError extends Schema.TaggedError<CheckpointAcco
  */
 export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
   const sql = yield* SqlClient.SqlClient;
-  // A space marker outlives its last record. Validate every initialized pair before
-  // any delta, including untouched spaces used by global admission. This reads only
-  // the bounded space index and counter PK, never the corpus/cache rows.
-  const missing = yield* sql`SELECT i.space FROM memory_quota_counters i
-    WHERE i.dimension='checkpoint_initialized' AND i.scope_key='' AND
-      (i.value!=1 OR NOT EXISTS(SELECT 1 FROM memory_quota_counters b WHERE b.space=i.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key='')
-       OR NOT EXISTS(SELECT 1 FROM memory_quota_counters n WHERE n.space=i.space AND n.dimension='hub_snapshot_rows' AND n.scope_key='')) LIMIT 1`;
+  // Any lifecycle address requires marker=1 and both totals, even without dirty keys.
+  // DISTINCT walks three bounded index entries per healthy space; validation uses
+  // three counter PK probes per space, never corpus/cache rows.
+  const missing = yield* sql`SELECT i.space FROM (
+    SELECT DISTINCT space FROM memory_quota_counters
+    WHERE (dimension='hub_snapshot_rows' OR dimension='checkpoint_initialized' OR dimension='hub_snapshot_bytes') AND scope_key=''
+  ) i WHERE
+    NOT EXISTS(SELECT 1 FROM memory_quota_counters m WHERE m.space=i.space AND m.dimension='checkpoint_initialized' AND m.scope_key='' AND m.value=1)
+    OR NOT EXISTS(SELECT 1 FROM memory_quota_counters b WHERE b.space=i.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key='')
+    OR NOT EXISTS(SELECT 1 FROM memory_quota_counters n WHERE n.space=i.space AND n.dimension='hub_snapshot_rows' AND n.scope_key='') LIMIT 1`;
   if (missing.length) return yield* new CheckpointAccountingError({ stage: "missing-total" });
   const now = yield* Clock.currentTimeMillis;
   const dirty = yield* sql<{
