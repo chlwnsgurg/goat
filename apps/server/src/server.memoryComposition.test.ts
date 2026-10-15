@@ -157,9 +157,6 @@ it.effect("two consumers of the application Snapshot layer observe the same inst
 
 it.effect("import and source relay share the application late-bound Sync instance", () =>
   Effect.gen(function* () {
-    const { MemorySourceReadBinding, layerMemorySourceReadBinding } = yield* Effect.promise(
-      () => import("./server.ts"),
-    );
     yield* Effect.gen(function* () {
       const binding = yield* MemorySourceReadBinding;
       expect((yield* binding.importSync.readLocalReadiness().pipe(Effect.flip))._tag).toBe(

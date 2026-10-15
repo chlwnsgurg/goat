@@ -59,6 +59,7 @@ const id = () => M.MemoryOperationId.make(NodeCrypto.randomUUID());
 const graph = (
   config: Parameters<typeof layerMemoryImport>[0],
   scopes?: Effect.Effect<readonly M.AuthEnvironmentScope[]>,
+  afterCommit?: Effect.Effect<void>,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -97,8 +98,24 @@ const graph = (
       Layer.provideMerge(Layer.succeedContext(base)),
       Layer.provide(FetchHttpClient.layer),
     );
+    const observed = Layer.effect(
+      Service.MemoryService,
+      Effect.gen(function* () {
+        const actual = yield* Service.MemoryService;
+        return Service.MemoryService.of({
+          ...actual,
+          importPorts: {
+            ...actual.importPorts,
+            commit: (input, permit) =>
+              actual.importPorts
+                .commit(input, permit)
+                .pipe(Effect.tap(() => afterCommit ?? Effect.void)),
+          },
+        });
+      }),
+    ).pipe(Layer.provideMerge(sync));
     const context = yield* Layer.buildWithMemoMap(
-      layerMemoryImport(config).pipe(Layer.provideMerge(sync)),
+      layerMemoryImport(config).pipe(Layer.provideMerge(afterCommit ? observed : sync)),
       memo,
       scope,
     );
@@ -196,7 +213,7 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
           {
             format: fixture.snapshot.format,
             rootSlot: "synthetic",
-            path: fixture.snapshot.format === "codex" ? fixture.sourceRoot : fixture.trustedRoot,
+            path: fixture.trustedRoot,
           },
         ],
         onSourceRead: () => {
@@ -260,6 +277,13 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
             row.sourceKey.sourceItemKey === preview.items[0]!.sourceItemKey,
         ),
       );
+      assert.equal(item.pendingSync, false);
+      assert.deepInclude(item.revision.provenance.importSource, {
+        sourceId,
+        format: fixture.snapshot.format,
+        sourceItemKey: preview.items[0]!.sourceItemKey,
+        sourceFingerprint: preview.items[0]!.sourceFingerprint!,
+      });
       const serialized = JSON.stringify(item);
       assert.include(serialized, sourceId);
       assert.include(serialized, preview.items[0]!.sourceItemKey);
@@ -303,6 +327,8 @@ it.effect.each(["codex-handbook-v1", "claude-topic-v1", "omo-memory-core-beta63"
         before,
         after: stamp(fixture.sourceRoot),
         receipt: status.receipt,
+        provenance: item.revision.provenance,
+        pendingSync: item.pendingSync,
       };
       // Persist synthetic evidence outside the checkout when the remote runner requests it.
       if (process.env.WP5_IMPORT_EVIDENCE_DIR)
@@ -468,6 +494,70 @@ it.effect(
           if (result._tag === "Failure") assert.equal(result.failure._tag, "MemoryRpcError");
           permitEntered = undefined;
         }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { timeout: 120000 },
+);
+
+it.effect.each([1, 2] as const)(
+  "lost response after %s real item commits returns the persisted receipt without source reads",
+  (stopAfter) =>
+    Effect.gen(function* () {
+      const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1", {
+        files: {
+          "extensions/ad_hoc/notes/a.md": "Synthetic first guidance.",
+          "extensions/ad_hoc/notes/b.md": "Synthetic second guidance.",
+        },
+      });
+      let reads = 0;
+      let commits = 0;
+      const committed = yield* Deferred.make<void>();
+      const gate = yield* Deferred.make<void>();
+      const observer = Effect.suspend(() =>
+        ++commits === stopAfter
+          ? Deferred.succeed(committed, undefined).pipe(Effect.andThen(Deferred.await(gate)))
+          : Effect.void,
+      );
+      const g = yield* graph(
+        {
+          stateDir: fixture.stateDir,
+          roots: [{ format: "codex", rootSlot: "synthetic", path: fixture.trustedRoot }],
+          onSourceRead: () => {
+            reads++;
+          },
+        },
+        undefined,
+        observer,
+      );
+      const d = yield* g.call({ action: "discover", memorySpaceId: g.space, format: "codex" });
+      if (d.action !== "discover") return assert.fail("discover");
+      const sourceId = d.sources[0]!.sourceId;
+      const p = yield* g.call({ action: "preview", memorySpaceId: g.space, sourceId });
+      if (p.action !== "preview") return assert.fail("preview");
+      const operationId = id();
+      const request = yield* g
+        .call({
+          action: "apply",
+          memorySpaceId: g.space,
+          sourceId,
+          sessionId: p.sessionId,
+          operationId,
+          items: p.items.map((i) => ({
+            sourceItemKey: i.sourceItemKey,
+            sourceFingerprint: i.sourceFingerprint!,
+            scope: { kind: "user" },
+          })),
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(committed);
+      yield* Fiber.interrupt(request);
+      const readCount = reads;
+      const status = yield* g.call({ action: "status", memorySpaceId: g.space, operationId });
+      if (status.action !== "status") return assert.fail("status");
+      assert.equal(status.receipt.state, stopAfter === 1 ? "partial" : "completed");
+      assert.lengthOf(status.receipt.items, stopAfter);
+      assert.equal(status.receipt.remaining, 2 - stopAfter);
+      assert.equal(reads, readCount);
+      assert.equal(commits, stopAfter);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   { timeout: 120000 },
 );
