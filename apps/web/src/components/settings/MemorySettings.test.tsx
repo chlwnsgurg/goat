@@ -714,7 +714,7 @@ it.each([false, true])(
       return first.promise;
     });
     const { render } = await supportedScreen();
-    await click("Forget memory");
+    await click("Forget");
     await click("Confirm forget");
     const oldRequest = state.calls.mock.calls.at(-1)![0];
     state.write = false;
@@ -732,13 +732,13 @@ it.each([false, true])(
     state.write = true;
     await render();
     expect(container.textContent).not.toContain("Forget request failed");
-    await click("Forget memory");
+    await click("Forget");
     expect(
       [...container.querySelectorAll("button")].find((b) => b.textContent === "Confirm forget")
         ?.disabled,
     ).toBe(false);
     await click("Cancel");
-    await click("Forget memory");
+    await click("Forget");
     state.executors.set("forget", async (input) => {
       state.calls(input);
       return { _tag: "Failure" };
@@ -753,7 +753,7 @@ it.each([false, true])(
 it("discards the editor and its draft on write-only revoke and requires Edit after regrant", async () => {
   const { render, registry } = await supportedScreen();
   const writes = vi.spyOn(registry, "set");
-  await click("Edit memory");
+  await click("Edit");
   expect(container.querySelector<HTMLInputElement>('[aria-label="Memory text"]')?.value).toBe(
     "Synthetic original",
   );
@@ -764,7 +764,7 @@ it("discards the editor and its draft on write-only revoke and requires Edit aft
   state.write = true;
   await render();
   expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
-  await click("Edit memory");
+  await click("Edit");
   expect(container.querySelector<HTMLInputElement>('[aria-label="Memory text"]')?.value).toBe(
     "Synthetic original",
   );
@@ -787,7 +787,7 @@ it("retries a failed load inline without a reload control", async () => {
   expect(container.textContent).not.toContain("Device removal applied");
 });
 
-it("automatically opens the ready space and shows the off empty state after confirmation", async () => {
+it("automatically opens the ready space and keeps saved memories read-only after disabling", async () => {
   state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
   state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
   await supportedScreen(false);
@@ -802,8 +802,8 @@ it("automatically opens the ready space and shows the off empty state after conf
   await click("Turn sharing off");
   expect(container.textContent).toContain("Saved memories stay.");
   await click("Stop sharing");
-  expect(container.textContent).toContain("Turn on memory to start saving memories.");
-  expect(container.textContent).not.toContain("Synthetic original");
+  expect(container.textContent).toContain("Turn on memory to save new memories.");
+  expect(container.textContent).toContain("Synthetic original");
   state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(8) }));
   state.responses.set("hubSettingsUpdate", success({ view: hubView(4, id(8)), credential: null }));
   await click("Make this device the hub");
@@ -880,7 +880,7 @@ it.each([false, true])(
       return first.promise;
     });
     const { render } = await supportedScreen();
-    await click("Forget memory");
+    await click("Forget");
     await click("Confirm forget");
     const original = state.calls.mock.calls.at(-1)![0];
     async function invalidate() {
@@ -926,7 +926,7 @@ it.each(["write", "read", "reconnect", "close"])(
       return first.promise;
     });
     const { render } = await supportedScreen();
-    await click("Forget memory");
+    await click("Forget");
     await click("Confirm forget");
     state.queries.set("read", Option.none());
     state.queries.set("history", Option.none());
@@ -959,7 +959,7 @@ it.each(["write", "read", "reconnect"])(
       return { _tag: "Failure" };
     });
     const { render } = await supportedScreen();
-    await click("Forget memory");
+    await click("Forget");
     await click("Confirm forget");
     const original = forgetCalls.mock.calls[0]![0];
     expect(container.textContent).toContain("Try again to continue this request");
@@ -992,7 +992,7 @@ it.each(["write", "read", "reconnect"])(
     state.queries.set("read", Option.some(activeItem));
     await render();
     expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
-    await click("Forget memory");
+    await click("Forget");
     await click("Confirm forget");
     expect(forgetCalls.mock.calls.length).toBe(calls + 1);
     expect(forgetCalls.mock.calls.at(-1)![0]).not.toEqual(original);
@@ -1194,6 +1194,9 @@ it("ends a confirmed sharing conflict, refreshes and requires a new confirmation
   const old = state.calls.mock.calls.at(-1)![0];
   expect(container.textContent).toContain("Review latest settings");
   state.responses.set("hubSettingsGet", success(hubView(7)));
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await render();
+  expect(container.textContent).toContain("Review latest settings");
   await click("Review latest settings");
   await render();
   await click("Turn sharing off");
@@ -1257,6 +1260,9 @@ it.each(["reading", "installing"])(
     state.deviceConnections.set("active-device", { httpBaseUrl: "https://member-new.example" });
     await render();
     expect(container.textContent).toContain("Device connection changed");
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await render();
+    expect(container.textContent).toContain("Review latest settings");
     await act(async () => deferred.resolve(success({ view: hubView(5), credential: null })));
     expect(mutations.some((call) => call.input.action === "acknowledgeCredential")).toBe(false);
     await click("Review latest settings");
@@ -1346,7 +1352,7 @@ it.each([false, true])(
     expect(document.activeElement?.getAttribute("aria-label")).toBe("Memory details");
     state.responses.set("forget", success({ outcome: "deleted", pendingSync: true }));
     state.navigate.mockClear();
-    await click("Forget memory");
+    await click("Forget");
     await click("Confirm forget");
     expect(state.navigate).toHaveBeenCalledWith(
       expect.objectContaining({ search: expect.not.objectContaining({ memoryId: id(2) }) }),
@@ -1360,3 +1366,89 @@ it.each([false, true])(
     expect(state.refresh).toHaveBeenCalled();
   },
 );
+
+it("keeps saved memories readable while memory is off and blocks saving and editing", async () => {
+  const { render } = await supportedScreen();
+  await click("Edit");
+  state.responses.set("syncStatus", success({ state: "disabled", memorySpaceId: null }));
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await render();
+  expect(container.textContent).toContain(
+    "Saved memories stay. Turn on memory to save new memories.",
+  );
+  expect(container.textContent).toContain("Synthetic original");
+  expect(
+    [...container.querySelectorAll("button")].find((b) => b.textContent === "Remember something")!
+      .disabled,
+  ).toBe(true);
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Edit")).toBe(
+    false,
+  );
+  expect(container.querySelector("textarea")).toBeNull();
+});
+
+it("labels ordinary history as versions and closes details with the accessible icon", async () => {
+  const { render } = await supportedScreen();
+  state.queries.set(
+    "history",
+    Option.some({ ...retained, resolutions: [], revisions: [{ revision: revision(3), payload }] }),
+  );
+  await render();
+  expect(container.textContent).toContain("Open Version 1");
+  expect(container.textContent).not.toContain("Open Original");
+  expect(container.textContent).not.toContain("Refresh details");
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('button[aria-label="Close details"]')!.click(),
+  );
+  expect(state.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ search: expect.not.objectContaining({ memoryId: id(2) }) }),
+  );
+});
+
+it("explains the device limit and starts a fresh add after removing a device", async () => {
+  const { render } = await supportedScreen(false);
+  const Cause = await import("effect/Cause");
+  const { MemoryRpcError } = await import("@goat/contracts");
+  const Schema = await import("effect/Schema");
+  const capacity = Schema.decodeUnknownSync(MemoryRpcError)({
+    _tag: "MemoryRpcError",
+    code: "capacity_exceeded",
+    capacity: {
+      code: "capacity_exceeded",
+      dimension: "members",
+      current: 128,
+      limit: 128,
+      reclaimable: 0,
+    },
+  });
+  state.responses.set("hubSettingsUpdate", { _tag: "Failure", cause: Cause.fail(capacity) });
+  await selectAddDevice();
+  await click("Confirm");
+  const first = state.calls.mock.calls
+    .map(([c]) => c)
+    .findLast((c) => c.input.action === "provisionMember");
+  expect(container.textContent).toContain("Device limit reached. Remove a device to add another.");
+  const member = {
+    environmentId: "old-device",
+    credentialVersion: 1,
+    status: "active",
+    joinedAt: 0,
+  };
+  state.responses.set("hubSettingsGet", success({ ...hubView(5), members: [member] }));
+  await click("Review latest settings");
+  await render();
+  await click("Remove");
+  state.responses.set("hubSettingsUpdate", success({ view: hubView(6), credential: null }));
+  await click("Remove device");
+  state.executors.set("hubSettingsUpdate", async () => ({
+    _tag: "Failure",
+    cause: Cause.fail(capacity),
+  }));
+  await selectAddDevice();
+  await click("Confirm");
+  const fresh = state.calls.mock.calls
+    .map(([c]) => c)
+    .findLast((c) => c.input.action === "provisionMember");
+  expect(fresh.input.expectedVersion).toBe(6);
+  expect(fresh.input.requestId).not.toBe(first.input.requestId);
+});

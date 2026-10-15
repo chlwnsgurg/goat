@@ -1194,9 +1194,14 @@ describe("shared memory client", () => {
   );
 });
 
-it.effect.each(["list", "search"] as const)(
-  "keeps unrelated %s records after forget without exposing forgotten or derived text",
-  (method) =>
+it.effect.each([
+  ["list", true],
+  ["list", false],
+  ["search", true],
+  ["search", false],
+] as const)(
+  "keeps unrelated %s records after forget without exposing forgotten or derived text (source present: %s)",
+  ([method, sourcePresent]) =>
     Effect.scoped(
       Effect.gen(function* () {
         const derivedId = MemoryId.make("00000000-0000-4000-8000-000000000009");
@@ -1209,13 +1214,18 @@ it.effect.each(["list", "search"] as const)(
           payload: {
             ...unrelatedItem.payload,
             text: "Derived forgotten text",
-            derivedFromMemoryRevisions: [{ memoryId: id, revisionId: item.revision.revisionId }],
+            derivedFromMemoryRevisions: [item.revision.revisionId],
           },
         };
-        const h = yield* harness(createMemoryTombstoneLedger(), {
-          ...page,
-          items: [item, unrelatedItem, derived],
-        });
+        const stalePage = yield* Schema.decodeUnknownEffect(MemoryPage)(
+          {
+            ...page,
+            nextCursor: "next-page",
+            items: [...(sourcePresent ? [item] : []), unrelatedItem, derived],
+          },
+          { onExcessProperty: "error" },
+        );
+        const h = yield* harness(createMemoryTombstoneLedger(), stalePage);
         const exposure = h.memory.exposureAtom(target);
         h.registry.mount(exposure);
         yield* Queue.offer(h.queue, signal("reset"));
@@ -1244,8 +1254,79 @@ it.effect.each(["list", "search"] as const)(
         if (value._tag !== "Success" || Option.isNone(value.value))
           throw new Error("Page required");
         expect(value.value.value.items.map((entry) => entry.memoryId)).toEqual([unrelated]);
+        expect(value.value.value.nextCursor).toBe("next-page");
         expect(JSON.stringify(value.value.value)).not.toContain("Derived forgotten text");
+        // Reconnection/reset still cannot authorize unknown revision dependencies.
+        h.registry.set(prepared(env), Option.some({} as PreparedConnection));
+        yield* waitFor(h.registry, exposure, (state) => !state.ready);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, query, (r) => r._tag === "Success" && Option.isSome(r.value));
+        const afterReset = h.registry.get(query);
+        if (afterReset._tag !== "Success" || Option.isNone(afterReset.value))
+          throw new Error("Page required");
+        expect(afterReset.value.value.items.map((entry) => entry.memoryId)).toEqual([unrelated]);
         expect(h.registry.get(exposure).forgotten.has(id)).toBe(true);
       }),
     ),
+);
+
+it.effect("keeps schema-decoded forgotten rows visible after observing the same forget", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const tombstone = {
+        memorySpaceId: space,
+        memoryId: id,
+        deleteOperationId: "00000000-0000-4000-8000-000000000007",
+        deletingEnvironmentId: env,
+        deletedAtUtc: "2026-10-15T00:00:00.000Z",
+        suppressedSourceKeys: [],
+        suppressedContent: [],
+        sourceExclusions: [],
+      };
+      const forgottenPage = yield* Schema.decodeUnknownEffect(MemoryPage)(
+        {
+          ...page,
+          items: [
+            {
+              memorySpaceId: space,
+              memoryId: id,
+              status: "forgotten",
+              pendingSync: false,
+              localAvailability: {
+                exposure: "forgotten",
+                reasons: [],
+                deferred: [],
+                cleanupPending: false,
+              },
+              tombstone,
+            },
+            unrelatedItem,
+          ],
+        },
+        { onExcessProperty: "error" },
+      );
+      const h = yield* harness(createMemoryTombstoneLedger(), forgottenPage);
+      const exposure = h.memory.exposureAtom(target);
+      h.registry.mount(exposure);
+      yield* Queue.offer(h.queue, signal("reset"));
+      yield* waitFor(h.registry, exposure, (state) => state.ready);
+      yield* Queue.offer(h.queue, signal("forget"));
+      yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+      const query = h.memory.list({
+        ...target,
+        input: { ...target.input, includeQuarantined: false, limit: 10 },
+      });
+      h.registry.mount(query);
+      yield* Deferred.succeed(h.reply, item);
+      yield* waitFor(h.registry, query, (r) => r._tag === "Success" && Option.isSome(r.value));
+      const result = h.registry.get(query);
+      if (result._tag !== "Success" || Option.isNone(result.value))
+        throw new Error("Page required");
+      expect(result.value.value.items.map((entry) => entry.status)).toEqual([
+        "forgotten",
+        "active",
+      ]);
+      expect(JSON.stringify(result.value.value)).not.toContain("Synthetic memory");
+    }),
+  ),
 );

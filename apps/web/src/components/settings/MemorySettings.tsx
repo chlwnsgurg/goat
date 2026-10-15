@@ -1,3 +1,4 @@
+import { XIcon } from "lucide-react";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { randomUUID } from "../../lib/utils";
 import { RegistryContext, useAtom, useAtomValue } from "@effect/atom-react";
@@ -221,11 +222,10 @@ function MemoryDestinationContent({
     };
   }, [canSync, environmentId, getSync, syncReload]);
   const refreshBootstrap = useCallback(() => setSyncReload((value) => value + 1), []);
-  const memorySpaceId =
-    target.memorySpaceId ??
-    (sync && sync.state !== "disabled" && sync.state !== "bootstrapping"
-      ? sync.memorySpaceId
-      : null);
+  const readySpace = sync && sync.state !== "disabled" ? sync.memorySpaceId : null;
+  const [savedSpace, setSavedSpace] = useState<MemorySpaceId | null>(null);
+  if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
+  const memorySpaceId = target.memorySpaceId ?? readySpace ?? savedSpace;
 
   return (
     <>
@@ -282,6 +282,9 @@ function MemoryDestinationContent({
           target={target}
           environmentId={environmentId}
           memorySpaceId={memorySpaceId}
+          memoryEnabled={
+            sync !== null && sync.state !== "disabled" && sync.state !== "bootstrapping"
+          }
         />
       ) : (
         <SettingsSection title="Memories">
@@ -320,17 +323,20 @@ function MemoryRecords({
   target,
   environmentId,
   memorySpaceId,
+  memoryEnabled,
 }: {
   target: MemorySettingsSearch;
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
+  memoryEnabled: boolean;
 }) {
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState<string | undefined>();
   const [adding, setAdding] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const canWrite = useAtomValue(memoryEnvironment.upsert.permissionAtom(environmentId));
+  const writePermission = useAtomValue(memoryEnvironment.upsert.permissionAtom(environmentId));
+  const canWrite = writePermission && memoryEnabled;
   const [quarantine, setQuarantine] = useState(false);
   const navigate = useNavigate();
   if (!canWrite && adding) setAdding(false);
@@ -366,7 +372,11 @@ function MemoryRecords({
       <SettingsSection title="Memories" id="memory-records">
         <SettingsRow
           title="Save a memory"
-          description="Add something you want this device to remember."
+          description={
+            memoryEnabled
+              ? "Add something you want this device to remember."
+              : "Saved memories stay. Turn on memory to save new memories."
+          }
           control={
             <Button
               size="sm"
@@ -546,6 +556,7 @@ function MemoryRecords({
           target={target}
           environmentId={environmentId}
           memorySpaceId={memorySpaceId}
+          memoryEnabled={memoryEnabled}
           onForgotten={(message) => {
             setNotice(message);
             page.refresh();
@@ -561,18 +572,21 @@ function MemoryDetails({
   environmentId,
   memorySpaceId,
   onForgotten,
+  memoryEnabled,
 }: {
   target: MemorySettingsSearch;
   environmentId: EnvironmentId;
   memorySpaceId: MemorySpaceId;
   onForgotten: (message: string) => void;
+  memoryEnabled: boolean;
 }) {
   const { environments } = useEnvironments();
   const deviceName = (id: EnvironmentId) =>
     environments.find((e) => e.environmentId === id)?.label ?? "Unknown device";
   const memoryId = target.memoryId!;
   const [editing, setEditing] = useState(false);
-  const canWrite = useAtomValue(memoryEnvironment.upsert.permissionAtom(environmentId));
+  const writePermission = useAtomValue(memoryEnvironment.upsert.permissionAtom(environmentId));
+  const canWrite = writePermission && memoryEnabled;
   const read = useEnvironmentQuery(
     memoryEnvironment.read({ environmentId, input: { memorySpaceId, memoryId } }),
   );
@@ -596,19 +610,40 @@ function MemoryDetails({
     <SettingsSection title="Memory details" id="memory-details">
       <SettingsRow title={item?.status === "forgotten" ? "Forgotten memory" : "Memory"}>
         <div ref={detailsRef} tabIndex={-1} aria-label="Memory details" className="space-y-3">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() =>
-              void navigate({
-                to: "/settings/memory",
-                search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
-                hash: "",
-              })
-            }
-          >
-            Close details
-          </Button>
+          <div className="flex items-center justify-end gap-2">
+            {item?.status === "active" && canWrite ? (
+              <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+                Edit
+              </Button>
+            ) : null}
+            <MemoryForgetControl
+              environmentId={environmentId}
+              item={item}
+              label="Forget"
+              onForgotten={(message) => {
+                onForgotten(message);
+                void navigate({
+                  to: "/settings/memory",
+                  search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+                  hash: "",
+                });
+              }}
+            />
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label="Close details"
+              onClick={() =>
+                void navigate({
+                  to: "/settings/memory",
+                  search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+                  hash: "",
+                })
+              }
+            >
+              <XIcon />
+            </Button>
+          </div>
           {read.error || history.error ? <p role="alert">{read.error ?? history.error}</p> : null}
           {item ? (
             <>
@@ -627,9 +662,6 @@ function MemoryDetails({
               ) : null}
               {item.status === "active" && canWrite ? (
                 <>
-                  <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
-                    Edit memory
-                  </Button>
                   {editing ? (
                     <MemoryEditor
                       key={item.revision.revisionId}
@@ -649,29 +681,6 @@ function MemoryDetails({
           ) : (
             <p role="status">This memory is unavailable. Visible details have been cleared.</p>
           )}
-          {/* A forget signal hides bodies while the same request may still need its receipt retried. */}
-          <MemoryForgetControl
-            environmentId={environmentId}
-            item={item}
-            onForgotten={(message) => {
-              onForgotten(message);
-              void navigate({
-                to: "/settings/memory",
-                search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
-                hash: "",
-              });
-            }}
-          />
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              read.refresh();
-              history.refresh();
-            }}
-          >
-            Refresh details
-          </Button>
           {item && item.status !== "forgotten" && value ? (
             <>
               {value.resolutions.length > 0 ? (
@@ -690,7 +699,7 @@ function MemoryDetails({
                     <p>Resolved on {deviceName(display.resolvingEnvironmentId)}</p>
                     <p>Revert deadline: {formatTimestamp(display.revertDeadlineUtc, "locale")}</p>
                     <p>{entry.payload?.judgment ?? "Retained judgment unavailable."}</p>
-                    {item ? (
+                    {item && memoryEnabled ? (
                       <MemoryRevertControl
                         environmentId={environmentId}
                         item={item}
@@ -713,11 +722,11 @@ function MemoryDetails({
               {value.revisions.map((entry, index) => (
                 <MemoryHistoryDisclosure
                   key={entry.revision.revisionId}
-                  title={`Original ${index + 1}`}
+                  title={`${value.resolutions.length ? "Original" : "Version"} ${index + 1}`}
                   description={formatTimestamp(entry.revision.createdAtUtc, "locale")}
                 >
                   <p className="whitespace-pre-wrap break-words">
-                    {entry.payload?.text ?? "Original unavailable."}
+                    {entry.payload?.text ?? "Version unavailable."}
                   </p>
                   <p>Saved on {deviceName(entry.revision.provenance.environmentId)}</p>
                   {entry.payload?.evidence
@@ -959,12 +968,14 @@ export function MemoryRevertControl({
 }
 
 export function MemoryForgetControl({
+  label = "Forget memory",
   environmentId,
   item,
   onForgotten,
 }: {
   environmentId: EnvironmentId;
   item: MemoryItem | null;
+  label?: string;
   onForgotten?: ((message: string) => void) | undefined;
 }) {
   const canForget = useAtomValue(memoryEnvironment.forget.permissionAtom(environmentId));
@@ -974,12 +985,14 @@ export function MemoryForgetControl({
       environmentId={environmentId}
       item={item}
       canForget={canForget}
+      label={label}
       onForgotten={onForgotten}
     />
   );
 }
 
 function MemoryForgetRequest({
+  label,
   environmentId,
   item,
   canForget,
@@ -988,6 +1001,7 @@ function MemoryForgetRequest({
   environmentId: EnvironmentId;
   item: MemoryItem | null;
   canForget: boolean;
+  label: string;
   onForgotten?: ((message: string) => void) | undefined;
 }) {
   const registry = useContext(RegistryContext);
@@ -1072,7 +1086,7 @@ function MemoryForgetRequest({
               }
             }}
           >
-            Forget memory
+            {label}
           </Button>
         )
       ) : null}

@@ -168,13 +168,13 @@ export function MemoryAdministration({
   }, [environmentId, getHub, getOwner, registry, reload]);
   useEffect(() => {
     const refresh = () => {
-      if (pending !== null || busy) return;
+      if (pending !== null || busy || recovery) return;
       setReload((n) => n + 1);
       onSharingRefresh?.();
     };
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
-  }, [pending, busy, onSharingRefresh]);
+  }, [pending, busy, recovery, onSharingRefresh]);
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
     if (busy || !live() || !writable(environmentId)) return;
     loadGeneration.current += 1;
@@ -297,7 +297,8 @@ export function MemoryAdministration({
             const result = await updateHub({ environmentId: id, input });
             if (result._tag === "Failure") {
               if (versionConflict(result.cause)) throw new Error("revision_changed");
-              throw new Error("Request failed");
+              const failure = Option.getOrNull(Cause.findErrorOption(result.cause));
+              throw failure ?? new Error("Request failed");
             }
             return result.value;
           },
@@ -320,6 +321,20 @@ export function MemoryAdministration({
         recover(
           "Device connection changed. Setup may be incomplete. Review the latest devices, then Replace key to recover or Remove to clean up.",
         );
+        return;
+      }
+      if (
+        typeof failure === "object" &&
+        failure !== null &&
+        "code" in failure &&
+        failure.code === "capacity_exceeded" &&
+        "capacity" in failure &&
+        typeof failure.capacity === "object" &&
+        failure.capacity !== null &&
+        "dimension" in failure.capacity &&
+        failure.capacity.dimension === "members"
+      ) {
+        recover("Device limit reached. Remove a device to add another.");
         return;
       }
       if (failure instanceof Error && failure.message === "revision_changed") {

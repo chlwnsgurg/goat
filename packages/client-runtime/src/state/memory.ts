@@ -88,6 +88,18 @@ export function memoryExposureMatches(
 
 function containsForgottenMemory(value: unknown, forgotten: ReadonlySet<MemoryId>): boolean {
   if (typeof value !== "object" || value === null) return false;
+  // Tombstones are body-free records and remain visible consistently across devices.
+  if ("status" in value && value.status === "forgotten") return false;
+  // Change signals identify memories, not revisions. Without a complete revision-to-memory
+  // map, a derived body cannot be proven independent of a remembered forget. Never infer
+  // safety from the absence of its source memory on this particular page.
+  if (
+    forgotten.size > 0 &&
+    "derivedFromMemoryRevisions" in value &&
+    Array.isArray(value.derivedFromMemoryRevisions) &&
+    value.derivedFromMemoryRevisions.length > 0
+  )
+    return true;
   if (
     "memoryId" in value &&
     typeof value.memoryId === "string" &&
