@@ -20,6 +20,7 @@ const guest = (initialUrl = "https://app.example") => {
   });
   const loadURL = vi.fn();
   const contents = Object.assign(events, {
+    session: { profile: Symbol("preview session") } as unknown as Electron.Session,
     getURL: () => url,
     isDestroyed: () => destroyed,
     setIgnoreMenuShortcuts: vi.fn(),
@@ -75,6 +76,21 @@ const family = (url?: string) => {
 };
 
 describe("native preview popup lifecycle", () => {
+  it("pins browser-created and opener-retaining children to each source session", () => {
+    const { owner, lifecycle } = family();
+    const decision = owner.open(request("https://provider.example/login"));
+    expect(decision.overrideBrowserWindowOptions?.webPreferences?.session).toBe(
+      owner.contents.session,
+    );
+    const popup = child(owner, "https://provider.example/login");
+    expect(popup.contents.session).not.toBe(owner.contents.session);
+    const nested = popup.open(request("https://provider.example/consent"));
+    expect(nested.overrideBrowserWindowOptions?.webPreferences?.session).toBe(
+      popup.contents.session,
+    );
+    lifecycle.dispose();
+  });
+
   it("allows blank -> provider -> callback without reloading the opener or child", () => {
     const { owner, lifecycle } = family();
     expect(owner.open().action).toBe("allow");

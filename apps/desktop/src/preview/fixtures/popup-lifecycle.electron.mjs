@@ -16,11 +16,18 @@ const run = async () => {
   try {
     await app.whenReady();
     let origin;
+    const requests = new NodeEvents.EventEmitter();
     // An ephemeral HTTP fixture, never a GOAT server or live browser profile.
     const server = NodeHttp.createServer((request, response) => {
       const body = [];
       request.on("data", (part) => body.push(part));
       request.on("end", () => {
+        const result = {
+          method: request.method,
+          body: Buffer.concat(body).toString(),
+          cookie: request.headers.cookie,
+        };
+        requests.emit(request.url, result);
         response.setHeader("Content-Type", "text/html");
         if (request.url === "/owner") {
           response.setHeader("Set-Cookie", "popupSession=retained; SameSite=Lax");
@@ -40,11 +47,6 @@ const run = async () => {
           window.opener.postMessage('consent-ok', location.origin); window.close();
         </script>`);
         } else if (request.url === "/post") {
-          const result = {
-            method: request.method,
-            body: Buffer.concat(body).toString(),
-            cookie: request.headers.cookie,
-          };
           response.end(`<!doctype html><script>
           window.opener.postMessage(${JSON.stringify(result)}, ${JSON.stringify(origin)});
           window.close();
@@ -67,6 +69,14 @@ const run = async () => {
         nodeIntegration: false,
       },
     });
+    // Match DesktopWindow's guest overrides, including contextIsolation=false.
+    host.webContents.on("will-attach-webview", (_event, preferences) => {
+      preferences.sandbox = true;
+      preferences.nodeIntegration = false;
+      preferences.nodeIntegrationInSubFrames = false;
+      preferences.contextIsolation = false;
+      preferences.disableHtmlFullscreenWindowResize = true;
+    });
     const guestReady = new Promise((resolve) => {
       host.webContents.once("did-attach-webview", (_event, guest) => {
         const lifecycle = createPreviewPopupLifecycle(guest, () => {});
@@ -81,11 +91,17 @@ const run = async () => {
         src="${origin}/owner"></webview>`),
     );
     const guest = await guestReady;
+    NodeAssert.equal(guest.getLastWebPreferences().contextIsolation, false);
     const ownerId = guest.id;
     const popupPreferences = [];
-    guest.on("did-create-window", (window) => {
-      popupPreferences.push(window.webContents.getLastWebPreferences());
-    });
+    const trackPopups = (opener) => {
+      opener.on("did-create-window", (window) => {
+        NodeAssert.equal(window.webContents.session, opener.session);
+        popupPreferences.push(window.webContents.getLastWebPreferences());
+        trackPopups(window.webContents);
+      });
+    };
+    trackPopups(guest);
     let navigations = 0;
     guest.on("did-navigate", () => navigations++);
     const providerOrigin = `http://localhost:${port}`;
@@ -121,6 +137,54 @@ const run = async () => {
     NodeAssert.equal(post.method, "POST");
     NodeAssert.equal(post.body, "proof=retained");
     NodeAssert.match(post.cookie, /popupSession=retained/);
+    const createdWindow = (opener) =>
+      new Promise((resolve) => {
+        opener.once("did-create-window", (window) => {
+          window.webContents.once("did-finish-load", () => resolve(window));
+        });
+      });
+    const postRequest = NodeEvents.once(requests, "/post-noopener");
+    const postWindow = createdWindow(guest);
+    await guest.executeJavaScript(
+      `(() => {
+        const form = document.createElement('form');
+        form.method = 'POST'; form.target = '_blank';
+        form.action = ${JSON.stringify(`${origin}/post-noopener`)};
+        const input = document.createElement('input');
+        input.name = 'proof'; input.value = 'without-opener';
+        form.append(input); document.body.append(form); form.submit();
+      })()`,
+      true,
+    );
+    const [withoutOpener] = await postRequest;
+    NodeAssert.equal(withoutOpener.method, "POST");
+    NodeAssert.equal(withoutOpener.body, "proof=without-opener");
+    NodeAssert.match(withoutOpener.cookie, /popupSession=retained/);
+    const postPopup = await postWindow;
+    NodeAssert.equal(postPopup.webContents.session, guest.session);
+    NodeAssert.equal(await postPopup.webContents.executeJavaScript("window.opener === null"), true);
+
+    const nestedRequest = NodeEvents.once(requests, "/nested-noopener");
+    const nestedWindow = createdWindow(postPopup.webContents);
+    await postPopup.webContents.executeJavaScript(
+      `(() => {
+        const link = document.createElement('a');
+        link.target = '_blank'; link.rel = 'noopener';
+        link.href = ${JSON.stringify(`${origin}/nested-noopener`)};
+        document.body.append(link); link.click();
+      })()`,
+      true,
+    );
+    const [nested] = await nestedRequest;
+    NodeAssert.match(nested.cookie, /popupSession=retained/);
+    const nestedPopup = await nestedWindow;
+    NodeAssert.equal(nestedPopup.webContents.session, postPopup.webContents.session);
+    NodeAssert.equal(
+      await nestedPopup.webContents.executeJavaScript("window.opener === null"),
+      true,
+    );
+    nestedPopup.destroy();
+    postPopup.destroy();
     const denied = await guest.executeJavaScript(
       `['file:///etc/passwd','vscode://test','data:text/html,x']
       .map(url => window.open(url, '_blank', 'width=300') === null)`,
@@ -137,6 +201,7 @@ const run = async () => {
     NodeAssert.equal(opened.length, 4);
     for (const preferences of popupPreferences) {
       NodeAssert.equal(preferences.sandbox, true);
+      NodeAssert.equal(preferences.contextIsolation, true);
       NodeAssert.equal(preferences.nodeIntegration, false);
       NodeAssert.equal(preferences.webviewTag, false);
     }

@@ -112,8 +112,9 @@ export const createPreviewPopupLifecycle = (
       overrideBrowserWindowOptions: {
         autoHideMenuBar: true,
         webPreferences: {
-          // about:blank inherits the guest's sandboxed, Node-disabled prefs;
-          // Chromium ignores preference overrides for about:blank children.
+          // Browser-created children (e.g. noopener POSTs) may have no inherited
+          // WebContents. Pin their cookies and profile to the source session.
+          session: source.session,
           contextIsolation: true,
           nodeIntegration: false,
           nodeIntegrationInSubFrames: false,

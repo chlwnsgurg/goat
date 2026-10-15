@@ -628,6 +628,67 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect(
+    "retains blank, POST and nested noopener journeys through the installed handler",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const preview = makeFaviconWebContents();
+          fromId.mockReturnValue(preview.webContents);
+          yield* manager.createTab("tab_popup_journeys");
+          yield* manager.registerWebview("tab_popup_journeys", 42);
+          const handler = vi.mocked(
+            (preview.webContents as Electron.WebContents).setWindowOpenHandler,
+          ).mock.lastCall![0];
+          for (const details of [
+            { url: "about:blank", disposition: "new-window" as const },
+            {
+              url: "https://provider.example/post",
+              disposition: "foreground-tab" as const,
+              postBody: { data: [], contentType: "application/x-www-form-urlencoded" },
+            },
+          ]) {
+            const decision = handler({
+              frameName: "",
+              features: "",
+              referrer: { url: "", policy: "default" },
+              ...details,
+            });
+            expect(decision.action).toBe("allow");
+            expect(decision.createWindow).toBeUndefined();
+            expect(decision.overrideBrowserWindowOptions?.webPreferences?.session).toBe(
+              (preview.webContents as Electron.WebContents).session,
+            );
+            const popup = makeFaviconWebContents({ id: 43 });
+            const window = Object.assign(new NodeEvents.EventEmitter(), {
+              webContents: popup.webContents,
+              isDestroyed: () => false,
+              destroy: vi.fn(),
+            });
+            preview.listeners.get("did-create-window")!(window as never);
+            const nestedHandler = vi.mocked(
+              (popup.webContents as Electron.WebContents).setWindowOpenHandler,
+            ).mock.lastCall![0];
+            // A nested target=_blank/noopener link stays in the native family,
+            // even though the root Manager routes ordinary links to preview tabs.
+            const nested = nestedHandler({
+              frameName: "",
+              features: "",
+              referrer: { url: "", policy: "default" },
+              url: "https://provider.example/consent",
+              disposition: "foreground-tab",
+            });
+            expect(nested.action).toBe("allow");
+            expect(nested.overrideBrowserWindowOptions?.webPreferences?.session).toBe(
+              (popup.webContents as Electron.WebContents).session,
+            );
+            window.emit("closed");
+          }
+          expect(preview.loadURL).not.toHaveBeenCalled();
+        }),
+      ),
+  );
+
   effectIt.effect("keeps preview shortcuts out of the host window", () =>
     withManager((manager) =>
       Effect.gen(function* () {
