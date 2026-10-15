@@ -390,7 +390,7 @@ describe("shared memory client", () => {
         const coreOnlyConfig = {
           environment: { capabilities: { memory: { protocolVersion: 1 } } },
         } as ServerConfig;
-        const coreReply = { settings: { mode: "disabled" as const }, version: 0 };
+        const coreReply = { settings: { mode: "disabled" as const }, version: 0, members: [] };
         const coreRequest = vi.fn(() => Effect.succeed(coreReply));
         const importRequest = vi.fn(h.rpc[WS_METHODS.memoryImportProvider]);
         yield* SubscriptionRef.set(

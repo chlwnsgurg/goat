@@ -277,6 +277,7 @@ describe("native Memory with shared factory", () => {
     await mount(["memory:read", "memory:write", "settings:write"]);
     h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
       settings: { mode: "hub", memorySpaceId: nativeSpace },
+      members: [],
       version: 1,
     }));
     h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => nativeOwnerPolicy);
@@ -442,6 +443,7 @@ describe("native Memory with shared factory", () => {
     const policy = nativeOwnerPolicy;
     h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
       settings: { mode: "hub", memorySpaceId: nativeSpace },
+      members: [],
       version: 1,
     }));
     h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => policy);
@@ -544,6 +546,7 @@ describe("native Memory with shared factory", () => {
     await mount(["memory:read", "memory:write", "settings:write"]);
     h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
       settings: { mode: "hub", memorySpaceId: nativeSpace },
+      members: [],
       version: 1,
     }));
     h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => nativeOwnerPolicy);
@@ -551,7 +554,8 @@ describe("native Memory with shared factory", () => {
     const configured = h.deferred<typeof nativeSyncStatus>();
     h.responses.set(WS_METHODS.memorySyncStatus, () => configured.response);
     h.responses.set(WS_METHODS.memoryHubSettingsUpdate, () => ({
-      view: { settings: { mode: "disabled" }, version: 2 },
+      view: { settings: { mode: "disabled" }, version: 2, members: [] },
+      credential: null,
     }));
     await view.click("Turn off memory sharing");
     await act(async () => h.confirm());
@@ -601,6 +605,7 @@ describe("native Memory with shared factory", () => {
         settings:
           mode === "disabled" ? { mode: "disabled" } : { mode: "hub", memorySpaceId: nextSpace },
         version: 2,
+        members: [],
       }));
       h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => {
         throw new Error("Synthetic owner lookup failed");
