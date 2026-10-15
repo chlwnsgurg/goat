@@ -33,7 +33,7 @@ import Migration0062 from "../persistence/Migrations/064_RemoteReports.ts";
 import Migration0063 from "../persistence/Migrations/065_RemoteDispatches.ts";
 import Migration0065 from "../persistence/Migrations/067_RemoteDispatchQuestions.ts";
 import Migration0068 from "../persistence/Migrations/069_RemoteReportRelay.ts";
-import Migration0073 from "../persistence/Migrations/073_MemoryTaskGrantCeiling.ts";
+import Migration0073 from "../persistence/Migrations/074_MemoryTaskGrantCeiling.ts";
 import * as LaunchWatchService from "../mcp/LaunchWatchService.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";

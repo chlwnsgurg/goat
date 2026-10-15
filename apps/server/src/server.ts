@@ -1,3 +1,7 @@
+import type * as Crypto from "effect/Crypto";
+import type * as FileSystem from "effect/FileSystem";
+import type * as Path from "effect/Path";
+import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
 import * as McpToolAccess from "./mcp/McpToolAccess.ts";
 import { invocationPermit, memoryError } from "./mcp/toolkits/memory/handlers.ts";
@@ -945,7 +949,9 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     provideMemorySnapshot(
       application,
       ProviderInstanceRegistryHydration.layer.pipe(
-        Layer.provide(layerPullRequestService.pipe(Layer.provide(RuntimeLayer.layerProjectService))),
+        Layer.provide(
+          layerPullRequestService.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
+        ),
         Layer.provide(ProjectionStoreV2.layer),
       ),
       layerMemorySnapshotWithDependencies,
@@ -1483,5 +1489,15 @@ const layerMakeServer = Layer.unwrap(
   }),
 ).pipe(Layer.provide(ProcessRunner.layer));
 
+// Keep the CLI boundary requirements explicit: cross-module inference widens this large
+// composed layer to any when the memory/provider dependency graph is included.
 // The CLI supplies configuration.
-export const runServer = Layer.launch(layerMakeServer);
+export const runServer: Effect.Effect<
+  never,
+  Layer.Error<typeof layerMakeServer>,
+  | FileSystem.FileSystem
+  | Path.Path
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Crypto.Crypto
+  | ServerConfig.ServerConfig
+> = Layer.launch(layerMakeServer);

@@ -60,8 +60,8 @@ describe("GOAT migration ids", () => {
         [62, "ThreadFailureLookupIndex"],
         [71, "Memory"],
         [72, "MemoryHubSync"],
-        [72, "MemorySearchCounters"],
-        [73, "MemoryTaskGrantCeiling"],
+        [73, "MemorySearchCounters"],
+        [74, "MemoryTaskGrantCeiling"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -82,8 +82,8 @@ describe("GOAT migration ids", () => {
         [70, "ProjectionTurnItemRequestIndex"],
         [71, "Memory"],
         [72, "MemoryHubSync"],
-        [72, "MemorySearchCounters"],
-        [73, "MemoryTaskGrantCeiling"],
+        [73, "MemorySearchCounters"],
+        [74, "MemoryTaskGrantCeiling"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -111,8 +111,8 @@ describe("GOAT migration ids", () => {
           [62, "ThreadFailureLookupIndex"],
           [71, "Memory"],
           [72, "MemoryHubSync"],
-        [72, "MemorySearchCounters"],
-        [73, "MemoryTaskGrantCeiling"],
+          [73, "MemorySearchCounters"],
+          [74, "MemoryTaskGrantCeiling"],
         ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);

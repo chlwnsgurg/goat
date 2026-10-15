@@ -16,7 +16,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
-import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
+import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";

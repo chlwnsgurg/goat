@@ -1,7 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
-import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 import { migrationEntries, runMigrations } from "../Migrations.ts";
 import { reconcileGoatMigrationIds } from "../reconcileGoatMigrationIds.ts";
@@ -39,10 +38,10 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 72 });
+      yield* runMigrations({ toMigrationInclusive: 73 });
       yield* insertTask;
       yield* insertDispatches;
-      assert.deepStrictEqual(yield* runMigrations(), [[73, "MemoryTaskGrantCeiling"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [[74, "MemoryTaskGrantCeiling"]]);
       assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
         { memory_grant_ceiling: "none" },
       ]);
@@ -95,57 +94,35 @@ it.effect(
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
-it.effect(
-  "renumbers the ceiling by stable name without replaying ALTER TABLE or losing grants",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations();
-      yield* insertTask;
-      yield* insertDispatches;
-      yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling='read'`;
-      yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling='read'`;
-      // An upstream migration claims 73; the existing GOAT ceiling moves to 74.
-      const incoming = [
-        ...migrationEntries.filter(([id]) => id < 73),
-        [
-          73,
-          "SyntheticUpstream",
-          sql`CREATE TABLE IF NOT EXISTS ceiling_renumber_fixture (id INTEGER)`,
-        ] as const,
-        ...migrationEntries
-          .filter(([id]) => id >= 73)
-          .map(([id, name, migration]) => [id + 1, name, migration] as const),
-      ];
-      assert.deepStrictEqual(yield* reconcileGoatMigrationIds(incoming), [
-        [73, "SyntheticUpstream"],
-      ]);
-      const loader = Migrator.fromRecord(
-        Object.fromEntries(incoming.map(([id, name, migration]) => [`${id}_${name}`, migration])),
-      );
-      assert.deepStrictEqual(yield* Migrator.make({})({ loader }), []);
-      assert.deepStrictEqual(
-        yield* sql`SELECT migration_id,name FROM effect_sql_migrations WHERE migration_id>=73 ORDER BY migration_id`,
-        [
-          { migration_id: 73, name: "SyntheticUpstream" },
-          { migration_id: 74, name: "MemoryTaskGrantCeiling" },
-        ],
-      );
-      assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
-        { memory_grant_ceiling: "read" },
-      ]);
-      assert.deepStrictEqual(
-        yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
-        [
-          { kind: "task", memory_grant_ceiling: "read" },
-          { kind: "thread", memory_grant_ceiling: "read" },
-        ],
-      );
-      const taskColumns = yield* sql<{ name: string }>`PRAGMA table_info(scheduled_tasks)`;
-      const dispatchColumns = yield* sql<{ name: string }>`PRAGMA table_info(remote_dispatches)`;
-      for (const columns of [taskColumns, dispatchColumns]) {
-        assert.strictEqual(columns.filter(({ name }) => name === "memory_grant_ceiling").length, 1);
-      }
-      assert.deepStrictEqual(yield* reconcileGoatMigrationIds(incoming), []);
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+it.effect("rejects an unreleased ceiling ledger without changing grants or its evidence", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations();
+    yield* insertTask;
+    yield* insertDispatches;
+    yield* sql`UPDATE scheduled_tasks SET memory_grant_ceiling='read'`;
+    yield* sql`UPDATE remote_dispatches SET memory_grant_ceiling='read'`;
+    yield* sql`DELETE FROM effect_sql_migrations WHERE name='MemorySearchCounters'`;
+    yield* sql`UPDATE effect_sql_migrations SET migration_id=73 WHERE name='MemoryTaskGrantCeiling'`;
+    const before =
+      yield* sql`SELECT migration_id,name FROM effect_sql_migrations ORDER BY migration_id`;
+    const result = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));
+    if (result._tag !== "MigrationError") return yield* result;
+    assert.strictEqual(result.kind, "BadState");
+    assert.include(result.message, "Unreleased memory DB is incompatible");
+    assert.deepStrictEqual(
+      yield* sql`SELECT migration_id,name FROM effect_sql_migrations ORDER BY migration_id`,
+      before,
+    );
+    assert.deepStrictEqual(yield* sql`SELECT memory_grant_ceiling FROM scheduled_tasks`, [
+      { memory_grant_ceiling: "read" },
+    ]);
+    assert.deepStrictEqual(
+      yield* sql`SELECT kind,memory_grant_ceiling FROM remote_dispatches ORDER BY kind`,
+      [
+        { kind: "task", memory_grant_ceiling: "read" },
+        { kind: "thread", memory_grant_ceiling: "read" },
+      ],
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

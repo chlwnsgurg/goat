@@ -13,7 +13,7 @@ import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
-import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
+import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";

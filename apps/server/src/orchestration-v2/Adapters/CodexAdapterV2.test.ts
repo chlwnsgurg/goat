@@ -933,7 +933,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         name: "Computer Use",
         kind: "computer",
       });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["inProgress", "completed", "failed"] as const)(
@@ -951,7 +951,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         });
         assert.equal(projection.title, "Read the desktop window");
         assert.equal(projection.toolSurface, "computer");
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["cua_repl", "node_repl"])(
@@ -985,7 +985,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
           (yield* CodexAdapterV2.projectCodexDynamicToolItem({ ...call, server: "github" })).title,
           "js",
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each(["inProgress", "completed", "failed"] as const)(
@@ -1007,7 +1007,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
           kind: "integration",
         });
         assert.deepEqual(projection.input, { city: "Berlin" });
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("uses Codex connector names without reading a display title from arguments", () =>
@@ -1036,7 +1036,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         logoUrl: "https://example.com/weather.png",
       });
       assert.deepEqual(projection.toolSource?.icon, projection.toolIcon);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves native browser and app icons alongside MCP tool output", () =>
@@ -1091,7 +1091,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         app: { _tag: "app-id", appId: "com.apple.finder" },
       });
       assert.equal(app.toolSource?.name, "Finder");
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves MCP arguments and prefers structured output", () =>
@@ -1123,7 +1123,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         },
         status: "completed",
       });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect("preserves namespaced dynamic tool output", () =>
@@ -1145,7 +1145,7 @@ describe("CodexAdapterV2 dynamic tool projection", () => {
         output: [{ type: "inputText", text: "inspection failed" }],
         status: "failed",
       });
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 });
 
@@ -4318,11 +4318,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           planItems.map((item) => item.streaming),
           [...Array.from({ length: planItems.length - 1 }, () => true), false],
         );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -5270,7 +5266,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           ),
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
     );
   });
 
@@ -5390,7 +5386,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             ),
           ),
         );
-      }).pipe(Effect.provide(NodeServices.layer)),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 

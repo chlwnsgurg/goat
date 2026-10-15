@@ -2033,7 +2033,7 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
         ProviderEventLoggers.ProviderEventLoggers,
         ProviderEventLoggers.NoOpProviderEventLoggers,
       ),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(layerAdapterTest),
     );
 
   it.effect("sends MCP servers over stdin, not argv or the environment", () =>
@@ -3312,11 +3312,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       if (terminal.status !== "failed") return;
       assert.equal(terminal.failure.message, cliText);
       assert.equal(terminal.failure.code, "api_error_403");
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
+    }).pipe(Effect.provide(layerAdapterTest)),
   );
 
   it.effect.each([
@@ -8912,11 +8908,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.equal(latest.subagent.status, resume ? "running" : "completed");
           assert.equal(latest.subagent.result, resume ? null : "Finished audit.");
           assert.equal(latest.subagent.completedAt === null, resume);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9034,11 +9026,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* fixture.notify("completed");
         assert.equal((yield* Queue.take(fixture.subagentReceipts)).subagent.status, "completed");
         assert.isFalse(yield* fixture.hasPendingBackgroundWork);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9081,11 +9069,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               result: "Native outcome.",
             }),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -9117,11 +9101,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           completedAt: completed.subagent.completedAt!,
           result: "Native outcome.",
         });
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(layerAdapterTest)),
     ),
   );
 
@@ -9176,11 +9156,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             DateTime.toEpochMillis(resumed.subagent.completedAt!),
             DateTime.toEpochMillis(completed.subagent.completedAt!),
           );
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-          ),
-        ),
+        }).pipe(Effect.provide(layerAdapterTest)),
       ),
   );
 
@@ -13958,6 +13934,7 @@ describe("Claude WP4 memory delivery", () => {
                       registrations.push(servers);
                     }),
                   setModel: () => Effect.void,
+                  applyFlagSettings: () => Effect.void,
                   setPermissionMode: () => Effect.void,
                   stopTask: () => Effect.void,
                   interrupt: Effect.void,
