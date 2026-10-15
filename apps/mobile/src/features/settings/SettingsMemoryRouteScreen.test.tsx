@@ -1064,7 +1064,7 @@ describe("native WP6 Settings commands", () => {
       ]);
       expect(view.container.textContent).toContain("Import completed");
       expect(h.secureValues.size).toBe(0);
-      expect(view.container.textContent).toContain("Added: 1");
+      expect(view.container.textContent).toContain("Added: 33");
       expect(view.container.textContent).not.toContain("/private/path");
       expect(view.container.textContent).not.toContain("synthetic-session");
     },
@@ -1375,8 +1375,18 @@ describe("native WP6 Settings commands", () => {
     expect(
       importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
     ).toHaveLength(0);
-    expect(view.container.textContent).toContain("Import could not finish");
+    expect(view.container.textContent).toContain("Retry saving import");
     expect(view.container.textContent).not.toContain("Import completed");
+    await act(async () => h.active());
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(0);
+    h.setSecureWrite(null);
+    await view.click("Retry saving import");
+    expect(
+      importCalls().filter((call) => (call.input as { action: string }).action === "apply"),
+    ).toHaveLength(1);
+    expect(view.container.textContent).toContain("Import completed");
   });
   it("offline reconnect preserves the exact handle and ignores the previous session reply", async () => {
     setupImport();
@@ -1750,3 +1760,32 @@ describe("native WP6 Settings commands", () => {
     },
   );
 });
+
+it.each([
+  ["pending", "Revert awaiting hub"],
+  ["revision_changed", "Memory changed since resolution"],
+  ["refused", "Last revert attempt was refused: permission denied"],
+] as const)(
+  "reads %s revert history through the shared query without a new mutation",
+  async (status, label) => {
+    await mount();
+    h.responses.set(WS_METHODS.memoryHistory, () => ({
+      ...revertHistory(),
+      revertResults: [
+        decodeRevertResult({
+          operationId: "00000000-0000-4000-8000-000000000009",
+          memoryId: nativeId,
+          resolutionId,
+          revertDeadlineUtc: "2000-01-31T00:00:00.000Z",
+          status,
+          ...(status === "refused" ? { failureCode: "permission_denied" } : {}),
+        }),
+      ],
+    }));
+    await view.click("Open memory: Synthetic memory body");
+    expect(view.container.textContent).toContain(label);
+    expect(
+      h.calls.filter((call) => call.method === WS_METHODS.memoryRevertResolution),
+    ).toHaveLength(0);
+  },
+);

@@ -52,6 +52,7 @@ import { useHomeThreadSelection } from "../home/home-thread-navigation";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
+import { MemorySyncDiagnostics } from "./MemorySyncDiagnostics";
 import { MemoryImportSettings } from "./MemoryImportSettings";
 import { MemoryProjectSettings } from "./MemoryProjectSettings";
 import { MemoryAdministration } from "./MemorySharingSettings";
@@ -414,6 +415,7 @@ function MemoryConnected({
         <ScreenScrollView>
           <MemoryAgentAccess environmentId={environmentId} />
           {status ? <MemoryStatusRows status={status} /> : null}
+          <MemorySyncDiagnostics environmentId={environmentId} status={status} onRefresh={load} />
           <MemoryAdministration
             environmentId={environmentId}
             onSharingRefresh={() => void load()}
@@ -602,6 +604,11 @@ function MemoryBrowser({
           />
           <MemoryAgentAccess environmentId={params.environmentId} />
           {status ? <MemoryStatusRows status={status} /> : null}
+          <MemorySyncDiagnostics
+            environmentId={params.environmentId}
+            status={status}
+            onRefresh={onSyncRefresh}
+          />
           <SettingsSection title="Memory scope">
             <Copy>
               Select a scope for new memories and imports. Existing memories keep their scope.
@@ -1215,6 +1222,7 @@ function MemoryRevertControl({
       <Copy>{display.windowLabel}</Copy>
       {display.timeNotice ? <Copy>{display.timeNotice}</Copy> : null}
       {display.reason ? <Copy>{display.reason}</Copy> : null}
+      {display.notice ? <Copy>{display.notice}</Copy> : null}
       {!allowed ? <Copy>Memory write permission is required to revert.</Copy> : null}
       {error ? <Copy>{error}</Copy> : null}
       {result ? <Copy>{presentMemoryRevertResult(result).label}</Copy> : null}

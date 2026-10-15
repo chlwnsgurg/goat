@@ -8,8 +8,7 @@ import {
   type MemoryScope,
   type MemorySpaceId,
 } from "@goat/contracts";
-import type { MemoryImportWorkflowState } from "@goat/client-runtime/memory-import-workflow";
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
 import * as Crypto from "expo-crypto";
 import * as Option from "effect/Option";
@@ -69,7 +68,7 @@ export function MemoryImportSettings({
       operationId: () => MemoryOperationId.make(Crypto.randomUUID()),
     }),
   );
-  const [state, setState] = useState<MemoryImportWorkflowState>(workflow.getState());
+  const state = useSyncExternalStore(workflow.subscribe, workflow.getSnapshot);
   const [format, setFormat] = useState<MemoryImportFormat | null>(null);
   const [sources, setSources] = useState<Discovery | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -108,32 +107,27 @@ export function MemoryImportSettings({
       }
     };
   }, [workflow, params.environmentId, registry, connection]);
-  const run = useCallback(
-    async (action: () => Promise<unknown>) => {
-      if (pending.current) return;
-      pending.current = true;
-      const token = generation.current;
-      setBusy(true);
-      setError(null);
-      try {
-        await transition.current;
-        if (!mounted.current || token !== generation.current) return;
-        const request = action();
-        setState(workflow.getState());
-        await request;
-      } catch {
-        if (mounted.current && token === generation.current)
-          setError("Import could not finish. Check the saved result before previewing again.");
-      } finally {
-        if (mounted.current && token === generation.current) {
-          setState(workflow.getState());
-          setBusy(false);
-          pending.current = false;
-        }
+  const run = useCallback(async (action: () => Promise<unknown>) => {
+    if (pending.current) return;
+    pending.current = true;
+    const token = generation.current;
+    setBusy(true);
+    setError(null);
+    try {
+      await transition.current;
+      if (!mounted.current || token !== generation.current) return;
+      const request = action();
+      await request;
+    } catch {
+      if (mounted.current && token === generation.current)
+        setError("Import could not finish. Check the saved result before previewing again.");
+    } finally {
+      if (mounted.current && token === generation.current) {
+        setBusy(false);
+        pending.current = false;
       }
-    },
-    [workflow],
-  );
+    }
+  }, []);
   useEffect(() => {
     const retire = async () => {
       generation.current++;
@@ -144,7 +138,6 @@ export function MemoryImportSettings({
       workflow.invalidate();
       transition.current = transition.current.then(() => workflow.removeDestination());
       await transition.current;
-      if (mounted.current) setState(workflow.getState());
     };
     retireRef.current = retire;
     return () => {
@@ -152,6 +145,7 @@ export function MemoryImportSettings({
     };
   }, [workflow, retireRef, invalidateSelection]);
   const recover = useCallback(() => {
+    if (["save_failed", "recovery"].includes(workflow.getSnapshot().phase)) return;
     if (!registry.get(memory.importProvider.permissionAtom(params.environmentId)) || !enabled)
       return;
     void run(async () => {
@@ -190,7 +184,6 @@ export function MemoryImportSettings({
       void transition.current
         .then(() => {
           if (mounted.current) {
-            setState(workflow.getState());
             recover();
           }
         })
@@ -221,7 +214,8 @@ export function MemoryImportSettings({
       return () => listener.remove();
     }, [recover]),
   );
-  const writable = allowed && enabled && !busy;
+  const writable =
+    allowed && enabled && !busy && state.phase !== "save_failed" && state.phase !== "recovery";
   const selecting = state.phase === "selecting";
   return (
     <SettingsSection title="Import memories">
@@ -323,7 +317,6 @@ export function MemoryImportSettings({
                     ...(scope.kind !== "user" && params.project ? { project: params.project } : {}),
                   })),
               );
-              setState(workflow.getState());
             }}
           />
           <Action
@@ -337,7 +330,6 @@ export function MemoryImportSettings({
             onPress={() => {
               workflow.invalidate();
               invalidateSelection();
-              setState(workflow.getState());
             }}
           />
         </>
@@ -347,15 +339,24 @@ export function MemoryImportSettings({
           label="Stop import"
           onPress={() => {
             workflow.stop();
-            setState(workflow.getState());
           }}
         />
       ) : null}
       <Action
         label="Check saved import result"
-        disabled={!writable}
+        disabled={!allowed || !enabled || busy}
         onPress={() => void run(() => workflow.recover())}
       />
+      {state.phase === "save_failed" ? (
+        <Action
+          label="Retry saving import"
+          disabled={!allowed || !enabled || busy}
+          onPress={() => void run(() => workflow.retry())}
+        />
+      ) : null}
+      {state.phase === "recovery" ? (
+        <Copy>Check the saved import result before continuing.</Copy>
+      ) : null}
       {state.message ? <Copy>{state.message}</Copy> : null}
       {state.phase === "completed" ? (
         <Copy>Import completed. Accepted memories may still be processing or waiting to sync.</Copy>
@@ -371,7 +372,7 @@ export function MemoryImportSettings({
         </Copy>
       ) : null}
       {state.receipt
-        ? nativeMemoryImportOutcomes(state.receipt).map((label) => <Copy key={label}>{label}</Copy>)
+        ? nativeMemoryImportOutcomes(state.totals).map((label) => <Copy key={label}>{label}</Copy>)
         : null}
       {error ? <Copy>{error}</Copy> : null}
     </SettingsSection>

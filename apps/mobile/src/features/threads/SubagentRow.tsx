@@ -1,4 +1,4 @@
-import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation";
+import { scheduledMemoryAccess } from "../settings/scheduledTaskPresentation";
 import { scopeProjectRef, scopeThreadRef } from "@goat/client-runtime/environment";
 import { resolveProviderInstanceDisplayName } from "@goat/client-runtime/state/provider-instance-display";
 import { resolveSubagentMetadata } from "@goat/client-runtime/state/subagent-display";
@@ -17,6 +17,7 @@ import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
 
 type SubagentRowSubagent = Pick<
   OrchestrationV2Subagent,
+  | "currentMemoryAccess"
   | "memoryGrantCeiling"
   | "threadId"
   | "childThreadId"
@@ -160,9 +161,8 @@ function SubagentMetadata(props: {
 export function SubagentMemoryAccess({
   subagent,
 }: {
-  readonly subagent: Pick<OrchestrationV2Subagent, "memoryGrantCeiling">;
+  readonly subagent: Pick<OrchestrationV2Subagent, "memoryGrantCeiling" | "currentMemoryAccess">;
 }) {
-  const view = presentMemoryRunAccess(subagent);
-  if (view.savedCeiling === "none") return null;
-  return <Text className="text-xs text-foreground-muted">Memory: {view.savedCeiling}</Text>;
+  const label = scheduledMemoryAccess(subagent);
+  return label ? <Text className="text-xs text-foreground-muted">{label}</Text> : null;
 }

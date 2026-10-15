@@ -34,6 +34,7 @@ jobs:
             test-desktop,
             test-contracts,
             test-client-runtime,
+            test-mobile-memory,
             test-shared,
             test-memory-growth,
             build,
@@ -134,6 +135,21 @@ jobs:
       - name: Test shared
         if: matrix.task == 'test-shared'
         run: vp run --filter @goat/shared test
+
+      - name: Test mobile memory
+        if: matrix.task == 'test-mobile-memory'
+        run: >-
+          vp test run --config vite.config.ts
+          apps/mobile/src/features/settings/SettingsMemoryRouteScreen.test.tsx
+          apps/mobile/src/persistence/memory-import-recovery.test.ts
+          apps/mobile/src/features/settings/MemorySyncDiagnostics.test.tsx
+          apps/mobile/src/features/settings/SettingsMemoryRouteScreen.logic.test.ts
+          apps/mobile/src/features/settings/scheduledTaskPresentation.test.ts
+          apps/mobile/src/features/goat-bot/GoatBotScreen.memory.test.tsx
+          apps/mobile/src/features/threads/ThreadHeader.memory.test.tsx
+          apps/mobile/src/features/threads/SubagentRow.memory.test.tsx
+          apps/mobile/src/features/threads/useThreadHeaderOptions.test.tsx
+          apps/mobile/src/features/keyboard/commandPaletteItems.test.ts
 
       # Advisory until GOAT_SCREENSHOT_GATE is "enforce". The script reads the live
       # PR, so re-running only this job picks up a new screenshot or waiver label.

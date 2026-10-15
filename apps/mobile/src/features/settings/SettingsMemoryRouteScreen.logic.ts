@@ -1,10 +1,10 @@
+import type { MemoryImportCounts } from "@goat/client-runtime/memory-import-workflow";
 import {
   EnvironmentId,
   MemoryId,
   MemorySpaceId,
   MemoryResolutionId,
   type MemoryItem,
-  type MemoryImportReceipt,
   type MemoryImportOutcome,
   type MemoryScope,
   type MemoryOwnerSourceReadPolicyView,
@@ -71,8 +71,8 @@ export function memoryScopeForSelection(
     : undefined;
 }
 
-/** Counts are scoped to the latest receipt; earlier chunks are not reconstructed from status. */
-export function nativeMemoryImportOutcomes(receipt: MemoryImportReceipt) {
+/** Display aggregate workflow outcomes across all settled chunks. */
+export function nativeMemoryImportOutcomes(counts: MemoryImportCounts) {
   const labels: Record<MemoryImportOutcome, string> = {
     created: "Added",
     revised: "Updated",
@@ -83,7 +83,7 @@ export function nativeMemoryImportOutcomes(receipt: MemoryImportReceipt) {
     conflicted: "Conflicting memories on hold",
   };
   return (Object.keys(labels) as MemoryImportOutcome[]).flatMap((outcome) => {
-    const count = receipt.items.filter((item) => item.outcome === outcome).length;
+    const count = counts.outcomes[outcome] ?? 0;
     return count ? [`${labels[outcome]}: ${count}`] : [];
   });
 }
