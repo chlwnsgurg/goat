@@ -213,7 +213,7 @@ describe("native Memory with shared factory", () => {
       memoryId: nativeId,
       status: "forgotten",
       pendingSync: false,
-      localAvailability: nativeItem.localAvailability,
+      localAvailability: { ...nativeItem.localAvailability, exposure: "forgotten" },
       tombstone: {
         memorySpaceId: nativeSpace,
         memoryId: nativeId,
