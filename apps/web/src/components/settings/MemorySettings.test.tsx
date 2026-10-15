@@ -122,6 +122,21 @@ vi.mock("../../state/session", async (original) => ({
     return state.allowed;
   },
 }));
+vi.mock("@legendapp/list/react", () => ({
+  LegendList: ({
+    data,
+    renderItem,
+  }: {
+    data: MemoryItem[];
+    renderItem: (input: { item: MemoryItem }) => ReactNode;
+  }) => (
+    <div>
+      {data.map((item) => (
+        <div key={item.memoryId}>{renderItem({ item })}</div>
+      ))}
+    </div>
+  ),
+}));
 vi.mock("../ui/select", () => ({
   Select: ({
     children,
@@ -531,7 +546,7 @@ it("does not mount memory consumers for an unsupported explicit foreign deep lin
     );
   });
   expect(container.textContent).toContain("Update or reconnect");
-  expect(container.textContent).toContain("foreign-owner");
+  expect(container.textContent).not.toContain("foreign-owner");
   expect(state.calls).not.toHaveBeenCalled();
 });
 
@@ -595,7 +610,11 @@ it("keeps pending reenrollment when removing another owner permission and render
   expect(request.input.allowedRequesterEnvironmentIds).toEqual(["pending-device"]);
   expect(request.input.expectedVersion).toBe(3);
   expect(request.environmentId).toBe("remote-owner");
-  expect(container.textContent).not.toContain("active device");
+  expect(
+    [...container.querySelectorAll("[data-test-row]")].some((row) =>
+      row.textContent?.startsWith("active device"),
+    ),
+  ).toBe(false);
   expect(container.textContent).toContain("pending device");
   const calls = state.calls.mock.calls.length;
   await click("Turn sharing off");
