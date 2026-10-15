@@ -2016,6 +2016,7 @@ export default function ChatView(props: ChatViewProps) {
     LastInvokedScriptByProjectSchema,
   );
   const legendListRef = useRef<LegendListRef | null>(null);
+  const [timelineScrollNode, setTimelineScrollNode] = useState<HTMLElement | null>(null);
   const getTimelineScrollableNode = useCallback(
     () => legendListRef.current?.getScrollableNode() ?? null,
     [],
@@ -6623,7 +6624,17 @@ export default function ChatView(props: ChatViewProps) {
     readonly userScrollGeneration: number;
   } | null>(null);
   const anchorScrollRestoreFrameRef = useRef<number | null>(null);
+  const scrollToEndFrameRef = useRef<number | null>(null);
+  const cancelPendingScrollToEnd = useCallback(() => {
+    if (scrollToEndFrameRef.current !== null) {
+      cancelAnimationFrame(scrollToEndFrameRef.current);
+      scrollToEndFrameRef.current = null;
+    }
+  }, []);
+  // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Each route owns its pending scroll frame, including when the list is reused.
+  useLayoutEffect(() => cancelPendingScrollToEnd, [routeThreadKey, cancelPendingScrollToEnd]);
   const cancelTimelineLiveFollowForUserNavigation = useCallback(() => {
+    cancelPendingScrollToEnd();
     cancelPositionRestoreRef.current?.();
     anchorUserScrollGenerationRef.current += 1;
     const wasProgrammaticScrollMode = timelineScrollModeRef.current !== "free-scrolling";
@@ -6663,7 +6674,7 @@ export default function ChatView(props: ChatViewProps) {
         scrollNode.scrollTop = currentScrollTop;
       }
     }
-  }, []);
+  }, [cancelPendingScrollToEnd]);
   const cancelTimelineLiveFollowForUserNavigationRef = useRef(
     cancelTimelineLiveFollowForUserNavigation,
   );
@@ -6752,178 +6763,172 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
   // Live-follow stays active after send/thread-open until an actual list scroll
   // gesture opts out.
-  const scrollToEnd = useCallback((animated = false) => {
-    cancelPositionRestoreRef.current?.();
-    isAtEndRef.current = true;
-    timelineScrollModeRef.current = "following-end";
-    liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    setTimelineLiveFollowEnabled(true);
-    pendingTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    setTimelineAnchor(releaseChatTimelineAnchor);
-    // The anchored end space must be gone before the scroll measures, or the
-    // list lands short of the real end (#6519).
-    requestAnimationFrame(() => {
-      void legendListRef.current?.scrollToEnd?.({ animated });
-    });
-  }, []);
-  useEffect(() => {
-    let removeListeners: (() => void) | null = null;
-    let frame: number | null = null;
-    const attach = (remainingAttempts: number) => {
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        const scrollNode = legendListRef.current?.getScrollableNode();
-        if (!scrollNode) {
-          // The list may not have mounted on the first frame after a thread
-          // switch — without a retry the opt-out listeners never attach and
-          // live-follow becomes impossible to escape for the whole thread.
-          if (remainingAttempts > 0) {
-            attach(remainingAttempts - 1);
-          }
+  const scrollToEnd = useCallback(
+    (animated = false) => {
+      cancelPendingScrollToEnd();
+      cancelPositionRestoreRef.current?.();
+      isAtEndRef.current = true;
+      timelineScrollModeRef.current = "following-end";
+      liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+      setTimelineLiveFollowEnabled(true);
+      pendingTimelineAnchorRef.current = null;
+      activeTimelineAnchorIndexRef.current = null;
+      showScrollDebouncer.current.cancel();
+      setShowScrollToBottom(false);
+      setTimelineAnchor(releaseChatTimelineAnchor);
+      // The anchored end space must be gone before the scroll measures, or the
+      // list lands short of the real end (#6519).
+      const list = legendListRef.current;
+      const generation = anchorUserScrollGenerationRef.current;
+      scrollToEndFrameRef.current = requestAnimationFrame(() => {
+        scrollToEndFrameRef.current = null;
+        if (
+          currentRouteThreadKeyRef.current !== routeThreadKey ||
+          anchorUserScrollGenerationRef.current !== generation ||
+          legendListRef.current !== list
+        )
           return;
-        }
-        const handleManualNavigation = () => {
-          cancelTimelineLiveFollowForUserNavigationRef.current();
-        };
-        // The gestures below must only break follow when they can actually
-        // move the viewport away from the live edge (#5566): a spurious break
-        // while pinned at the end produces no scroll event, never re-arms,
-        // and streaming silently stops following. Underflowing content can't
-        // scroll at all, so nothing there should break follow.
-        const contentScrollsUp = () => timelineRealContentOverflowsViewport();
-        // The follow re-arm band, not the strict flag: streaming growth makes
-        // isAtEnd flicker false for a frame before the follow scroll catches
-        // up, and a gesture landing in that window while still pinned would
-        // otherwise break follow with no scroll event left to re-arm it.
-        const viewportIsAwayFromEnd = () =>
-          resolveTimelineIsAtEnd(legendListRef.current?.getState()) === false;
-        // Only an upward wheel is a navigation intent; wheeling down while
-        // following either does nothing (at the end) or moves toward it.
-        const handleWheel = (event: WheelEvent) => {
-          if (event.ctrlKey || !isTimelineScrollTarget(event.target, scrollNode, event.deltaY))
-            return;
-          if (event.deltaY > 0) {
-            timelineScrollIntentRef.current = "toward-end";
-            if (isAtEndRef.current) {
-              composerRef.current?.restoreAfterTimelineReachedEnd();
-            }
-          } else if (event.deltaY < 0) {
-            timelineScrollIntentRef.current = "away-from-end";
-          }
-          if (event.deltaY < 0 && contentScrollsUp()) {
-            handleManualNavigation();
-          }
-        };
-        // Touch direction isn't observable here (touchmove fires on any
-        // finger motion, scrolling or not), so break only once the drag has
-        // actually carried the viewport out of the end band — an upward flick
-        // gets there within its first few events and later touchmoves break.
-        const handleTouchMove = () => {
-          if (viewportIsAwayFromEnd()) {
-            handleManualNavigation();
-          }
-        };
-        // Scrollbar drags produce no wheel/touch events; they are the only
-        // pointerdowns whose target is the scroll node itself rather than a
-        // message row. Content clicks break follow only away from the end
-        // (reading or selecting up there must hold position); clicking near
-        // the live edge keeps following.
-        const handlePointerDown = (event: PointerEvent) => {
-          if (event.target === scrollNode) {
-            if (contentScrollsUp()) {
-              handleManualNavigation();
-            }
-            return;
-          }
-          if (viewportIsAwayFromEnd()) {
-            handleManualNavigation();
-          }
-        };
-        // Keyboard scrolling (PageUp/Home/ArrowUp) bypasses wheel and
-        // pointer events entirely; without this the timeline yanks back to
-        // the end on the next stream chunk. Clicking message text can leave
-        // DOM focus on body, so these keys must also be heard at document.
-        const handleKeyDown = (event: KeyboardEvent) => {
-          if (
-            !(event.target instanceof Node) ||
-            (!scrollNode.contains(event.target) &&
-              event.target !== document.body &&
-              event.target !== document.documentElement) ||
-            event.defaultPrevented ||
-            event.isComposing ||
-            event.altKey ||
-            event.ctrlKey ||
-            event.metaKey ||
-            event.shiftKey ||
-            eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR) ||
-            document.querySelector(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)
-          ) {
-            return;
-          }
-          if (!["PageUp", "Home", "ArrowUp", "PageDown", "End", "ArrowDown"].includes(event.key))
-            return;
-          const scrollDirection = ["PageUp", "Home", "ArrowUp"].includes(event.key) ? -1 : 1;
-          if (
-            scrollNode.contains(event.target) &&
-            !isTimelineScrollTarget(event.target, scrollNode, scrollDirection)
-          )
-            return;
-          switch (event.key) {
-            case "PageUp":
-            case "Home":
-            case "ArrowUp":
-              timelineScrollIntentRef.current = "away-from-end";
-              if (contentScrollsUp()) {
-                handleManualNavigation();
-                composerRef.current?.collapseForTimelineScrollKey(event.key);
-              }
-              break;
-            case "PageDown":
-            case "End":
-            case "ArrowDown":
-              timelineScrollIntentRef.current = "toward-end";
-              if (viewportIsAwayFromEnd()) {
-                handleManualNavigation();
-              }
-              composerRef.current?.collapseForTimelineScrollKey(event.key);
-              if (isTimelineAtLogicalEnd()) {
-                composerRef.current?.restoreAfterTimelineReachedEnd();
-              }
-              break;
-            default:
-              break;
-          }
-        };
-        scrollNode.addEventListener("wheel", handleWheel, {
-          passive: true,
-        });
-        scrollNode.addEventListener("touchmove", handleTouchMove, {
-          passive: true,
-        });
-        scrollNode.addEventListener("pointerdown", handlePointerDown, {
-          passive: true,
-        });
-        document.addEventListener("keydown", handleKeyDown);
-        removeListeners = () => {
-          scrollNode.removeEventListener("wheel", handleWheel);
-          scrollNode.removeEventListener("touchmove", handleTouchMove);
-          scrollNode.removeEventListener("pointerdown", handlePointerDown);
-          document.removeEventListener("keydown", handleKeyDown);
-        };
+        void list?.scrollToEnd({ animated });
       });
+    },
+    [cancelPendingScrollToEnd, routeThreadKey],
+  );
+  useEffect(() => {
+    const scrollNode = timelineScrollNode;
+    if (!scrollNode) return;
+    const handleManualNavigation = () => {
+      cancelTimelineLiveFollowForUserNavigationRef.current();
     };
-    attach(12);
-
-    return () => {
-      if (frame !== null) {
-        cancelAnimationFrame(frame);
+    // The gestures below must only break follow when they can actually
+    // move the viewport away from the live edge (#5566): a spurious break
+    // while pinned at the end produces no scroll event, never re-arms,
+    // and streaming silently stops following. Underflowing content can't
+    // scroll at all, so nothing there should break follow.
+    const contentScrollsUp = () => timelineRealContentOverflowsViewport();
+    // The follow re-arm band, not the strict flag: streaming growth makes
+    // isAtEnd flicker false for a frame before the follow scroll catches
+    // up, and a gesture landing in that window while still pinned would
+    // otherwise break follow with no scroll event left to re-arm it.
+    const viewportIsAwayFromEnd = () =>
+      resolveTimelineIsAtEnd(legendListRef.current?.getState()) === false;
+    // Only an upward wheel is a navigation intent; wheeling down while
+    // following either does nothing (at the end) or moves toward it.
+    const handleWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || !isTimelineScrollTarget(event.target, scrollNode, event.deltaY)) return;
+      if (event.deltaY > 0) {
+        timelineScrollIntentRef.current = "toward-end";
+        if (isAtEndRef.current) {
+          composerRef.current?.restoreAfterTimelineReachedEnd();
+        }
+      } else if (event.deltaY < 0) {
+        timelineScrollIntentRef.current = "away-from-end";
       }
-      removeListeners?.();
+      if (event.deltaY < 0 && contentScrollsUp()) {
+        handleManualNavigation();
+      }
     };
-  }, [activeThread?.id, isTimelineAtLogicalEnd, timelineRealContentOverflowsViewport]);
+    // Touch direction isn't observable here (touchmove fires on any
+    // finger motion, scrolling or not), so break only once the drag has
+    // actually carried the viewport out of the end band — an upward flick
+    // gets there within its first few events and later touchmoves break.
+    const handleTouchMove = () => {
+      if (viewportIsAwayFromEnd()) {
+        handleManualNavigation();
+      }
+    };
+    // Scrollbar drags produce no wheel/touch events; they are the only
+    // pointerdowns whose target is the scroll node itself rather than a
+    // message row. Content clicks break follow only away from the end
+    // (reading or selecting up there must hold position); clicking near
+    // the live edge keeps following.
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target === scrollNode) {
+        if (contentScrollsUp()) {
+          handleManualNavigation();
+        }
+        return;
+      }
+      if (viewportIsAwayFromEnd()) {
+        handleManualNavigation();
+      }
+    };
+    // Keyboard scrolling (PageUp/Home/ArrowUp) bypasses wheel and
+    // pointer events entirely; without this the timeline yanks back to
+    // the end on the next stream chunk. Clicking message text can leave
+    // DOM focus on body, so these keys must also be heard at document.
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        !(event.target instanceof Node) ||
+        (!scrollNode.contains(event.target) &&
+          event.target !== document.body &&
+          event.target !== document.documentElement) ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        eventPathContainsSelector(event, TYPE_TO_FOCUS_EDITABLE_SELECTOR) ||
+        document.querySelector(TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR)
+      ) {
+        return;
+      }
+      if (!["PageUp", "Home", "ArrowUp", "PageDown", "End", "ArrowDown"].includes(event.key))
+        return;
+      const scrollDirection = ["PageUp", "Home", "ArrowUp"].includes(event.key) ? -1 : 1;
+      if (
+        scrollNode.contains(event.target) &&
+        !isTimelineScrollTarget(event.target, scrollNode, scrollDirection)
+      )
+        return;
+      switch (event.key) {
+        case "PageUp":
+        case "Home":
+        case "ArrowUp":
+          timelineScrollIntentRef.current = "away-from-end";
+          if (contentScrollsUp()) {
+            handleManualNavigation();
+            composerRef.current?.collapseForTimelineScrollKey(event.key);
+          }
+          break;
+        case "PageDown":
+        case "End":
+        case "ArrowDown":
+          timelineScrollIntentRef.current = "toward-end";
+          if (viewportIsAwayFromEnd()) {
+            handleManualNavigation();
+          }
+          composerRef.current?.collapseForTimelineScrollKey(event.key);
+          if (isTimelineAtLogicalEnd()) {
+            composerRef.current?.restoreAfterTimelineReachedEnd();
+          }
+          break;
+        default:
+          break;
+      }
+    };
+    scrollNode.addEventListener("wheel", handleWheel, {
+      passive: true,
+    });
+    scrollNode.addEventListener("touchmove", handleTouchMove, {
+      passive: true,
+    });
+    scrollNode.addEventListener("pointerdown", handlePointerDown, {
+      passive: true,
+    });
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      scrollNode.removeEventListener("wheel", handleWheel);
+      scrollNode.removeEventListener("touchmove", handleTouchMove);
+      scrollNode.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [
+    composerRef,
+    timelineScrollNode,
+    isTimelineAtLogicalEnd,
+    timelineRealContentOverflowsViewport,
+  ]);
 
   const onTimelineAnchorReady = useCallback((messageId: MessageId, anchorIndex: number) => {
     if (pendingTimelineAnchorRef.current === messageId) {
@@ -7030,7 +7035,13 @@ export default function ChatView(props: ChatViewProps) {
       setShowScrollToBottom(false);
       return;
     }
-    if (isAtEndRef.current === isAtEnd) return;
+    // An upward gesture can break follow without leaving the 40px end band.
+    // Re-entering it toward the end must re-arm even when the boolean is unchanged.
+    const returningToEnd =
+      isAtEnd &&
+      timelineScrollIntentRef.current === "toward-end" &&
+      timelineScrollModeRef.current === "free-scrolling";
+    if (isAtEndRef.current === isAtEnd && !returningToEnd) return;
     isAtEndRef.current = isAtEnd;
     if (isAtEnd) {
       if (timelineScrollIntentRef.current === "toward-end") {
@@ -12149,6 +12160,7 @@ export default function ChatView(props: ChatViewProps) {
                   )
                 }
                 listRef={legendListRef}
+                onScrollableNodeChange={setTimelineScrollNode}
                 timelineEntries={displayedTimeline.entries}
                 providerStatuses={
                   environmentById.get(
