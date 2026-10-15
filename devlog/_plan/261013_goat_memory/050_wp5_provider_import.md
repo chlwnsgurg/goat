@@ -176,9 +176,15 @@ config with only core.repositoryformatversion=0 and core.bare=true in a `[core]`
 with no include/includeIf or extensions. Unsupported object format/layout refuses
 unsupported_format; no source-config parser or include-detection dependency remains.
 
-The adapter must enforce ancestor-relative no-follow opens, with a held root/parent
-chain and identity revalidation; path lstat followed by path open is insufficient. Unsupported
-platform enforcement returns path_rejected. Every copied descriptor is checked before/after
+The adapter is Node-only (B decision, 2026-10-15): Node has no openat/dir_fd, and a Python or
+native helper is not acceptable for a server and desktop app that ship only the Node runtime
+(macOS without Command Line Tools turns /usr/bin/python3 into an install prompt; Windows has no
+Python). It walks from the trusted root with lstat, opens files with O_NOFOLLOW where the
+platform provides it, compares fstat dev/ino/size/mtime with the preceding lstat, keeps full
+stamps for enumerated source directories, and re-lstats the file and every ancestor after
+reading. The accepted residual risk is a same-user swap-and-restore between two checks: that
+attacker already controls the provider files. Platforms without O_NOFOLLOW rely on the lstat
+checks plus revalidation. Every copied descriptor is checked before/after
 read and the ancestor chain revalidated through copy completion; identity/size/mtime drift,
 replacement or disappearance returns source_changed with no candidate bytes. Seal the snapshot
 before Git: close all writable handles; only this reader Scope can own it, and Git gets no
