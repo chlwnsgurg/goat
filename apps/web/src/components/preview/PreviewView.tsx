@@ -32,6 +32,8 @@ import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { ensureLocalApi } from "~/localApi";
 import {
   rememberPreviewUrl,
+  readThreadPreviewState,
+  setActivePreviewTab,
   updatePreviewServerSnapshot,
   useThreadPreviewState,
 } from "~/previewStateStore";
@@ -149,6 +151,8 @@ export function PreviewView({
   visible,
   onSendAnnotation,
 }: Props) {
+  const threadKey = scopedThreadKey(threadRef);
+  const surfaces = useRightPanelStore((state) => state.byThreadKey[threadKey]?.surfaces);
   const [focusUrlNonce, setFocusUrlNonce] = useState<number | undefined>(undefined);
   const [pickActive, setPickActive] = useState(false);
   const canSendAnnotation =
@@ -255,7 +259,6 @@ export function PreviewView({
   const navUrl = navStatus._tag === "Success" ? navStatus.url : null;
   const navTitle = navStatus._tag === "Success" ? navStatus.title : null;
   const latestHistoryUrl = recentHistoryEntries[0]?.url;
-  const threadKey = scopedThreadKey(threadRef);
   useEffect(() => {
     if (!navUrl || !navTitle || !latestHistoryUrl) return;
     // Agent-driven pages only enrich an existing requested URL.
@@ -967,6 +970,31 @@ export function PreviewView({
       data-thread-key={scopedThreadKey(threadRef)}
     >
       <PreviewChromeRow
+        addressKey={runtimeTabId ?? JSON.stringify([threadKey, "new"])}
+        threadRef={threadRef}
+        tabId={tabId}
+        tabs={(surfaces ?? []).flatMap((surface) => {
+          if (surface.kind !== "preview" || !surface.resourceId) return [];
+          const session = previewState.sessions[surface.resourceId];
+          if (!session || session.navStatus._tag === "Idle") return [];
+          return [
+            { tabId: session.tabId, url: session.navStatus.url, title: session.navStatus.title },
+          ];
+        })}
+        history={recentHistoryEntries}
+        onActivateTab={(targetTabId) => {
+          const current = readThreadPreviewState(threadRef);
+          if (current.serverEpoch !== previewState.serverEpoch || !current.sessions[targetTabId])
+            return false;
+          const panel = useRightPanelStore.getState();
+          const surface = panel.byThreadKey[threadKey]?.surfaces.find(
+            (entry) => entry.kind === "preview" && entry.resourceId === targetTabId,
+          );
+          if (!surface) return false;
+          setActivePreviewTab(threadRef, targetTabId);
+          panel.activateSurface(threadRef, surface.id);
+          return true;
+        }}
         url={url}
         loading={loading || serverStreamPending}
         canGoBack={canGoBack && !serverInputDisabled}
