@@ -18,6 +18,7 @@ import {
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -257,6 +258,65 @@ const runService = <A, E>(
 };
 
 describe("PendingQuestionsMcpService", () => {
+  it.effect("returns fast hosts at the fan-out deadline without interrupting a slow launch", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<void>();
+      const slow = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.andThen(Deferred.succeed(finished, undefined)),
+        Effect.as({ questions: [], truncated: false, unavailableHosts: [] }),
+        Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+      );
+      const fiber = yield* runService(
+        {
+          candidates: [{ threadId: targetId, requestId }],
+          hosts: ["fast", "slow"],
+          hostCall: (call) =>
+            call.host === "slow"
+              ? slow
+              : Effect.succeed({
+                  questions: [remoteQuestion()],
+                  truncated: false,
+                  unavailableHosts: [],
+                }),
+        },
+        (service) => service.list(scope, { scope: "launched" }),
+      ).pipe(
+        Effect.tap(() => Deferred.succeed(returned, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(14_999);
+      expect(yield* Deferred.isDone(returned)).toBe(false);
+      yield* TestClock.adjust(1);
+      const returnedOnTime = yield* Deferred.isDone(returned);
+      const wasInterrupted = yield* Deferred.isDone(interrupted);
+      // Release even on the old implementation so a failing regression cannot hang.
+      yield* Deferred.succeed(release, undefined);
+      const { result } = yield* Fiber.join(fiber);
+      if (!wasInterrupted) yield* Deferred.await(finished);
+      expect(returnedOnTime).toBe(true);
+      expect(wasInterrupted).toBe(false);
+      expect(result._tag).toBe("Success");
+      if (result._tag !== "Success") return;
+      expect("questions" in result.success).toBe(true);
+      if (!("questions" in result.success)) return;
+      expect(result.success.questions.map((question) => question.host)).toEqual([null, "fast"]);
+      expect(result.success.unavailableHosts).toEqual([
+        {
+          host: "slow",
+          code: "host_unavailable",
+          message: expect.stringContaining("host:slow"),
+        },
+      ]);
+      expect(result.success.unavailableHosts?.[0]?.message).toContain("waits longer");
+    }),
+  );
+
   it.effect("keeps default local list restricted to pending user_input", () =>
     Effect.gen(function* () {
       const projection = questionProjection(callerId);
