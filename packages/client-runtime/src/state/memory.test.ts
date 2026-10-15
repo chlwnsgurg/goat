@@ -1,6 +1,8 @@
+import { createMemoryImportRecoveryStore } from "../memoryImportRecovery.ts";
 import {
   EnvironmentId,
   MemorySpaceId,
+  MemoryOperationId,
   MemoryId,
   MemoryItem,
   MemoryPage,
@@ -396,6 +398,43 @@ describe("shared memory client", () => {
           expect(h.registry.get(h.memory.importProvider.permissionAtom(other, request.input))).toBe(
             false,
           );
+        }),
+      ),
+  );
+
+  it.effect(
+    "import workflow uses the guarded command and rechecks the live destination grants",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* harness();
+          const recovery = createMemoryImportRecoveryStore(
+            { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+            () => 1000,
+          );
+          const workflow = h.memory.createImportWorkflow(h.registry, {
+            fence: { environmentId: env, memorySpaceId: space, session: "connection" },
+            recovery,
+            operationId: () => MemoryOperationId.make("00000000-0000-4000-8000-000000000008"),
+          });
+          const phases: string[] = [];
+          const unsubscribe = workflow.subscribe(() => phases.push(workflow.getSnapshot().phase));
+          const result = yield* Effect.promise(() => workflow.discover("codex"));
+          expect(phases).toEqual(["discovering", "discovered"]);
+          expect(workflow.getSnapshot()).toBe(workflow.getState());
+          unsubscribe();
+          expect(result).toEqual({ action: "discover", sources: [] });
+          expect(h.destinations).toEqual([env]);
+          h.registry.set(grants(env), AsyncResult.success(sessionScopes(["memory:write"])));
+          yield* Effect.promise(() =>
+            expect(workflow.discover("codex")).rejects.toThrow("unavailable"),
+          );
+          expect(h.destinations).toEqual([env]);
+          workflow.invalidate({ environmentId: other, memorySpaceId: space, session: "other" });
+          yield* Effect.promise(() =>
+            expect(workflow.discover("codex")).rejects.toThrow("unavailable"),
+          );
+          expect(h.destinations).toEqual([env]);
         }),
       ),
   );
