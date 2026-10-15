@@ -684,7 +684,7 @@ describe("MemoryImportReader", () => {
           NodeFS.writeFileSync(
             wrapper,
             `#!/bin/sh
-[ -z "\${GIT_CONFIG_COUNT+x}" ] || exit 91
+[ -z "\${GIT_CONFIG_COUNT+x}" ] || { "$GIT_CONFIG_VALUE_0"; exit 91; }
 [ -z "\${GIT_ASKPASS+x}" ] || exit 92
 [ -z "\${HTTPS_PROXY+x}" ] || exit 93
 [ "$GIT_NO_LAZY_FETCH" = 1 ] || exit 94
@@ -697,11 +697,41 @@ exec /usr/bin/git "$@"
 `,
             { mode: 0o700 },
           );
+          const marker = NodePath.join(fixture.sandbox, "helper-executed");
+          const helper = NodePath.join(fixture.sandbox, "synthetic-helper");
+          NodeFS.writeFileSync(
+            helper,
+            `#!/bin/sh
+printf synthetic > '${marker}'
+`,
+            { mode: 0o700 },
+          );
+          // Replace the entire parent map without enumerating host values. Restore even on failure.
+          const parent = {
+            PATH: "/usr/bin:/bin",
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "credential.helper",
+            GIT_CONFIG_VALUE_0: helper,
+            GIT_ASKPASS: helper,
+            SSH_ASKPASS: helper,
+            HTTPS_PROXY: "http://synthetic.invalid:9",
+            HTTP_PROXY: "http://synthetic.invalid:9",
+            ALL_PROXY: "http://synthetic.invalid:9",
+          };
           const config = { ...readerConfig(fixture), gitExecutable: wrapper };
           const reader = yield* Reader.acquireMemoryImportReader(config);
           const before = captureMemoryImportInventory(fixture.sourceRoot);
-          const value = yield* reader.read({ slot: fixture.snapshot.slot });
+          const original = Object.getOwnPropertyDescriptor(process, "env")!;
+          Object.defineProperty(process, "env", { ...original, value: parent });
+          const value = yield* reader.read({ slot: fixture.snapshot.slot }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                Object.defineProperty(process, "env", original);
+              }),
+            ),
+          );
           assert.deepEqual(value.files, fixture.snapshot.files);
+          assert.equal(NodeFS.existsSync(marker), false);
           assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
           assert.deepEqual(residue(fixture), []);
         }),
@@ -914,6 +944,71 @@ process.stdout.write("a".repeat(257));
           assert.deepEqual(residue(fixture), []);
         }),
       ),
+  );
+
+  it.effect.each(["claude-topic-v1", "omo-memory-core-beta63"] as const)(
+    "discover retains the source listing stamp through child stat for %s",
+    (profile) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture(profile);
+          const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+          const target = NodePath.dirname(fixture.sourceRoot);
+          const lstat = NodeFS.promises.lstat;
+          let mutated = false;
+          vi.spyOn(NodeFS.promises, "lstat").mockImplementation(async (...args) => {
+            if (args[0] === target && !mutated) {
+              mutated = true;
+              NodeFS.mkdirSync(NodePath.join(fixture.trustedRoot, "new-selection"));
+            }
+            return lstat(...args);
+          });
+          const failure = yield* Effect.flip(reader.discover({ format: fixture.snapshot.format }));
+          assert.equal(mutated, true);
+          assert.equal(failure.issue, "source_changed");
+          assert.deepEqual(Object.keys(failure).sort(), ["_tag", "issue"]);
+          assert.deepEqual(residue(fixture), []);
+        }),
+      ),
+  );
+
+  it.effect("listed file disappearance before first stat is source_changed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        const target = NodePath.join(fixture.sourceRoot, "MEMORY.md");
+        const lstat = NodeFS.promises.lstat;
+        let removed = false;
+        vi.spyOn(NodeFS.promises, "lstat").mockImplementation(async (...args) => {
+          if (args[0] === target && !removed) {
+            removed = true;
+            NodeFS.unlinkSync(target);
+          }
+          return lstat(...args);
+        });
+        const failure = yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }));
+        assert.equal(removed, true);
+        assert.equal(failure.issue, "source_changed");
+        assert.deepEqual(Object.keys(failure).sort(), ["_tag", "issue"]);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("initially absent source root remains source_missing", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("claude-topic-v1");
+        const reader = yield* Reader.acquireMemoryImportReader(
+          readerConfig(fixture, NodePath.join(fixture.sandbox, "absent-root")),
+        );
+        const failure = yield* Effect.flip(reader.discover({ format: fixture.snapshot.format }));
+        assert.equal(failure.issue, "source_missing");
+        assert.deepEqual(Object.keys(failure).sort(), ["_tag", "issue"]);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
   );
 
   it.effect("Node restat rejects a transient source rewrite without returning bytes", () =>

@@ -103,7 +103,7 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
             } catch (cause) {
               // A vanished entry may be an initially absent source or a changed ancestor.
               // Recheck observed ancestors before classifying the missing entry.
-              for (const [ancestor, { before }] of checks) {
+              for (const [ancestor, { before, stable }] of checks) {
                 if (
                   ancestor !== path &&
                   !path.startsWith(
@@ -112,7 +112,9 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
                 )
                   continue;
                 try {
-                  if (!identity(before, await fs.lstat(ancestor, { bigint: true })))
+                  if (
+                    !(stable ? stamp : identity)(before, await fs.lstat(ancestor, { bigint: true }))
+                  )
                     throw error("source_changed");
                 } catch {
                   throw error("source_changed");
@@ -184,8 +186,9 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
             if (before.dev !== parentStat.dev) throw error("path_rejected");
             return before;
           };
-          const names = async (path: string, maximum = 4096) => {
-            const before = await remember(path, true);
+          const names = async (path: string, maximum = 4096, sourceStable = false) => {
+            // Source listings remain stable until final verification; owned parents may mutate.
+            const before = await remember(path, true, sourceStable);
             const result: string[] = [];
             const handle = await fs.opendir(path);
             try {
@@ -369,7 +372,7 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
           } else if (input.action === "discover") {
             const root = await directory(input.root);
             result.selections = [];
-            for (const name of await names(root, 512)) {
+            for (const name of await names(root, 512, true)) {
               const s = await stat(NodePath.join(root, name));
               await child(root, name, s.isDirectory(), false, s);
               if (s.isDirectory()) result.selections.push(name);
@@ -397,7 +400,7 @@ const nodeSnapshot = (config: MemoryImportReaderConfig, input: SnapshotOperation
               depth: number,
               git: boolean,
             ): Promise<void> => {
-              for (const name of await names(parent, (git ? 4096 : 512) - count)) {
+              for (const name of await names(parent, (git ? 4096 : 512) - count, true)) {
                 const selector = rel ? `${rel}/${name}` : name;
                 safe(selector);
                 const obj = selector === "objects" || selector.startsWith("objects/");
