@@ -1,7 +1,7 @@
 import type { ScopedThreadRef } from "@goat/contracts";
 import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useOpenLink } from "~/browser/useOpenLink";
-import { Button } from "~/components/ui/button";
+import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "~/components/solar";
 import { Input } from "~/components/ui/input";
 import { observeResize } from "~/lib/observeResize";
 import { FileSurfaceFailure, FileSurfaceLoading } from "../fileSurfaceChrome";
@@ -17,7 +17,7 @@ import {
 import { findPdfMatches, indexPdfText } from "./pdfSearch";
 import { usePdfDocument } from "./usePdfDocument";
 import { PdfPage } from "./PdfPage";
-import { PdfToolbar } from "./PdfToolbar";
+import { PdfIconButton, PdfToolbar } from "./PdfToolbar";
 import { isPdfFindShortcut } from "./pdfShortcuts";
 import "./pdfViewer.css";
 
@@ -252,7 +252,7 @@ function PdfDocument(props: {
         <div
           role="search"
           aria-label="Find in PDF"
-          className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1 text-xs"
+          className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border px-2 py-1 text-xs"
         >
           <div className="min-w-24 flex-1">
             <Input
@@ -272,33 +272,36 @@ function PdfDocument(props: {
               }}
             />
           </div>
-          <span role="status">
+          <span role="status" className="min-w-0 text-muted-foreground">
             {searchError ??
-              (!texts
-                ? "Searching…"
-                : `${matches.length ? matchIndex + 1 : 0} of ${matches.length} matches`)}
+              (!texts ? (
+                "Searching…"
+              ) : (
+                <span className="whitespace-nowrap tabular-nums">
+                  {matches.length ? matchIndex + 1 : 0} of {matches.length}
+                  <span className="sr-only"> matches</span>
+                </span>
+              ))}
           </span>
-          <Button
-            size="xs"
-            variant="ghost"
+          <PdfIconButton
+            label="Previous match"
             disabled={!matches.length}
             onClick={() => nextMatch(-1)}
           >
-            Previous match
-          </Button>
-          <Button size="xs" variant="ghost" disabled={!matches.length} onClick={() => nextMatch(1)}>
-            Next match
-          </Button>
-          <Button
-            size="xs"
-            variant="ghost"
+            <ChevronLeftIcon />
+          </PdfIconButton>
+          <PdfIconButton label="Next match" disabled={!matches.length} onClick={() => nextMatch(1)}>
+            <ChevronRightIcon />
+          </PdfIconButton>
+          <PdfIconButton
+            label="Close find"
             onClick={() => {
               setFindOpen(false);
               root.current?.focus();
             }}
           >
-            Close find
-          </Button>
+            <XIcon />
+          </PdfIconButton>
         </div>
       ) : null}
       <div
