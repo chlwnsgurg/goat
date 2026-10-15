@@ -2751,6 +2751,16 @@ describe("MemoryImport physical-growth source harness", () => {
                   const head = aggregate.revisions.find(
                     (r) => r.revision.revisionId === aggregate.heads[0],
                   )!;
+                  // Match Sync's closed lineage input: a previous resolution head
+                  // carries dependencies even when fresh provider imports have none.
+                  const dependencies = [
+                    ...new Set([
+                      ...aggregate.heads,
+                      ...aggregate.revisions
+                        .filter((r) => aggregate.heads.includes(r.revision.revisionId))
+                        .flatMap((r) => r.payload!.derivedFromMemoryRevisions),
+                    ]),
+                  ];
                   const op: Extract<M.MemoryOperation, { kind: "resolve" }> = {
                     protocolVersion: 1,
                     kind: "resolve",
@@ -2772,7 +2782,7 @@ describe("MemoryImport physical-growth source harness", () => {
                     payload: {
                       text: text(index, round),
                       evidence: head.payload!.evidence,
-                      derivedFromMemoryRevisions: aggregate.heads,
+                      derivedFromMemoryRevisions: dependencies,
                     },
                     resolution: {
                       resolutionId,
