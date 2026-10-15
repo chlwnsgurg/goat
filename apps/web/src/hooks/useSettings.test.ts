@@ -183,15 +183,22 @@ describe("client settings hydration", () => {
       });
 
     const completion = persistClientSettingsUpdate(complete, persist);
-    persistClientSettingsPatch({ wordWrap: false }, persist);
+    const olderPatch = persistClientSettingsPatch({ wordWrap: false }, persist);
+    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
     finishRead(savedSettings);
     await completionWriteStarted;
-    persistClientSettingsPatch({ wordWrap: true }, persist);
+    const newerPatch = persistClientSettingsPatch({ wordWrap: true }, persist);
+    expect(getClientSettings().wordWrap).toBe(true);
     const finalWrite = persistClientSettingsUpdate((current) => current, persist);
 
     finishCompletionWrite();
-    await completion;
-    await finalWrite;
+    await Promise.all([completion, olderPatch, newerPatch, finalWrite]);
+    expect(persist.mock.calls.map(([settings]) => settings.wordWrap)).toEqual([
+      true,
+      false,
+      true,
+      true,
+    ]);
 
     const expected = { ...savedSettings, onboardingCompletedAt, wordWrap: true };
     expect(getClientSettings()).toEqual(expected);
@@ -200,6 +207,54 @@ describe("client settings hydration", () => {
 });
 
 describe("persistClientSettingsPatch", () => {
+  it("publishes immediately and rolls back only failed keys before the next write", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let rejectWrite!: (error: Error) => void;
+    persistenceMocks.setClientSettings.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+
+    const failed = persistClientSettingsPatch({ wordWrap: false });
+    expect(getClientSettings().wordWrap).toBe(false);
+    await Promise.resolve();
+    const later = persistClientSettingsPatch({ snapShotFlash: false });
+    expect(getClientSettings()).toMatchObject({ wordWrap: false, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenCalledTimes(1);
+
+    const rejection = expect(failed).rejects.toBe(failure);
+    rejectWrite(failure);
+    await rejection;
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, snapShotFlash: false });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(getClientSettings());
+  });
+
+  it("does not roll back a newer value for a key from a failed patch", async () => {
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+    const failure = new Error("disk full");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let rejectWrite!: (error: Error) => void;
+    persistenceMocks.setClientSettings.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectWrite = reject;
+      }),
+    );
+    const failed = persistClientSettingsPatch({ fontSizeTerminal: 16, wordWrap: false });
+    await Promise.resolve();
+    const later = persistClientSettingsPatch({ fontSizeTerminal: 18 });
+    expect(getClientSettings().fontSizeTerminal).toBe(18);
+    const rejection = expect(failed).rejects.toBe(failure);
+    rejectWrite(failure);
+    await rejection;
+    await later;
+    expect(getClientSettings()).toEqual({ ...DEFAULT_CLIENT_SETTINGS, fontSizeTerminal: 18 });
+    expect(persistenceMocks.setClientSettings).toHaveBeenLastCalledWith(getClientSettings());
+  });
+
   it("rejects failed patches, keeps the saved snapshot, and continues queued writes", async () => {
     __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
     const failure = new Error("disk full");
@@ -240,7 +295,7 @@ describe("persistClientSettingsPatch", () => {
     const second = persistClientSettingsPatch({ snapShotPlaySound: false });
 
     expect(persistenceMocks.setClientSettings).toHaveBeenCalledTimes(1);
-    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
+    expect(getClientSettings()).toEqual(secondSettings);
     finishFirst();
     await Promise.all([first, second]);
 
@@ -317,7 +372,7 @@ describe("persistClientSettingsUpdate", () => {
     finishFirstPersistence();
     await Promise.all([pending, patch]);
 
-    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist).toHaveBeenCalledTimes(3);
     expect(persist.mock.calls[1]?.[0]).toMatchObject({
       wordWrap: false,
     });

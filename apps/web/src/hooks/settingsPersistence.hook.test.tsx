@@ -57,11 +57,22 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("shows a save failure toast, keeps the saved UI value and supports retry", async () => {
-  mocks.setClientSettings.mockRejectedValueOnce(new Error("disk full"));
+it("publishes immediately, rolls back with one failure toast and supports retry", async () => {
+  let rejectWrite!: (error: Error) => void;
+  mocks.setClientSettings.mockReturnValueOnce(
+    new Promise((_, reject) => {
+      rejectWrite = reject;
+    }),
+  );
   const button = container.querySelector("button")!;
   await act(async () => {
     button.click();
+  });
+  expect(button.textContent).toBe("unwrapped");
+  expect(result).toBeUndefined();
+  expect(mocks.toast).not.toHaveBeenCalled();
+  await act(async () => {
+    rejectWrite(new Error("disk full"));
     await save;
   });
   expect(result).toBe(false);

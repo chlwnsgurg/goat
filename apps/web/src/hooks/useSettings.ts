@@ -137,6 +137,7 @@ let clientSettingsHydrationStatus: ClientSettingsHydrationStatus = "pending";
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
 let clientSettingsPersistenceQueue: Promise<void> = Promise.resolve();
+let deferredClientSettingsPatchCount = 0;
 
 function emitClientSettingsChange() {
   for (const listener of clientSettingsListeners) {
@@ -255,15 +256,52 @@ export function persistClientSettingsPatch(
   patch: ClientSettingsPatch,
   persist: (settings: ClientSettings) => Promise<void> = defaultClientSettingsPersistence,
 ): Promise<void> {
-  return persistClientSettingsUpdate((current) => ({ ...current, ...patch }), persist)
-    .then(() => undefined)
-    .catch((error) => {
+  // Patches queued before hydration must publish before newer optimistic patches.
+  const deferPatch =
+    clientSettingsHydrationStatus !== "ready" || deferredClientSettingsPatchCount > 0;
+  let previous: ClientSettings | undefined;
+  const publish = () => {
+    previous = getClientSettingsSnapshot();
+    replaceClientSettingsSnapshot({ ...previous, ...patch });
+  };
+  if (deferPatch) {
+    deferredClientSettingsPatchCount += 1;
+  } else {
+    publish();
+  }
+  return enqueueClientSettingsPersistence(async () => {
+    try {
+      if (deferPatch) {
+        try {
+          if (clientSettingsHydrationStatus !== "ready") {
+            await hydrateClientSettings();
+          }
+          publish();
+        } finally {
+          deferredClientSettingsPatchCount -= 1;
+        }
+      }
+      await persist(getClientSettingsSnapshot());
+    } catch (error) {
+      if (previous) {
+        const current = getClientSettingsSnapshot();
+        const rollback = Object.fromEntries(
+          Object.entries(patch)
+            .filter(([key, value]) => Object.is(current[key as keyof ClientSettings], value))
+            .map(([key]) => [key, previous?.[key as keyof ClientSettings]]),
+        );
+        // Roll back before the next queued write captures its snapshot.
+        if (Object.keys(rollback).length > 0) {
+          replaceClientSettingsSnapshot({ ...current, ...rollback });
+        }
+      }
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, {
         operation: "persist",
         ...safeErrorLogAttributes(error),
       });
       throw error;
-    });
+    }
+  });
 }
 
 /**
@@ -863,6 +901,7 @@ export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationStatus = "pending";
   clientSettingsHydrationPromise = null;
   clientSettingsPersistenceQueue = Promise.resolve();
+  deferredClientSettingsPatchCount = 0;
   clientSettingsListeners.clear();
   clientSettingsHydrationListeners.clear();
   sidebarViewMirrorCache = undefined;
