@@ -3264,20 +3264,21 @@ const make = Effect.gen(function* () {
           state: "tracked",
           revisions: [],
         };
-    // Cross-thread history has no transferable receipt contract yet. Refuse its summaries,
-    // including imports with an already attached native conversation. Same-thread handoffs
-    // and native compaction keep the original cumulative set. Never infer clean from rollback.
+    // Only history-bearing origins fence writes. Parent/node/launcher links and
+    // subagent_spawn describe routing: app-owned delegation sends a new task, not history.
+    // An active provider pointer alone also says nothing about inherited context.
+    // Same-thread handoffs/compaction keep the cumulative set; rollback cannot clear it.
     const unknown = yield* stored(
       "thread-lineage-origin",
       sql`SELECT 1 FROM orchestration_events
       WHERE application_event_version=2 AND aggregate_kind='thread' AND stream_id=${thread.threadId}
       AND ((event_type='thread.created' AND (
-        json_type(payload_json,'$.forkedFrom') NOT IN ('null')
-        OR json_extract(payload_json,'$.lineage.parentThreadId') IS NOT NULL
-        OR json_extract(payload_json,'$.historyOrigin')='v1_import'
-        OR json_extract(payload_json,'$.activeProviderThreadId') IS NOT NULL))
+        json_extract(payload_json,'$.forkedFrom.type') IN ('run','provider_thread')
+        OR json_extract(payload_json,'$.lineage.relationshipToParent')='fork'
+        OR json_extract(payload_json,'$.historyOrigin')='v1_import'))
         OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.status')='not_loaded' AND json_extract(payload_json,'$.nativeThreadRef') IS NOT NULL AND json_extract(payload_json,'$.providerSessionId') IS NULL)
         OR (event_type IN ('context-transfer.created','context-transfer.updated')
+          AND json_extract(payload_json,'$.type') IS NOT 'subagent_spawn'
           AND json_extract(payload_json,'$.targetThreadId')=${thread.threadId}
           AND json_extract(payload_json,'$.sourceThreadId')!=${thread.threadId})) LIMIT 1`,
     );
