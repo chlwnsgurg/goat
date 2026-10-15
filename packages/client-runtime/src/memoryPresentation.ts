@@ -245,7 +245,9 @@ export function presentMemoryReport(
 }
 
 /** Online is a connection state, not proof of publication, exposure or policy readiness. */
-export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memorySpaceId">) {
+export function presentMemorySync(
+  status: Pick<MemorySyncStatus, "state" | "memorySpaceId" | "diagnostics">,
+) {
   const labels = {
     disabled: "Memory sharing off",
     bootstrapping: "Receiving initial memories",
@@ -254,12 +256,29 @@ export function presentMemorySync(status: Pick<MemorySyncStatus, "state" | "memo
     error: "Memory sync error",
   } as const;
   return {
-    label:
-      status.state !== "disabled" && status.memorySpaceId === null
+    label: status.diagnostics
+      ? status.diagnostics.readiness === "disabled"
+        ? labels.disabled
+        : status.diagnostics.readiness === "unbound"
+          ? "Connect a memory space"
+          : status.diagnostics.readiness === "staging"
+            ? labels.bootstrapping
+            : status.diagnostics.connection === "connected"
+              ? labels.online
+              : status.diagnostics.connection === "unreachable"
+                ? labels.offline
+                : "Hub connection not confirmed"
+      : status.state !== "disabled" && status.memorySpaceId === null
         ? "Connect a memory space"
         : labels[status.state],
-    diagnostics: "unknown" as const,
-    canReconcileInSettings: false,
+    diagnostics: status.diagnostics?.publication.state ?? "unknown",
+    readiness: status.diagnostics?.readiness ?? "unknown",
+    connection: status.diagnostics?.connection ?? "unknown",
+    publicationLabel:
+      status.diagnostics?.publication.state === "last_valid" ? "Last valid settings in use" : null,
+    recoverableHolds: status.diagnostics?.recoverableHolds ?? [],
+    permanentHolds: status.diagnostics?.permanentHolds ?? [],
+    canReconcileInSettings: status.diagnostics?.reconcile === "available",
   };
 }
 

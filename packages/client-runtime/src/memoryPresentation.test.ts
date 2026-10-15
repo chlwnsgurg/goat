@@ -448,3 +448,35 @@ describe("memory presentation boundaries", () => {
     });
   });
 });
+
+it("presents only authoritative publication/readiness and recoverable Settings eligibility", () => {
+  const diagnostics: M.MemoryHubDiagnostics = {
+    version: 7,
+    publication: { state: "last_valid", code: "invalid_settings" },
+    readiness: "ready",
+    connection: "unreachable",
+    recoverableHolds: ["protocol"],
+    permanentHolds: [],
+    reconcile: "unavailable",
+  };
+  const status = { state: "offline" as const, memorySpaceId: item.memorySpaceId, diagnostics };
+  expect(presentMemorySync(status)).toMatchObject({
+    diagnostics: "last_valid",
+    publicationLabel: "Last valid settings in use",
+    readiness: "ready",
+    connection: "unreachable",
+    canReconcileInSettings: false,
+  });
+  expect(
+    presentMemorySync({
+      ...status,
+      diagnostics: { ...diagnostics, publication: { state: "current" }, reconcile: "available" },
+    }).canReconcileInSettings,
+  ).toBe(true);
+  expect(
+    presentMemorySync({
+      ...status,
+      diagnostics: { ...diagnostics, permanentHolds: ["identity"], reconcile: "permanent_hold" },
+    }).canReconcileInSettings,
+  ).toBe(false);
+});

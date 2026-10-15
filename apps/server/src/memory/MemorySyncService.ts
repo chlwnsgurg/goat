@@ -104,6 +104,10 @@ export class MemorySyncService extends Context.Service<
       input: M.MemorySyncStatusInput,
       permit: Permit,
     ) => Effect.Effect<M.MemorySyncStatus, Error>;
+    readonly reconcileHub: (
+      input: M.MemoryHubReconcileInput,
+      permit: Permit,
+    ) => Effect.Effect<M.MemoryHubReconcileResult, Error>;
     readonly getHubSettings: (
       input: M.MemoryHubSettingsGetInput,
       permit: Permit,
@@ -226,12 +230,14 @@ const make = Effect.gen(function* () {
       syncDone: boolean;
       resolutionDone: boolean;
       restartRequested: boolean;
+      permit?: Permit;
     }
   >();
   const enqueueRearm = (
     epoch: number,
     space: M.MemorySpaceId,
     classes: readonly Store.MemoryHoldClass[],
+    permit?: Permit,
   ) => {
     for (const c of classes) {
       const pending = rearms.get(c);
@@ -244,8 +250,13 @@ const make = Effect.gen(function* () {
           syncDone: false,
           resolutionDone: false,
           restartRequested: false,
+          ...(permit ? { permit } : {}),
         });
-      else pending.restartRequested = true;
+      else {
+        pending.restartRequested = true;
+        if (permit) pending.permit = permit;
+        else delete pending.permit;
+      }
     }
   };
   const ensureEpoch = (epoch: number): Permit =>
@@ -1628,17 +1639,34 @@ const make = Effect.gen(function* () {
       }
     }
   });
+  const readPublication =
+    committedSettings.readPublication ??
+    Effect.succeed<M.MemoryHubPublication>({ state: "unknown" });
+  const requireCurrentPublication = readPublication.pipe(
+    Effect.flatMap((p) =>
+      p.state === "current"
+        ? Effect.void
+        : Effect.fail(new Service.MemoryAccessError({ code: "fenced" })),
+    ),
+  );
   const rearmPage = Effect.fnUntraced(function* (r: Route) {
     for (const [c, pending] of rearms) {
       if (pending.epoch !== r.settings.memoryHubVersion || pending.space !== r.space) {
         rearms.delete(c);
         continue;
       }
+      const permit = pending.permit;
       yield* ensureEpoch(pending.epoch);
       const now = yield* Clock.currentTimeMillis;
       const page = yield* store.transact(
         Effect.gen(function* () {
           yield* ensureEpoch(pending.epoch);
+          if (permit) {
+            yield* permit;
+            yield* requireCurrentPublication;
+            if ((yield* runtime.readBootstrap(pending.space, r.hubId)).state !== "ready")
+              return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+          }
           const input = { memorySpaceId: pending.space, holdClass: c, now, limit: 100 };
           const empty: Store.HoldRearmPage = {
             changedIds: [],
@@ -1660,6 +1688,11 @@ const make = Effect.gen(function* () {
               expectedVersion: retry.version,
               retry: { attempts: 0, nextAttemptAt: now, failureCode: null, holdClass: null },
             });
+          if (permit) {
+            yield* permit;
+            yield* ensureEpoch(pending.epoch);
+            yield* requireCurrentPublication;
+          }
           return { sync, resolution };
         }),
       );
@@ -1840,6 +1873,8 @@ const make = Effect.gen(function* () {
           ([, pending]) =>
             pending.epoch === previousBinding.epoch &&
             pending.space === previousBinding.space &&
+            // A Settings request cannot become an unguarded observation in a new epoch.
+            pending.permit === undefined &&
             !(pending.syncDone && pending.resolutionDone),
         )
         .map(([c]) => c);
@@ -1978,9 +2013,73 @@ const make = Effect.gen(function* () {
       bootstrap: (yield* runtime.readBootstrap(r.space, r.hubId)).state,
     };
   });
+  // A Settings request owns its permit through every bounded rearm page. A public
+  // descriptor proves protocol/availability recovery only, never identity or credentials.
+  const reconcileHub: MemorySyncService["Service"]["reconcileHub"] = (input, permit) =>
+    mutex
+      .withPermit(
+        Effect.gen(function* () {
+          yield* permit;
+          if (input.environmentId !== local)
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          yield* ensureEpoch(input.expectedVersion);
+          yield* requireCurrentPublication;
+          const r = yield* route();
+          if (!r?.space) return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+          if (
+            r.space !== input.memorySpaceId ||
+            r.settings.memoryHubVersion !== input.expectedVersion
+          )
+            return yield* new M.MemoryHubError({ code: "fenced" });
+          if ((yield* runtime.readBootstrap(r.space, r.hubId)).state !== "ready")
+            return yield* new M.MemoryHubError({ code: "bootstrap_required" });
+          const classes = yield* store.readPersistedHoldClasses({
+            memorySpaceId: r.space,
+            hubEnvironmentId: r.hubId,
+          });
+          // Reauthorize after the SQL wait, even on a refusal/no-op path.
+          yield* permit;
+          yield* ensureEpoch(input.expectedVersion);
+          yield* requireCurrentPublication;
+          if (classes.includes("authorization"))
+            return yield* new M.MemoryHubError({ code: "route_unavailable" });
+          if (classes.includes("identity"))
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          const recoverable = classes.filter(
+            (c): c is "protocol" | "availability" => c === "protocol" || c === "availability",
+          );
+          if (!recoverable.length) return { version: input.expectedVersion, rearmedClasses: [] };
+          if (!r.connection) return yield* new M.MemoryHubError({ code: "route_unavailable" });
+          const descriptor = yield* client.preflight(r.connection);
+          if (descriptor.environmentId !== r.hubId)
+            return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+          if (descriptor.capabilities.memoryHubProtocolVersion !== 1)
+            return yield* new M.MemoryHubError({ code: "unsupported_protocol" });
+          yield* permit;
+          yield* ensureEpoch(input.expectedVersion);
+          yield* requireCurrentPublication;
+          enqueueRearm(input.expectedVersion, r.space, recoverable, permit);
+          yield* rearmPage(r).pipe(
+            Effect.tapError(() =>
+              Effect.sync(() => {
+                for (const c of recoverable) if (rearms.get(c)?.permit === permit) rearms.delete(c);
+              }),
+            ),
+          );
+          return { version: input.expectedVersion, rearmedClasses: recoverable };
+        }),
+      )
+      .pipe(
+        Effect.tap((result) =>
+          result.rearmedClasses.length && started
+            ? requestCycle(syncCycle, false, false)
+            : Effect.void,
+        ),
+      );
   return MemorySyncService.of({
     start,
     syncOnce,
+    reconcileHub,
     shutdown,
     scheduleConflictResolution: requestCycle(sweep, true),
     activeResolutions: Effect.sync(() => executions.size + reservations),
@@ -2021,6 +2120,11 @@ const make = Effect.gen(function* () {
         const space = s.memoryHub.mode === "disabled" ? null : s.memoryHub.memorySpaceId;
         const hubId = s.memoryHub.mode === "member" ? s.memoryHub.hubEnvironmentId : local;
         const bootstrap = space ? (yield* runtime.readBootstrap(space, hubId)).state : "unbound";
+        const holds = space
+          ? yield* store
+              .readPersistedHoldClasses({ memorySpaceId: space, hubEnvironmentId: hubId })
+              .pipe(Effect.orElseSucceed(() => null))
+          : [];
         const persisted = yield* runtime.readProcessing(space, space ? hubId : null);
         const storage = space
           ? yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: local })
@@ -2031,8 +2135,41 @@ const make = Effect.gen(function* () {
           return yield* new M.MemoryHubError({ code: "fenced" });
         const failure = lastFailure?.epoch === epoch ? lastFailure.code : undefined;
         const success = lastSuccess?.epoch === epoch ? lastSuccess.at : null;
+        const publication = yield* readPublication;
+        const recoverableHolds = (holds ?? []).filter(
+          (c): c is "protocol" | "availability" => c === "protocol" || c === "availability",
+        );
+        const permanentHolds = (holds ?? []).filter(
+          (c): c is "identity" | "authorization" => c === "identity" || c === "authorization",
+        );
+        const disabled = s.memoryHub.mode === "disabled";
+        const diagnostics: M.MemoryHubDiagnostics = {
+          version: epoch,
+          publication,
+          readiness: disabled ? "disabled" : bootstrap,
+          connection: disabled
+            ? "disabled"
+            : failure === "unavailable"
+              ? "unreachable"
+              : failure
+                ? "unknown"
+                : success
+                  ? "connected"
+                  : "unknown",
+          recoverableHolds,
+          permanentHolds,
+          reconcile:
+            disabled || bootstrap !== "ready" || publication.state !== "current"
+              ? "unavailable"
+              : permanentHolds.length
+                ? "permanent_hold"
+                : recoverableHolds.length
+                  ? "available"
+                  : "not_needed",
+        };
         return {
           memorySpaceId: space,
+          ...(holds ? { diagnostics } : {}),
           state:
             s.memoryHub.mode === "disabled"
               ? "disabled"

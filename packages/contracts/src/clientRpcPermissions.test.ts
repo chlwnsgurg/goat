@@ -83,3 +83,7 @@ it("report retry reset is Settings-only", () =>
   expect(clientRpcRequiredScopes(WS_METHODS.memoryResetReportAttempts, {})).toEqual([
     "settings:write",
   ]));
+
+it("hub reconcile requires Settings authority", () => {
+  expect(clientRpcRequiredScopes(WS_METHODS.memoryHubReconcile, {})).toEqual(["settings:write"]);
+});

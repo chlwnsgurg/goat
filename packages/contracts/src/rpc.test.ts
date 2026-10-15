@@ -188,12 +188,13 @@ it.effect("applies scope middleware to SSH workspace RPCs", () =>
 );
 
 describe("memory RPC groups", () => {
-  it("declares eighteen memory methods with typed inputs and authorization middleware", () => {
-    expect(WsMemoryRpcGroup.requests.size).toBe(18);
+  it("declares nineteen memory methods with typed inputs and authorization middleware", () => {
+    expect(WsMemoryRpcGroup.requests.size).toBe(19);
     expect(WsMemoryCoreRpcGroup.requests.size).toBe(14);
     expect(WsMemoryImportRpcGroup.requests.size).toBe(1);
-    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(3);
+    expect(WsMemoryAdministrationRpcGroup.requests.size).toBe(4);
     expect([...WsMemoryAdministrationRpcGroup.requests.keys()]).toEqual([
+      "memory.hub.reconcile",
       "memory.resetReportAttempts",
       "memory.ownerSourceReadPolicy.get",
       "memory.ownerSourceReadPolicy.update",

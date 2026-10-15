@@ -1112,9 +1112,38 @@ export const MemoryStorageStatus = struct({
 }).check(Schema.makeFilter((v) => v.retentionFloor <= v.checkpointSequence));
 export type MemoryStorageStatus = typeof MemoryStorageStatus.Type;
 
+/** Published by the committed settings owner; never inferred from connectivity. */
+export const MemoryHubPublication = struct({
+  state: Schema.Literals(["unknown", "current", "last_valid", "unavailable"]),
+  code: Schema.optionalKey(Schema.Literals(["invalid_settings", "settings_unavailable"])),
+});
+export type MemoryHubPublication = typeof MemoryHubPublication.Type;
+export const MemoryHubDiagnostics = struct({
+  version: NonNegativeInt,
+  publication: MemoryHubPublication,
+  readiness: Schema.Literals(["disabled", "unbound", "staging", "ready"]),
+  connection: Schema.Literals(["disabled", "unknown", "connected", "unreachable"]),
+  recoverableHolds: distinct(Schema.Literals(["protocol", "availability"]), 2),
+  permanentHolds: distinct(Schema.Literals(["identity", "authorization"]), 2),
+  reconcile: Schema.Literals(["unavailable", "permanent_hold", "available", "not_needed"]),
+});
+export type MemoryHubDiagnostics = typeof MemoryHubDiagnostics.Type;
+export const MemoryHubReconcileInput = struct({
+  memorySpaceId: MemorySpaceId,
+  environmentId: EnvironmentId,
+  expectedVersion: NonNegativeInt,
+});
+export type MemoryHubReconcileInput = typeof MemoryHubReconcileInput.Type;
+export const MemoryHubReconcileResult = struct({
+  version: NonNegativeInt,
+  rearmedClasses: distinct(Schema.Literals(["protocol", "availability"]), 2),
+});
+export type MemoryHubReconcileResult = typeof MemoryHubReconcileResult.Type;
+
 export const MemorySyncStatus = struct({
   memorySpaceId: Schema.NullOr(MemorySpaceId),
   state: Schema.Literals(["disabled", "bootstrapping", "online", "offline", "error"]),
+  diagnostics: Schema.optionalKey(MemoryHubDiagnostics),
   pendingSync: NonNegativeInt,
   quarantined: NonNegativeInt,
   parked: NonNegativeInt,

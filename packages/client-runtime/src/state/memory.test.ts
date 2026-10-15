@@ -400,6 +400,29 @@ describe("shared memory client", () => {
       ),
   );
 
+  it.effect("hub reconcile follows live Settings permission on the exact destination", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* harness();
+        const input = { memorySpaceId: space, environmentId: env, expectedVersion: 1 };
+        for (const [scopes, expected] of [
+          [["memory:write"], false],
+          [["settings:write"], true],
+          [[], false],
+        ] as const) {
+          h.registry.set(grants(env), AsyncResult.success(sessionScopes(scopes)));
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(env, input))).toBe(expected);
+          expect(h.registry.get(h.memory.hubReconcile.permissionAtom(other, input))).toBe(false);
+        }
+        expect(
+          (yield* Effect.promise(() =>
+            h.memory.hubReconcile.run(h.registry, { environmentId: env, input }),
+          ))._tag,
+        ).toBe("Failure");
+      }),
+    ),
+  );
+
   it.effect("report retry reset permission follows settings write on the exact environment", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -426,6 +426,7 @@ export const WS_METHODS = {
   memoryList: "memory.list",
   memoryRead: "memory.read",
   memoryHistory: "memory.history",
+  memoryHubReconcile: "memory.hub.reconcile",
   memoryResetReportAttempts: "memory.resetReportAttempts",
   memorySyncStatus: "memory.syncStatus",
   memoryOwnerSourceReadPolicyGet: "memory.ownerSourceReadPolicy.get",
@@ -2405,7 +2406,13 @@ export const WsMemoryResetReportAttemptsRpc = Rpc.make(WS_METHODS.memoryResetRep
   success: Memory.MemoryResetReportAttemptsResult,
   error: MemoryRpcErrors,
 });
+export const WsMemoryHubReconcileRpc = Rpc.make(WS_METHODS.memoryHubReconcile, {
+  payload: Memory.MemoryHubReconcileInput,
+  success: Memory.MemoryHubReconcileResult,
+  error: MemoryRpcErrors,
+});
 export const WsMemoryAdministrationRpcGroup = RpcGroup.make(
+  WsMemoryHubReconcileRpc,
   WsMemoryResetReportAttemptsRpc,
   WsMemoryOwnerSourceReadPolicyGetRpc,
   WsMemoryOwnerSourceReadPolicyUpdateRpc,

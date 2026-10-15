@@ -2053,10 +2053,12 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
           const status = () =>
             sync.syncStatus({}, Effect.void).pipe(Effect.tap((s) => decodeStatus(s)));
           assert.strictEqual((yield* status()).state, "disabled");
+          assert.strictEqual((yield* status()).diagnostics?.readiness, "disabled");
           yield* changeHub(1, { ...member, memorySpaceId: null });
           const unbound = yield* status();
           assert.strictEqual(unbound.state, "bootstrapping");
           assert.strictEqual(unbound.memorySpaceId, null);
+          assert.strictEqual(unbound.diagnostics?.readiness, "unbound");
           yield* changeHub(2, member);
           assert.strictEqual((yield* status()).state, "bootstrapping");
           yield* ready;
@@ -5673,7 +5675,7 @@ it.effect("typed hold discovery failure leaves healthy sync available", () =>
           const status = yield* sync.syncStatus({}, Effect.void);
           assert.strictEqual(status.failureCode, "storage_failed");
           yield* sync.syncOnce;
-          assert.strictEqual(reads, 1);
+          assert.strictEqual(reads, 2);
           const sql = yield* SqlClient.SqlClient;
           assert.deepStrictEqual(
             yield* sql`SELECT status FROM memory_outbox WHERE id='sync:98210'`,
@@ -6469,4 +6471,393 @@ it.effect.each(["tail", "bootstrap"] as const)(
         assert.deepStrictEqual(yield* bStore.receipt(space, input.operationId), bCanonical);
       }),
     ),
+);
+
+const failureCodeForTest = (error: Hub.MemoryHubServiceError) =>
+  "code" in error ? error.code : error._tag;
+const reconcileInput: M.MemoryHubReconcileInput = {
+  memorySpaceId: space,
+  environmentId: local,
+  expectedVersion: 1,
+};
+it.effect.each(["protocol", "availability"] as const)(
+  "Settings reconcile rearms %s only after a real pinned recovery observation",
+  (c) =>
+    Effect.gen(function* () {
+      yield* ready;
+      yield* persistPullHold(c);
+      const sync = yield* Sync.MemorySyncService;
+      const store = yield* Store.MemoryStore;
+      const before = yield* sync.syncStatus({}, Effect.void);
+      assert.deepStrictEqual(before.diagnostics?.recoverableHolds, [c]);
+      assert.strictEqual(before.diagnostics?.reconcile, "available");
+      const result = yield* sync.reconcileHub(reconcileInput, Effect.void);
+      assert.deepStrictEqual(result, { version: 1, rearmedClasses: [c] });
+      assert.isNull(
+        (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote })).holdClass,
+      );
+      assert.deepStrictEqual(
+        (yield* sync.reconcileHub(reconcileInput, Effect.void)).rearmedClasses,
+        [],
+      );
+    }).pipe(
+      Effect.provide(fixture(peer({ preflight: () => Effect.succeed(recoveredDescriptor) }))),
+    ),
+);
+it.effect.each(["identity", "authorization"] as const)(
+  "Settings reconcile refuses permanent %s hold without probing or releasing it",
+  (c) =>
+    Effect.gen(function* () {
+      yield* ready;
+      yield* persistPullHold(c);
+      const sync = yield* Sync.MemorySyncService;
+      const store = yield* Store.MemoryStore;
+      assert.deepStrictEqual(
+        (yield* sync.syncStatus({}, Effect.void)).diagnostics?.permanentHolds,
+        [c],
+      );
+      const error = yield* sync.reconcileHub(reconcileInput, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(
+        "code" in error ? error.code : error._tag,
+        c === "identity" ? "identity_mismatch" : "route_unavailable",
+      );
+      assert.strictEqual(
+        (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote })).holdClass,
+        c,
+      );
+    }).pipe(
+      Effect.provide(
+        fixture(peer({ preflight: () => Effect.die("permanent hold must not probe") })),
+      ),
+    ),
+);
+it.effect.each([
+  "stale",
+  "environment",
+  "space",
+  "unbound",
+  "staging",
+  "disabled",
+  "denied",
+] as const)("Settings reconcile rejects %s authority before recovery", (mode) =>
+  Effect.gen(function* () {
+    const sync = yield* Sync.MemorySyncService;
+    if (mode !== "staging") yield* ready;
+    if (mode === "unbound") yield* changeHub(1, { ...member, memorySpaceId: null });
+    if (mode === "disabled") yield* changeHub(1, { mode: "disabled" });
+    const input = {
+      ...reconcileInput,
+      expectedVersion: mode === "stale" ? 0 : mode === "unbound" || mode === "disabled" ? 2 : 1,
+      environmentId: mode === "environment" ? remote : local,
+      memorySpaceId: mode === "space" ? M.MemorySpaceId.make(id(99880)) : space,
+    };
+    const error = yield* sync
+      .reconcileHub(
+        input,
+        mode === "denied"
+          ? Effect.fail(new Service.MemoryAccessError({ code: "unavailable" }))
+          : Effect.void,
+      )
+      .pipe(Effect.flip);
+    assert.strictEqual(
+      "code" in error ? error.code : error._tag,
+      mode === "environment"
+        ? "identity_mismatch"
+        : mode === "stale" || mode === "space"
+          ? "fenced"
+          : mode === "denied"
+            ? "unavailable"
+            : "bootstrap_required",
+    );
+  }).pipe(
+    Effect.provide(
+      fixture(peer({ preflight: () => Effect.die("invalid authority must not probe") })),
+    ),
+  ),
+);
+it.effect.each(["identity_mismatch", "unsupported_protocol", "unavailable"] as const)(
+  "failed Settings recovery observation retains holds: %s",
+  (code) =>
+    Effect.gen(function* () {
+      yield* ready;
+      yield* persistPullHold("protocol");
+      const sync = yield* Sync.MemorySyncService;
+      const store = yield* Store.MemoryStore;
+      assert.strictEqual(
+        failureCodeForTest(yield* sync.reconcileHub(reconcileInput, Effect.void).pipe(Effect.flip)),
+        code,
+      );
+      assert.strictEqual(
+        (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote })).holdClass,
+        "protocol",
+      );
+    }).pipe(
+      Effect.provide(
+        fixture(
+          peer({
+            preflight: () =>
+              code === "unavailable"
+                ? Effect.fail(new M.MemoryHubError({ code }))
+                : Effect.succeed({
+                    ...recoveredDescriptor,
+                    ...(code === "identity_mismatch"
+                      ? { environmentId: local }
+                      : { capabilities: { repositoryIdentity: false } }),
+                  }),
+          }),
+        ),
+      ),
+    ),
+);
+it.effect.each(["last_valid", "unavailable", "unknown"] as const)(
+  "Settings reconcile rejects %s publication even with matching epoch",
+  (state) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        const committed = yield* Settings.MemoryHubCommittedSettings;
+        yield* Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          assert.strictEqual(
+            failureCodeForTest(
+              yield* sync.reconcileHub(reconcileInput, Effect.void).pipe(Effect.flip),
+            ),
+            "fenced",
+          );
+          assert.strictEqual(
+            (yield* sync.syncStatus({}, Effect.void)).diagnostics?.publication.state,
+            state,
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(
+                Layer.succeed(Settings.MemoryHubCommittedSettings, {
+                  ...committed,
+                  readPublication: Effect.succeed({ state }),
+                }),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture())),
+    ),
+);
+it.effect.each(["permission", "epoch", "publication"] as const)(
+  "Settings reconcile rechecks live %s after waiting for the rearm SQL transaction",
+  (revoked) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* ready;
+        yield* persistPullHold("protocol");
+        const store = yield* Store.MemoryStore;
+        const committed = yield* Settings.MemoryHubCommittedSettings;
+        const entered = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        let armed = false;
+        let allowed = true;
+        let publication: M.MemoryHubPublication = { state: "current" };
+        const permit = Effect.suspend(() =>
+          allowed
+            ? Effect.void
+            : Effect.fail(new Service.MemoryAccessError({ code: "unavailable" })),
+        );
+        yield* Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          const fiber = yield* sync.reconcileHub(reconcileInput, permit).pipe(Effect.forkChild);
+          yield* Deferred.await(entered);
+          if (revoked === "permission") allowed = false;
+          if (revoked === "epoch") yield* changeHub(1, member);
+          if (revoked === "publication")
+            publication = { state: "last_valid", code: "invalid_settings" };
+          yield* Deferred.succeed(resume, undefined);
+          const error = yield* Fiber.join(fiber).pipe(Effect.flip);
+          assert.strictEqual(
+            "code" in error ? error.code : error._tag,
+            revoked === "permission" ? "unavailable" : "fenced",
+          );
+          assert.strictEqual(
+            (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+              .holdClass,
+            "protocol",
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(
+                Layer.succeed(Client.MemoryHubClient, {
+                  ...(yield* Client.MemoryHubClient),
+                  preflight: () =>
+                    Effect.sync(() => {
+                      armed = true;
+                      return recoveredDescriptor;
+                    }),
+                }),
+              ),
+              Layer.provide(
+                Layer.succeed(Settings.MemoryHubCommittedSettings, {
+                  ...committed,
+                  readPublication: Effect.sync(() => publication),
+                }),
+              ),
+              Layer.provide(
+                Layer.succeed(Store.MemoryStore, {
+                  ...store,
+                  transact: (effect) =>
+                    Effect.suspend(() =>
+                      armed
+                        ? Deferred.succeed(entered, undefined).pipe(
+                            Effect.andThen(Deferred.await(resume)),
+                            Effect.andThen(store.transact(effect)),
+                          )
+                        : store.transact(effect),
+                    ),
+                }),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture())),
+    ),
+);
+
+it.effect("Settings reconcile rolls back a rearm if live permission is revoked before commit", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* ready;
+      yield* persistPullHold("protocol");
+      const store = yield* Store.MemoryStore;
+      const entered = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      let allowed = true;
+      const permit = Effect.suspend(() =>
+        allowed ? Effect.void : Effect.fail(new Service.MemoryAccessError({ code: "unavailable" })),
+      );
+      yield* Effect.gen(function* () {
+        const sync = yield* Sync.MemorySyncService;
+        const fiber = yield* sync.reconcileHub(reconcileInput, permit).pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        allowed = false;
+        yield* Deferred.succeed(resume, undefined);
+        assert.strictEqual(
+          failureCodeForTest(yield* Fiber.join(fiber).pipe(Effect.flip)),
+          "unavailable",
+        );
+        assert.strictEqual(
+          (yield* store.readPullRetry({ memorySpaceId: space, hubEnvironmentId: remote }))
+            .holdClass,
+          "protocol",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(Sync.layer).pipe(
+            Layer.provide(
+              Layer.succeed(Store.MemoryStore, {
+                ...store,
+                writePullRetryTx: (input) =>
+                  store
+                    .writePullRetryTx(input)
+                    .pipe(
+                      Effect.tap(() =>
+                        Deferred.succeed(entered, undefined).pipe(
+                          Effect.andThen(Deferred.await(resume)),
+                        ),
+                      ),
+                    ),
+              }),
+            ),
+          ),
+        ),
+      );
+    }).pipe(
+      Effect.provide(fixture(peer({ preflight: () => Effect.succeed(recoveredDescriptor) }))),
+    ),
+  ),
+);
+
+it.effect(
+  "diagnostics distinguish staging, unobserved readiness and a ready but unreachable hub",
+  () =>
+    Effect.gen(function* () {
+      yield* ready;
+      const sql = yield* SqlClient.SqlClient;
+      const sync = yield* Sync.MemorySyncService;
+      yield* sql`UPDATE memory_sync_cursors SET bootstrap_state='staging' WHERE space=${space}`;
+      const staging = yield* sync.syncStatus({}, Effect.void);
+      assert.strictEqual(staging.diagnostics?.readiness, "staging");
+      assert.strictEqual(staging.diagnostics?.reconcile, "unavailable");
+      yield* sql`UPDATE memory_sync_cursors SET bootstrap_state='ready' WHERE space=${space}`;
+      const before = yield* sync.syncStatus({}, Effect.void);
+      assert.strictEqual(before.diagnostics?.readiness, "ready");
+      assert.strictEqual(before.diagnostics?.connection, "unknown");
+      assert.strictEqual(failureCodeForTest(yield* sync.syncOnce.pipe(Effect.flip)), "unavailable");
+      const failed = yield* sync.syncStatus({}, Effect.void);
+      assert.strictEqual(failed.diagnostics?.readiness, "ready");
+      assert.strictEqual(failed.diagnostics?.connection, "unreachable");
+      assert.strictEqual(failed.failureCode, "unavailable");
+    }).pipe(
+      Effect.provide(
+        fixture(peer({ pull: () => Effect.fail(new M.MemoryHubError({ code: "unavailable" })) })),
+      ),
+    ),
+);
+
+it.effect("an unfinished Settings rearm never becomes an unguarded sweep in the next epoch", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const blocked = yield* Deferred.make<void>();
+      const nextEpochPulled = yield* Deferred.make<void>();
+      const client = peer({
+        preflight: () => Effect.succeed(recoveredDescriptor),
+        pull: (connection, input) =>
+          Effect.gen(function* () {
+            if (connection.epoch === 2) yield* Deferred.succeed(nextEpochPulled, undefined);
+            return {
+              highWatermark: input.highWatermark ?? input.afterSequence,
+              throughSequence: input.afterSequence,
+              hasMore: false,
+              entries: [],
+            };
+          }),
+      });
+      yield* Effect.gen(function* () {
+        yield* ready;
+        const sql = yield* SqlClient.SqlClient;
+        for (let n = 99000; n < 99101; n++) yield* enqueue(n, M.MemoryId.make(id(n)));
+        yield* sql`UPDATE memory_outbox SET status='retry',hold_class='protocol',next_attempt_at=9007199254740991 WHERE kind='sync'`;
+        const store = yield* Store.MemoryStore;
+        let pages = 0;
+        yield* Effect.gen(function* () {
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.start;
+          yield* sync.reconcileHub(reconcileInput, Effect.void);
+          yield* Deferred.await(blocked);
+          yield* changeHub(1, member);
+          yield* Deferred.await(nextEpochPulled);
+          yield* sync.syncOnce;
+          const held = yield* sql`SELECT id FROM memory_outbox WHERE hold_class='protocol'`;
+          assert.strictEqual(held.length, 1, "only the first authorized page may be rearmed");
+          yield* sync.shutdown;
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(Sync.layer).pipe(
+              Layer.provide(
+                Layer.succeed(Store.MemoryStore, {
+                  ...store,
+                  rearmSyncHoldsTx: (input) =>
+                    Effect.suspend(() => {
+                      if (input.holdClass === "protocol" && ++pages === 2)
+                        return Deferred.succeed(blocked, undefined).pipe(
+                          Effect.andThen(Effect.never),
+                        );
+                      return store.rearmSyncHoldsTx(input);
+                    }),
+                }),
+              ),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(fixture(client, undefined, false, true)));
+    }),
+  ),
 );

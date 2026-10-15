@@ -628,6 +628,7 @@ it.effect(
         WS_METHODS.memoryHubSettingsGet,
         WS_METHODS.memoryHubSettingsUpdate,
         WS_METHODS.memoryResetReportAttempts,
+        WS_METHODS.memoryHubReconcile,
         WS_METHODS.memoryOwnerSourceReadPolicyGet,
         WS_METHODS.memoryOwnerSourceReadPolicyUpdate,
       ];
