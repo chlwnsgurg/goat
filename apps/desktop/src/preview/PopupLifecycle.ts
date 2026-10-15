@@ -111,10 +111,19 @@ export const createPreviewPopupLifecycle = (
       outlivesOpener: false,
       overrideBrowserWindowOptions: {
         autoHideMenuBar: true,
+        // Electron accepts undefined to clear a preload; its exact optional
+        // TypeScript field only admits strings when present.
+        // @ts-expect-error Explicitly clear any opener preload.
         webPreferences: {
           // Browser-created children (e.g. noopener POSTs) may have no inherited
           // WebContents. Pin their cookies and profile to the source session.
           session: source.session,
+          // Popups are provider pages, not preview guests. Electron applies
+          // these overrides before creating even an opener-retaining blank
+          // child, whose initial realm can still share the opener's world.
+          // Never carry the guest's pick/annotation/passkey bridge in.
+          preload: undefined,
+          additionalArguments: [],
           contextIsolation: true,
           nodeIntegration: false,
           nodeIntegrationInSubFrames: false,

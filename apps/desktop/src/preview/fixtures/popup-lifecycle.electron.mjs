@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
 import * as NodeAssert from "node:assert/strict";
 import * as NodeEvents from "node:events";
 import * as NodeHttp from "node:http";
@@ -8,9 +8,25 @@ import { createPreviewPopupLifecycle } from "./PopupLifecycle.mjs";
 
 // The test copies this fixture and the stripped policy into a temporary directory.
 const directory = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const preload = NodePath.join(directory, "preview-pick-preload.cjs");
+const passkeyArgument = "--t3code-preview-passkey-bridge";
+const preloadState = `({
+  globals: Object.getOwnPropertyNames(globalThis).filter(name => /goat|t3code/i.test(name)),
+  nodeGlobals: ['require', 'process', 'Buffer'].filter(name => name in globalThis),
+  nativeCredentials: [CredentialsContainer.prototype.create, CredentialsContainer.prototype.get,
+    PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable,
+    PublicKeyCredential.isConditionalMediationAvailable]
+    .every(method => Function.prototype.toString.call(method).includes('[native code]'))
+})`;
 app.setPath("userData", NodePath.join(directory, "userdata"));
 app.setPath("sessionData", NodePath.join(directory, "session"));
 app.on("window-all-closed", () => {});
+const preloadExecutions = new Set();
+const preloadErrors = [];
+ipcMain.on("popup-fixture:preload-loaded", (event) => preloadExecutions.add(event.sender.id));
+app.on("web-contents-created", (_event, contents) => {
+  contents.on("preload-error", (_event, path, error) => preloadErrors.push({ path, error }));
+});
 
 const run = async () => {
   try {
@@ -76,6 +92,7 @@ const run = async () => {
       preferences.nodeIntegrationInSubFrames = false;
       preferences.contextIsolation = false;
       preferences.disableHtmlFullscreenWindowResize = true;
+      preferences.additionalArguments = [passkeyArgument];
     });
     const guestReady = new Promise((resolve) => {
       host.webContents.once("did-attach-webview", (_event, guest) => {
@@ -87,11 +104,49 @@ const run = async () => {
     await host.loadURL(
       "data:text/html," +
         encodeURIComponent(`<webview allowpopups partition="popup-fixture"
+        preload="${NodeURL.pathToFileURL(preload).href}"
         webpreferences="contextIsolation=false,sandbox=true,nodeIntegration=false"
         src="${origin}/owner"></webview>`),
     );
     const guest = await guestReady;
     NodeAssert.equal(guest.getLastWebPreferences().contextIsolation, false);
+    NodeAssert.deepEqual(await guest.executeJavaScript(preloadState), {
+      globals: ["__goatPopupFixturePreload"],
+      nodeGlobals: [],
+      nativeCredentials: false,
+    });
+    NodeAssert.equal(preloadExecutions.has(guest.id), true);
+    const assertPopupPreferences = async (contents, path) => {
+      const preferences = contents.getLastWebPreferences();
+      const effective = {
+        contextIsolation: preferences.contextIsolation,
+        sandbox: preferences.sandbox,
+        nodeIntegration: preferences.nodeIntegration,
+        nodeIntegrationInSubFrames: preferences.nodeIntegrationInSubFrames,
+        nodeIntegrationInWorker: preferences.nodeIntegrationInWorker,
+        webviewTag: preferences.webviewTag,
+      };
+      NodeAssert.deepEqual(effective, {
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        nodeIntegrationInSubFrames: false,
+        nodeIntegrationInWorker: false,
+        webviewTag: false,
+      });
+      NodeAssert.deepEqual(await contents.executeJavaScript(preloadState), {
+        globals: [],
+        nodeGlobals: [],
+        nativeCredentials: true,
+      });
+      // Electron 44's SaveLastPreferences omits preload/additionalArguments.
+      // Inspect execution as well, including preloads hidden by isolation.
+      NodeAssert.equal(preloadExecutions.has(contents.id), false);
+      NodeAssert.deepEqual(preloadErrors, []);
+      console.log(
+        "POPUP_PREFERENCES " + JSON.stringify({ path, ...effective, preloadExecuted: false }),
+      );
+    };
     const ownerId = guest.id;
     const popupPreferences = [];
     const trackPopups = (opener) => {
@@ -102,6 +157,24 @@ const run = async () => {
       });
     };
     trackPopups(guest);
+    // Inspect the initial about:blank document before navigating to a provider.
+    const blankWindow = NodeEvents.once(guest, "did-create-window");
+    NodeAssert.equal(
+      await guest.executeJavaScript(
+        "Boolean(window.savedBlank = window.open('', '_blank', 'width=300'))",
+        true,
+      ),
+      true,
+    );
+    const [blankPopup] = await blankWindow;
+    NodeAssert.equal(
+      await blankPopup.webContents.executeJavaScript("window.opener !== null"),
+      true,
+    );
+    await assertPopupPreferences(blankPopup.webContents, "opener-retaining-about:blank");
+    await blankPopup.loadURL(`${origin}/blank-callback`);
+    await assertPopupPreferences(blankPopup.webContents, "opener-retaining-after-navigation");
+    blankPopup.destroy();
     let navigations = 0;
     guest.on("did-navigate", () => navigations++);
     const providerOrigin = `http://localhost:${port}`;
@@ -163,6 +236,7 @@ const run = async () => {
     const postPopup = await postWindow;
     NodeAssert.equal(postPopup.webContents.session, guest.session);
     NodeAssert.equal(await postPopup.webContents.executeJavaScript("window.opener === null"), true);
+    await assertPopupPreferences(postPopup.webContents, "browser-created-noopener-post");
 
     const nestedRequest = NodeEvents.once(requests, "/nested-noopener");
     const nestedWindow = createdWindow(postPopup.webContents);
@@ -178,6 +252,7 @@ const run = async () => {
     const [nested] = await nestedRequest;
     NodeAssert.match(nested.cookie, /popupSession=retained/);
     const nestedPopup = await nestedWindow;
+    await assertPopupPreferences(nestedPopup.webContents, "browser-created-nested-noopener");
     NodeAssert.equal(nestedPopup.webContents.session, postPopup.webContents.session);
     NodeAssert.equal(
       await nestedPopup.webContents.executeJavaScript("window.opener === null"),
@@ -205,6 +280,8 @@ const run = async () => {
       NodeAssert.equal(preferences.nodeIntegration, false);
       NodeAssert.equal(preferences.webviewTag, false);
     }
+    NodeAssert.deepEqual([...preloadExecutions], [ownerId]);
+    NodeAssert.deepEqual(preloadErrors, []);
     NodeAssert.equal(guest.id, ownerId);
     NodeAssert.equal(navigations, 0);
     const destroyed = NodeEvents.once(guest, "destroyed");
