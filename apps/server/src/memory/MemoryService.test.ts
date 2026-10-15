@@ -2978,6 +2978,9 @@ it.effect("Settings retry reset reauthorizes after waiting for the SQL writer", 
   ).pipe(checkUsage, Effect.provide(live)),
 );
 
+const decodeLegacyHistory = Schema.decodeUnknownEffect(LegacyHistoryPage);
+const decodeLegacyHistorySync = Schema.decodeUnknownSync(LegacyHistoryPage);
+
 // Real retained resolution and staged operation; report approval is never seeded by SQL.
 const stageReportRevert = Effect.gen(function* () {
   const service = yield* Service.MemoryService;
@@ -3626,7 +3629,7 @@ it.effect("A2 keeps a generic authoritative refusal without inventing revision_c
       Effect.void,
     );
     assert.isEmpty(page.revertResults);
-    assert.deepStrictEqual(yield* Schema.decodeUnknownEffect(LegacyHistoryPage)(page), page);
+    assert.deepStrictEqual(yield* decodeLegacyHistory(page), page);
     const optedIn = yield* service.history(
       { memorySpaceId: space, memoryId, limit: 100, includeRefusedReverts: true },
       Effect.void,
@@ -3641,7 +3644,7 @@ it.effect("A2 keeps a generic authoritative refusal without inventing revision_c
       status: "refused",
       failureCode: "unavailable",
     });
-    assert.throws(() => Schema.decodeUnknownSync(LegacyHistoryPage)(optedIn));
+    assert.throws(() => decodeLegacyHistorySync(optedIn));
     assert.isTrue(presentMemoryRevertResult(result).settled);
     const current = yield* service.read({ memorySpaceId: space, memoryId }, Effect.void);
     const presentation = presentMemoryRevert({

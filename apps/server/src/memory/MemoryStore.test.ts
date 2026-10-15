@@ -8591,6 +8591,7 @@ it.effect.each(["pending", "revision_changed", "revert_expired", "forgotten", "a
 );
 
 // Synthetic checkpoint has the same resolve R and accepted revert X on both devices.
+const decodeCheckpointResolution = Schema.decodeUnknownSync(M.MemoryResolution);
 const acceptedRevertCheckpoint = () => {
   const base = checkpoint();
   const original = base.revisions[0]!;
@@ -8602,7 +8603,7 @@ const acceptedRevertCheckpoint = () => {
   const inputs = [original.revision.revisionId, secondOp.revision.revisionId];
   const resolved = { ...resolveOp.revision, parents: inputs };
   const reverted = { ...revertOp.revision, parents: [resolved.revisionId] };
-  const resolution = Schema.decodeUnknownSync(M.MemoryResolution)({
+  const resolution = decodeCheckpointResolution({
     resolutionId: id(900),
     memorySpaceId: space,
     memoryId: memory,
@@ -8804,7 +8805,11 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       yield* store.apply(decision());
       const item = (yield* store.readAccess(space, memory)).item!;
-      const body = { text: "한".repeat(11000), evidence: [], derivedFromMemoryRevisions: [] };
+      const body = {
+        text: "한".repeat(1000),
+        evidence: [{ origin: "user", messageIds: ["m".repeat(30000)] }],
+        derivedFromMemoryRevisions: [],
+      };
       yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify(body)}`;
       yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) SELECT space,${id(71001)},memory_id,${id(71002)},parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at FROM memory_revisions LIMIT 1`;
       const first = (yield* store.historyPage(
@@ -8822,7 +8827,7 @@ it.effect(
       assert.strictEqual(next.revisions[0]?.revision.revisionId, id(71001));
       assert.isAtMost(new TextEncoder().encode(JSON.stringify(next)).length, 65536);
       // Large valid revision metadata makes the single pair exceed the page budget.
-      yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify({ ...body, text: "한".repeat(21000) })}`;
+      yield* sql`UPDATE memory_payloads SET body_json=${JSON.stringify({ ...body, evidence: [{ origin: "user", messageIds: ["m".repeat(60000)] }] })}`;
       yield* sql`UPDATE memory_revisions SET provenance_json=${JSON.stringify({ environmentId: "e".repeat(3000) })}`;
       const error = yield* store
         .historyPage({ memorySpaceId: space, memoryId: memory, limit: 100 }, item, env)

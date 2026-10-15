@@ -64,7 +64,9 @@ const struct = <F extends Schema.Struct.Fields>(fields: F) => {
       : schema,
   );
 };
-const canonical = Schema.String.check(Schema.makeFilter((s) => s.length > 0 && s.trim() === s));
+const canonical = Schema.String.check(
+  Schema.makeFilter((s) => s.length > 0 && s.trim() === s && Array.from(s).length <= 1024),
+);
 const revertArms = Schema.Union([
   struct({
     operationId: MemoryOperationId,

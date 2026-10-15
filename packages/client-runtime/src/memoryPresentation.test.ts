@@ -31,6 +31,7 @@ const payload = M.MemoryPayload.make({
   evidence: [{ origin: "user", messageIds: [] }],
   derivedFromMemoryRevisions: [],
 });
+const decodeRevertResult = Schema.decodeUnknownSync(M.MemoryRevertResult);
 const decodeRevision = Schema.decodeUnknownSync(M.MemoryRevision);
 const decodeOwnerView = Schema.decodeUnknownSync(M.MemoryOwnerSourceReadPolicyView);
 const revision = (n: number) =>
@@ -450,7 +451,7 @@ describe("memory presentation boundaries", () => {
 });
 
 it("refused is settled while retry still checks head, history and originals", () => {
-  const result = Schema.decodeUnknownSync(M.MemoryRevertResult)({
+  const result = decodeRevertResult({
     operationId: id(60),
     memoryId: item.memoryId,
     resolutionId: resolution.resolutionId,
