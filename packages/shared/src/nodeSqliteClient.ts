@@ -868,25 +868,33 @@ const make = Effect.fn("makeWithDatabase")(function* (
   });
 
   const acquirer = Effect.flatMap(route, (target) =>
-    Effect.withFiber((fiber) => {
-      // The statement's span is current here only when it propagates, which
-      // Statement skips while tracing is off. Otherwise the current span is
-      // the caller's, so leave it alone.
-      if (
-        !fiber.getRef(References.TracerEnabled) ||
-        !fiber.getRef(Statement.SpanPropagationEnabled)
-      ) {
-        return target.lock.withPermits(1)(Effect.succeed(target.connection));
-      }
-      const clock = fiber.getRef(Clock.Clock);
-      const start = clock.monotonicTimeNanosUnsafe();
-      return target.lock.withPermits(1)(
-        Effect.sync(() => {
-          annotateAcquired(fiber, acquired(target, clock, start));
-          return target.connection;
+    Effect.uninterruptibleMask((restore) =>
+      Effect.flatMap(Effect.scope, (scope) =>
+        Effect.withFiber((fiber) => {
+          // Statement and stream scopes cover execution, retries, and result-mode
+          // cleanup. Returning the connection must not release its permit.
+          const lease = Effect.andThen(
+            restore(target.lock.take(1)),
+            Scope.addFinalizer(scope, target.lock.release(1)),
+          );
+          // The statement's span is current here only when it propagates, which
+          // Statement skips while tracing is off. Otherwise the current span is
+          // the caller's, so leave it alone.
+          if (
+            !fiber.getRef(References.TracerEnabled) ||
+            !fiber.getRef(Statement.SpanPropagationEnabled)
+          ) {
+            return Effect.as(lease, target.connection);
+          }
+          const clock = fiber.getRef(Clock.Clock);
+          const start = clock.monotonicTimeNanosUnsafe();
+          return Effect.map(lease, () => {
+            annotateAcquired(fiber, acquired(target, clock, start));
+            return target.connection;
+          });
         }),
-      );
-    }),
+      ),
+    ),
   );
   const transactionAcquirer = Effect.flatMap(route, (target) =>
     Effect.uninterruptibleMask((restore) => {

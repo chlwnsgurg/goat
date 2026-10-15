@@ -5,12 +5,16 @@ import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
+import * as Reactivity from "effect/reactivity/Reactivity";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
 import { vi } from "vite-plus/test";
@@ -309,6 +313,40 @@ it.effect("releases statement permits and result mode after interrupted WAL reco
       (spy) => Effect.sync(() => spy.mockRestore()),
     );
   }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("releases connections across statement scope consumers", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const select = sql<{ value: number }>`SELECT 42 AS value`;
+    // reserve owns its caller's scope; execute through the returned connection.
+    const reserved = yield* Effect.scoped(
+      Effect.flatMap(sql.reserve, (connection) =>
+        connection.execute("SELECT 42 AS value", [], undefined),
+      ),
+    );
+    assert.deepEqual(reserved, [{ value: 42 }]);
+    assert.deepEqual(yield* select, reserved);
+
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const results = yield* sql.reactiveMailbox(["statement-scope"], select);
+        assert.deepEqual(yield* Queue.take(results), [{ value: 42 }]);
+        // A reactive query must release before its subscription scope closes.
+        assert.deepEqual(yield* select, [{ value: 42 }]);
+        yield* Reactivity.invalidate(["statement-scope"]);
+        assert.deepEqual(yield* Queue.take(results), [{ value: 42 }]);
+      }),
+    );
+
+    const streamed = yield* select.stream.pipe(Stream.runCollect, Effect.exit);
+    assert(Exit.isFailure(streamed));
+    // Unsupported streams still close their acquisition scope on failure.
+    assert.deepEqual(yield* select, [{ value: 42 }]);
+    assert.deepEqual(yield* sql.withTransaction(sql.withTransaction(select)), [{ value: 42 }]);
+  }).pipe(
+    Effect.provide(Layer.mergeAll(SqliteClient.layer({ filename: ":memory:" }), Reactivity.layer)),
+  ),
 );
 
 it.effect("waits for WAL recovery when preparing a writer statement", () =>
