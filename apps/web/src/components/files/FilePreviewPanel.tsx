@@ -61,7 +61,7 @@ import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { cn } from "~/lib/utils";
 import type { ChatFileAttachment } from "~/types";
-import { isAbsolutePath } from "@goat/shared/path";
+import { isAbsolutePath, resolveWorkspaceFilePath } from "@goat/shared/path";
 import { resolvePathLinkTarget } from "@goat/shared/fileLinks";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -71,6 +71,8 @@ import { assetEnvironment } from "~/state/assets";
 import { usePreviewAvailable } from "~/browser/previewRuntime";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
+import { projectEnvironment } from "~/state/projects";
+import { useEnvironmentQuery } from "~/state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
@@ -107,6 +109,7 @@ import { projectFileCacheKey } from "./fileContentRevision";
 import {
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
+  resolveFileExplorerTarget,
   resolveFilePreviewPath,
   setMarkdownTaskChecked,
   shouldShowFileExplorer,
@@ -1087,12 +1090,21 @@ export default function FilePreviewPanel({
     attachment === undefined && relativePath !== null,
   );
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
-  // A chat link cannot tell a folder from a file, so a folder arrives here as
-  // a file surface and the read fails. Keep the breadcrumbs, drop the preview
-  // pane, and let the tree fill the surface with the folder revealed. Mutation
-  // refresh stays on so the surface notices if the path becomes a file. A host
-  // path cannot be revealed in the workspace tree, so it keeps the read error.
-  const isDirectory = file.isNotFile && !isHostFile;
+  const hostMetadata = useEnvironmentQuery(
+    canReadFiles &&
+      isHostFile &&
+      attachment === undefined &&
+      relativePath !== null &&
+      file.readError !== null
+      ? projectEnvironment.fileMetadata({ environmentId, input: { path: relativePath } })
+      : null,
+  );
+  // Folder links use file surfaces too. Reveal workspace folders in the project
+  // tree; outside folders get a tree rooted at that folder, with absolute opens.
+  const isDirectory =
+    (file.isNotFile && !isHostFile) ||
+    (hostMetadata.error === null && hostMetadata.data?.kind === "directory");
+  const explorerTarget = resolveFileExplorerTarget(cwd, relativePath, isDirectory);
   // Everything preview-related keys off previewPath; a folder has no preview.
   const previewPath = isDirectory ? null : relativePath;
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
@@ -1492,13 +1504,19 @@ export default function FilePreviewPanel({
             )}
           >
             <FileBrowserPanel
-              key={`${environmentId}:${cwd}`}
+              key={`${environmentId}:${explorerTarget.cwd}`}
               environmentId={environmentId}
-              cwd={cwd}
+              cwd={explorerTarget.cwd}
               projectName={projectName}
-              selectedPath={relativePath}
+              selectedPath={explorerTarget.selectedPath}
               selectedPathRevealId={revealRequestId}
-              onOpenFile={onOpenFile}
+              onOpenFile={(path) =>
+                onOpenFile(
+                  explorerTarget.cwd === cwd
+                    ? path
+                    : resolveWorkspaceFilePath(path, explorerTarget.cwd),
+                )
+              }
               workspaceMutationId={workspaceMutationId}
               {...(previewPath && !isMedia && !isPdf
                 ? { onRefreshSelectedFile: file.refresh }

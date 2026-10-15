@@ -11,6 +11,7 @@ import {
 import {
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
+  resolveFileExplorerTarget,
   resolveFilePreviewPath,
   setMarkdownTaskChecked,
   shouldShowFileExplorer,
@@ -18,6 +19,36 @@ import {
 } from "./filePreviewMode";
 
 const decodeReadError = Schema.decodeSync(ProjectReadFileError);
+
+describe("directory explorer targets", () => {
+  it("reveals workspace directories without changing the tree root", () => {
+    expect(resolveFileExplorerTarget("/repo", "src/components", true)).toEqual({
+      cwd: "/repo",
+      selectedPath: "src/components",
+    });
+  });
+
+  it.each(["/srv/notes", "/", "D:\\notes", "D:\\", "\\\\host\\share\\"])(
+    "browses the outside directory %s as the tree root",
+    (path) => {
+      expect(resolveFileExplorerTarget("/repo", path, true)).toEqual({
+        cwd: path,
+        selectedPath: null,
+      });
+    },
+  );
+
+  it("does not treat an absolute file or an empty selection as a directory", () => {
+    expect(resolveFileExplorerTarget("/repo", "/srv/file.ts", false)).toEqual({
+      cwd: "/repo",
+      selectedPath: "/srv/file.ts",
+    });
+    expect(resolveFileExplorerTarget("/repo", null, false)).toEqual({
+      cwd: "/repo",
+      selectedPath: null,
+    });
+  });
+});
 
 describe("file preview read errors", () => {
   it.each([

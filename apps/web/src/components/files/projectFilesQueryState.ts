@@ -213,7 +213,7 @@ export function useProjectEntriesQuery(
 }
 
 /**
- * Backing query for the project file picker: a debounced, bounded, file-only
+ * Backing query for the project file picker: a debounced, bounded
  * server search. An empty query is a valid request — the index answers it
  * with frecency-ordered files, so the picker's initial view is recent files
  * without transferring the full workspace listing. `matchedQuery` is the
@@ -225,14 +225,14 @@ export function useProjectFilePickerQuery(
   cwd: string,
   query: string,
   limit: number,
-  options?: { readonly imageOnly?: boolean },
+  options?: { readonly imageOnly?: boolean; readonly includeDirectories?: boolean },
 ) {
   const search = useProjectPathSearch(
     {
       environmentId,
       cwd,
       query,
-      kind: "file",
+      ...(options?.includeDirectories && query.trim() ? {} : { kind: "file" as const }),
       ...(options?.imageOnly ? { imageOnly: true } : {}),
     },
     limit,
