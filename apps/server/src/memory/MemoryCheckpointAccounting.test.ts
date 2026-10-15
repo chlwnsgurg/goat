@@ -24,7 +24,11 @@ import {
   CHECKPOINT_PAGE_OVERHEAD,
   futureForgetReserve,
 } from "./MemoryCheckpointBound.ts";
-import { encodeCompactReceipt, ImportCompletedNoopCodec } from "./MemoryStore.ts";
+import {
+  encodeCompactReceipt,
+  ImportCompletedNoopCodec,
+  ImportNoopResultCodec,
+} from "./MemoryStore.ts";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
@@ -406,4 +410,27 @@ it.effect(
         "Failure",
       );
     }),
+);
+
+const decodeNoopResult = Schema.decodeUnknownEffect(ImportNoopResultCodec);
+it.effect("completed result codec slot rejects changed, empty and body-bearing objects", () =>
+  Effect.gen(function* () {
+    const item = {
+      sourceItemKey: "synthetic",
+      outcome: "noop",
+      memoryId,
+      revisionId: M.MemoryRevisionId.make(id(9)),
+    };
+    const value = { codecVersion: 1, items: [item] };
+    yield* decodeNoopResult(value, { onExcessProperty: "error" });
+    for (const bad of [
+      { ...value, items: [] },
+      { ...value, items: [{ ...item, outcome: "created" }] },
+      { ...value, body: "forbidden" },
+    ])
+      assert.strictEqual(
+        (yield* decodeNoopResult(bad, { onExcessProperty: "error" }).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+  }),
 );

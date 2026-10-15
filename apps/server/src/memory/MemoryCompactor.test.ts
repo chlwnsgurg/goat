@@ -512,7 +512,7 @@ describe("MemoryCompactor", () => {
         const pages = rows.map((r) => JSON.parse(r.metadata_json) as M.MemoryHubCheckpointPage);
         assert.isTrue(M.validateMemoryCheckpointRecords(pages));
         assert.strictEqual(
-          pages.flatMap((p) => p.items).filter((i) => i.status === "active")[0]!.payload.text,
+          pages.flatMap((p) => p.items).find((i) => i.status === "active")!.payload.text,
           op.payload.text,
         );
         assert.strictEqual(pages.flatMap((p) => p.revisions)[0]!.payload!.text, op.payload.text);
