@@ -345,6 +345,11 @@ function MemoryRecords({
   );
   const value = page.data ? Option.getOrNull(page.data) : null;
   const items = value?.items ?? [];
+  const [listLayout, setListLayout] = useState<{
+    items: readonly MemoryItem[];
+    height: number;
+    sizes: ReadonlyMap<string, number>;
+  } | null>(null);
   function select(item: MemoryItem) {
     void navigate({
       to: "/settings/memory",
@@ -463,7 +468,25 @@ function MemoryRecords({
             data={items}
             keyExtractor={(item) => item.memoryId}
             estimatedItemSize={72}
-            style={{ height: Math.min(320, items.length * 88) }}
+            style={{
+              height:
+                listLayout?.items === items ? listLayout.height : Math.min(320, items.length * 88),
+            }}
+            onItemSizeChanged={({ itemKey, size }) => {
+              setListLayout((previous) => {
+                if (previous?.items === items && previous.sizes.get(itemKey) === size)
+                  return previous;
+                const sizes = new Map(previous?.items === items ? previous.sizes : []);
+                sizes.set(itemKey, size);
+                const height = Math.min(
+                  320,
+                  Math.ceil(
+                    items.reduce((total, item) => total + (sizes.get(item.memoryId) ?? 88), 0),
+                  ),
+                );
+                return { items, height, sizes };
+              });
+            }}
             renderItem={({ item }) => (
               <SettingsRow
                 title={
