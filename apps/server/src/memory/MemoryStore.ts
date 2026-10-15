@@ -3459,12 +3459,24 @@ const make = Effect.gen(function* () {
     now: number,
     limit: number,
   ) {
+    // Filter before LIMIT: a page of derived work must not hide its unsent inputs.
+    // Payload deps are bounded to 100; CROSS JOIN keeps edge iteration ahead of
+    // revision/outbox PK probes instead of letting SQLite scan all revisions in a space.
+    // Only live local submissions wait. Missing/GC/terminal inputs still reach the hub's
+    // authoritative typed rejection, without inventing a receipt or retry attempt here.
     const rows = yield* stored(
       "sync-outbox",
       sql<WorkRow & { sync_version: number; operation_digest: string | null }>`
       SELECT o.* FROM memory_outbox o LEFT JOIN memory_events e ON e.memory_space_id=o.space AND e.operation_id=json_extract(o.metadata_json,'$.operationId')
       WHERE o.space=${space} AND o.kind IN ('sync','revert_intent')
       AND (o.status IN ('pending','retry') OR (o.status='running' AND o.claimed_until<=${now})) AND o.next_attempt_at<=${now}
+      AND NOT EXISTS (
+        SELECT 1 FROM memory_payloads p CROSS JOIN json_each(p.dependencies_json) dep
+        CROSS JOIN memory_revisions r ON r.space=o.space AND r.revision_id=dep.value
+        CROSS JOIN memory_outbox prerequisite ON prerequisite.id='sync:'||r.space||':'||r.operation_id
+        WHERE p.space=o.space AND p.payload_ref=o.payload_ref
+          AND prerequisite.status IN ('pending','retry','running')
+      )
       ORDER BY CASE WHEN json_extract(o.metadata_json,'$.kind')='forget'
         THEN CASE WHEN json_extract(e.receipt_json,'$.forgetRetryOf') IS NOT NULL OR
           EXISTS (SELECT 1 FROM memory_events b WHERE b.memory_space_id=o.space AND json_extract(b.receipt_json,'$.forgetExpansion.operationId')=json_extract(o.metadata_json,'$.operationId'))
