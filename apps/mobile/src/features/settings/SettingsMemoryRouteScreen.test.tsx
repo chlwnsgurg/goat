@@ -1762,8 +1762,8 @@ describe("native WP6 Settings commands", () => {
 });
 
 it.each([
-  ["pending", "Revert awaiting hub"],
-  ["revision_changed", "Memory changed since resolution"],
+  ["pending", "Waiting for revert approval"],
+  ["revision_changed", "Memory changed; cannot revert"],
   ["refused", "Last revert attempt was refused: permission denied"],
 ] as const)(
   "reads %s revert history through the shared query without a new mutation",
