@@ -15,6 +15,9 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 const state = vi.hoisted(() => ({
   allowed: true,
+  write: true,
+  queries: new Map<string, unknown>(),
+  refresh: vi.fn(),
   calls: vi.fn(),
   environment: null as unknown,
   result: null as unknown,
@@ -25,19 +28,48 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("@effect/atom-react", async (original) => ({
   ...(await original<typeof import("@effect/atom-react")>()),
-  useAtomValue: () => state.allowed,
+  useAtomValue: (atom: { label: string }) =>
+    state.allowed && (!["forget", "upsert"].includes(atom.label) || state.write),
 }));
-vi.mock("../../state/memory", () => ({
-  memoryEnvironment: Object.fromEntries(
-    [
-      "forget",
-      "revertResolution",
-      "hubSettingsGet",
-      "hubSettingsUpdate",
-      "ownerSourceReadPolicyGet",
-      "ownerSourceReadPolicyUpdate",
-    ].map((label) => [label, { label, permissionAtom: () => ({}) }]),
-  ),
+vi.mock("../../state/memory", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const drafts = Atom.family((_key: string) => {
+    const stored = Atom.make<{ text: string; memoryIds: readonly string[] } | null>(null);
+    return Atom.writable(
+      (get) => get(stored)?.text ?? null,
+      (ctx, value: { text: string; memoryIds: readonly string[] } | null) => ctx.set(stored, value),
+    );
+  });
+  return {
+    memoryEnvironment: {
+      ...Object.fromEntries(
+        [
+          "syncStatus",
+          "upsert",
+          "forget",
+          "revertResolution",
+          "hubSettingsGet",
+          "hubSettingsUpdate",
+          "ownerSourceReadPolicyGet",
+          "ownerSourceReadPolicyUpdate",
+        ].map((label) => [label, { label, permissionAtom: () => ({ label }) }]),
+      ),
+      ...Object.fromEntries(
+        ["list", "search", "read", "history", "readSource"].map((label) => [
+          label,
+          () => ({ label }),
+        ]),
+      ),
+      draftAtom: ({ draftId }: { draftId: string }) => drafts(draftId),
+    },
+  };
+});
+vi.mock("../../state/query", () => ({
+  useEnvironmentQuery: ({ label }: { label: string }) => ({
+    data: state.queries.get(label) ?? Option.none(),
+    error: null,
+    refresh: state.refresh,
+  }),
 }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: { label: string }) => {
@@ -96,6 +128,10 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
   state.allowed = true;
+  state.write = true;
+  state.queries.clear();
+  state.executors.clear();
+  state.refresh.mockClear();
   state.calls.mockClear();
   state.environment = null;
   state.result = { _tag: "Failure" };
@@ -476,4 +512,284 @@ it("keeps pending reenrollment when removing another owner permission and render
   await click("Confirm sharing off");
   expect(container.textContent).toContain("Sharing: disabled");
   expect(container.textContent).toContain("Turn sharing on");
+});
+
+// A manually settled Deferred keeps response ordering deterministic without timers.
+async function deferredResult() {
+  let resolve!: (value: unknown) => void;
+  const promise = new Promise<unknown>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+const success = (value: unknown) => ({ _tag: "Success", value });
+const hubView = (version: number, space = id(1)) => ({
+  version,
+  settings: { mode: "hub", memorySpaceId: space },
+});
+const ownerView = (version: number, requester: string) => ({
+  version,
+  revocationPropagation: "complete",
+  policy: {
+    ownerPolicyEpoch: version,
+    allowedRequesterEnvironmentIds: [requester],
+    enrollments: [],
+    removals: [],
+  },
+});
+async function supportedScreen(withDetails = true) {
+  const { AtomRegistry } = await import("effect/reactivity");
+  const registry = AtomRegistry.make();
+  const get = registry.get.bind(registry);
+  vi.spyOn(registry, "get").mockImplementation((atom) => {
+    const label = (atom as unknown as { label?: string }).label;
+    if (label)
+      return (state.allowed && (!["forget", "upsert"].includes(label) || state.write)) as never;
+    return get(atom);
+  });
+  state.environment = {
+    serverConfig: { environment: { capabilities: { memory: { protocolVersion: 1 } } } },
+  };
+  state.queries.set("read", Option.some(activeItem));
+  state.responses.set("hubSettingsGet", success(hubView(2)));
+  state.responses.set("ownerSourceReadPolicyGet", success(ownerView(2, "device-a")));
+  const target = validateMemorySettingsSearch({
+    environmentId: "remote-owner",
+    ...(withDetails ? { memorySpaceId: id(1), memoryId: id(2) } : {}),
+  });
+  const render = () =>
+    act(async () =>
+      root.render(
+        <RegistryContext value={registry}>
+          <MemorySettings target={target} />
+        </RegistryContext>,
+      ),
+    );
+  await render();
+  return { render, registry };
+}
+
+it.each([false, true])(
+  "clears an in-flight forget on write-only revoke and ignores its late result (after regrant: %s)",
+  async (afterRegrant) => {
+    const first = await deferredResult();
+    state.executors.set("forget", (input) => {
+      state.calls(input);
+      return first.promise;
+    });
+    const { render } = await supportedScreen();
+    await click("Forget memory");
+    await click("Confirm forget");
+    const oldRequest = state.calls.mock.calls.at(-1)![0];
+    state.write = false;
+    await render();
+    expect(container.textContent).toContain("Synthetic original");
+    expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
+    if (afterRegrant) {
+      state.write = true;
+      await render();
+    }
+    await act(async () => {
+      await first.resolve({ _tag: "Failure" });
+      await first.promise;
+    });
+    state.write = true;
+    await render();
+    expect(container.textContent).not.toContain("Forget request failed");
+    await click("Forget memory");
+    expect(
+      [...container.querySelectorAll("button")].find((b) => b.textContent === "Confirm forget")
+        ?.disabled,
+    ).toBe(false);
+    await click("Cancel");
+    await click("Forget memory");
+    state.executors.set("forget", async (input) => {
+      state.calls(input);
+      return { _tag: "Failure" };
+    });
+    await render();
+    await click("Confirm forget");
+    expect(state.calls.mock.calls.at(-1)![0]).not.toEqual(oldRequest);
+    expect(container.textContent).toContain("Forget request failed");
+  },
+);
+
+it("discards the editor and its draft on write-only revoke and requires Edit after regrant", async () => {
+  const { render, registry } = await supportedScreen();
+  const writes = vi.spyOn(registry, "set");
+  await click("Edit memory");
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Memory text"]')?.value).toBe(
+    "Synthetic original",
+  );
+  state.write = false;
+  await render();
+  expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
+  expect(writes.mock.calls.at(-1)?.[1]).toBeNull();
+  state.write = true;
+  await render();
+  expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
+  await click("Edit memory");
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Memory text"]')?.value).toBe(
+    "Synthetic original",
+  );
+});
+
+it("keeps the latest hub and owner versions when pre-Reload loads finish last", async () => {
+  const oldHub = await deferredResult();
+  const newHub = await deferredResult();
+  const oldOwner = await deferredResult();
+  const newOwner = await deferredResult();
+  let hubCalls = 0;
+  let ownerCalls = 0;
+  state.executors.set("hubSettingsGet", () => (++hubCalls === 1 ? oldHub : newHub).promise);
+  state.executors.set(
+    "ownerSourceReadPolicyGet",
+    () => (++ownerCalls === 1 ? oldOwner : newOwner).promise,
+  );
+  await supportedScreen();
+  await click("Reload sharing settings");
+  await act(async () => {
+    await newHub.resolve(success(hubView(9)));
+    await newOwner.resolve(success(ownerView(9, "latest-device")));
+    await Promise.all([newHub.promise, newOwner.promise]);
+  });
+  await act(async () => {
+    await oldHub.resolve(success({ version: 2, settings: { mode: "disabled" } }));
+    await oldOwner.resolve(success(ownerView(2, "old-device")));
+    await Promise.all([oldHub.promise, oldOwner.promise]);
+  });
+  expect(container.textContent).toContain("Sharing: hub");
+  expect(container.textContent).toContain("latest-device");
+  expect(container.textContent).not.toContain("old-device");
+  await click("Turn sharing off");
+  await click("Confirm sharing off");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({ input: { expectedVersion: 9 } });
+  await click("Remove access");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+    input: { expectedVersion: 9, allowedRequesterEnvironmentIds: [] },
+  });
+});
+
+async function enterInput(label: string, text: string) {
+  const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+it("refreshes sharing status and connected-space destination after off/on and explicit Reload", async () => {
+  let syncReply = Promise.resolve<unknown>(success({ state: "online", memorySpaceId: id(1) }));
+  const getSync = vi.fn(() => syncReply);
+  state.executors.set("syncStatus", getSync);
+  await supportedScreen(false);
+  expect(getSync).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain("Hub connected");
+  await click("Open connected memory space");
+  expect(state.navigate.mock.calls.at(-1)![0]).toMatchObject({
+    search: { environmentId: "remote-owner", memorySpaceId: id(1) },
+  });
+  const offSync = await deferredResult();
+  syncReply = offSync.promise;
+  state.responses.set(
+    "hubSettingsUpdate",
+    success({ view: { version: 3, settings: { mode: "disabled" } } }),
+  );
+  await click("Turn sharing off");
+  await click("Confirm sharing off");
+  expect(getSync).toHaveBeenCalledTimes(2);
+  expect(container.textContent).not.toContain("Hub connected");
+  expect(container.textContent).not.toContain("Open connected memory space");
+  await act(async () => {
+    await offSync.resolve(success({ state: "disabled", memorySpaceId: null }));
+    await offSync.promise;
+  });
+  expect(container.textContent).toContain("Memory sharing off");
+  syncReply = Promise.resolve(success({ state: "online", memorySpaceId: id(8) }));
+  state.responses.set("hubSettingsUpdate", success({ view: hubView(4, id(8)) }));
+  await click("Turn sharing on");
+  await click("This environment is the hub");
+  await enterInput("Sharing memory space ID (optional)", id(8));
+  await click("Enable sharing");
+  expect(getSync).toHaveBeenCalledTimes(3);
+  expect(container.textContent).toContain("Hub connected");
+  expect(
+    state.calls.mock.calls.findLast(
+      ([input]) => (input as { input?: { action?: string } }).input?.action === "configure",
+    )?.[0],
+  ).toMatchObject({ input: { settings: { mode: "hub", memorySpaceId: id(8) } } });
+  await click("Open connected memory space");
+  expect(state.navigate.mock.calls.at(-1)![0]).toMatchObject({
+    search: { environmentId: "remote-owner", memorySpaceId: id(8) },
+  });
+  syncReply = Promise.resolve(success({ state: "offline", memorySpaceId: id(7) }));
+  await click("Reload sharing settings");
+  expect(getSync).toHaveBeenCalledTimes(4);
+  expect(container.textContent).toContain("Hub disconnected");
+  await click("Open connected memory space");
+  expect(state.navigate.mock.calls.at(-1)![0]).toMatchObject({
+    search: { environmentId: "remote-owner", memorySpaceId: id(7) },
+  });
+});
+
+it("unmounts retained bodies and an open source when read is None, without reopening source on recovery", async () => {
+  const { render } = await supportedScreen();
+  state.queries.set(
+    "history",
+    Option.some({
+      ...retained,
+      revisions: [
+        {
+          revision: revision(3),
+          payload: {
+            ...payload,
+            text: "Retained body",
+            evidence: [
+              {
+                origin: "user",
+                sourceThread: { environmentId: "source-owner", threadId: "synthetic-thread" },
+                messageIds: ["synthetic-message"],
+              },
+            ],
+          },
+        },
+      ],
+      resolutions: [entry],
+      reports: [],
+    }),
+  );
+  state.queries.set(
+    "readSource",
+    Option.some({
+      messages: [{ messageId: "synthetic-message", text: "Source body" }],
+      nextCursor: null,
+    }),
+  );
+  await render();
+  const original = [...container.querySelectorAll("details")].find((el) =>
+    el.textContent?.includes("Retained body"),
+  )!;
+  await act(async () => {
+    original.open = true;
+  });
+  await click("Read original");
+  expect(container.textContent).toContain("Retained body");
+  expect(container.textContent).toContain("Synthetic judgment");
+  expect(container.textContent).toContain("Source body");
+  state.queries.set("read", Option.none());
+  await render();
+  expect(container.textContent).toContain("Visible details have been cleared");
+  expect(container.textContent).not.toContain("Retained body");
+  expect(container.textContent).not.toContain("Synthetic judgment");
+  expect(container.textContent).not.toContain("Source body");
+  expect(container.textContent).not.toContain("Read original");
+  expect(container.textContent).not.toContain("Close original");
+  state.queries.set("read", Option.some(activeItem));
+  await render();
+  expect(container.textContent).toContain("Read original");
+  expect(container.textContent).not.toContain("Source body");
+  expect(container.textContent).not.toContain("Close original");
+  const recovered = [...container.querySelectorAll("details")].find((el) =>
+    el.textContent?.includes("Retained body"),
+  )!;
+  expect(recovered.open).toBe(false);
 });

@@ -38,7 +38,7 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useEnvironment, useEnvironments } from "../../state/environments";
 import {
   readPreparedConnection,
@@ -193,10 +193,18 @@ function MemoryDestinationContent({
   const getSync = useAtomCommand(memoryEnvironment.syncStatus, { reportFailure: false });
   const [sync, setSync] = useState<MemorySyncStatus | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncReload, setSyncReload] = useState(0);
+  const refreshSync = useCallback(() => {
+    setSync(null);
+    setSyncError(null);
+    setSyncReload((value) => value + 1);
+  }, []);
   const navigate = useNavigate();
   const [space, setSpace] = useState("");
   useEffect(() => {
     let current = true;
+    setSync(null);
+    setSyncError(null);
     if (canSync)
       void getSync({ environmentId, input: {} }).then((result) => {
         if (!current) return;
@@ -206,7 +214,7 @@ function MemoryDestinationContent({
     return () => {
       current = false;
     };
-  }, [canSync, environmentId, getSync]);
+  }, [canSync, environmentId, getSync, syncReload]);
   const chooseSpace = (value: string) => {
     try {
       const memorySpaceId = decodeSpace(value);
@@ -228,6 +236,7 @@ function MemoryDestinationContent({
           <MemoryAdministration
             key={`${environmentId}:${canAdmin}:${canOwner}`}
             environmentId={environmentId}
+            onSharingRefresh={refreshSync}
           />
         ) : (
           <p>Settings write permission is required to manage sharing and source access.</p>
@@ -280,7 +289,13 @@ function MemoryDestinationContent({
   );
 }
 
-export function MemoryAdministration({ environmentId }: { environmentId: EnvironmentId }) {
+export function MemoryAdministration({
+  environmentId,
+  onSharingRefresh,
+}: {
+  environmentId: EnvironmentId;
+  onSharingRefresh?: () => void;
+}) {
   const registry = useContext(RegistryContext);
   const getHub = useAtomCommand(memoryEnvironment.hubSettingsGet, { reportFailure: false });
   const getOwner = useAtomCommand(memoryEnvironment.ownerSourceReadPolicyGet, {
@@ -309,19 +324,25 @@ export function MemoryAdministration({ environmentId }: { environmentId: Environ
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    let current = true;
     void getHub({ environmentId, input: {} }).then((result) => {
-      if (!mounted.current) return;
+      if (!current) return;
       if (result._tag === "Success") setHub(result.value);
       else setError("Could not load sharing settings.");
     });
     if (registry.get(memoryEnvironment.ownerSourceReadPolicyGet.permissionAtom(environmentId)))
       void getOwner({ environmentId, input: {} }).then((result) => {
-        if (!mounted.current) return;
+        if (!current) return;
         if (result._tag === "Success") setOwner(result.value);
         else setError("Could not load source access policy.");
       });
     return () => {
-      mounted.current = false;
+      current = false;
     };
   }, [environmentId, getHub, getOwner, registry, reload]);
   async function saveHub(input: MemoryHubSettingsUpdateInput) {
@@ -338,6 +359,7 @@ export function MemoryAdministration({ environmentId }: { environmentId: Environ
     setBusy(false);
     if (result._tag === "Success") {
       setHub(result.value.view);
+      onSharingRefresh?.();
       setHubIntent(null);
       setConfigure(false);
       setConfirmDisable(false);
@@ -389,7 +411,9 @@ export function MemoryAdministration({ environmentId }: { environmentId: Environ
           setOwnerIntent(null);
           setConfirmDisable(false);
           setConfigure(false);
+          setError(null);
           setReload((value) => value + 1);
+          onSharingRefresh?.();
         }}
       >
         Reload sharing settings
@@ -802,7 +826,7 @@ function MemoryDetails({
     }),
   );
   const item = read.data ? Option.getOrNull(read.data) : null;
-  if (item === null && editing) setEditing(false);
+  if ((item === null || !canWrite) && editing) setEditing(false);
   const value = history.data ? Option.getOrNull(history.data) : null;
   const navigate = useNavigate();
   return (
@@ -870,7 +894,7 @@ function MemoryDetails({
         Refresh details
       </Button>
       <h3>Resolution history</h3>
-      {value ? (
+      {item && value ? (
         <>
           {value.resolutions.map((entry) => {
             const display = presentMemoryResolution(entry);
@@ -1107,6 +1131,25 @@ export function MemoryForgetControl({
   item: MemoryItem;
 }) {
   const canForget = useAtomValue(memoryEnvironment.forget.permissionAtom(environmentId));
+  return (
+    <MemoryForgetRequest
+      key={String(canForget)}
+      environmentId={environmentId}
+      item={item}
+      canForget={canForget}
+    />
+  );
+}
+
+function MemoryForgetRequest({
+  environmentId,
+  item,
+  canForget,
+}: {
+  environmentId: EnvironmentId;
+  item: MemoryItem;
+  canForget: boolean;
+}) {
   const registry = useContext(RegistryContext);
   const forget = useAtomCommand(memoryEnvironment.forget, { reportFailure: false });
   const [intent, setIntent] = useState<ReturnType<typeof memoryForgetIntent>>(null);
@@ -1119,7 +1162,6 @@ export function MemoryForgetControl({
       mounted.current = false;
     };
   }, []);
-  if (!canForget && intent !== null) setIntent(null);
   const available = presentMemoryItem(item).canForget && memoryForgetIntent(item) !== null;
   async function submit() {
     if (!intent || busy || !registry.get(memoryEnvironment.forget.permissionAtom(environmentId)))
