@@ -104,20 +104,25 @@ export function MemorySettings({ target }: { target: MemorySettingsSearch }) {
               isMemoryEnvironmentAvailable(item.serverConfig?.environment.capabilities),
             )
             .map((item) => (
-              <Button
+              <SettingsRow
                 key={item.environmentId}
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  void navigate({
-                    to: "/settings/memory",
-                    search: validateMemorySettingsSearch({ environmentId: item.environmentId }),
-                    hash: "",
-                  })
+                title={item.label}
+                control={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      void navigate({
+                        to: "/settings/memory",
+                        search: validateMemorySettingsSearch({ environmentId: item.environmentId }),
+                        hash: "",
+                      })
+                    }
+                  >
+                    Open Memory
+                  </Button>
                 }
-              >
-                {item.label}
-              </Button>
+              />
             ))}
         </SettingsSection>
       </SettingsPageContainer>
@@ -125,7 +130,12 @@ export function MemorySettings({ target }: { target: MemorySettingsSearch }) {
   if (!isMemoryEnvironmentAvailable(environment?.serverConfig?.environment.capabilities))
     return (
       <SettingsPageContainer>
-        <p role="status">Update or reconnect the selected environment to use Memory.</p>
+        <SettingsSection title="Memory">
+          <SettingsRow
+            title="Memory unavailable"
+            description="Update or reconnect the selected environment to use Memory."
+          />
+        </SettingsSection>
       </SettingsPageContainer>
     );
   return (
@@ -153,7 +163,12 @@ function MemoryDestination({
   return (
     <SettingsPageContainer>
       {connection === null ? (
-        <p role="status">Reconnect this environment to continue.</p>
+        <SettingsSection title="Memory">
+          <SettingsRow
+            title="Device disconnected"
+            description="Reconnect this environment to continue."
+          />
+        </SettingsSection>
       ) : (
         <MemoryDestinationContent
           key={`${identity.key}:${canRead}`}
@@ -258,10 +273,12 @@ function MemoryDestinationContent({
           memorySpaceId={memorySpaceId}
         />
       ) : (
-        <p role="status">
-          Memory read permission is required to view records. Write permission does not grant read
-          access.
-        </p>
+        <SettingsSection title="Memories">
+          <SettingsRow
+            title="Memory read permission required"
+            description="Memory read permission is required to view records. Write permission does not grant read access."
+          />
+        </SettingsSection>
       )}
     </>
   );
@@ -326,14 +343,16 @@ function MemoryRecords({
           }
         />
         {adding && canWrite ? (
-          <MemoryEditor
-            environmentId={environmentId}
-            memorySpaceId={memorySpaceId}
-            onClose={() => {
-              setAdding(false);
-              page.refresh();
-            }}
-          />
+          <SettingsRow title="New memory">
+            <MemoryEditor
+              environmentId={environmentId}
+              memorySpaceId={memorySpaceId}
+              onClose={() => {
+                setAdding(false);
+                page.refresh();
+              }}
+            />
+          </SettingsRow>
         ) : null}
         <SettingsRow
           title="Search memories"

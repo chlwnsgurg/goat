@@ -270,11 +270,13 @@ export function MemoryAdministration({
                   : "Memory off"
           }
           description={
-            hub?.settings.mode === "hub"
-              ? "Devices you add here share memory with it."
-              : hub?.settings.mode === "member"
-                ? `Shares memory with ${name(hub.settings.hubEnvironmentId)}.`
-                : "Memory is off on this device. Make this device the hub, or add it from the hub's Memory settings."
+            !hub
+              ? "Sharing settings are not loaded yet."
+              : hub.settings.mode === "hub"
+                ? "Devices you add here share memory with it."
+                : hub?.settings.mode === "member"
+                  ? `Shares memory with ${name(hub.settings.hubEnvironmentId)}.`
+                  : "Memory is off on this device. Make this device the hub, or add it from the hub's Memory settings."
           }
           status={
             sync && hub?.settings.mode !== "disabled" ? presentMemorySync(sync).label : undefined
