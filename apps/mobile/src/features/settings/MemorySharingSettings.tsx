@@ -9,10 +9,15 @@ import {
   type MemoryOwnerSourceReadPolicyView,
   type MemorySyncStatus,
 } from "@goat/contracts";
-import { presentMemoryOwnerPolicy } from "@goat/client-runtime/memory-presentation";
+import {
+  presentMemoryOwnerPolicy,
+  presentMemorySync,
+} from "@goat/client-runtime/memory-presentation";
 import { memoryDeviceFlow } from "@goat/client-runtime/memory-device-flow";
 import { useContext, useEffect, useRef, useState } from "react";
-import { View, TextInput } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
+import { useCallback } from "react";
+import { AppState, View, TextInput } from "react-native";
 import * as Crypto from "expo-crypto";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -61,6 +66,7 @@ const operationId = () => MemoryOperationId.make(Crypto.randomUUID());
 export function MemoryAdministration({
   environmentId,
   onSharingRefresh,
+  sync,
 }: {
   environmentId: EnvironmentId;
   onSharingRefresh?: () => void;
@@ -168,6 +174,26 @@ export function MemoryAdministration({
       supportsMemoryProtocol(
         registry.get(serverEnvironment.configValueAtom(e.environmentId))!.environment.capabilities,
       ),
+  );
+  const focusedOnce = useRef(false);
+  const refreshBlocked = useRef(false);
+  refreshBlocked.current = busy || pending !== null || recovery;
+  useFocusEffect(
+    useCallback(() => {
+      const refresh = () => {
+        if (refreshBlocked.current || intent.current || ownerIntent.current || flow.current) return;
+        setReload((value) => value + 1);
+      };
+      if (focusedOnce.current) refresh();
+      focusedOnce.current = true;
+      const subscription = AppState.addEventListener("change", (state) => {
+        if (state === "active") refresh();
+      });
+      return () => {
+        loadGeneration.current += 1;
+        subscription.remove();
+      };
+    }, []),
   );
   useEffect(() => {
     let current = true;
@@ -396,6 +422,9 @@ export function MemoryAdministration({
                 ? `Shares memory with ${name(hub.settings.hubEnvironmentId)}`
                 : "Memory off"}
         </Copy>
+        {sync && hub && hub.settings.mode !== "disabled" ? (
+          <Copy>{presentMemorySync(sync).label}</Copy>
+        ) : null}
         {hub ? (
           hub.settings.mode === "disabled" ? (
             <Action

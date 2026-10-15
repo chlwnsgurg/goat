@@ -1,5 +1,5 @@
 import { RegistryContext, useAtomValue, useAtomSet } from "@effect/atom-react";
-import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import { useNavigation, useFocusEffect, type StaticScreenProps } from "@react-navigation/native";
 import {
   AuthMemoryReadScope,
   AuthOrchestrationReadScope,
@@ -17,6 +17,7 @@ import {
   type MemoryRevisionId,
   type MemoryRevertResolutionInput,
   type MemoryRevertResult,
+  type MemoryForgetInput,
 } from "@goat/contracts";
 import {
   presentMemoryItem,
@@ -31,7 +32,7 @@ import { squashAtomCommandFailure } from "@goat/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Modal, FlatList, Pressable, TextInput, View } from "react-native";
+import { AppState, Modal, FlatList, Pressable, TextInput, View } from "react-native";
 import * as Crypto from "expo-crypto";
 import { AppText as Text } from "../../components/AppText";
 import { ScreenScrollView } from "../../components/ScreenScrollView";
@@ -46,6 +47,7 @@ import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import { MemoryAdministration } from "./MemorySharingSettings";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsRow } from "./components/SettingsRow";
 import {
   memoryExpectedHeads,
@@ -346,7 +348,6 @@ function MemoryConnected({
   const load = useCallback(async () => {
     if (!mounted.current || !registry.get(memory.syncStatus.permissionAtom(environmentId))) return;
     const before = ++generation.current;
-    setStatus(null);
     setError(null);
     const result = await sync({ environmentId, input: {} });
     if (
@@ -361,11 +362,18 @@ function MemoryConnected({
       setError(null);
     } else if (AsyncResult.isFailure(result)) setError(failureMessage(result));
   }, [registry, environmentId, sync]);
-  useEffect(() => {
-    // The command synchronizes the selected environment, not derived render state.
-    // oxlint-disable-next-line react/set-state-in-effect
-    if (readAllowed) void load();
-  }, [load, readAllowed]);
+  useFocusEffect(
+    useCallback(() => {
+      if (readAllowed) void load();
+      const subscription = AppState.addEventListener("change", (state) => {
+        if (state === "active" && readAllowed) void load();
+      });
+      return () => {
+        generation.current += 1;
+        subscription.remove();
+      };
+    }, [load, readAllowed]),
+  );
   const readySpace =
     status && status.state !== "disabled" && status.state !== "bootstrapping"
       ? status.memorySpaceId
@@ -453,8 +461,34 @@ function MemoryBrowser({
   const [selected, setSelected] = useState(params.memoryId);
   const [creating, setCreating] = useState(false);
   const [scope] = useState<MemoryScope | undefined>();
-  const [quarantine] = useState(true);
+  const [quarantine, setQuarantine] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const forget = useAtomCommand(memory.forget);
+  const liveDestination = useMemoryLifetime(params.environmentId);
+  // This owner survives the detail's immediate forget fence.
+  async function forgetMemory(input: MemoryForgetInput, imported: boolean) {
+    const result = await forget({ environmentId: params.environmentId, input });
+    if (
+      liveDestination() &&
+      readEnvironmentScope(params.environmentId, AuthMemoryReadScope) &&
+      registry.get(memory.forget.permissionAtom(params.environmentId))
+    ) {
+      if (AsyncResult.isSuccess(result)) {
+        if (result.value.outcome === "rejected") {
+          setNotice("Could not forget this memory. Review the record before trying again.");
+        } else {
+          setSelected((current) => (current === input.memoryId ? undefined : current));
+          setNotice(
+            "Forgotten. Other devices remove it when they sync." +
+              (imported ? ` ${MEMORY_FORGET_NOTICE}` : ""),
+          );
+          registry.refresh(atom);
+        }
+      } else if (AsyncResult.isFailure(result))
+        setNotice("Forget request failed. Try again to continue this request.");
+    }
+    return result;
+  }
   const exposure = useAtomValue(
     memory.exposureAtom({ environmentId: params.environmentId, input: { memorySpaceId } }),
   );
@@ -496,11 +530,7 @@ function MemoryBrowser({
         memoryId={selected}
         memoryEnabled={memoryEnabled}
         onClose={() => setSelected(undefined)}
-        onForgotten={() => {
-          setSelected(undefined);
-          setNotice("Forgotten. Other devices remove it when they sync.");
-          registry.refresh(atom);
-        }}
+        onForget={forgetMemory}
       />
     );
   if (creating && memoryEnabled)
@@ -541,6 +571,24 @@ function MemoryBrowser({
               setCursor(undefined);
             }}
           />
+          {query || search ? (
+            <Action
+              label="Clear"
+              onPress={() => {
+                setQuery("");
+                setSearch("");
+                setCursor(undefined);
+              }}
+            />
+          ) : null}
+          <SettingsSwitchRow
+            label="Include quarantined"
+            value={quarantine}
+            onValueChange={(value) => {
+              setQuarantine(value);
+              setCursor(undefined);
+            }}
+          />
           <Action
             label="Remember something"
             onPress={() => setCreating(true)}
@@ -563,13 +611,16 @@ function MemoryBrowser({
           }}
           className="gap-1 border-b border-border p-4"
         >
-          <Text className="text-foreground">
+          <Text
+            className={item.status === "forgotten" ? "text-foreground-muted" : "text-foreground"}
+          >
             {item.status === "active"
               ? item.payload.text
               : item.status === "forgotten"
                 ? "Forgotten memory"
                 : "Conflicting memory"}
           </Text>
+          {item.status === "forgotten" ? <Copy>The memory body has been removed.</Copy> : null}
           <Text className="text-sm text-foreground-muted">
             {presentMemoryItem(item).label}
             {presentMemoryItem(item).syncLabel ? ` · ${presentMemoryItem(item).syncLabel}` : ""}
@@ -587,7 +638,9 @@ function MemoryBrowser({
       }
       ListFooterComponent={
         <>
-          <Action label="Refresh memories" onPress={() => registry.refresh(atom)} />
+          {!page || AsyncResult.isFailure(result) ? (
+            <Action label="Refresh memories" onPress={() => registry.refresh(atom)} />
+          ) : null}
           {page?.nextCursor ? (
             <Action
               label="Next page"
@@ -602,19 +655,28 @@ function MemoryBrowser({
   );
 }
 
+function originalDisplay(history: MemoryHistoryPage, id: MemoryRevisionId) {
+  const index = history.revisions.findIndex((pair) => pair.revision.revisionId === id);
+  const pair = history.revisions[index];
+  return { number: index + 1, pair };
+}
+
 function MemoryDetails({
   params,
   memorySpaceId,
   memoryId,
   memoryEnabled,
-  onForgotten,
+  onForget,
   onClose,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
   readonly memoryId: MemoryId;
   readonly memoryEnabled: boolean;
-  readonly onForgotten: () => void;
+  readonly onForget: (
+    input: MemoryForgetInput,
+    imported: boolean,
+  ) => Promise<AsyncResult.AsyncResult<import("@goat/contracts").MemoryMutationReceipt, unknown>>;
   readonly onClose: () => void;
 }) {
   const registry = useContext(RegistryContext);
@@ -639,7 +701,6 @@ function MemoryDetails({
   const canWrite = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
   const canForget = useAtomValue(memory.forget.permissionAtom(params.environmentId));
   const canReadOriginal = useEnvironmentScope(params.environmentId, AuthOrchestrationReadScope);
-  const forget = useAtomCommand(memory.forget);
   const liveDestination = useMemoryLifetime(params.environmentId);
   const [confirmForget, setConfirmForget] = useState(false);
   const intent = useRef<{
@@ -683,14 +744,19 @@ function MemoryDetails({
     busy.current = true;
     setPending(true);
     try {
-      const result = await forget({
-        environmentId: params.environmentId,
-        input: { memorySpaceId, memoryId, ...intent.current },
-      });
+      const result = await onForget(
+        { memorySpaceId, memoryId, ...intent.current },
+        live?.status === "active" && live.payload.evidence.some((e) => e.origin === "import"),
+      );
       if (!mounted.current || !registry.get(memory.forget.permissionAtom(params.environmentId)))
         return;
       if (AsyncResult.isSuccess(result)) {
-        onForgotten();
+        if (result.value.outcome === "rejected") {
+          intent.current = null;
+          setRetry(false);
+          setNotice("Could not forget this memory. Review the record before trying again.");
+          return;
+        }
         intent.current = null;
         setRetry(false);
         registry.refresh(readAtom);
@@ -788,7 +854,12 @@ function MemoryDetails({
       {confirmForget ? (
         <MemoryConfirmation
           title="Forget this memory?"
-          message={MEMORY_FORGET_NOTICE}
+          message={
+            "Forget this memory and its derived content?" +
+            (item?.status === "active" && item.payload.evidence.some((e) => e.origin === "import")
+              ? ` ${MEMORY_FORGET_NOTICE}`
+              : "")
+          }
           label="Confirm forget"
           onClose={() => setConfirmForget(false)}
           onConfirm={() => {
@@ -815,7 +886,7 @@ function MemoryDetails({
       <SettingsSection title="History">
         {item ? (
           <>
-            {history?.revisions.map((pair, index) => (
+            {history?.revisions.map((pair) => (
               <View key={pair.revision.revisionId}>
                 <Copy>
                   {history.resolutions.some((r) =>
@@ -823,7 +894,8 @@ function MemoryDetails({
                   )
                     ? "Original"
                     : "Version"}{" "}
-                  {index + 1} · {formatMemoryTime(pair.revision.createdAtUtc)} ·{" "}
+                  {originalDisplay(history, pair.revision.revisionId).number} ·{" "}
+                  {formatMemoryTime(pair.revision.createdAtUtc)} ·{" "}
                   {pair.revision.provenance.provider ?? "User"}
                 </Copy>
                 <Copy>{pair.payload?.text ?? "Original unavailable"}</Copy>
@@ -912,6 +984,7 @@ function MemoryRevertControl({
   const liveDestination = useMemoryLifetime(environmentId);
   const allowed = useAtomValue(memory.revertResolution.permissionAtom(environmentId));
   const revert = useAtomCommand(memory.revertResolution);
+  const { savedConnectionsById } = useSavedRemoteConnections();
   const [selected, setSelected] = useState<MemoryRevisionId | null>(null);
   const [intent, setIntent] = useState<MemoryRevertResolutionInput | null>(null);
   const [result, setResult] = useState<MemoryRevertResult | null>(null);
@@ -1006,14 +1079,27 @@ function MemoryRevertControl({
       {!result && available ? (
         <>
           <Copy>Choose the retained original to restore.</Copy>
-          {display.restorableRevisionIds.map((id, index) => (
-            <Action
-              key={id}
-              label={`${selected === id ? "Selected original" : "Restore original"} ${index + 1}`}
-              disabled={pending || intent !== null}
-              onPress={() => setSelected(id)}
-            />
-          ))}
+          {display.restorableRevisionIds.map((id) => {
+            const { number, pair } = originalDisplay(history, id);
+            return (
+              <View key={id}>
+                <Action
+                  label={`${selected === id ? "Selected original" : "Restore original"} ${number}`}
+                  disabled={pending || intent !== null}
+                  onPress={() => setSelected(id)}
+                />
+                <Copy>{pair?.payload?.text ?? "Original unavailable"}</Copy>
+                {pair ? (
+                  <Copy>
+                    {formatMemoryTime(pair.revision.createdAtUtc)} ·{" "}
+                    {pair.revision.provenance.provider ?? "User"} ·{" "}
+                    {savedConnectionsById[pair.revision.provenance.environmentId]
+                      ?.environmentLabel ?? "Unknown device"}
+                  </Copy>
+                ) : null}
+              </View>
+            );
+          })}
           <Action
             label={intent ? "Retry revert request" : "Revert resolution"}
             disabled={!selected || pending}

@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   WS_METHODS,
   MemoryItem,
+  MemoryMutationReceipt,
+  type MemoryForgetInput,
   MemorySourcePage,
   type MemoryUpsertInput,
   MemoryHistoryPage,
@@ -90,6 +92,16 @@ function revertHistory() {
     nextCursor: null,
   });
 }
+function receipt(input: unknown, rejected = false) {
+  return Schema.decodeUnknownSync(MemoryMutationReceipt)({
+    operationId: (input as MemoryForgetInput).operationId,
+    memoryId: nativeId,
+    revisionId: null,
+    outcome: rejected ? "rejected" : "deleted",
+    pendingSync: !rejected,
+    ...(rejected ? { failureCode: "revision_changed" } : {}),
+  });
+}
 describe("native Memory with shared factory", () => {
   it("searches the selected destination, retains an empty page's cursor, and clears search", async () => {
     await mount();
@@ -104,10 +116,124 @@ describe("native Memory with shared factory", () => {
       environmentId: nativeEnv,
       input: { memorySpaceId: nativeSpace, query: "absent", cursor: "synthetic-next" },
     });
-    await view.type("Search memory", "");
-    await view.click("Search");
+    await view.click("Clear");
     expect(view.container.textContent).toContain("Synthetic memory body");
   });
+  it("keeps the bootstrap subscription stable until a new reset makes it ready", async () => {
+    h = createNativeMemoryHarness();
+    const initial = h.deferred<unknown>();
+    const refresh = h.deferred<unknown>();
+    let calls = 0;
+    h.responses.set(WS_METHODS.memorySyncStatus, () =>
+      ++calls === 1 ? initial.response : calls === 2 ? refresh.response : nativeSyncStatus,
+    );
+    await h.waitForAtom(h.memory.syncStatus.permissionAtom(nativeEnv), Boolean);
+    view = renderNative(
+      h,
+      <SettingsMemoryRouteScreen route={{ params: { environmentId: nativeEnv } }} />,
+    );
+    await view.render();
+    await act(async () => {
+      await initial.succeed({ ...nativeSyncStatus, state: "bootstrapping" });
+    });
+    expect(calls).toBe(2);
+    await act(async () => {
+      await refresh.succeed({ ...nativeSyncStatus, state: "bootstrapping" });
+    });
+    expect(calls).toBe(2);
+    await view.render();
+    expect(calls).toBe(2);
+    await act(async () => {
+      await h.signal({ kind: "reset", memorySpaceId: nativeSpace, projectionWatermark: 2 });
+    });
+    expect(calls).toBe(3);
+    expect(view.container.textContent).toContain("Synthetic memory body");
+    expect(view.container.textContent).toContain("Hub connected");
+  });
+  it("retains local forget completion when the signal closes details before the receipt", async () => {
+    await mount();
+    const response = h.deferred<unknown>();
+    h.responses.set(WS_METHODS.memoryForget, () => response.response);
+    await view.click("Open memory: Synthetic memory body");
+    await view.click("Forget");
+    expect(view.container.textContent).not.toContain("provider's original");
+    await view.click("Confirm forget");
+    const input = h.calls.find((c) => c.method === WS_METHODS.memoryForget)!.input;
+    await act(async () => {
+      await h.signal({
+        kind: "forget",
+        memorySpaceId: nativeSpace,
+        memoryId: nativeId,
+        projectionWatermark: 2,
+      });
+    });
+    expect(view.container.textContent).not.toContain("Close details");
+    expect(view.container.textContent).not.toContain("Forgotten. Other devices");
+    await act(async () => {
+      await response.succeed(receipt(input));
+    });
+    expect(view.container.textContent).toContain(
+      "Forgotten. Other devices remove it when they sync.",
+    );
+  });
+  it("keeps rejected forget open and reports failure with a schema-valid receipt", async () => {
+    await mount();
+    h.responses.set(WS_METHODS.memoryForget, (input) => receipt(input, true));
+    await view.click("Open memory: Synthetic memory body");
+    await view.click("Forget");
+    await view.click("Confirm forget");
+    expect(view.container.textContent).toContain("Could not forget this memory. Review the record");
+    expect(view.container.textContent).toContain("Close details");
+    expect(view.container.textContent).not.toContain("Forgotten. Other devices");
+  });
+  it.each([2, 3])(
+    "restores the displayed Original %i with missing payloads and reversed inputs",
+    async (number) => {
+      await mount();
+      const history = revertHistory();
+      if (nativeItem.status !== "active") throw new Error("active fixture required");
+      const activeItem = nativeItem;
+      const ids = [
+        "00000000-0000-4000-8000-000000000009",
+        originalId,
+        "00000000-0000-4000-8000-000000000007",
+      ];
+      h.responses.set(WS_METHODS.memoryHistory, () =>
+        decodeHistory({
+          ...history,
+          revisions: ids.map((revisionId, index) => ({
+            revision: { ...activeItem.revision, revisionId, payloadRef: revisionId },
+            payload:
+              index === 0
+                ? null
+                : { ...activeItem.payload, text: `Distinct original ${index + 1}` },
+          })),
+          resolutions: history.resolutions.map((entry) => ({
+            ...entry,
+            resolution: { ...entry.resolution, inputRevisionIds: [ids[2], ids[1], ids[0]] },
+          })),
+        }),
+      );
+      h.responses.set(WS_METHODS.memoryRevertResolution, () => {
+        throw new Error("Synthetic response lost");
+      });
+      await view.click("Open memory: Synthetic memory body");
+      expect(view.container.textContent).toContain("Original 2");
+      expect(view.container.textContent).toContain("Original 3");
+      expect(view.container.textContent).toContain("Distinct original 2");
+      expect(view.container.textContent).toContain("Distinct original 3");
+      expect(view.container.textContent).not.toContain("Restore original 1");
+      const button = [...view.container.querySelectorAll("button")].find(
+        (node) => node.textContent === `Restore original ${number}`,
+      )!;
+      expect(button.parentElement!.textContent).toContain(`Distinct original ${number}`);
+      await view.click(`Restore original ${number}`);
+      await view.click("Revert resolution");
+      expect(
+        h.calls.find((c) => c.method === WS_METHODS.memoryRevertResolution)?.input,
+      ).toMatchObject({ restoredRevisionId: ids[number - 1] });
+    },
+  );
   it("saves through the shared command and hides the editor after grant revocation", async () => {
     await mount();
     h.responses.set(WS_METHODS.memoryUpsert, (input) => ({
@@ -135,11 +261,7 @@ describe("native Memory with shared factory", () => {
   it("forgets the exact memory after confirmation and drops invalidated bodies", async () => {
     await mount();
     await view.click("Open memory: Synthetic memory body");
-    h.responses.set(WS_METHODS.memoryForget, () => ({
-      memoryId: nativeId,
-      outcome: "deleted",
-      pendingSync: true,
-    }));
+    h.responses.set(WS_METHODS.memoryForget, (input) => receipt(input));
     await view.click("Forget");
     expect(h.calls.some((call) => call.method === WS_METHODS.memoryForget)).toBe(false);
     await act(async () => h.confirm());
@@ -402,6 +524,64 @@ describe("native sharing workflow", () => {
     );
     await view.render();
   }
+  it.each(["focus", "active"] as const)(
+    "refreshes hub, owner and sync on %s and keeps saved memories read-only after remote disable",
+    async (event) => {
+      await start();
+      h.responses.set(WS_METHODS.memorySyncStatus, () => ({
+        ...nativeSyncStatus,
+        state: "disabled",
+        memorySpaceId: null,
+      }));
+      h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
+        settings: { mode: "disabled" },
+        members: [],
+        version: 2,
+      }));
+      const ownerCalls = h.calls.filter(
+        (c) => c.method === WS_METHODS.memoryOwnerSourceReadPolicyGet,
+      ).length;
+      await act(async () => h[event]());
+      expect(
+        h.calls.filter((c) => c.method === WS_METHODS.memoryOwnerSourceReadPolicyGet),
+      ).toHaveLength(ownerCalls + 1);
+      expect(view.container.textContent).toContain("Memory off");
+      expect(view.container.textContent).toContain("Synthetic memory body");
+      await view.click("Remember something");
+      expect(view.container.querySelector('input[aria-label="Memory text"]')).toBeNull();
+    },
+  );
+  it("reloads the roster on active and leaves recovery CTA intact on focus", async () => {
+    await start();
+    h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
+      settings: { mode: "hub", memorySpaceId: nativeSpace },
+      members: [{ environmentId: nativeDevice, status: "pending_ack" }],
+      version: 2,
+    }));
+    await act(async () => h.active());
+    expect(view.container.textContent).toContain("Waiting for the device to confirm");
+    h.responses.set(WS_METHODS.memoryHubSettingsUpdate, () =>
+      Effect.fail({ code: "revision_changed" }),
+    );
+    await view.click("Turn sharing off");
+    await view.click("Stop sharing");
+    const reads = h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsGet).length;
+    await act(async () => h.focus());
+    expect(view.container.textContent).toContain("Review latest settings");
+    expect(h.calls.filter((c) => c.method === WS_METHODS.memoryHubSettingsGet)).toHaveLength(reads);
+  });
+  it("toggles quarantine without refreshing healthy lists and clears search", async () => {
+    await start();
+    expect(view.container.textContent).not.toContain("Refresh memories");
+    await view.click("Include quarantined");
+    expect(h.calls.filter((c) => c.method === WS_METHODS.memoryList).at(-1)?.input).toMatchObject({
+      includeQuarantined: true,
+    });
+    await view.type("Search memory", "absent");
+    await view.click("Search");
+    await view.click("Clear");
+    expect(view.container.textContent).toContain("Synthetic memory body");
+  });
   it("automatically displays ready memories without raw IDs or manual setup fields", async () => {
     await start();
     expect(view.container.textContent).toContain("This device is the hub");

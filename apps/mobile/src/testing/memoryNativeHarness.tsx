@@ -40,6 +40,8 @@ const bridge = vi.hoisted(() => ({
   current: null as unknown,
   platform: "ios",
   navigations: [] as unknown[],
+  focus: new Set<() => void | (() => void)>(),
+  active: new Set<(state: string) => void>(),
   confirmations: [] as Array<() => void>,
 }));
 vi.mock("react-native", async () => {
@@ -90,6 +92,12 @@ vi.mock("react-native", async () => {
     );
   return {
     View,
+    AppState: {
+      addEventListener: (_: string, listener: (state: string) => void) => {
+        bridge.active.add(listener);
+        return { remove: () => bridge.active.delete(listener) };
+      },
+    },
     Modal: (props: { visible: boolean; children?: ReactNode }) =>
       props.visible ? createElement("div", { role: "dialog" }, props.children) : null,
     Text,
@@ -116,7 +124,18 @@ vi.mock("react-native", async () => {
   };
 });
 vi.mock("expo-crypto", () => ({ randomUUID: () => globalThis.crypto.randomUUID() }));
-vi.mock("@react-navigation/native", () => ({
+vi.mock("@react-navigation/native", async () => ({
+  useFocusEffect: (callback: () => void | (() => void)) => {
+    const { useEffect } = React;
+    useEffect(() => {
+      bridge.focus.add(callback);
+      const cleanup = callback();
+      return () => {
+        bridge.focus.delete(callback);
+        cleanup?.();
+      };
+    }, [callback]);
+  },
   useNavigation: () => ({
     navigate: (...args: unknown[]) => bridge.navigations.push(args),
     goBack: () => {},
@@ -208,6 +227,21 @@ vi.mock("../features/settings/components/SettingsActionRow", () => ({
       </button>
     );
   },
+}));
+vi.mock("../features/settings/components/SettingsSwitchRow", () => ({
+  SettingsSwitchRow: (props: {
+    label: string;
+    value: boolean;
+    onValueChange: (value: boolean) => void;
+  }) => (
+    <button
+      role="switch"
+      aria-checked={props.value}
+      onClick={() => props.onValueChange(!props.value)}
+    >
+      {props.label}
+    </button>
+  ),
 }));
 vi.mock("../features/settings/components/SettingsRow", () => ({
   SettingsRow: (props: { label: string; disabled?: boolean; onPress: () => void }) => (
@@ -523,6 +557,12 @@ export function createNativeMemoryHarness() {
     memory,
     updateSettings,
     navigations: bridge.navigations,
+    focus: () => {
+      for (const callback of [...bridge.focus]) callback();
+    },
+    active: () => {
+      for (const listener of [...bridge.active]) listener("active");
+    },
     setPlatform: (platform: string) => {
       bridge.platform = platform;
     },
