@@ -105,6 +105,7 @@ export function observeSelectionActions({
     // Buttons can preserve an existing text selection while opening a menu.
     // Their release must not reopen selection actions beside the button.
     if (target?.closest("button, [role=button]")) return;
+    if (target?.closest("input, textarea, select")) return;
     // A surface may consume a press for a link or terminal mouse reporting.
     gestureActive = event.button === 0 && !event.defaultPrevented;
     dismissed = !gestureActive;

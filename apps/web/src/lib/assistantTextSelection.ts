@@ -229,13 +229,28 @@ export function captureAssistantTextSelection(
   const source = first.parentElement?.closest<HTMLElement>("[data-assistant-citation-source]");
   if (!source || !viewport.contains(source)) return null;
 
+  const captured = captureRenderedTextSelection(source, selection);
+  return captured === null ? null : { source, ...captured };
+}
+
+/** Captures visible text within one rendered surface, without claiming source line numbers. */
+export function captureRenderedTextSelection(
+  root: HTMLElement,
+  selection: Selection | null,
+): { selector: AssistantTextSelector; range: Range } | null {
+  if (selection === null || selection.isCollapsed || selection.rangeCount !== 1) return null;
+  const range = selection.getRangeAt(0).cloneRange();
+  const first = selectedTextBoundary(range, range.commonAncestorContainer, false);
+  const last = selectedTextBoundary(range, range.commonAncestorContainer, true);
+  if (first === null || last === null) return null;
+
   // Paragraph selection can end at the next block's offset 0 or a parent
   // boundary. Validate the text actually selected, not that empty endpoint.
   range.setStart(first, first === range.startContainer ? range.startOffset : 0);
   range.setEnd(last, last === range.endContainer ? range.endOffset : last.length);
-  if (!isUsableRange(source, range)) return null;
+  if (!isUsableRange(root, range)) return null;
 
-  const stream = readAssistantText(source);
+  const stream = readAssistantText(root);
   let rawStart: number | null = null;
   let rawEnd = 0;
   for (const chunk of stream.chunks) {
@@ -248,7 +263,7 @@ export function captureAssistantTextSelection(
   }
   if (rawStart === null) return null;
   const selector = createAssistantTextSelector(stream.text, rawStart, rawEnd);
-  return selector === null ? null : { source, selector, range };
+  return selector === null ? null : { selector, range };
 }
 
 function rawTextOffset(text: string, normalizedOffset: number): number {
