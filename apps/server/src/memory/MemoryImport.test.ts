@@ -2337,6 +2337,11 @@ describe("MemoryImport physical-growth source harness", () => {
               current: number | undefined;
               limit: number;
             }[] = [];
+            const resolutionRefusals: {
+              round: number;
+              index: number;
+              receipt: M.MemoryHubReceipt;
+            }[] = [];
             // Replace only model output; use the same lease and canonical Service commit
             // as MemorySyncService.runResolution, without a provider or background timers.
             const resolveChanged = (round: number) =>
@@ -2432,6 +2437,14 @@ describe("MemoryImport physical-growth source harness", () => {
                     },
                     authority.principal,
                   );
+                  if (receipt.outcome === "rejected") {
+                    resolutionRefusals.push({ round, index, receipt });
+                    yield* fs.writeFileString(
+                      `${directory}/resolution-refusals.json`,
+                      encodeUnknown(resolutionRefusals),
+                    );
+                    continue;
+                  }
                   assert.strictEqual(receipt.outcome, "accepted");
                   assert.strictEqual((yield* store.loadAggregate(space, id)).heads.length, 1);
                 }
@@ -2845,12 +2858,14 @@ describe("MemoryImport physical-growth source harness", () => {
               noopSpreadBytes: spread(noopSamples),
               rebuildSpreadBytes: spread(rebuildSamples.slice(8)),
               activeAfterChange: changed.counts.active,
+              resolutionRefusals,
               refusals,
               allowanceBytes: 1048576,
               packaged: "NOT_RUN",
             };
             yield* fs.writeFileString(`${directory}/gates.json`, encodeUnknown(gates));
             yield* Console.log(`WP5_GROWTH_GATES ${encodeUnknown(gates)}`);
+            assert.isEmpty(resolutionRefusals, "synthetic resolutions must all be admitted");
             assert.strictEqual(
               changed.counts.active,
               16,
