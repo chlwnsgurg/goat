@@ -275,7 +275,7 @@ function MemoryDestinationContent({
       ) : null}
       {memorySpaceId && canRead ? (
         <MemoryImportSettings
-          key={memorySpaceId}
+          key={`import:${memorySpaceId}`}
           environmentId={environmentId}
           memorySpaceId={memorySpaceId}
         />

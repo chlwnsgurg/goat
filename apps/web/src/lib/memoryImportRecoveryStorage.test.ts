@@ -231,3 +231,48 @@ it("revoke/removal discards late replies and removes the old destination handle"
   expect(f.workflow.getState().receipt).toBeNull();
   expect(await f.store.load(destination)).toBeNull();
 });
+it("serializes 65 selected items into three persisted chunks", async () => {
+  const f = fixture();
+  await f.ready();
+  f.setRequest(async (input) => {
+    if (input.action === "apply")
+      expect((await f.store.load(destination))?.operationId).toBe(input.operationId);
+    return f.respond(input);
+  });
+  await f.workflow.apply();
+  expect(
+    f.calls.filter((input) => input.action === "apply").map((input) => input.items.length),
+  ).toEqual([32, 32, 1]);
+  expect(f.workflow.getState()).toMatchObject({ phase: "completed", settledChunks: 3 });
+  expect(await f.store.load(destination)).toBeNull();
+});
+it("session invalidation rejects late replies while preserving exact status recovery", async () => {
+  const f = fixture(1);
+  await f.ready();
+  const admitted = deferred<void>();
+  const reply = deferred<void>();
+  f.setRequest(async (input) => {
+    if (input.action === "apply") {
+      admitted.resolve();
+      await reply.promise;
+    }
+    return f.respond(input);
+  });
+  const applying = f.workflow.apply();
+  await admitted.promise;
+  f.workflow.invalidate({ ...destination, session: "reconnected" });
+  reply.resolve();
+  await applying;
+  expect(f.workflow.getState().receipt).toBeNull();
+  const handle = await f.store.load(destination);
+  expect(handle).not.toBeNull();
+  f.calls.length = 0;
+  await f.create().recover();
+  expect(f.calls).toEqual([
+    {
+      action: "status",
+      memorySpaceId: destination.memorySpaceId,
+      operationId: handle!.operationId,
+    },
+  ]);
+});

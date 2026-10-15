@@ -1841,3 +1841,25 @@ it.each(["available", "partial", "unavailable"])(
     );
   },
 );
+it("preserves the recovery handle while disconnected and checks it on reconnect", async () => {
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(78));
+  const store = memoryImportRecoveryStorage();
+  await store.save({ environmentId: envId, memorySpaceId: spaceId }, operationId);
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  state.connection = null;
+  await act(async () => root.render(null));
+  expect((await store.load({ environmentId: envId, memorySpaceId: spaceId }))?.operationId).toBe(
+    operationId,
+  );
+  state.connection = {};
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  expect(
+    state.calls.mock.calls.map(
+      (call) => (call[0] as { input: MemoryImportProviderInput }).input.action,
+    ),
+  ).toEqual(["status", "status"]);
+});
