@@ -2891,11 +2891,15 @@ it.effect.each(["resolve", "unrelated issue"] as const)(
         assert.isUndefined(
           (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess,
         );
-        if (pruneBy === "unrelated issue")
+        if (pruneBy === "unrelated issue") {
           yield* registry.issue({
             threadId: ThreadId.make("unrelated-live-credential"),
             providerInstanceId: modelSelection.instanceId,
           });
+          timestamp = 1_000;
+          assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
+          timestamp = 1_101;
+        }
         assert.isUndefined(yield* registry.resolve(token));
         assert.isUndefined(yield* registry.currentMemoryPolicy!(config.providerSessionId));
         assert.isUndefined(
