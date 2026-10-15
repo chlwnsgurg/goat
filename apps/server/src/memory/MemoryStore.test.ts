@@ -7879,7 +7879,7 @@ it.effect.each(missingCheckpointCases)(
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const store = yield* Store.MemoryStore;
-      yield* store.apply(approved());
+      yield* store.apply({ ...approved(), identity: checkpoint().identities[0]! });
       assert.deepStrictEqual(
         yield* sql`SELECT * FROM memory_quota_counters WHERE space='_checkpoint_dirty'`,
         [],
@@ -7964,7 +7964,7 @@ it.effect(
         yield* sql`SELECT * FROM memory_quota_counters WHERE space=${space} AND dimension='checkpoint_initialized'`,
         [],
       );
-      yield* store.apply(approved());
+      yield* store.apply({ ...approved(), identity: checkpoint().identities[0]! });
       yield* store.transact(sql`DELETE FROM memory_identity_ledger WHERE space=${space}`);
       assert.deepStrictEqual(
         yield* sql`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows','checkpoint_initialized') ORDER BY dimension`,
