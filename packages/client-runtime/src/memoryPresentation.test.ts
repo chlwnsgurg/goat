@@ -5,6 +5,12 @@ import {
   MEMORY_FORGET_NOTICE,
   MEMORY_REVOCATION_NOTICE,
   memoryReportTarget,
+  isMemoryReportRetryCandidate,
+  presentMemoryReportReset,
+  presentMemoryCoverage,
+  presentMemoryStorage,
+  presentMemoryProcessing,
+  presentMemoryReceipt,
   presentMemoryAvailability,
   presentMemoryForget,
   presentMemoryItem,
@@ -374,7 +380,12 @@ describe("memory presentation boundaries", () => {
   it.each([undefined, -1, 11, 1.5, NaN])(
     "treats invalid or absent attempts %s as unknown",
     (automaticAttempts) => {
-      expect(presentMemoryReport(report, { automaticAttempts })).toMatchObject({
+      expect(
+        presentMemoryReport({
+          ...report,
+          ...(automaticAttempts === undefined ? {} : { automaticAttempts }),
+        }),
+      ).toMatchObject({
         automaticAttempts: null,
         retryState: "unknown",
         canResetInSettings: false,
@@ -383,12 +394,11 @@ describe("memory presentation boundaries", () => {
   );
   it("requires exact exhausted owner and no active claim for a Settings reset", () => {
     const options = {
-      automaticAttempts: 10,
       isResetEligible: true,
       isDeliveryOwner: true,
       hasActiveClaim: false,
     };
-    expect(presentMemoryReport(report, options)).toMatchObject({
+    expect(presentMemoryReport({ ...report, automaticAttempts: 10 }, options)).toMatchObject({
       canResetInSettings: true,
       label: "All 10 automatic retries used",
     });
@@ -399,14 +409,17 @@ describe("memory presentation boundaries", () => {
       { hasActiveClaim: true },
       { hasActiveClaim: undefined },
     ]) {
-      expect(presentMemoryReport(report, { ...options, ...overrides }).canResetInSettings).toBe(
-        false,
-      );
+      expect(
+        presentMemoryReport(
+          { ...report, automaticAttempts: 10, ...overrides },
+          { ...options, ...overrides },
+        ).canResetInSettings,
+      ).toBe(false);
     }
     expect(presentMemoryReport({ ...report, state: "pending" }, options).canResetInSettings).toBe(
       false,
     );
-    expect(presentMemoryReport(report, { automaticAttempts: 0 }).retryState).toBe("remaining");
+    expect(presentMemoryReport({ ...report, automaticAttempts: 0 }).retryState).toBe("remaining");
   });
   it("links delivered reports by their actual thread, not the resolving device", () => {
     const reportThread = {
@@ -445,6 +458,191 @@ describe("memory presentation boundaries", () => {
     expect(presentMemoryRunAccess({ memoryGrantCeiling: "read_write" })).toMatchObject({
       savedCeiling: "read_write",
       effectiveAccess: "unknown",
+    });
+  });
+});
+
+describe("shared memory progress presentation", () => {
+  it("reads attempts from the report DTO with no caller options", () => {
+    expect(presentMemoryReport(report).automaticAttempts).toBeNull();
+    expect(presentMemoryReport({ ...report, automaticAttempts: 0 }).automaticAttempts).toBe(0);
+    expect(presentMemoryReport({ ...report, automaticAttempts: 10 }).retryState).toBe("exhausted");
+    const owner = M.EnvironmentId.make("resolver");
+    expect(isMemoryReportRetryCandidate({ ...report, automaticAttempts: 10 }, owner)).toBe(true);
+    expect(isMemoryReportRetryCandidate(report, owner)).toBe(false);
+    expect(isMemoryReportRetryCandidate({ ...report, automaticAttempts: 9 }, owner)).toBe(false);
+    expect(
+      isMemoryReportRetryCandidate({ ...report, automaticAttempts: 10, state: "pending" }, owner),
+    ).toBe(false);
+    expect(
+      isMemoryReportRetryCandidate(
+        { ...report, automaticAttempts: 10 },
+        M.EnvironmentId.make("other"),
+      ),
+    ).toBe(false);
+    expect(presentMemoryReportReset({ resetCount: 2, unchangedCount: 1 }).label).toBe(
+      "2 reports ready to retry; 1 unchanged",
+    );
+    expect(presentMemoryReportReset({ resetCount: 0, unchangedCount: 3 }).label).toBe(
+      "0 reports ready to retry; 3 unchanged",
+    );
+  });
+  it.each(["available", "partial", "unavailable", undefined] as const)(
+    "distinguishes empty results and %s coverage",
+    (status) => {
+      const coverage =
+        status === undefined
+          ? undefined
+          : M.MemoryIndexCoverage.make({
+              status,
+              eligibleItems: status === "available" ? 0 : 1,
+              indexedItems: 0,
+              unindexedItems: status === "available" ? 0 : 1,
+              projectionWatermark: 0,
+            });
+      const result = presentMemoryCoverage(coverage, 0);
+      expect(result.complete).toBe(status === "available");
+      expect(result.emptyLabel).toBe(
+        status === "available"
+          ? "No memories found"
+          : "Results are incomplete; memories may still be available",
+      );
+      expect(presentMemoryCoverage(coverage, 1).emptyLabel).toBeNull();
+    },
+  );
+  it("keeps scanner checking neutral and a secret hold forget-only despite an accepted receipt", () => {
+    const checking = M.MemoryLocalAvailability.make({
+      exposure: "held",
+      reasons: ["scanner_pending"],
+      deferred: [],
+      cleanupPending: false,
+    });
+    const secret = M.MemoryLocalAvailability.make({ ...checking, reasons: ["secret_detected"] });
+    const receipt = M.MemoryMutationReceipt.make({
+      operationId: report.operationId,
+      memoryId: item.memoryId,
+      outcome: "accepted",
+      revisionId: item.revision.revisionId,
+      pendingSync: true,
+    });
+    expect(presentMemoryReceipt(receipt, checking)).toMatchObject({
+      label: "Memory change accepted",
+      syncLabel: "Waiting to sync",
+      availability: { label: "Checking content", detailsAvailable: false, canForget: true },
+    });
+    expect(presentMemoryItem({ ...item, localAvailability: secret })).toMatchObject({
+      canEdit: false,
+      detailsAvailable: false,
+      canForget: true,
+    });
+    expect(presentMemoryReceipt(receipt, secret).availability.label).toBe(
+      "Held for sensitive content",
+    );
+    expect(
+      presentMemoryReceipt(
+        { ...receipt, outcome: "rejected", failureCode: "storage_failed" },
+        visible,
+      ).label,
+    ).toBe("Memory change rejected");
+  });
+  it("maps processing independently of connection and exposure", () => {
+    const processing = M.MemoryProcessingStatus.make({
+      lastReceivedHubSequence: 4,
+      receiveLag: null,
+      deferred: 1,
+      oldestDeferredAtUtc: M.MemoryUtcTimestamp.make(applied),
+      unindexedItems: 1,
+      scannerHeldItems: 1,
+      scannerPendingItems: 1,
+      missingParentItems: 1,
+      pendingCleanupItems: 1,
+      reportBacklog: 2,
+      reportFailed: 1,
+      hubAdmissionFailures: 1,
+      indexCoverage: {
+        status: "partial",
+        eligibleItems: 2,
+        indexedItems: 1,
+        unindexedItems: 1,
+        projectionWatermark: 4,
+      },
+    });
+    expect(presentMemoryProcessing(processing)).toMatchObject({
+      checkingLabel: "Checking content",
+      heldLabel: "Sensitive content on hold; forgetting is available",
+      waitingLabel: "Waiting for earlier memories",
+      cleanupLabel: "Cleaning up remaining content",
+      receiveLabel: "Sync progress unknown",
+      reportLabel: "Some reports could not be delivered",
+      admissionLabel: "Some memory changes could not be accepted",
+    });
+  });
+  it("shows capacity, held reclamation and indexing pause without raw storage fields", () => {
+    const storage = M.MemoryStorageStatus.make({
+      quotas: [
+        {
+          dimension: "body",
+          current: 128,
+          limit: 128,
+          reclaimable: 0,
+          reserved: 0,
+          warning: "full",
+          blockedReasons: ["capacity_exceeded"],
+        },
+      ],
+      tables: [],
+      measuredAtUtc: null,
+      dbFileBytes: null,
+      walBytes: null,
+      freelistBytes: null,
+      freelistRatio: null,
+      retentionFloor: 0,
+      checkpointSequence: 0,
+      compaction: {
+        lastRunAtUtc: null,
+        removedRows: 0,
+        reclaimedLogicalBytes: 0,
+        reclaimableLogicalBytes: 0,
+        blockedReasons: ["retained_revert_input"],
+      },
+      ftsAdmission: {
+        state: "braked",
+        changedAtUtc: null,
+        lastMeasuredAtUtc: null,
+        allocatedBytes: null,
+        measurementStatus: "unavailable",
+      },
+      growth: {
+        current: null,
+        deltas: ([1, 7, 30] as const).flatMap((days) =>
+          M.MemoryStorageMetric.literals.map((metric) => ({
+            days,
+            metric,
+            status: "unavailable" as const,
+            baselineAtUtc: null,
+            currentAtUtc: null,
+            elapsedMs: null,
+            deltaBytes: null,
+            reason: "missing_baseline" as const,
+          })),
+        ),
+      },
+      warnings: ["capacity_exceeded"],
+    });
+    expect(presentMemoryStorage(storage)).toEqual({
+      label: "Memory storage limit reached",
+      reasons: ["Memory storage limit reached", "Originals retained for revert"],
+      searchLabel: "Search indexing paused",
+    });
+    expect(
+      presentMemoryStorage({
+        ...storage,
+        quotas: [],
+        ftsAdmission: { ...storage.ftsAdmission, state: "open" },
+      }),
+    ).toMatchObject({
+      label: "Memory storage usage unknown",
+      searchLabel: "Search storage usage unknown",
     });
   });
 });

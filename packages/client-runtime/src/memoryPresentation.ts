@@ -1,5 +1,10 @@
 import {
   MEMORY_REPORT_MAX_AUTOMATIC_ATTEMPTS,
+  type EnvironmentId,
+  type MemoryIndexCoverage,
+  type MemoryProcessingStatus,
+  type MemoryResetReportAttemptsResult,
+  type MemoryStorageStatus,
   type MemoryHistoryPage,
   type MemoryItem,
   type MemoryLocalAvailability,
@@ -205,14 +210,13 @@ export function presentMemoryOwnerPolicy(view: MemoryOwnerSourceReadPolicyView) 
 export function presentMemoryReport(
   report: MemoryReportDelivery,
   options: {
-    readonly automaticAttempts?: number | undefined;
     readonly isDeliveryOwner?: boolean;
     /** Authoritative classification/approval eligibility, supplied after the lifecycle handoff. */
     readonly isResetEligible?: boolean;
     readonly hasActiveClaim?: boolean | undefined;
   } = {},
 ) {
-  const value = options.automaticAttempts;
+  const value = report.automaticAttempts;
   const attempts =
     value !== undefined &&
     Number.isInteger(value) &&
@@ -271,5 +275,148 @@ export function presentMemoryRunAccess(input: {
     savedCeiling: input.memoryGrantCeiling ?? "none",
     effectiveAccess: "unknown" as const,
     effectiveReason: null,
+  };
+}
+
+/** A candidate only: approval/claim checks and the final reset decision belong to the server. */
+export function isMemoryReportRetryCandidate(report: MemoryReportDelivery, owner: EnvironmentId) {
+  return (
+    report.state === "failed" &&
+    report.automaticAttempts === MEMORY_REPORT_MAX_AUTOMATIC_ATTEMPTS &&
+    report.resolvingEnvironmentId === owner
+  );
+}
+
+export function presentMemoryReportReset(result: MemoryResetReportAttemptsResult) {
+  return {
+    label: `${result.resetCount} reports ready to retry; ${result.unchangedCount} unchanged`,
+    resetCount: result.resetCount,
+    unchangedCount: result.unchangedCount,
+  };
+}
+
+/** Empty results only establish absence when coverage is complete. */
+export function presentMemoryCoverage(
+  coverage: MemoryIndexCoverage | undefined,
+  resultCount: number,
+) {
+  const status = coverage?.status ?? "unknown";
+  return {
+    status,
+    complete: status === "available",
+    label:
+      status === "unavailable"
+        ? "Memory search unavailable"
+        : status === "partial"
+          ? "Some memories are still being indexed"
+          : status === "unknown"
+            ? "Memory coverage unknown"
+            : "Memory search ready",
+    emptyLabel:
+      resultCount > 0
+        ? null
+        : status === "available"
+          ? "No memories found"
+          : "Results are incomplete; memories may still be available",
+  };
+}
+
+const STORAGE_REASON_LABELS = {
+  retained_revert_input: "Originals retained for revert",
+  active_lease: "Waiting for active work",
+  pending_work: "Work pending",
+  checkpoint_pinned: "Checkpoint retained",
+  storage_unavailable: "Memory storage unavailable",
+  index_unavailable: "Memory search unavailable",
+  fts_braked: "Search indexing paused",
+  cleanup_failed: "Memory cleanup needs attention",
+  report_backlog: "Reports waiting to be delivered",
+  capacity_exceeded: "Memory storage limit reached",
+} as const;
+
+export function presentMemoryStorage(storage: MemoryStorageStatus) {
+  const levels = ["normal", "warning", "critical", "full"] as const;
+  const level = levels.reduce(
+    (current, candidate) =>
+      storage.quotas.some((quota) => quota.warning === candidate) ? candidate : current,
+    "normal",
+  );
+  const reasons = [
+    ...new Set([
+      ...storage.warnings,
+      ...storage.quotas.flatMap((quota) => quota.blockedReasons),
+      ...storage.compaction.blockedReasons,
+    ]),
+  ];
+  return {
+    label:
+      level === "full"
+        ? "Memory storage limit reached"
+        : level === "critical"
+          ? "Memory storage nearly full"
+          : level === "warning"
+            ? "Memory storage getting full"
+            : storage.measuredAtUtc === null
+              ? "Memory storage usage unknown"
+              : "Memory storage available",
+    reasons: reasons.map((reason) => STORAGE_REASON_LABELS[reason]),
+    searchLabel:
+      storage.ftsAdmission.state === "braked"
+        ? "Search indexing paused"
+        : storage.ftsAdmission.measurementStatus === "unavailable"
+          ? "Search storage usage unknown"
+          : "Search indexing available",
+  };
+}
+
+export function presentMemoryProcessing(processing: MemoryProcessingStatus) {
+  return {
+    coverage: presentMemoryCoverage(
+      processing.indexCoverage,
+      processing.indexCoverage.indexedItems,
+    ),
+    checkingLabel: processing.scannerPendingItems > 0 ? "Checking content" : null,
+    heldLabel:
+      processing.scannerHeldItems > 0 ? "Sensitive content on hold; forgetting is available" : null,
+    waitingLabel:
+      processing.deferred > 0 || processing.missingParentItems > 0
+        ? "Waiting for earlier memories"
+        : null,
+    cleanupLabel: processing.pendingCleanupItems > 0 ? "Cleaning up remaining content" : null,
+    receiveLabel:
+      processing.receiveLag === null
+        ? "Sync progress unknown"
+        : processing.receiveLag > 0
+          ? "Receiving memories"
+          : "Memories received",
+    reportLabel:
+      processing.reportFailed > 0
+        ? "Some reports could not be delivered"
+        : processing.reportBacklog > 0
+          ? "Reports waiting to be delivered"
+          : null,
+    admissionLabel:
+      processing.hubAdmissionFailures > 0 ? "Some memory changes could not be accepted" : null,
+  };
+}
+
+/** A receipt describes admission; exposure independently determines whether content can be shown. */
+export function presentMemoryReceipt(
+  receipt: MemoryMutationReceipt,
+  availability: MemoryLocalAvailability,
+) {
+  return {
+    label:
+      receipt.outcome === "rejected"
+        ? "Memory change rejected"
+        : receipt.outcome === "conflicted"
+          ? "Conflicting memory on hold"
+          : receipt.outcome === "deleted"
+            ? "Forget request applied"
+            : receipt.outcome === "noop"
+              ? "Memory unchanged"
+              : "Memory change accepted",
+    syncLabel: receipt.pendingSync ? "Waiting to sync" : null,
+    availability: presentMemoryAvailability(availability),
   };
 }
