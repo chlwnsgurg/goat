@@ -6118,158 +6118,64 @@ const make = Effect.gen(function* () {
     space: M.MemorySpaceId,
     scope: M.MemoryScope,
   ) {
-    const scoped = yield* stored(
-      "usage-scope",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_items WHERE space=${space} AND scope_key=${scopeKey(scope)} AND status!='forgotten'`,
+    const rows = yield* stored(
+      "usage-counters",
+      sql<{ space: string; dimension: string; scope_key: string; value: number }>`
+      SELECT space,dimension,scope_key,value FROM memory_quota_counters
+      WHERE (space=${space} OR space='_usage_environment')
+        AND dimension IN ('usage_items','usage_summaries','usage_live_bytes','usage_payload_bytes','usage_identities','usage_identity_bytes','usage_reserved_keys','usage_reserved_receipts','usage_keys','usage_key_bytes','usage_lineage_bytes','usage_work_items','usage_work_bytes','usage_log_rows','usage_log_bytes','usage_receipts','usage_receipt_bytes') AND scope_key IN ('',${scopeKey(scope)})`,
     );
-    const summaryCount = yield* stored(
-      "usage-summaries",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_items i WHERE space=${space} AND scope_key=${scopeKey(scope)} AND status!='forgotten' AND EXISTS (SELECT 1 FROM memory_revisions r JOIN json_each(i.heads_json) h WHERE r.space=i.space AND r.revision_id=h.value AND json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL)`,
+    const get = (dimension: string, environment = false, scoped = false) =>
+      rows.find(
+        (r) =>
+          r.space === (environment ? "_usage_environment" : space) &&
+          r.dimension === `usage_${dimension}` &&
+          r.scope_key === (scoped ? scopeKey(scope) : ""),
+      )?.value ?? 0;
+    const extra = yield* stored(
+      "usage-existing-counters",
+      sql<{ space: string; dimension: string; value: number }>`
+      SELECT space,dimension,value FROM memory_quota_counters WHERE scope_key='' AND
+      ((space=${space} AND dimension IN ('import_metadata','report_items','report_bytes')) OR
+       (space='_hub_global' AND dimension='hub_private_metadata'))`,
     );
-    const local = yield* stored(
-      "usage-local",
-      sql<{ count: number }>`SELECT count(*) AS count FROM memory_items WHERE status!='forgotten'`,
-    );
-    const live = yield* stored(
-      "usage-live",
-      sql<{
-        count: number;
-      }>`SELECT count(*) AS count FROM memory_items WHERE space=${space} AND status!='forgotten'`,
-    );
-    const identities = yield* stored(
-      "usage-identities",
-      sql<{
-        count: number;
-        bytes: number;
-        reserved_receipts: number;
-        reserved_keys: number;
-      }>`SELECT count(*) AS count,coalesce(sum(reserve_bytes),0) AS bytes,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=memory_identity_ledger.space AND t.memory_id=memory_identity_ledger.memory_id) THEN 1 ELSE 0 END),0) AS reserved_receipts,coalesce(sum(reserve_keys),0) AS reserved_keys FROM memory_identity_ledger WHERE space=${space}`,
-    );
-    const payloads = yield* stored(
-      "usage-payloads",
-      sql<{
-        live: number;
-        history: number;
-        all_bytes: number;
-      }>`SELECT coalesce(sum(CASE WHEN EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS live,coalesce(sum(CASE WHEN NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref) THEN length(CAST(p.body_json AS BLOB)) ELSE 0 END),0) AS history,coalesce(sum(length(CAST(p.body_json AS BLOB))),0) AS all_bytes FROM memory_payloads p WHERE p.space=${space}`,
-    );
-    const receipts = yield* stored(
-      "usage-receipts",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(bytes),0) AS bytes FROM (
-        SELECT operation_id,coalesce(length(compact_blob),length(CAST(compact_json AS BLOB))) AS bytes FROM memory_compact_receipts WHERE space=${space}
-        UNION ALL SELECT operation_id,${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} AS bytes FROM memory_events e WHERE memory_space_id=${space}
-          AND NOT EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=e.memory_space_id AND c.operation_id=e.operation_id))`,
-    );
-    const keys = yield* stored(
-      "usage-keys",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM memory_import_keys WHERE space=${space}`,
-    );
-    const work = yield* stored(
-      "usage-work",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(length(CAST(metadata_json AS BLOB))),0) AS bytes FROM memory_outbox WHERE space=${space} AND status IN ('pending','retry','running')`,
-    );
-    const reports = yield* stored(
-      "usage-reports",
-      sql<{
-        count: number;
-      }>`SELECT coalesce((SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='report_items' AND scope_key=''),0) AS count`,
-    );
-    const log = yield* stored(
-      "usage-log",
-      sql<{
-        count: number;
-        bytes: number;
-      }>`SELECT count(*) AS count,coalesce(sum(length(CAST(metadata_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) AS bytes FROM memory_events WHERE memory_space_id=${space}`,
-    );
-    const environment = yield* stored(
-      "usage-environment",
-      sql<{
-        live: number;
-        history: number;
-        ids: number;
-        receipts: number;
-        permanent: number;
-        receipt_bytes: number;
-      }>`SELECT
-      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref)) AS live,
-      (SELECT coalesce(sum(length(CAST(p.body_json AS BLOB))),0) FROM memory_payloads p WHERE NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND i.memory_id=p.memory_id AND v.payload_ref=p.payload_ref)) AS history,
-      (SELECT count(*) FROM memory_identity_ledger) AS ids,
-      (SELECT count(*) FROM (SELECT memory_space_id AS space,operation_id FROM memory_events UNION SELECT space,operation_id FROM memory_compact_receipts))+(SELECT count(*) FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipts,
-      (SELECT coalesce(sum(reserve_bytes),0) FROM memory_identity_ledger)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_keys)+(SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) FROM memory_import_lineage) AS permanent,
-      (SELECT coalesce(sum(coalesce(length(compact_blob),length(CAST(compact_json AS BLOB)))),0) FROM memory_compact_receipts)+
-      (SELECT count(*)*${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} FROM memory_events e WHERE NOT EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=e.memory_space_id AND c.operation_id=e.operation_id))+
-      (SELECT count(*)*${M.MEMORY_COMPACT_RECEIPT_MAX_BYTES} FROM memory_identity_ledger l WHERE NOT EXISTS (SELECT 1 FROM memory_tombstones t WHERE t.space=l.space AND t.memory_id=l.memory_id)) AS receipt_bytes`,
-    );
-    const lineage = yield* stored(
-      "usage-lineage",
-      sql<{ bytes: number }>`
-      SELECT coalesce(sum(length(CAST(record_json AS BLOB))),0) AS bytes FROM memory_import_lineage WHERE space=${space}`,
-    );
-    const importUsage = yield* stored(
-      "usage-import",
-      sql<{
-        value: number;
-      }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='import_metadata' AND scope_key=''`,
-    );
-    const importMetadata = importUsage[0]?.value ?? 0;
+    const existing = (dimension: string) =>
+      extra.find((r) => r.dimension === dimension)?.value ?? 0;
+    const permanent = (environment = false) =>
+      get("identity_bytes", environment) +
+      get("key_bytes", environment) +
+      get("lineage_bytes", environment) +
+      get("receipt_bytes", environment) +
+      get("reserved_receipts", environment) * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES;
     return {
-      scopeItems: scoped[0]!.count,
-      scopeSummaries: summaryCount[0]!.count,
-      scopeExplicit: scoped[0]!.count - summaryCount[0]!.count,
-      environmentItems: local[0]!.count,
-      environmentLiveBytes: environment[0]!.live,
-      environmentHistoryBytes: environment[0]!.history,
-      environmentLifetimeIds: environment[0]!.ids,
-      environmentReceipts: environment[0]!.receipts,
-      environmentPermanentBytes:
-        environment[0]!.permanent +
-        environment[0]!.receipt_bytes +
-        ((yield* globalHubCounters()).find((row) => row.dimension === "hub_private_metadata")
-          ?.value ?? 0),
-      spaceItems: live[0]!.count,
-      lifetimeIds: identities[0]!.count,
-      permanentBytes:
-        importMetadata +
-        identities[0]!.bytes +
-        lineage[0]!.bytes +
-        keys[0]!.bytes +
-        receipts[0]!.bytes +
-        identities[0]!.reserved_receipts * M.MEMORY_COMPACT_RECEIPT_MAX_BYTES,
-      receipts: receipts[0]!.count + identities[0]!.reserved_receipts,
-      liveBytes: payloads[0]!.live,
-      historyBytes: payloads[0]!.history,
+      scopeItems: get("items", false, true),
+      scopeSummaries: get("summaries", false, true),
+      scopeExplicit: get("items", false, true) - get("summaries", false, true),
+      environmentItems: get("items", true),
+      environmentLiveBytes: get("live_bytes", true),
+      environmentHistoryBytes: get("payload_bytes", true) - get("live_bytes", true),
+      environmentLifetimeIds: get("identities", true),
+      environmentReceipts: get("receipts", true) + get("reserved_receipts", true),
+      environmentPermanentBytes: permanent(true) + existing("hub_private_metadata"),
+      spaceItems: get("items"),
+      lifetimeIds: get("identities"),
+      permanentBytes: permanent() + existing("import_metadata"),
+      receipts: get("receipts") + get("reserved_receipts"),
+      liveBytes: get("live_bytes"),
+      historyBytes: get("payload_bytes") - get("live_bytes"),
       logicalBytes:
-        importMetadata +
-        payloads[0]!.all_bytes +
-        log[0]!.bytes +
-        keys[0]!.bytes +
-        lineage[0]!.bytes,
-      keys: keys[0]!.count + identities[0]!.reserved_keys,
-      workItems: work[0]!.count,
-      workBytes: work[0]!.bytes,
-      reportItems: reports[0]!.count,
-      reportBytes:
-        (yield* stored(
-          "usage-report-bytes",
-          sql<{
-            value: number;
-          }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='report_bytes' AND scope_key=''`,
-        ))[0]?.value ?? 0,
-      logRows: log[0]!.count,
-      logBytes: log[0]!.bytes,
+        existing("import_metadata") +
+        get("payload_bytes") +
+        get("log_bytes") +
+        get("key_bytes") +
+        get("lineage_bytes"),
+      keys: get("keys") + get("reserved_keys"),
+      workItems: get("work_items"),
+      workBytes: get("work_bytes"),
+      reportItems: existing("report_items"),
+      reportBytes: existing("report_bytes"),
+      logRows: get("log_rows"),
+      logBytes: get("log_bytes"),
     };
   });
   const readImportRegistrationTx: ImportStorePorts["readImportRegistrationTx"] = Effect.fnUntraced(
