@@ -27,6 +27,12 @@ const mocks = vi.hoisted(() => ({
   openMiniPlayer: vi.fn(),
   closeMiniPlayer: vi.fn(),
   closeRightPanel: vi.fn(),
+  activateSurface: vi.fn(),
+  setActivePreviewTab: vi.fn(),
+  activateAddressTab: null as ((tabId: string) => boolean) | null,
+  liveTabIds: new Set(["tab-1"]),
+  liveEpoch: null as string | null,
+  addressSurfaces: [{ id: "browser:tab-1", kind: "preview" as const, resourceId: "tab-1" }],
   openPictureInPicture: vi.fn(async (_tabId: string): Promise<void> => undefined),
   closePictureInPicture: vi.fn(async (_tabId: string): Promise<void> => undefined),
   pickElement: vi.fn(),
@@ -111,6 +117,11 @@ vi.mock("~/localApi", () => ({
 vi.mock("~/previewStateStore", () => ({
   rememberPreviewUrl: mocks.rememberPreviewUrl,
   updatePreviewServerSnapshot: vi.fn(),
+  setActivePreviewTab: mocks.setActivePreviewTab,
+  readThreadPreviewState: () => ({
+    serverEpoch: mocks.liveEpoch,
+    sessions: Object.fromEntries([...mocks.liveTabIds].map((id) => [id, {}])),
+  }),
   useThreadPreviewState: () => ({
     activeTabId: "tab-1",
     serverEpoch: mocks.serverEpoch,
@@ -205,11 +216,24 @@ vi.mock("~/previewMiniPlayerStore", () => {
   };
 });
 
-vi.mock("~/rightPanelStore", () => ({
-  useRightPanelStore: {
-    getState: () => ({ close: mocks.closeRightPanel }),
-  },
-}));
+vi.mock("~/rightPanelStore", () => {
+  const state = () => ({
+    close: mocks.closeRightPanel,
+    activateSurface: mocks.activateSurface,
+    byThreadKey: {
+      "environment-1:thread-1": { surfaces: mocks.addressSurfaces },
+      "environment-2:thread-1": {
+        surfaces: [{ id: "browser:tab-1", kind: "preview", resourceId: "tab-1" }],
+      },
+    },
+  });
+  return {
+    useRightPanelStore: Object.assign(
+      (select: (value: ReturnType<typeof state>) => unknown) => select(state()),
+      { getState: state },
+    ),
+  };
+});
 
 vi.mock("~/components/ui/toast", () => ({
   stackedThreadToast: vi.fn(),
@@ -232,6 +256,7 @@ vi.mock("./previewBridge", () => ({
 vi.mock("./PreviewChromeRow", () => ({
   PreviewChromeRow: (props: {
     onSubmit: (url: string) => void;
+    onActivateTab: (tabId: string) => boolean;
     onPickElement?: () => void;
     onPictureInPicture?: () => void;
     pictureInPicture?: boolean;
@@ -240,6 +265,7 @@ vi.mock("./PreviewChromeRow", () => ({
     };
   }) => {
     mocks.submittedUrl = props.onSubmit;
+    mocks.activateAddressTab = props.onActivateTab;
     mocks.toggleAnnotation = props.onPickElement ?? null;
     mocks.togglePictureInPicture = props.onPictureInPicture ?? null;
     mocks.toggleNativePictureInPicture =
@@ -344,6 +370,11 @@ function installTestDom() {
 describe("PreviewView navigation", () => {
   beforeEach(() => {
     mocks.navigate.mockClear();
+    mocks.activateSurface.mockClear();
+    mocks.setActivePreviewTab.mockClear();
+    mocks.liveTabIds = new Set(["tab-1"]);
+    mocks.liveEpoch = null;
+    mocks.addressSurfaces = [{ id: "browser:tab-1", kind: "preview", resourceId: "tab-1" }];
     mocks.rememberPreviewUrl.mockClear();
     mocks.readPreparedConnection.mockClear();
     mocks.readEnvironmentScope.mockReset().mockReturnValue(true);
@@ -424,6 +455,37 @@ describe("PreviewView navigation", () => {
     } finally {
       await act(() => root.unmount());
       vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("activates the existing scoped browser surface and refuses closed or replaced results", async () => {
+    const document = installTestDom();
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.createElement("div") as unknown as Element);
+    try {
+      await act(() =>
+        root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />),
+      );
+      expect(mocks.activateAddressTab?.("tab-1")).toBe(true);
+      expect(mocks.activateSurface).toHaveBeenCalledExactlyOnceWith(
+        TEST_THREAD_REF,
+        "browser:tab-1",
+      );
+      expect(mocks.setActivePreviewTab).toHaveBeenCalledExactlyOnceWith(TEST_THREAD_REF, "tab-1");
+      expect(mocks.navigate).not.toHaveBeenCalled();
+
+      mocks.liveTabIds.clear();
+      expect(mocks.activateAddressTab?.("tab-1")).toBe(false);
+      mocks.liveTabIds.add("tab-1");
+      mocks.addressSurfaces = [];
+      expect(mocks.activateAddressTab?.("tab-1")).toBe(false);
+      mocks.addressSurfaces = [{ id: "browser:tab-1", kind: "preview", resourceId: "tab-1" }];
+      mocks.liveEpoch = "replacement-server";
+      expect(mocks.activateAddressTab?.("tab-1")).toBe(false);
+      expect(mocks.activateSurface).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(() => root.unmount());
       vi.unstubAllGlobals();
     }
   });
