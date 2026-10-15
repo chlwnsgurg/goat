@@ -1561,3 +1561,148 @@ it.effect.each(["read", "history", "source", "draft"] as const)(
       }),
     ),
 );
+
+it.effect.each(
+  (["read", "history", "source"] as const).flatMap((consumer) =>
+    (["refresh", "reopen", "reset-reopen"] as const).map((restart) => ({ consumer, restart })),
+  ),
+)(
+  "admits post-stream-forget $consumer on $restart with a fresh request generation",
+  ({ consumer, restart }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const independentHistory = yield* decodeMemoryHistory({
+          ...history,
+          memoryId: unrelated,
+          revisions: [],
+        });
+        const h = yield* harness(createMemoryTombstoneLedger(), page, true, independentHistory);
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const direct = { ...target, input: { ...target.input, memoryId: unrelated } };
+        const query: Atom.Atom<AsyncResult.AsyncResult<Option.Option<unknown>, unknown>> =
+          consumer === "read"
+            ? h.memory.read(direct)
+            : consumer === "history"
+              ? h.memory.history({ ...direct, input: { ...direct.input, limit: 10 } })
+              : h.memory.readSource({
+                  ...direct,
+                  input: {
+                    ...direct.input,
+                    sourceThread: sourcePage.sourceThread,
+                    messageIds: [MessageId.make("m1")],
+                    limit: 10,
+                  },
+                });
+        let release = h.registry.mount(query);
+        yield* Deferred.succeed(h.reply, unrelatedItem);
+        yield* waitFor(h.registry, hasBody(query), Boolean);
+        if (consumer === "read") yield* Queue.take(h.reads);
+        // A different client forgets X; this client performs no mutation or refresh.
+        yield* Queue.offer(h.queue, signal("forget", id));
+        yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+        expect(h.registry.get(hasBody(query))).toBe(false);
+        expect(h.readCount()).toBe(consumer === "read" ? 1 : 0);
+        if (restart === "refresh") h.registry.refresh(query);
+        else {
+          release();
+          yield* TestClock.adjust(0);
+          if (restart === "reset-reopen") {
+            const before = h.registry.get(exposure);
+            yield* Queue.offer(h.queue, signal("reset"));
+            yield* waitFor(
+              h.registry,
+              exposure,
+              (state) => state.epoch !== before.epoch && state.ready,
+            );
+          }
+          release = h.registry.mount(query);
+        }
+        if (consumer === "read") {
+          const next = yield* Queue.take(h.reads);
+          yield* Deferred.succeed(next.reply, unrelatedItem);
+          yield* Deferred.await(next.finalized);
+        }
+        // Await the actual successful RPC result, then assert admission independently.
+        // A stale generation must fail an assertion, rather than hang waiting for a body.
+        yield* TestClock.adjust(0);
+        const result = h.registry.get(query);
+        expect(result._tag).toBe("Success");
+        expect(Option.isSome(Option.flatten(AsyncResult.value(result)))).toBe(true);
+        expect(h.registry.get(exposure).forgotten.has(id)).toBe(true);
+        release();
+      }),
+    ),
+);
+
+it.effect("blocks a pre-stream-forget late read but admits the explicit retry", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const exposure = h.memory.exposureAtom(target);
+      h.registry.mount(exposure);
+      yield* Queue.offer(h.queue, signal("reset"));
+      yield* waitFor(h.registry, exposure, (state) => state.ready);
+      const query = h.memory.read({ ...target, input: { ...target.input, memoryId: unrelated } });
+      h.registry.mount(query);
+      const first = yield* Queue.take(h.reads);
+      yield* Queue.offer(h.queue, signal("forget", id));
+      yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+      yield* Deferred.succeed(first.reply, unrelatedItem);
+      yield* Deferred.await(first.finalized);
+      expect(h.registry.get(hasBody(query))).toBe(false);
+      expect(h.readCount()).toBe(1);
+      h.registry.refresh(query);
+      const second = yield* Queue.take(h.reads);
+      yield* Deferred.succeed(second.reply, unrelatedItem);
+      yield* Deferred.await(second.finalized);
+      yield* TestClock.adjust(0);
+      expect(h.registry.get(hasBody(query))).toBe(true);
+    }),
+  ),
+);
+
+it.effect(
+  "blocks forgotten and explicitly derived direct reads after a stream forget and reset",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (item.status !== "active" || unrelatedItem.status !== "active")
+          throw new Error("Active fixture required");
+        const derived = yield* decodeMemoryItem(
+          {
+            ...unrelatedItem,
+            payload: {
+              ...unrelatedItem.payload,
+              derivedFromMemoryRevisions: [item.revision.revisionId],
+            },
+          },
+          { onExcessProperty: "error" },
+        );
+        const h = yield* harness();
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        yield* Queue.offer(h.queue, signal("forget", id));
+        yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+        const before = h.registry.get(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.epoch !== before.epoch);
+        const forgotten = h.memory.read(readTarget);
+        h.registry.mount(forgotten);
+        yield* TestClock.adjust(0);
+        expect(h.registry.get(hasBody(forgotten))).toBe(false);
+        expect(h.readCount()).toBe(0);
+        const query = h.memory.read({ ...target, input: { ...target.input, memoryId: unrelated } });
+        h.registry.mount(query);
+        const response = yield* Queue.take(h.reads);
+        yield* Deferred.succeed(response.reply, derived);
+        yield* Deferred.await(response.finalized);
+        expect(h.registry.get(hasBody(query))).toBe(false);
+        expect(h.readCount()).toBe(1);
+      }),
+    ),
+);
