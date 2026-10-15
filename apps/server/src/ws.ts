@@ -562,6 +562,12 @@ function projectFileFailureContext(
       };
     case "WorkspacePathNotFileError":
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
+    case "WorkspaceFileChangedOnDiskError":
+      return { failure: "changed_on_disk" };
+    case "WorkspaceFileDeletedOnDiskError":
+      return { failure: "deleted_on_disk" };
+    case "WorkspaceUnsupportedTextFormatError":
+      return { failure: "unsupported_text_format" };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
     default:

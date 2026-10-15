@@ -4,6 +4,7 @@ import {
   type ProjectListEntriesResult,
   ProjectReadFileError,
   type ProjectReadFileResult,
+  type ProjectWriteFileResult,
 } from "@goat/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
@@ -87,9 +88,12 @@ export function setProjectFileQueryData(
   if (!unsavedFileMounts.has(atom)) {
     unsavedFileMounts.set(atom, appAtomRegistry.mount(atom));
   }
+  const baseline =
+    appAtomRegistry.get(atom)?.data ?? getProjectFileData(environmentId, cwd, relativePath);
   appAtomRegistry.set(atom, {
     confirmedAgainst: undefined,
     data: {
+      ...baseline,
       relativePath,
       contents,
       byteLength: new TextEncoder().encode(contents).byteLength,
@@ -104,6 +108,36 @@ export function getOptimisticProjectFileQueryData(
   relativePath: string,
 ): ProjectReadFileResult | null {
   return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? null;
+}
+
+/** Retain the version that produced a dirty buffer, even when the query refreshes. */
+export function getProjectFileData(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+) {
+  const optimistic = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath);
+  if (optimistic) return optimistic;
+  return Option.getOrNull(
+    AsyncResult.value(
+      appAtomRegistry.get(getProjectFileQueryAtom(environmentId, cwd, relativePath)),
+    ),
+  );
+}
+
+export async function reloadProjectFileData(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+) {
+  const query = getProjectFileQueryAtom(environmentId, cwd, relativePath);
+  appAtomRegistry.refresh(query);
+  const result = await executeAtomQuery(appAtomRegistry, query, {
+    reportDefect: false,
+    reportFailure: false,
+  });
+  if (result._tag === "Success") clearProjectFileQueryData(environmentId, cwd, relativePath);
+  return result;
 }
 
 /** The contents the Files panel shows, read outside React so it is current within a frame. */
@@ -132,9 +166,17 @@ export function confirmProjectFileQueryData(
   cwd: string,
   relativePath: string,
   contents: string,
+  written?: ProjectWriteFileResult,
 ): boolean {
   const atom = optimisticFileAtom(environmentId, cwd, relativePath);
-  const optimisticFile = appAtomRegistry.get(atom);
+  let optimisticFile = appAtomRegistry.get(atom);
+  if (optimisticFile && written?.version !== undefined) {
+    optimisticFile = {
+      ...optimisticFile,
+      data: { ...optimisticFile.data, version: written.version },
+    };
+    appAtomRegistry.set(atom, optimisticFile);
+  }
   if (optimisticFile?.data.contents !== contents) return false;
 
   const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath);

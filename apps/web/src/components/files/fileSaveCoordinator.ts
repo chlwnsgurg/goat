@@ -29,6 +29,18 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.schedule(this.options.debounceMs);
   }
 
+  retry(): void {
+    if (this.disposed) return;
+    this.clearTimer();
+    void this.persistLatest();
+  }
+
+  discard(): void {
+    this.clearTimer();
+    this.confirmedRevision = this.latestRevision;
+    this.options.onPendingChange(false);
+  }
+
   dispose(): void {
     this.disposed = true;
     this.clearTimer();

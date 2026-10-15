@@ -45,6 +45,66 @@ class AtomicWritePathEscapeError extends Schema.TaggedError<AtomicWritePathEscap
   { resolvedWorkspaceRoot: Schema.String, resolvedPath: Schema.String },
 ) {}
 
+export class WorkspaceFileChangedOnDiskError extends Schema.TaggedError<WorkspaceFileChangedOnDiskError>()(
+  "WorkspaceFileChangedOnDiskError",
+  {},
+) {}
+export class WorkspaceFileDeletedOnDiskError extends Schema.TaggedError<WorkspaceFileDeletedOnDiskError>()(
+  "WorkspaceFileDeletedOnDiskError",
+  {},
+) {}
+
+export const isWorkspaceFileChangedOnDiskError = Schema.is(WorkspaceFileChangedOnDiskError);
+export const isWorkspaceFileDeletedOnDiskError = Schema.is(WorkspaceFileDeletedOnDiskError);
+
+export function workspaceFileVersion(bytes: Uint8Array) {
+  return `sha256:${NodeCrypto.createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+async function assertVersion(target: string, expectedVersion: string) {
+  const handle = await operation("open", target, async () => {
+    try {
+      return await NodeFS.promises.open(
+        target,
+        NodeFS.constants.O_RDONLY | (NodeFS.constants.O_NONBLOCK ?? 0),
+      );
+    } catch (cause) {
+      if (hasCode(cause, "ENOENT")) throw new WorkspaceFileDeletedOnDiskError({});
+      throw cause;
+    }
+  }).catch((cause: unknown) => {
+    if (isAtomicWriteOperationError(cause) && isWorkspaceFileDeletedOnDiskError(cause.cause))
+      throw cause.cause;
+    throw cause;
+  });
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.size > 1024n * 1024n)
+      throw new WorkspaceFileChangedOnDiskError({});
+    const bytes = Buffer.alloc(Number(before.size) + 1);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    const after = await handle.stat({ bigint: true });
+    const current = await NodeFS.promises.stat(target, { bigint: true }).catch((cause: unknown) => {
+      if (hasCode(cause, "ENOENT")) throw new WorkspaceFileDeletedOnDiskError({});
+      throw cause;
+    });
+    if (
+      before.size !== BigInt(bytesRead) ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      after.ino !== current.ino ||
+      after.dev !== current.dev ||
+      after.mtimeNs !== current.mtimeNs ||
+      after.ctimeNs !== current.ctimeNs ||
+      workspaceFileVersion(bytes.subarray(0, bytesRead)) !== expectedVersion
+    ) {
+      throw new WorkspaceFileChangedOnDiskError({});
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 export const isAtomicWriteOperationError = Schema.is(AtomicWriteOperationError);
 export const isAtomicWritePathEscapeError = Schema.is(AtomicWritePathEscapeError);
 
@@ -79,6 +139,7 @@ export async function atomicWorkspaceWrite(input: {
   readonly absolutePath: string;
   readonly contents: Uint8Array;
   readonly platform: string;
+  readonly expectedVersion?: string;
 }) {
   const realRoot = await operation("realpath-workspace-root", input.workspaceRoot, () =>
     NodeFS.promises.realpath(input.workspaceRoot),
@@ -101,6 +162,17 @@ export async function atomicWorkspaceWrite(input: {
 
   // Walk and create one component at a time. Recursive mkdir on an unchecked
   // suffix could create directories outside the root through a symlink.
+  // Detect deletion before creating any missing parent directories.
+  if (input.expectedVersion !== undefined) {
+    const guardedTarget = await NodeFS.promises
+      .realpath(input.absolutePath)
+      .catch((cause: unknown) => {
+        if (hasCode(cause, "ENOENT")) throw new WorkspaceFileDeletedOnDiskError({});
+        throw cause;
+      });
+    assertContained(guardedTarget);
+    await assertVersion(guardedTarget, input.expectedVersion);
+  }
   let parent = realRoot;
   const components = NodePath.relative(
     NodePath.resolve(input.workspaceRoot),
@@ -198,6 +270,9 @@ export async function atomicWorkspaceWrite(input: {
     // Node has no portable descriptor-relative rename. Revalidation narrows,
     // but cannot eliminate, the final directory-swap race. Never unlink the
     // destination as a Windows fallback: a failed rename must keep old bytes.
+    if (input.expectedVersion !== undefined) {
+      await assertVersion(target, input.expectedVersion);
+    }
     await operation("write-file", target, () => NodeFS.promises.rename(temporary, target));
   } finally {
     if (!closed) await handle.close().catch(() => undefined);

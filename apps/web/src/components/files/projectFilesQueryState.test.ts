@@ -54,6 +54,44 @@ describe("project files queries", () => {
     vi.unstubAllGlobals();
   });
 
+  it("preserves the loaded version through edits and advances it without clearing a newer draft", () => {
+    const textFormat = { encoding: "utf-8", bom: true, lineEnding: "crlf" } as const;
+    appAtomRegistry.set(optimisticFile, {
+      confirmedAgainst: null,
+      data: {
+        relativePath: "convex.json",
+        contents: "loaded",
+        byteLength: 6,
+        truncated: false,
+        version: "loaded-version",
+        textFormat,
+      },
+    });
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", "first draft");
+    expect(getUnsavedProjectFileQueryData(environmentId, "/repo", "convex.json")).toMatchObject({
+      version: "loaded-version",
+      textFormat,
+    });
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", "newer draft");
+    expect(
+      confirmProjectFileQueryData(environmentId, "/repo", "convex.json", "first draft", {
+        relativePath: "convex.json",
+        version: "written-version",
+      }),
+    ).toBe(false);
+    expect(getUnsavedProjectFileQueryData(environmentId, "/repo", "convex.json")).toMatchObject({
+      contents: "newer draft",
+      version: "written-version",
+      textFormat,
+    });
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", "latest draft");
+    expect(getUnsavedProjectFileQueryData(environmentId, "/repo", "convex.json")).toMatchObject({
+      contents: "latest draft",
+      version: "written-version",
+      textFormat,
+    });
+  });
+
   it("resumes an unsaved draft after closing the preview and restoring write access", async () => {
     vi.stubGlobal("window", {});
     vi.useFakeTimers();
