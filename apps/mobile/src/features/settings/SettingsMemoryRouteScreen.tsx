@@ -340,17 +340,21 @@ function MemoryConnected({
   const [error, setError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
   const generation = useRef(0);
+  const mounted = useRef(true);
   useEffect(() => {
-    generation.current++;
+    mounted.current = true;
     return () => {
-      generation.current++;
+      mounted.current = false;
     };
   }, []);
   const load = useCallback(async () => {
-    if (!registry.get(memory.syncStatus.permissionAtom(environmentId))) return;
-    const before = generation.current;
+    if (!mounted.current || !registry.get(memory.syncStatus.permissionAtom(environmentId))) return;
+    const before = ++generation.current;
+    setStatus(null);
+    setError(null);
     const result = await sync({ environmentId, input: {} });
     if (
+      !mounted.current ||
       before !== generation.current ||
       !registry.get(memory.syncStatus.permissionAtom(environmentId))
     )
@@ -376,7 +380,13 @@ function MemoryConnected({
       {error ? <Copy>{error}</Copy> : null}
       {readAllowed ? (
         <>
-          <Copy>{status ? presentMemorySync(status).label : "Checking memory sharing…"}</Copy>
+          <Copy>
+            {status
+              ? presentMemorySync(status).label
+              : error
+                ? "Memory sharing status unavailable."
+                : "Checking memory sharing…"}
+          </Copy>
           <Action label="Refresh sharing status" onPress={() => void load()} />
         </>
       ) : null}
@@ -422,10 +432,11 @@ function MemoryConnected({
       {params.memorySpaceId && status && status.memorySpaceId !== params.memorySpaceId ? (
         <Copy>
           The selected memory space is not currently bound. Its destination has been preserved.
+          Current bound space: {status.memorySpaceId ?? "None"}.
         </Copy>
       ) : null}
       {space && readAllowed ? (
-        <MemoryBrowser key={space} params={params} memorySpaceId={space} />
+        <MemoryBrowser key={space} params={params} memorySpaceId={space} onSyncRefresh={load} />
       ) : (
         <ScreenScrollView>
           <Copy>
@@ -434,7 +445,7 @@ function MemoryConnected({
               : "Memory read access is unavailable. Administrative settings remain available."}
           </Copy>
           <MemoryWriteAccess params={params} />
-          <MemoryAdministration params={params} memorySpaceId={null} />
+          <MemoryAdministration params={params} memorySpaceId={null} onSyncRefresh={load} />
         </ScreenScrollView>
       )}
     </View>
@@ -486,9 +497,11 @@ function MemoryWriteAccess({
 function MemoryBrowser({
   params,
   memorySpaceId,
+  onSyncRefresh,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId;
+  readonly onSyncRefresh: () => Promise<void>;
 }) {
   const registry = useContext(RegistryContext);
   const canWrite = useAtomValue(memory.upsert.permissionAtom(params.environmentId));
@@ -628,6 +641,7 @@ function MemoryBrowser({
           <Action label="First page" disabled={!cursor} onPress={() => setCursor(undefined)} />
           {page ? <Copy>Index coverage: {page.indexCoverage?.status ?? "Unknown"}</Copy> : null}
           <MemoryAdministration
+            onSyncRefresh={onSyncRefresh}
             params={params}
             memorySpaceId={memorySpaceId}
             onBinding={(value) => {
@@ -690,6 +704,15 @@ function MemoryDetails({
     },
     [],
   );
+  const [hadItem, setHadItem] = useState(item !== null);
+  if (hadItem !== (item !== null)) {
+    setHadItem(item !== null);
+    if (!item) {
+      setSource(null);
+      setEditing(false);
+      setConfirmForget(false);
+    }
+  }
   async function performForget() {
     const current = registry.get(readAtom);
     const live = AsyncResult.isSuccess(current) ? Option.getOrNull(current.value) : null;
@@ -840,52 +863,56 @@ function MemoryDetails({
         />
       ) : null}
       <SettingsSection title="History">
-        {history?.revisions.map((pair) => (
-          <View key={pair.revision.revisionId}>
-            <Copy>
-              {pair.revision.createdAtUtc} · {pair.revision.provenance.provider ?? "User"}
-            </Copy>
-            <Copy>{pair.payload?.text ?? "Original unavailable"}</Copy>
-          </View>
-        ))}
-        {history?.resolutions.map((entry) => {
-          const view = presentMemoryResolution(entry);
-          return (
-            <View key={entry.resolution.resolutionId}>
-              <Copy>
-                {params.resolutionId === entry.resolution.resolutionId
-                  ? "Selected resolution · "
-                  : ""}
-                {view.label} · {view.providerLabel} · {view.effectiveModel} ·{" "}
-                {view.resolvingEnvironmentId}
-              </Copy>
-              <Copy>
-                Applied: {view.appliedAtUtc} · Revert deadline: {view.revertDeadlineUtc}
-              </Copy>
-              <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
-              {item && history ? (
-                <MemoryRevertControl
-                  environmentId={params.environmentId}
-                  item={item}
-                  entry={entry}
-                  history={history}
-                  readCurrent={() => {
-                    const value = registry.get(readAtom);
-                    return AsyncResult.isSuccess(value) ? Option.getOrNull(value.value) : null;
-                  }}
-                  readHistory={() => {
-                    const value = registry.get(historyAtom);
-                    return AsyncResult.isSuccess(value) ? Option.getOrNull(value.value) : null;
-                  }}
-                  onSettled={() => {
-                    registry.refresh(readAtom);
-                    registry.refresh(historyAtom);
-                  }}
-                />
-              ) : null}
-            </View>
-          );
-        })}
+        {item ? (
+          <>
+            {history?.revisions.map((pair) => (
+              <View key={pair.revision.revisionId}>
+                <Copy>
+                  {pair.revision.createdAtUtc} · {pair.revision.provenance.provider ?? "User"}
+                </Copy>
+                <Copy>{pair.payload?.text ?? "Original unavailable"}</Copy>
+              </View>
+            ))}
+            {history?.resolutions.map((entry) => {
+              const view = presentMemoryResolution(entry);
+              return (
+                <View key={entry.resolution.resolutionId}>
+                  <Copy>
+                    {params.resolutionId === entry.resolution.resolutionId
+                      ? "Selected resolution · "
+                      : ""}
+                    {view.label} · {view.providerLabel} · {view.effectiveModel} ·{" "}
+                    {view.resolvingEnvironmentId}
+                  </Copy>
+                  <Copy>
+                    Applied: {view.appliedAtUtc} · Revert deadline: {view.revertDeadlineUtc}
+                  </Copy>
+                  <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
+                  {item && history ? (
+                    <MemoryRevertControl
+                      environmentId={params.environmentId}
+                      item={item}
+                      entry={entry}
+                      history={history}
+                      readCurrent={() => {
+                        const value = registry.get(readAtom);
+                        return AsyncResult.isSuccess(value) ? Option.getOrNull(value.value) : null;
+                      }}
+                      readHistory={() => {
+                        const value = registry.get(historyAtom);
+                        return AsyncResult.isSuccess(value) ? Option.getOrNull(value.value) : null;
+                      }}
+                      onSettled={() => {
+                        registry.refresh(readAtom);
+                        registry.refresh(historyAtom);
+                      }}
+                    />
+                  ) : null}
+                </View>
+              );
+            })}
+          </>
+        ) : null}
         {history?.revertResults.map((value) => (
           <Copy key={value.operationId}>{presentMemoryRevertResult(value).label}</Copy>
         ))}
@@ -1234,10 +1261,12 @@ function MemoryAdministration({
   params,
   memorySpaceId,
   onBinding,
+  onSyncRefresh,
 }: {
   readonly params: MemoryScreenParams & { environmentId: EnvironmentId };
   readonly memorySpaceId: MemorySpaceId | null;
   readonly onBinding?: (value: MemoryProjectBinding) => void;
+  readonly onSyncRefresh: () => Promise<void>;
 }) {
   const registry = useContext(RegistryContext);
   const { environmentId } = params;
@@ -1311,6 +1340,9 @@ function MemoryAdministration({
   }
   async function loadAdministration() {
     if (!active()) return;
+    const refresh = onSyncRefresh();
+    await refresh;
+    if (!active()) return;
     const h = await getHub({ environmentId, input: {} });
     if (!active()) return;
     if (AsyncResult.isFailure(h)) throw squashAtomCommandFailure(h);
@@ -1354,7 +1386,8 @@ function MemoryAdministration({
     if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
     if (AsyncResult.isSuccess(result)) {
       setHub(result.value.view);
-      setNotice("Sharing settings saved. Refresh sharing status to check progress.");
+      setNotice("Sharing settings saved.");
+      await onSyncRefresh();
     }
   }
   const ownerView = owner ? presentMemoryOwnerPolicy(owner) : null;

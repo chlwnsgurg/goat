@@ -27,6 +27,7 @@ import {
 import type { RpcSession } from "@goat/client-runtime/rpc";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -415,7 +416,7 @@ export function createNativeMemoryHarness() {
             } as MemoryChangeSignal),
             Stream.fromQueue(queue),
           );
-        return Effect.sync(() => {
+        return Effect.suspend(() => {
           calls.push({ method: String(method), input, environmentId: nativeEnv });
           waiters
             .filter(
@@ -424,7 +425,8 @@ export function createNativeMemoryHarness() {
                 calls.filter((call) => call.method === method).length >= waiter.count,
             )
             .forEach((waiter) => waiter.resolve());
-          return responses.get(String(method))?.(input);
+          const response = responses.get(String(method))?.(input);
+          return Effect.isEffect(response) ? response : Effect.succeed(response);
         });
       },
     },
@@ -468,6 +470,14 @@ export function createNativeMemoryHarness() {
     prepared,
     calls,
     responses,
+    deferred: <A,>() => {
+      const value = Effect.runSync(Deferred.make<A, Error>());
+      return {
+        response: Deferred.await(value),
+        succeed: (result: A) => Effect.runPromise(Deferred.succeed(value, result)),
+        fail: (error: Error) => Effect.runPromise(Deferred.fail(value, error)),
+      };
+    },
     memory,
     updateSettings,
     navigations: bridge.navigations,

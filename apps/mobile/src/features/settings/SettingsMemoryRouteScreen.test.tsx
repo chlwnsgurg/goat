@@ -3,6 +3,8 @@ import { act } from "react";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   WS_METHODS,
+  MemoryItem,
+  MemorySourcePage,
   type MemoryOwnerSourceReadPolicyUpdateInput,
   type MemoryUpsertInput,
   MemoryHistoryPage,
@@ -21,6 +23,7 @@ import {
   type NativeMemoryHarness,
 } from "../../testing/memoryNativeHarness";
 import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
 import type { PreparedConnection } from "@goat/client-runtime/connection";
 import * as Schema from "effect/Schema";
 import { SettingsMemoryRouteScreen } from "./SettingsMemoryRouteScreen";
@@ -46,6 +49,8 @@ async function mount(scopes?: Parameters<NativeMemoryHarness["grant"]>[0]) {
 const originalId = "00000000-0000-4000-8000-000000000003";
 const resolutionId = "00000000-0000-4000-8000-000000000006";
 const decodeRevertResult = Schema.decodeUnknownSync(MemoryRevertResult);
+const decodeItem = Schema.decodeUnknownSync(MemoryItem);
+const decodeSource = Schema.decodeUnknownSync(MemorySourcePage);
 const decodeHistory = Schema.decodeUnknownSync(MemoryHistoryPage);
 function revertHistory() {
   if (nativeItem.status !== "active") throw new Error("Expected active fixture");
@@ -459,6 +464,166 @@ describe("native Memory with shared factory", () => {
       allowedRequesterEnvironmentIds: ["pending-requester", "active-requester"],
     });
     expect(view.container.textContent).toContain("Remove active-requester");
+  });
+  it("keeps the newest sharing status and diagnostics when refresh replies arrive in reverse order", async () => {
+    await mount();
+    const older = h.deferred<typeof nativeSyncStatus>();
+    const newer = h.deferred<typeof nativeSyncStatus>();
+    let count = 0;
+    h.responses.set(WS_METHODS.memorySyncStatus, () => (count++ === 0 ? older : newer).response);
+    await view.click("Refresh sharing status");
+    await view.click("Refresh sharing status");
+    await act(async () => {
+      await newer.succeed({ ...nativeSyncStatus, state: "disabled", pendingSync: 7 });
+    });
+    expect(view.container.textContent).toContain("Memory sharing off");
+    await view.click("Show sharing details");
+    expect(view.container.textContent).toContain("Pending sync: 7");
+    await act(async () => {
+      await older.succeed(nativeSyncStatus);
+    });
+    expect(view.container.textContent).toContain("Memory sharing off");
+    expect(view.container.textContent).toContain("Pending sync: 7");
+    expect(view.container.textContent).not.toContain("Hub connected");
+  });
+  it("ignores an older refresh failure after a newer success", async () => {
+    await mount();
+    const older = h.deferred<typeof nativeSyncStatus>();
+    let count = 0;
+    h.responses.set(WS_METHODS.memorySyncStatus, () =>
+      count++ === 0 ? older.response : nativeSyncStatus,
+    );
+    await view.click("Refresh sharing status");
+    await view.click("Refresh sharing status");
+    await act(async () => {
+      await older.fail(new Error("Synthetic obsolete refresh"));
+    });
+    expect(view.container.textContent).toContain("Hub connected");
+    expect(view.container.textContent).not.toContain("Synthetic obsolete refresh");
+  });
+  it("refreshes sharing after configuration and administration reload while preserving the selected space", async () => {
+    await mount(["memory:read", "memory:write", "settings:write"]);
+    h.responses.set(WS_METHODS.memoryHubSettingsGet, () => ({
+      settings: { mode: "hub", memorySpaceId: nativeSpace },
+      version: 1,
+    }));
+    h.responses.set(WS_METHODS.memoryOwnerSourceReadPolicyGet, () => nativeOwnerPolicy);
+    await view.click("Load sharing and original access settings");
+    const configured = h.deferred<typeof nativeSyncStatus>();
+    h.responses.set(WS_METHODS.memorySyncStatus, () => configured.response);
+    h.responses.set(WS_METHODS.memoryHubSettingsUpdate, () => ({
+      view: { settings: { mode: "disabled" }, version: 2 },
+    }));
+    await view.click("Turn off memory sharing");
+    await act(async () => h.confirm());
+    expect(view.container.textContent).toContain("Checking memory sharing");
+    expect(view.container.textContent).not.toContain("Hub connected");
+    await act(async () => {
+      await configured.succeed({
+        ...nativeSyncStatus,
+        state: "disabled",
+        memorySpaceId: null,
+      });
+    });
+    expect(view.container.textContent).toContain("Memory sharing off");
+    expect(view.container.textContent).toContain("Current bound space: None");
+    const rebound = h.deferred<typeof nativeSyncStatus>();
+    h.responses.set(WS_METHODS.memorySyncStatus, () => rebound.response);
+    await view.click("Load sharing and original access settings");
+    expect(view.container.textContent).toContain("Checking memory sharing");
+    expect(view.container.textContent).not.toContain("Memory sharing off");
+    const nextSpace = nativeSpace.replace(/1$/, "9") as typeof nativeSpace;
+    await act(async () => {
+      await rebound.succeed({ ...nativeSyncStatus, memorySpaceId: nextSpace });
+    });
+    expect(view.container.textContent).toContain("Hub connected");
+    expect(view.container.textContent).toContain(`Current bound space: ${nextSpace}`);
+    expect(view.container.textContent).toContain(`Space: ${nativeSpace}`);
+    await view.click("Remember something");
+    await view.type("Memory text", "Synthetic pinned destination");
+    h.responses.set(WS_METHODS.memoryUpsert, () => ({ outcome: "accepted", pendingSync: false }));
+    await view.click("Save memory");
+    expect(h.calls.find((call) => call.method === WS_METHODS.memoryUpsert)?.input).toMatchObject({
+      memorySpaceId: nativeSpace,
+    });
+    expect(h.calls.filter((call) => call.method === WS_METHODS.memorySyncStatus)).toHaveLength(4);
+    for (const call of h.calls.filter((call) => call.method === WS_METHODS.memoryList))
+      expect(call.input).toMatchObject({ memorySpaceId: nativeSpace });
+  });
+  it("unmounts history bodies and discards original entry when only read becomes unavailable", async () => {
+    await mount();
+    if (nativeItem.status !== "active") throw new Error("Expected active fixture");
+    const sourceThread = { environmentId: nativeEnv, threadId: "synthetic-source-thread" };
+    const item = decodeItem({
+      ...nativeItem,
+      payload: {
+        ...nativeItem.payload,
+        evidence: [{ origin: "thread", sourceThread, messageIds: ["synthetic-message"] }],
+      },
+    });
+    const history = revertHistory();
+    h.responses.set(WS_METHODS.memoryRead, () => item);
+    h.responses.set(WS_METHODS.memoryHistory, () => history);
+    h.responses.set(WS_METHODS.memoryReadSource, () =>
+      decodeSource({
+        sourceThread,
+        watermark: { fromEventId: "e1", toEventId: "e2", throughSequence: 2 },
+        messages: [{ messageId: "synthetic-message", text: "Synthetic original body" }],
+        nextCursor: null,
+      }),
+    );
+    await view.click(`Open memory ${nativeId}`);
+    await view.click(`Read original on ${nativeEnv}`);
+    expect(view.container.textContent).toContain("Synthetic original body");
+    expect(view.container.textContent).toContain("Synthetic resolution");
+    const read = h.memory.read({
+      environmentId: nativeEnv,
+      input: { memorySpaceId: nativeSpace, memoryId: nativeId },
+    });
+    const historyAtom = h.memory.history({
+      environmentId: nativeEnv,
+      input: { memorySpaceId: nativeSpace, memoryId: nativeId, limit: 30 },
+    });
+    const resumed = h.deferred<MemoryItem>();
+    h.responses.set(WS_METHODS.memoryRead, () => resumed.response);
+    await act(async () => h.registry.refresh(read));
+    const retained = h.registry.get(historyAtom);
+    expect(AsyncResult.isSuccess(retained) && Option.isSome(retained.value)).toBe(true);
+    expect(view.container.textContent).toContain("Memory unavailable");
+    expect(view.container.textContent).not.toContain("Synthetic memory body");
+    expect(view.container.textContent).not.toContain("Synthetic resolution");
+    expect(view.container.textContent).not.toContain("Synthetic original body");
+    expect(view.container.querySelector('section[aria-label="Original"]')).toBeNull();
+    await act(async () => {
+      await resumed.succeed(item);
+    });
+    expect(view.container.textContent).toContain("Synthetic memory body");
+    expect(view.container.querySelector('section[aria-label="Original"]')).toBeNull();
+    expect(h.calls.filter((call) => call.method === WS_METHODS.memoryReadSource)).toHaveLength(1);
+    await view.click(`Read original on ${nativeEnv}`);
+    expect(view.container.querySelector('section[aria-label="Original"]')).not.toBeNull();
+  });
+  it("requires a new edit click after read access recovers", async () => {
+    await mount();
+    await view.click(`Open memory ${nativeId}`);
+    await view.click("Edit memory");
+    await view.type("Memory text", "Synthetic discarded draft");
+    const read = h.memory.read({
+      environmentId: nativeEnv,
+      input: { memorySpaceId: nativeSpace, memoryId: nativeId },
+    });
+    const resumed = h.deferred<MemoryItem>();
+    h.responses.set(WS_METHODS.memoryRead, () => resumed.response);
+    await act(async () => h.registry.refresh(read));
+    expect(view.container.querySelector('input[aria-label="Memory text"]')).toBeNull();
+    await act(async () => {
+      await resumed.succeed(nativeItem);
+    });
+    expect(view.container.querySelector('input[aria-label="Memory text"]')).toBeNull();
+    await view.click("Edit memory");
+    expect(
+      view.container.querySelector<HTMLInputElement>('input[aria-label="Memory text"]')?.value,
+    ).toBe("Synthetic memory body");
   });
   it("pins the first selected space across later environment binding changes", async () => {
     h = createNativeMemoryHarness();
