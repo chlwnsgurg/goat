@@ -58,6 +58,7 @@ export type GoatMcpToolSummaryAction =
   | "environment-read"
   | "environment-update"
   | "host-status"
+  | "provider-diagnose"
   | "ssh-host-list"
   | "ssh-browse"
   | "ssh-thread-launch"
@@ -369,6 +370,10 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "environment-update",
   ),
   goat_host_status: tool(["Read", "Reading", "Read", "host status"], "host-status"),
+  goat_provider_diagnose: tool(
+    ["Diagnose", "Diagnosing", "Diagnosed", "a provider"],
+    "provider-diagnose",
+  ),
   goat_thread_launch: tool(
     ["Launch", "Launching", "Launched", "a project thread"],
     "thread-create",

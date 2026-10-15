@@ -109,6 +109,7 @@ import * as McpProviderSessions from "@goat/provider-core/server/McpProviderSess
 import * as OpenCodeRuntime from "@goat/provider-opencode/server/OpenCodeRuntime";
 import * as OpenCodeServerLedger from "@goat/provider-opencode/server/OpenCodeServerLedger";
 import * as ProviderHostLive from "./provider/ProviderHostLive.ts";
+import * as ProviderDiagnosisService from "./provider/ProviderDiagnosisService.ts";
 import * as AcpRegistrySupport from "@goat/provider-acp-registry/server/AcpRegistrySupport";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -1195,7 +1196,13 @@ const layerMakeRoutes = Layer.mergeAll(
   // delegation targets through the same live adapter facade the V2
   // orchestrator uses, so MCP capability reporting can never drift from
   // what dispatch can actually serve.
-  Layer.mergeAll(McpHttpServer.layer, layerMemoryToolkits).pipe(
+  Layer.mergeAll(
+    McpHttpServer.layer,
+    layerMemoryToolkits,
+    McpHttpServer.layerProviderToolkit.pipe(
+      Layer.provide(ProviderDiagnosisService.layer.pipe(Layer.provide(ProviderHostLive.layer))),
+    ),
+  ).pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),

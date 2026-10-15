@@ -1218,6 +1218,7 @@ export const CLAUDE_READ_ONLY_GOAT_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__goat__goat_preview_list",
   "mcp__goat__goat_environment_read",
   "mcp__goat__goat_host_status",
+  "mcp__goat__goat_provider_diagnose",
   "mcp__goat__goat_queue_list",
   "mcp__goat__goat_queue_read",
   "mcp__goat__html_preview",
