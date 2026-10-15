@@ -453,6 +453,77 @@ describe("MemoryCompactor", () => {
     }).pipe(Effect.provide(live)),
   );
   it.effect(
+    "producer covers escaped embedded payload, maximal source fields and mixed lifetime lineage",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const base = operation(15);
+        const sourceThread = {
+          environmentId: hubEnv,
+          threadId: M.ThreadId.make("\u0000".repeat(1024)),
+        };
+        const op = {
+          ...base,
+          revision: {
+            ...base.revision,
+            scope: { kind: "thread" as const, thread: sourceThread },
+            provenance: {
+              environmentId: hubEnv,
+              sourceThread,
+              sourceWatermark: {
+                fromEventId: M.EventId.make('"'.repeat(1024)),
+                toEventId: M.EventId.make("\\".repeat(1024)),
+                throughSequence: Number.MAX_SAFE_INTEGER,
+              },
+              importSource: {
+                sourceId: M.MemoryImportSourceId.make(id(8000)),
+                format: "codex" as const,
+                parserVersion: '"'.repeat(1024),
+                sourceLocator: "\u0000".repeat(1024),
+                sourceItemKey: "\u0000".repeat(512),
+                sourceFingerprint: "a".repeat(64),
+                contentFingerprint: "b".repeat(64),
+                sourceAliases: Array.from({ length: 3 }, (_, i) => ({
+                  environmentId: hubEnv,
+                  sourceId: M.MemoryImportSourceId.make(id(8100 + i)),
+                  sourceItemKey: "\u0000".repeat(512),
+                })),
+                acceptedContentFingerprints: Array.from({ length: 100 }, (_, i) =>
+                  String(i).padStart(64, "0"),
+                ),
+              },
+            },
+          },
+          payload: {
+            text: '\u0000\u0001"\\한🙂'.repeat(700),
+            evidence: [],
+            derivedFromMemoryRevisions: [],
+          },
+        };
+        assert.strictEqual((yield* push(op)).receipts[0]!.outcome, "accepted");
+        const store = yield* Store.MemoryStore;
+        const usage = yield* store.transact(store.readHubUsageTx(space));
+        const result = yield* (yield* Compactor.MemoryCompactor).compact(principal());
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{
+          metadata_json: string;
+        }>`SELECT metadata_json FROM memory_inbox_pending WHERE space=${space} AND checkpoint_id=${"hub:" + result.checkpointId} ORDER BY page_ordinal`;
+        assert.isAbove(rows.length, 1);
+        const pages = rows.map((r) => JSON.parse(r.metadata_json) as M.MemoryHubCheckpointPage);
+        assert.isTrue(M.validateMemoryCheckpointRecords(pages));
+        assert.strictEqual(
+          pages.flatMap((p) => p.items).filter((i) => i.status === "active")[0]!.payload.text,
+          op.payload.text,
+        );
+        assert.strictEqual(pages.flatMap((p) => p.revisions)[0]!.payload!.text, op.payload.text);
+        assert.strictEqual(pages.flatMap((p) => p.importLineage).length, 105);
+        assert.isAtMost(
+          rows.reduce((sum, r) => sum + new TextEncoder().encode(r.metadata_json).length, 0),
+          usage.requiredCheckpointBoundBytes,
+        );
+      }).pipe(Effect.provide(live)),
+  );
+  it.effect(
     "canonical pinned publication counts shared handles once and admits equality, rolls back plus one",
     () =>
       Effect.gen(function* () {

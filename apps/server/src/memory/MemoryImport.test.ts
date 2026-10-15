@@ -2779,6 +2779,21 @@ describe("MemoryImport physical-growth source harness", () => {
                   sample: growth.current,
                   freshAllocation: yield* store.measureAllocation(),
                   freshLogicalBytes: yield* store.logicalBytes,
+                  checkpointAccounting: {
+                    usage: yield* store
+                      .transact(store.readHubUsageTx(space))
+                      .pipe(
+                        Effect.map((u) => ({
+                          requiredCheckpointBoundBytes: u.requiredCheckpointBoundBytes,
+                          stagingBytes: u.stagingBytes,
+                          checkpointBytes: u.checkpointBytes,
+                          publishedPinnedBytes: u.publishedPinnedBytes,
+                          consumedBytes: u.checkpointReservationConsumedBytes,
+                        })),
+                      ),
+                    counters:
+                      yield* sql`SELECT space,dimension,value FROM memory_quota_counters WHERE scope_key='' AND (space='_hub_global' OR space=${space}) AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows','hub_snapshot_generation','import_metadata','import_staging','hub_private_metadata') ORDER BY space,dimension`,
+                  },
                   counts,
                 };
                 samples.push(metrics);

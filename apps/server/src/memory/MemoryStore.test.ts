@@ -6619,7 +6619,7 @@ it.effect("private retry charges its own input meter without invalidating produc
 
     assert.strictEqual(after[0]!.reserved_snapshot_id, "review-stage");
     assert.deepStrictEqual(after, before);
-    assert.strictEqual(triggers.length, 3);
+    assert.strictEqual(triggers.length, 6);
     assert.strictEqual(
       (yield* sql`SELECT 1 FROM memory_inbox_pending WHERE checkpoint_id='hub:review-stage'`)
         .length,
