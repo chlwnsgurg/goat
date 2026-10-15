@@ -205,8 +205,8 @@ function MemoryDestinationContent({
 
   useEffect(() => {
     let current = true;
-    setSync(null);
     setSyncError(null);
+    if (!canSync) setSync(null);
     if (canSync)
       void getSync({ environmentId, input: {} }).then((result) => {
         if (!current) return;
@@ -217,6 +217,7 @@ function MemoryDestinationContent({
       current = false;
     };
   }, [canSync, environmentId, getSync, syncReload]);
+  const refreshBootstrap = useCallback(() => setSyncReload((value) => value + 1), []);
   const memorySpaceId =
     target.memorySpaceId ??
     (sync && sync.state !== "disabled" && sync.state !== "bootstrapping"
@@ -225,6 +226,13 @@ function MemoryDestinationContent({
 
   return (
     <>
+      {canRead && sync?.state === "bootstrapping" && sync.memorySpaceId ? (
+        <MemoryBootstrapRefresh
+          environmentId={environmentId}
+          memorySpaceId={sync.memorySpaceId}
+          onChange={refreshBootstrap}
+        />
+      ) : null}
       {canAdmin ? (
         <MemoryAdministration
           environmentId={environmentId}
@@ -282,6 +290,25 @@ function MemoryDestinationContent({
       )}
     </>
   );
+}
+
+/** Bootstrap commits emit memory resets. Follow those signals instead of polling status. */
+function MemoryBootstrapRefresh({
+  environmentId,
+  memorySpaceId,
+  onChange,
+}: {
+  environmentId: EnvironmentId;
+  memorySpaceId: MemorySpaceId;
+  onChange: () => void;
+}) {
+  const exposure = useAtomValue(
+    memoryEnvironment.exposureAtom({ environmentId, input: { memorySpaceId } }),
+  );
+  useEffect(() => {
+    onChange();
+  }, [exposure, onChange]);
+  return null;
 }
 
 export { MemoryAdministration } from "./MemorySharingSettings";

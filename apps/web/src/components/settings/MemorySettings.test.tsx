@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
   allowed: true,
   write: true,
   version: 0,
+  exposure: 0,
   listeners: new Set<() => void>(),
   queries: new Map<string, unknown>(),
   refresh: vi.fn(),
@@ -53,7 +54,11 @@ vi.mock("@effect/atom-react", async (original) => ({
   ...(await original<typeof import("@effect/atom-react")>()),
   useAtomValue: (atom: { label: string }) => {
     useFixtureVersion();
-    return ["forget", "upsert"].includes(atom.label) ? state.write : state.allowed;
+    return atom.label === "syncChanges"
+      ? state.exposure
+      : ["forget", "upsert"].includes(atom.label)
+        ? state.write
+        : state.allowed;
   },
 }));
 vi.mock("../../state/memory", async () => {
@@ -67,6 +72,7 @@ vi.mock("../../state/memory", async () => {
   });
   return {
     memoryEnvironment: {
+      exposureAtom: () => ({ label: "syncChanges" }),
       ...Object.fromEntries(
         [
           "syncStatus",
@@ -225,6 +231,7 @@ beforeEach(() => {
   root = createRoot(container);
   state.allowed = true;
   state.write = true;
+  state.exposure = 0;
   state.queries.clear();
   state.executors.clear();
   state.refresh.mockClear();
@@ -1042,4 +1049,19 @@ it("adds a named device, retries install without exposing its key, and confirms 
   expect(container.textContent).toContain("Remove active device?");
   await click("Remove device");
   expect(mutations.at(-1)?.input.action).toBe("revokeMember");
+});
+
+it("opens memories when bootstrap publishes a reset without a reload or timer", async () => {
+  state.responses.set("syncStatus", success({ state: "bootstrapping", memorySpaceId: id(1) }));
+  state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Memory is getting ready.");
+  expect(container.textContent).not.toContain("Synthetic original");
+  state.responses.set("syncStatus", success({ state: "online", memorySpaceId: id(1) }));
+  await act(async () => {
+    state.exposure += 1;
+    notifyFixture();
+  });
+  expect(container.textContent).toContain("Synthetic original");
+  expect(container.textContent).not.toContain("Memory is getting ready.");
 });
