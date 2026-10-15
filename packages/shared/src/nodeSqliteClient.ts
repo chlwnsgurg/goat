@@ -868,33 +868,39 @@ const make = Effect.fn("makeWithDatabase")(function* (
   });
 
   const acquirer = Effect.flatMap(route, (target) =>
-    Effect.uninterruptibleMask((restore) =>
-      Effect.flatMap(Effect.scope, (scope) =>
-        Effect.withFiber((fiber) => {
-          // Statement and stream scopes cover execution, retries, and result-mode
-          // cleanup. Returning the connection must not release its permit.
-          const lease = Effect.andThen(
-            restore(target.lock.take(1)),
-            Scope.addFinalizer(scope, target.lock.release(1)),
-          );
-          // The statement's span is current here only when it propagates, which
-          // Statement skips while tracing is off. Otherwise the current span is
-          // the caller's, so leave it alone.
-          if (
-            !fiber.getRef(References.TracerEnabled) ||
-            !fiber.getRef(Statement.SpanPropagationEnabled)
-          ) {
-            return Effect.as(lease, target.connection);
-          }
-          const clock = fiber.getRef(Clock.Clock);
-          const start = clock.monotonicTimeNanosUnsafe();
-          return Effect.map(lease, () => {
-            annotateAcquired(fiber, acquired(target, clock, start));
-            return target.connection;
-          });
-        }),
-      ),
-    ),
+    Effect.withFiber((fiber) => {
+      const acquire =
+        target.name === "reader"
+          ? target.lock.withPermits(1)(Effect.succeed(target.connection))
+          : Effect.uninterruptibleMask((restore) =>
+              Effect.flatMap(Effect.scope, (scope) =>
+                // Only the writer retries asynchronously. Keep its permit through
+                // execution and result-mode cleanup, including reader fallback.
+                Effect.as(
+                  Effect.andThen(
+                    restore(target.lock.take(1)),
+                    Scope.addFinalizer(scope, target.lock.release(1)),
+                  ),
+                  target.connection,
+                ),
+              ),
+            );
+      // The statement's span is current here only when it propagates, which
+      // Statement skips while tracing is off. Otherwise the current span is
+      // the caller's, so leave it alone.
+      if (
+        !fiber.getRef(References.TracerEnabled) ||
+        !fiber.getRef(Statement.SpanPropagationEnabled)
+      ) {
+        return acquire;
+      }
+      const clock = fiber.getRef(Clock.Clock);
+      const start = clock.monotonicTimeNanosUnsafe();
+      return Effect.map(acquire, (connection) => {
+        annotateAcquired(fiber, acquired(target, clock, start));
+        return connection;
+      });
+    }),
   );
   const transactionAcquirer = Effect.flatMap(route, (target) =>
     Effect.uninterruptibleMask((restore) => {
