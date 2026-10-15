@@ -1,4 +1,8 @@
-import { ConnectionTransientError, PrimaryConnectionTarget } from "@goat/client-runtime/connection";
+import {
+  ConnectionTransientError,
+  PrimaryConnectionTarget,
+  RelayConnectionTarget,
+} from "@goat/client-runtime/connection";
 import { EnvironmentId, ThreadId } from "@goat/contracts";
 import { ConnectionCatalogDocument, Persistence } from "@goat/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
@@ -52,6 +56,90 @@ describe("ConnectionStorage.makeCatalogStore", () => {
       expect(writes).toHaveLength(1);
       expect(decodeCatalog(writes[0]!)).toEqual(emptyCatalog);
     }),
+  );
+
+  it.effect(
+    "preserves sequential additions and deletions from desktop channels with stale caches",
+    () =>
+      Effect.gen(function* () {
+        let disk: string | null = encodeCatalog(emptyCatalog);
+        const setConnectionCatalog = vi.fn(async (raw: string, expected: string | null) => {
+          if (disk !== expected) return "conflict" as const;
+          disk = raw;
+          return true;
+        });
+        vi.stubGlobal("window", {
+          desktopBridge: {
+            getConnectionCatalog: async () => disk,
+            setConnectionCatalog,
+          },
+        });
+        const backend = () => ConnectionStorage.makeCatalogBackend(fixedHandle({} as IDBDatabase));
+        const first = yield* ConnectionStorage.makeCatalogStore(backend());
+        const second = yield* ConnectionStorage.makeCatalogStore(backend());
+        yield* first.read;
+        yield* second.read;
+        const a = new RelayConnectionTarget({ environmentId: EnvironmentId.make("A"), label: "A" });
+        const b = new RelayConnectionTarget({ environmentId: EnvironmentId.make("B"), label: "B" });
+        yield* first.update((catalog) => ({ ...catalog, targets: [...catalog.targets, a] }));
+        yield* second.update((catalog) => ({ ...catalog, targets: [...catalog.targets, b] }));
+        expect(decodeCatalog(disk!).targets).toEqual([a, b]);
+        yield* first.update((catalog) => ({
+          ...catalog,
+          targets: catalog.targets.filter((t) => t.environmentId !== a.environmentId),
+        }));
+        yield* second.update((catalog) => ({
+          ...catalog,
+          disabledEnvironmentIds: [b.environmentId],
+        }));
+        expect(decodeCatalog(disk!).targets).toEqual([b]);
+        expect(decodeCatalog(disk!).disabledEnvironmentIds).toEqual([b.environmentId]);
+      }),
+  );
+
+  it.effect(
+    "reloads and reapplies after a desktop CAS conflict and bounds repeated conflicts",
+    () =>
+      Effect.gen(function* () {
+        const a = new RelayConnectionTarget({ environmentId: EnvironmentId.make("A"), label: "A" });
+        const b = new RelayConnectionTarget({ environmentId: EnvironmentId.make("B"), label: "B" });
+        let disk = encodeCatalog(emptyCatalog);
+        let conflict = true;
+        let alwaysConflict = false;
+        const setConnectionCatalog = vi.fn(async (raw: string, expected: string | null) => {
+          if (conflict || alwaysConflict) {
+            conflict = false;
+            disk = encodeCatalog({ ...emptyCatalog, targets: [a] });
+            return "conflict" as const;
+          }
+          if (disk !== expected) return "conflict" as const;
+          disk = raw;
+          return true;
+        });
+        vi.stubGlobal("window", {
+          desktopBridge: {
+            getConnectionCatalog: async () => disk,
+            setConnectionCatalog,
+          },
+        });
+        const store = yield* ConnectionStorage.makeCatalogStore(
+          ConnectionStorage.makeCatalogBackend(fixedHandle({} as IDBDatabase)),
+        );
+        const addB = (catalog: typeof ConnectionCatalogDocument.Type) => ({
+          ...catalog,
+          targets: [...catalog.targets, b],
+        });
+        yield* store.update(addB);
+        expect(decodeCatalog(disk).targets).toEqual([a, b]);
+        expect(setConnectionCatalog).toHaveBeenCalledTimes(2);
+        alwaysConflict = true;
+        const error = yield* store.update(addB).pipe(Effect.flip);
+        expect(error.message).toContain("kept changing");
+        expect(setConnectionCatalog).toHaveBeenCalledTimes(7);
+        alwaysConflict = false;
+        yield* store.update(addB);
+        expect(decodeCatalog(disk).targets).toEqual([a, b]);
+      }),
   );
 
   it.effect("does not hide catalog read failures", () =>
@@ -110,7 +198,7 @@ describe("ConnectionStorage.makeCatalogBackend", () => {
 
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error.message).toContain("Desktop secure storage is unavailable");
-      expect(setConnectionCatalog).toHaveBeenCalledWith("{}");
+      expect(setConnectionCatalog).toHaveBeenCalledWith("{}", null);
     }),
   );
 

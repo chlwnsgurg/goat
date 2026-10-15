@@ -16,6 +16,7 @@ import type {
 } from "@goat/contracts";
 import { fromLenientJson } from "@goat/shared/schemaJson";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
@@ -67,6 +68,7 @@ const DesktopConnectionCatalogStoreWriteOperation = Schema.Literals([
   "write-temporary-file",
   "replace-catalog-file",
   "back-up-catalog",
+  "lock-catalog",
 ]);
 
 const DesktopConnectionCatalogStoreMigrationOperation = Schema.Literals([
@@ -161,6 +163,11 @@ export class DesktopConnectionCatalogStoreProtectionError extends Schema.TaggedE
   }
 }
 
+const isWriteError = Schema.is(DesktopConnectionCatalogStoreWriteError);
+const isDocumentDecodeError = Schema.is(DesktopConnectionCatalogStoreDocumentDecodeError);
+const isDecodeError = Schema.is(DesktopConnectionCatalogStoreDecodeError);
+const isProtectionError = Schema.is(DesktopConnectionCatalogStoreProtectionError);
+
 /**
  * The saved connection catalog, encrypted with this app's safeStorage key in the shared GOAT home.
  * Another channel (GOAT, GOAT (Nightly), a dev build) may have written it under its own key. Then
@@ -174,6 +181,7 @@ export class DesktopConnectionCatalogStore extends Context.Service<
   {
     readonly get: Effect.Effect<
       Option.Option<string>,
+      | DesktopConnectionCatalogStoreWriteError
       | DesktopConnectionCatalogStoreReadError
       | DesktopConnectionCatalogStoreDocumentDecodeError
       | DesktopConnectionCatalogStoreDecodeError
@@ -182,8 +190,9 @@ export class DesktopConnectionCatalogStore extends Context.Service<
     >;
     readonly set: (
       catalog: string,
+      expectedCatalog: string | null,
     ) => Effect.Effect<
-      boolean,
+      boolean | "conflict",
       DesktopConnectionCatalogStoreWriteError | DesktopConnectionCatalogStoreProtectionError
     >;
     /** Reads the catalog first, so it is current without an earlier `get`. */
@@ -457,6 +466,107 @@ export const make = Effect.gen(function* () {
   );
   // One operation at a time: concurrent reads would each run recovery and prompt for keys.
   const lock = yield* Semaphore.make(1);
+  const lockPath = path.join(environment.stateDir, "connection-catalog.lock");
+  // A keychain prompt can outlive the timeout. Never evict an owner that is still alive.
+  const ownerAlive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return !(error instanceof Error && "code" in error && error.code === "ESRCH");
+    }
+  };
+  const acquireFileLock = Effect.gen(function* () {
+    yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DesktopConnectionCatalogStoreWriteError({
+            operation: "create-directory",
+            path: environment.stateDir,
+            cause,
+          }),
+      ),
+    );
+    const token = `${process.pid}:${yield* crypto.randomUUIDv4()}`;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const acquired = yield* fileSystem
+        .writeFileString(lockPath, token, { flag: "wx", mode: 0o600 })
+        .pipe(
+          Effect.as(true),
+          Effect.catchIf(
+            (error) => error.reason._tag === "AlreadyExists",
+            () => Effect.succeed(false),
+          ),
+        );
+      if (acquired) return token;
+      const info = yield* fileSystem.stat(lockPath).pipe(Effect.option);
+      const owner = yield* fileSystem.readFileString(lockPath).pipe(Effect.option);
+      const modified = Option.flatMap(info, (value) => value.mtime);
+      if (
+        Option.isSome(modified) &&
+        (yield* Clock.currentTimeMillis) - modified.value.getTime() > 60_000
+      ) {
+        const pid = Option.isSome(owner) ? Number(owner.value.split(":")[0]) : NaN;
+        if (!Number.isSafeInteger(pid) || pid <= 0 || !ownerAlive(pid)) {
+          // Serialize stale removers too: two removers must not unlink a new owner's lock.
+          // An abandoned reclaim guard fails closed rather than risking another writer's data.
+          const reclaimed = yield* Effect.scoped(
+            Effect.acquireRelease(
+              fileSystem.writeFileString(`${lockPath}.reclaim`, token, { flag: "wx", mode: 0o600 }),
+              () => fileSystem.remove(`${lockPath}.reclaim`, { force: true }).pipe(Effect.ignore),
+            ).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  const current = yield* fileSystem.readFileString(lockPath).pipe(Effect.option);
+                  if (
+                    Option.isSome(owner) &&
+                    Option.isSome(current) &&
+                    current.value === owner.value
+                  ) {
+                    yield* fileSystem.remove(lockPath, { force: true });
+                    return true;
+                  }
+                  return false;
+                }),
+              ),
+              Effect.catchIf(
+                (error) => error.reason._tag === "AlreadyExists",
+                () => Effect.succeed(false),
+              ),
+            ),
+          );
+          if (reclaimed) continue;
+        }
+      }
+      yield* Effect.sleep("50 millis").pipe(Effect.interruptible);
+    }
+    return yield* new DesktopConnectionCatalogStoreWriteError({
+      operation: "lock-catalog",
+      path: lockPath,
+      cause: "Another app is using the connection catalog.",
+    });
+  }).pipe(
+    Effect.mapError((cause) =>
+      isWriteError(cause)
+        ? cause
+        : new DesktopConnectionCatalogStoreWriteError({
+            operation: "lock-catalog",
+            path: lockPath,
+            cause,
+          }),
+    ),
+  );
+  const withFileLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.scoped(
+      Effect.acquireRelease(acquireFileLock, (token) =>
+        fileSystem.readFileString(lockPath).pipe(
+          Effect.flatMap((current) =>
+            current === token ? fileSystem.remove(lockPath, { force: true }) : Effect.void,
+          ),
+          Effect.ignore,
+        ),
+      ).pipe(Effect.andThen(effect)),
+    );
   const encryptionAvailable = safeStorage.isEncryptionAvailable.pipe(
     Effect.mapError(
       (cause) =>
@@ -785,7 +895,7 @@ export const make = Effect.gen(function* () {
       return Option.some(decrypted);
     });
   const get = lock
-    .withPermits(1)(readAttempt(2))
+    .withPermits(1)(withFileLock(readAttempt(2)))
     .pipe(Effect.withSpan("desktop.connectionCatalogStore.get"));
 
   /** True when this app's key opens the file as a valid catalog. */
@@ -811,15 +921,28 @@ export const make = Effect.gen(function* () {
 
   return DesktopConnectionCatalogStore.of({
     get,
-    set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
-      if (!(yield* encryptionAvailable)) {
-        return false;
-      }
-      yield* preserveBeforeReplace;
-      yield* writeCatalog(catalog);
-      yield* Ref.set(unreadableState, Option.none());
-      return true;
-    }, lock.withPermits(1)),
+    set: Effect.fn("desktop.connectionCatalogStore.set")(
+      function* (catalog, expectedCatalog) {
+        if (!(yield* encryptionAvailable)) {
+          return false;
+        }
+        yield* preserveBeforeReplace;
+        const current = yield* readAttempt(2).pipe(
+          Effect.catchIf(
+            (error) =>
+              isDocumentDecodeError(error) || isDecodeError(error) || isProtectionError(error),
+            () => Effect.succeedNone,
+          ),
+          Effect.mapError((cause) => backupError(catalogPath)(cause)),
+        );
+        if (Option.getOrNull(current) !== expectedCatalog) return "conflict" as const;
+        yield* writeCatalog(catalog);
+        yield* Ref.set(unreadableState, Option.none());
+        return true;
+      },
+      withFileLock,
+      lock.withPermits(1),
+    ),
     unreadable: get.pipe(
       Effect.ignore,
       Effect.andThen(Ref.get(unreadableState)),
@@ -839,7 +962,11 @@ export const make = Effect.gen(function* () {
         ),
       );
       yield* Ref.set(unreadableState, Option.none());
-    }).pipe(lock.withPermits(1), Effect.withSpan("desktop.connectionCatalogStore.clear")),
+    }).pipe(
+      withFileLock,
+      lock.withPermits(1),
+      Effect.withSpan("desktop.connectionCatalogStore.clear"),
+    ),
   });
 });
 

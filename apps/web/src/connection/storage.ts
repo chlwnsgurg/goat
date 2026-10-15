@@ -374,6 +374,10 @@ const encodeCatalog = Effect.fn("web.connectionStorage.encodeCatalog")(function*
 export interface CatalogBackend {
   readonly read: Effect.Effect<string | null, ConnectionTransientError>;
   readonly write: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
+  readonly compareAndSet?: (
+    raw: string,
+    expected: string | null,
+  ) => Effect.Effect<boolean, ConnectionTransientError>;
   readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
 }
 
@@ -387,11 +391,11 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
       }),
       write: (raw) =>
         Effect.tryPromise({
-          try: () => bridge.setConnectionCatalog!(raw),
+          try: () => bridge.setConnectionCatalog!(raw, null),
           catch: (cause) => catalogError("save", cause),
         }).pipe(
           Effect.flatMap((stored) =>
-            stored
+            stored === true
               ? Effect.void
               : Effect.fail(
                   catalogError(
@@ -399,6 +403,22 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
                     "Desktop secure storage is unavailable in this system context.",
                   ),
                 ),
+          ),
+        ),
+      compareAndSet: (raw, expected) =>
+        Effect.tryPromise({
+          try: () => bridge.setConnectionCatalog!(raw, expected),
+          catch: (cause) => catalogError("save", cause),
+        }).pipe(
+          Effect.flatMap((stored) =>
+            stored === false
+              ? Effect.fail(
+                  catalogError(
+                    "save",
+                    "Desktop secure storage is unavailable in this system context.",
+                  ),
+                )
+              : Effect.succeed(stored === true),
           ),
         ),
     };
@@ -472,6 +492,23 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     function* (transform) {
       yield* lock.withPermits(1)(
         Effect.gen(function* () {
+          if (backend.compareAndSet !== undefined) {
+            // Another desktop channel can save even after a fresh read. Reapply the operation,
+            // rather than merging an obsolete full document (which can resurrect deletions).
+            for (let attempt = 0; attempt < 5; attempt++) {
+              const raw = yield* backend.read;
+              const current =
+                raw === null ? EMPTY_CONNECTION_CATALOG_DOCUMENT : yield* decodeCatalog(raw);
+              const next = transform(current);
+              if (yield* backend.compareAndSet(yield* encodeCatalog(next), raw)) {
+                yield* Ref.set(state, Option.some(next));
+                return;
+              }
+            }
+            return yield* Effect.fail(
+              catalogError("save", "The connection catalog kept changing. Try again."),
+            );
+          }
           const next = transform(yield* loadUnlocked());
           yield* backend.write(yield* encodeCatalog(next));
           yield* Ref.set(state, Option.some(next));

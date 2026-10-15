@@ -3,6 +3,10 @@ import { assert, describe, it } from "@effect/vitest";
 import { ConnectionCatalogDocument } from "@goat/client-runtime/platform";
 import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@goat/contracts";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Base64 from "effect/encoding/Base64";
 import * as Hex from "effect/encoding/Hex";
@@ -22,6 +26,7 @@ import * as DesktopConnectionCatalogStore from "./DesktopConnectionCatalogStore.
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopSafeStorageSiblingKeys from "./DesktopSafeStorageSiblingKeys.ts";
 
+const EXPIRED_LOCK_TIME = DateTime.toDateUtc(DateTime.makeUnsafe(-120_000));
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 const VALID_CATALOG =
@@ -184,7 +189,7 @@ describe("DesktopConnectionCatalogStore", () => {
         const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
         const catalog = VALID_CATALOG;
 
-        assert.isTrue(yield* store.set(catalog));
+        assert.isTrue(yield* store.set(catalog, null));
         assert.deepStrictEqual(yield* store.get, Option.some(catalog));
 
         yield* store.clear;
@@ -193,11 +198,160 @@ describe("DesktopConnectionCatalogStore", () => {
     ),
   );
 
+  it.effect("rejects stale additions and deletions across independent stores", () =>
+    withStore(
+      Effect.gen(function* () {
+        const first = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const second = yield* DesktopConnectionCatalogStore.make;
+        const initial = VALID_CATALOG;
+        const a = { _tag: "RelayConnectionTarget", environmentId: "A", label: "A" };
+        const b = { _tag: "RelayConnectionTarget", environmentId: "B", label: "B" };
+        const added = JSON.stringify({ ...JSON.parse(initial), targets: [a] });
+        const both = JSON.stringify({ ...JSON.parse(initial), targets: [a, b] });
+        const onlyB = JSON.stringify({ ...JSON.parse(initial), targets: [b] });
+        assert.isTrue(yield* first.set(initial, null));
+        const firstRead = Option.getOrNull(yield* first.get);
+        const secondRead = Option.getOrNull(yield* second.get);
+        assert.isTrue(yield* first.set(added, firstRead));
+        assert.equal(yield* second.set(both, secondRead), "conflict");
+        assert.deepStrictEqual(yield* first.get, Option.some(added));
+        assert.isTrue(yield* second.set(both, Option.getOrNull(yield* second.get)));
+        // A deletes its entry; B's stale save must not resurrect it.
+        assert.isTrue(yield* first.set(onlyB, both));
+        assert.equal(yield* second.set(added, both), "conflict");
+        assert.deepStrictEqual(yield* second.get, Option.some(onlyB));
+      }),
+    ),
+  );
+
+  it.effect("reclaims an expired abandoned lock and releases it after failed saves", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const lockPath = `${environment.stateDir}/connection-catalog.lock`;
+        yield* fs.makeDirectory(environment.stateDir, { recursive: true });
+        yield* fs.writeFileString(lockPath, "2147483647:abandoned");
+        yield* fs.utimes(lockPath, EXPIRED_LOCK_TIME, EXPIRED_LOCK_TIME);
+        assert.isTrue(yield* store.set(VALID_CATALOG, null));
+        assert.isFalse(yield* fs.exists(lockPath));
+        assert.equal(yield* store.set(VALID_CATALOG, null), "conflict");
+        assert.isFalse(yield* fs.exists(lockPath));
+        yield* store.clear;
+        assert.isFalse(yield* fs.exists(lockPath));
+      }),
+    ),
+  );
+
+  it.effect.each(["set", "clear"] as const)(
+    "holds the cross-store lock between recovery comparison and rename against %s",
+    (operation) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "goat-catalog-lock-test-" });
+        const reachedWrite = yield* Deferred.make<void>();
+        const resumeWrite = yield* Deferred.make<void>();
+        const contended = yield* Deferred.make<void>();
+        let pause = true;
+        const fileSystemLayer = Layer.succeed(FileSystem.FileSystem, {
+          ...fs,
+          writeFileString: (file, contents, options) =>
+            Effect.gen(function* () {
+              if (pause && file.includes("connection-catalog.json.") && file.endsWith(".tmp")) {
+                pause = false;
+                yield* Deferred.succeed(reachedWrite, undefined);
+                yield* Deferred.await(resumeWrite);
+              }
+              return yield* fs
+                .writeFileString(file, contents, options)
+                .pipe(
+                  Effect.tapError((error) =>
+                    file.endsWith("connection-catalog.lock") &&
+                    error.reason._tag === "AlreadyExists"
+                      ? Deferred.succeed(contended, undefined)
+                      : Effect.void,
+                  ),
+                );
+            }),
+        });
+        yield* Effect.gen(function* () {
+          const first = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+          const second = yield* DesktopConnectionCatalogStore.make;
+          const { catalogPath } = yield* writeSiblingCatalog(VALID_CATALOG);
+          const recovery = yield* first.get.pipe(Effect.forkChild);
+          yield* Deferred.await(reachedWrite);
+          const newer = JSON.stringify({
+            ...JSON.parse(VALID_CATALOG),
+            disabledEnvironmentIds: ["new"],
+          });
+          const writer = yield* (
+            operation === "set" ? second.set(newer, VALID_CATALOG) : second.clear
+          ).pipe(Effect.forkChild);
+          yield* Deferred.await(contended);
+          // Observe the failed exclusive acquisition, cancel its retry, then retry explicitly
+          // after recovery. This keeps the ordering independent of OS I/O and timer scheduling.
+          yield* Fiber.interrupt(writer);
+          yield* Deferred.succeed(resumeWrite, undefined);
+          assert.deepStrictEqual(yield* Fiber.join(recovery), Option.some(VALID_CATALOG));
+          if (operation === "set") assert.isTrue(yield* second.set(newer, VALID_CATALOG));
+          else yield* second.clear;
+          if (operation === "set") assert.deepStrictEqual(yield* first.get, Option.some(newer));
+          else assert.isFalse(yield* fs.exists(catalogPath));
+          assert.isFalse(yield* fs.exists(`${baseDir}/userdata/connection-catalog.lock`));
+        }).pipe(Effect.provide(layerFor(baseDir, true, null, fileSystemLayer)));
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("does not steal an expired lock from a live owner and bounds lock contention", () =>
+    withStore(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const lockPath = `${environment.stateDir}/connection-catalog.lock`;
+        yield* fs.makeDirectory(environment.stateDir, { recursive: true });
+        const token = `${process.pid}:live-owner`;
+        yield* fs.writeFileString(lockPath, token);
+        yield* fs.utimes(lockPath, EXPIRED_LOCK_TIME, EXPIRED_LOCK_TIME);
+        const info = yield* fs.stat(lockPath);
+        const started = yield* Deferred.make<void>();
+        const blocked = yield* DesktopConnectionCatalogStore.make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            makeDirectory: () => Effect.void,
+            stat: () => Effect.succeed(info),
+            readFileString: () => Effect.succeed(token),
+            writeFileString: () =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "AlreadyExists",
+                  module: "FileSystem",
+                  method: "writeFileString",
+                  pathOrDescriptor: lockPath,
+                }),
+              ).pipe(Effect.tapError(() => Deferred.succeed(started, undefined))),
+          }),
+        );
+        const writer = yield* blocked
+          .set(VALID_CATALOG, null)
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("5 seconds");
+        const result = yield* Fiber.join(writer);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result))
+          assert.equal(result.failure._tag, "DesktopConnectionCatalogStoreWriteError");
+        assert.equal(yield* fs.readFileString(lockPath), token);
+        assert.isFalse(yield* fs.exists(`${environment.stateDir}/connection-catalog.json`));
+      }),
+    ),
+  );
+
   it.effect("does not persist when secure storage is unavailable", () =>
     withStore(
       Effect.gen(function* () {
         const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
-        assert.isFalse(yield* store.set("{}"));
+        assert.isFalse(yield* store.set("{}", null));
         assert.deepStrictEqual(yield* store.get, Option.none());
       }),
       false,
@@ -357,12 +511,10 @@ describe("DesktopConnectionCatalogStore", () => {
         method: "readFile",
         pathOrDescriptor: path.join(baseDir, "userdata", "connection-catalog.json"),
       });
-      const layerFileSystem = Layer.succeed(
-        FileSystem.FileSystem,
-        FileSystem.makeNoop({
-          readFile: () => Effect.fail(permissionError),
-        }),
-      );
+      const layerFileSystem = Layer.succeed(FileSystem.FileSystem, {
+        ...baseFileSystem,
+        readFile: () => Effect.fail(permissionError),
+      });
       const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore.pipe(
         Effect.provide(layerFor(baseDir, true, null, layerFileSystem)),
       );
@@ -405,7 +557,7 @@ describe("DesktopConnectionCatalogStore", () => {
         Effect.provide(layerFor(baseDir, true, null, layerFileSystem)),
       );
 
-      const error = yield* store.set("{}").pipe(Effect.flip);
+      const error = yield* store.set("{}", null).pipe(Effect.flip);
       assert.instanceOf(
         error,
         DesktopConnectionCatalogStore.DesktopConnectionCatalogStoreWriteError,
@@ -495,7 +647,7 @@ describe("DesktopConnectionCatalogStore", () => {
         Effect.provide(layer),
       );
 
-      assert.isTrue(yield* store.set(VALID_CATALOG));
+      assert.isTrue(yield* store.set(VALID_CATALOG, null));
       yield* Ref.set(failDecrypt, true);
       const error = yield* store.get.pipe(Effect.flip);
       assert.instanceOf(
@@ -573,7 +725,7 @@ describe("DesktopConnectionCatalogStore", () => {
         assert.equal(yield* Ref.get(siblingCalls), 1);
 
         // Start fresh saves an empty catalog over it; the copy stays.
-        assert.isTrue(yield* store.set(VALID_CATALOG));
+        assert.isTrue(yield* store.set(VALID_CATALOG, null));
         assert.equal(yield* fileSystem.readFileString(backupPath), raw);
         assert.deepStrictEqual(yield* store.unreadable, Option.none());
         assert.deepStrictEqual(yield* store.get, Option.some(VALID_CATALOG));
@@ -596,7 +748,7 @@ describe("DesktopConnectionCatalogStore", () => {
           yield* store.unreadable,
           Option.some({ catalogPath, backupPath: null, reason: "locked" as const }),
         );
-        const setError = yield* store.set(VALID_CATALOG).pipe(Effect.flip);
+        const setError = yield* store.set(VALID_CATALOG, null).pipe(Effect.flip);
         assert.instanceOf(
           setError,
           DesktopConnectionCatalogStore.DesktopConnectionCatalogStoreWriteError,
@@ -637,7 +789,7 @@ describe("DesktopConnectionCatalogStore", () => {
         const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
         const { catalogPath, raw, stateDir } = yield* writeSiblingCatalog(VALID_CATALOG);
 
-        assert.isTrue(yield* store.set(VALID_CATALOG));
+        assert.isTrue(yield* store.set(VALID_CATALOG, VALID_CATALOG));
         assert.equal(
           yield* fileSystem.readFileString(yield* unreadableBackupPath(stateDir, raw)),
           raw,
@@ -714,7 +866,7 @@ describe("DesktopConnectionCatalogStore", () => {
 
         yield* store.get.pipe(Effect.flip);
         assert.deepStrictEqual(yield* fileSystem.readFile(backupPath), raw);
-        assert.isTrue(yield* store.set(VALID_CATALOG));
+        assert.isTrue(yield* store.set(VALID_CATALOG, null));
         assert.deepStrictEqual(yield* fileSystem.readFile(backupPath), raw);
       }),
     ),
@@ -757,7 +909,7 @@ describe("DesktopConnectionCatalogStore", () => {
         const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
         const catalogPath = path.join(environment.stateDir, "connection-catalog.json");
         // This app's key opens it, but the renderer would discard what is inside.
-        assert.isTrue(yield* store.set(VALID_CATALOG));
+        assert.isTrue(yield* store.set(VALID_CATALOG, null));
         const raw = `${JSON.stringify({
           version: 1,
           encryptedCatalog: Base64.encode(textEncoder.encode('encrypted:{"schemaVersion":1}')),
