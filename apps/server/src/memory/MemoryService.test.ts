@@ -1492,7 +1492,10 @@ it.effect.each(["status", "kind", "memory_id"] as const)(
         );
         const after = yield* store.readHubUsageTx(space);
         assert.strictEqual(after.checkpointReservationConsumedBytes, 0);
-        assert.strictEqual(after.requiredCheckpointBoundBytes, before.requiredCheckpointBoundBytes);
+        assert.strictEqual(
+          after.requiredCheckpointBoundBytes,
+          before.requiredCheckpointBoundBytes + 1,
+        );
         assert.isAtMost(after.stagingBytes, M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES);
       });
       assert.strictEqual(

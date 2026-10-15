@@ -17,6 +17,7 @@ import {
   emptyCheckpointInventory,
   encodeCheckpointPage,
   encodeCheckpointRecord,
+  validateCheckpointInventory,
 } from "./MemoryCheckpointInventory.ts";
 import {
   checkpointBound,
@@ -351,4 +352,58 @@ it.effect("accepts exactly 262144 encoded page bytes and refuses one more byte",
     };
     assert.strictEqual((yield* encodeCheckpointPage(over).pipe(Effect.exit))._tag, "Failure");
   }),
+);
+
+const decodePull = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
+it.effect(
+  "proves the single-record pull envelope at 262144 bytes and rejects unpageable admission",
+  () =>
+    Effect.gen(function* () {
+      const page = {
+        memorySpaceId: space,
+        checkpointSequence: Number.MAX_SAFE_INTEGER,
+        retentionFloor: Number.MAX_SAFE_INTEGER,
+        causalBoundary: { checkpointSequence: Number.MAX_SAFE_INTEGER, boundaryId: "f".repeat(64) },
+        pageOrdinal: Number.MAX_SAFE_INTEGER,
+        ...emptyCheckpointInventory(),
+        identities: [{ ...identity, creatingEnvironmentId: M.EnvironmentId.make("x") }],
+        nextCursor: "f".repeat(64),
+        bootstrapComplete: false,
+      };
+      const pull = {
+        highWatermark: Number.MAX_SAFE_INTEGER,
+        throughSequence: Number.MAX_SAFE_INTEGER,
+        hasMore: true,
+        entries: [],
+        checkpoint: page,
+      };
+      const room = 262144 - new TextEncoder().encode(JSON.stringify(pull)).length;
+      const exactIdentity = {
+        ...identity,
+        creatingEnvironmentId: M.EnvironmentId.make("x".repeat(room + 1)),
+      };
+      const exact = { ...pull, checkpoint: { ...page, identities: [exactIdentity] } };
+      yield* decodePull(exact);
+      assert.strictEqual(new TextEncoder().encode(JSON.stringify(exact)).length, 262144);
+      const inventory = { ...emptyCheckpointInventory(), identities: [exactIdentity] };
+      yield* validateCheckpointInventory(space, inventory);
+      assert.isTrue(
+        new TextEncoder().encode(yield* encodeCheckpointPage(exact.checkpoint)).length <=
+          checkpointBound(checkpointInventorySize(inventory).bytes, 1),
+      );
+      assert.strictEqual(
+        (yield* validateCheckpointInventory(space, {
+          ...inventory,
+          identities: [
+            {
+              ...exactIdentity,
+              creatingEnvironmentId: M.EnvironmentId.make(
+                exactIdentity.creatingEnvironmentId + "x",
+              ),
+            },
+          ],
+        }).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+    }),
 );

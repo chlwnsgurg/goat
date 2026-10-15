@@ -1,3 +1,4 @@
+import { checkpointLedgerFixture } from "./MemoryCheckpoint.testkit.ts";
 import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -66,7 +67,7 @@ const record = (n: number): M.MemoryImportLineageRecord => ({
 const seed = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys)
-    VALUES (${space},${memoryId},'{}','{}',20000,0)`;
+    VALUES (${space},${memoryId},${checkpointLedgerFixture(space, memoryId, environmentId).identity},${checkpointLedgerFixture(space, memoryId, environmentId).fence},20000,0)`;
 });
 const inventory = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -1457,7 +1458,7 @@ describe("MemoryImport refused forget expansion", () => {
       );
       // Canonical replica restoration may leave local metadata above its admission ceiling.
       yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys)
-        VALUES (${space},${M.MemoryId.make(uuid(900))},'{}','{}',${M.MEMORY_PERMANENT_METADATA_MAX_BYTES},0)`;
+        VALUES (${space},${M.MemoryId.make(uuid(900))},${checkpointLedgerFixture(space, uuid(900), environmentId).identity},${checkpointLedgerFixture(space, uuid(900), environmentId).fence},${M.MEMORY_PERMANENT_METADATA_MAX_BYTES},0)`;
       const result = yield* service.forget(
         {
           memorySpaceId: space,

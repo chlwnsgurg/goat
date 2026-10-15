@@ -24,6 +24,8 @@ export default Effect.gen(function* () {
   yield* sql`CREATE TRIGGER memory_import_result_immutable BEFORE UPDATE ON memory_import_noop_results
     BEGIN SELECT RAISE(ABORT,'immutable import result'); END`;
 
+  // Preserve the legacy raw input meter for unbound local work. It is NOT U_next.
+  yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT space,'memory_input_bytes',scope_key,value FROM memory_quota_counters WHERE dimension='hub_snapshot_bytes'`;
   const definitions = yield* sql<{
     name: string;
     sql: string;
@@ -34,6 +36,8 @@ export default Effect.gen(function* () {
       trigger.name.startsWith("memory_tombstones_snapshot_forget_")
     ) {
       yield* sql.unsafe(`DROP TRIGGER ${trigger.name}`);
+      if (trigger.name.includes("_hub_snapshot_bytes_"))
+        yield* sql.unsafe(trigger.sql.replaceAll("hub_snapshot_bytes", "memory_input_bytes"));
     } else if (/^memory_import_lineage_(insert|update|delete)$/.test(trigger.name)) {
       // Keep permanent lineage/first-forget charge and generation invalidation.
       const rewritten = trigger.sql.replace(
@@ -48,6 +52,36 @@ export default Effect.gen(function* () {
     value.startsWith("-")
       ? `UPDATE memory_quota_counters SET value=value+(${value}) WHERE space=${space} AND dimension='${dimension}' AND scope_key='';`
       : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},'${dimension}','',${value}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`;
+  // Cursor retry is private scheduling metadata, not a canonical checkpoint record.
+  yield* sql.unsafe(
+    counter(
+      "'_hub_global'",
+      "hub_metadata",
+      "(SELECT coalesce(sum(length(CAST(pull_retry_json AS BLOB))),0) FROM memory_sync_cursors)",
+    ),
+  );
+  yield* sql.unsafe(
+    counter(
+      "'_hub_global'",
+      "hub_private_metadata",
+      "(SELECT coalesce(sum(length(CAST(pull_retry_json AS BLOB))),0) FROM memory_sync_cursors)",
+    ),
+  );
+  for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
+    const delta = (p: string, sign: number) =>
+      ["hub_metadata", "hub_private_metadata"]
+        .map((d) =>
+          counter(
+            "'_hub_global'",
+            d,
+            `${sign}*coalesce(length(CAST(${p}.pull_retry_json AS BLOB)),0)`,
+          ),
+        )
+        .join("");
+    yield* sql.unsafe(
+      `CREATE TRIGGER memory_sync_cursors_private_${action.toLowerCase()} AFTER ${action} ON memory_sync_cursors BEGIN ${action !== "INSERT" ? delta("OLD", -1) : ""}${action !== "DELETE" ? delta("NEW", 1) : ""} END`,
+    );
+  }
   // Replace origin triggers as one unit, retaining every private admission dimension.
   const columns =
     "receipt_id,space,environment_id,record_kind,source_id,format,source_locator,source_item_key,parser_version,scope_json,accepted_source_fingerprint,accepted_content_fingerprints_json,observed_rejected_fingerprint,memory_id,accepted_revision_id,batch_operation_id,request_digest,completed_items_json,outcome,issue,observed_at_utc,source_aliases_json,registration_json,result_ref".split(

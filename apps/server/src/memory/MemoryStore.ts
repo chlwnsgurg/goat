@@ -1797,12 +1797,23 @@ export const ImportCompletedNoopCodec = Schema.Struct({
   codecVersion: Schema.Literal(1),
   operationId: M.MemoryOperationId,
   selectionDigest: digest,
-  sessionId: importLabel,
+  sessionId: importLabel.check(Schema.makeFilter((s) => new TextEncoder().encode(s).length <= 64)),
   resultRef: digest,
   sessionNewItems: importCount,
   sessionBodyBytes: importCount,
   createdAtUtc: M.MemoryUtcTimestamp,
-}).check(Schema.makeFilter((b) => b.sessionNewItems <= M.MEMORY_IMPORT_MAX_LIVE_ITEMS));
+});
+export const ImportNoopResultCodec = Schema.Struct({
+  codecVersion: Schema.Literal(1),
+  items: Schema.Array(M.MemoryImportItemResult).check(
+    Schema.makeFilter(
+      (items) =>
+        items.length > 0 &&
+        items.length <= M.MEMORY_IMPORT_APPLY_MAX_ITEMS &&
+        items.every((i) => i.outcome === "noop"),
+    ),
+  ),
+});
 const ImportRetiredCodec = Schema.Struct({
   kind: Schema.Literal("retired"),
   codecVersion: Schema.Literal(1),

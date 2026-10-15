@@ -257,3 +257,37 @@ export const encodeCheckpointPage = (page: M.MemoryHubCheckpointPage) =>
           .join(",")}}`,
     ),
   );
+
+const validatePull = Schema.decodeUnknownEffect(M.MemoryHubPullResult);
+/** A numeric/continuation change must not make an admitted single record unpageable. */
+export const validateCheckpointInventory = Effect.fnUntraced(function* (
+  space: M.MemorySpaceId,
+  inventory: CheckpointInventory,
+) {
+  for (const key of checkpointKeys)
+    for (const record of inventory[key]) {
+      yield* validatePull(
+        {
+          highWatermark: Number.MAX_SAFE_INTEGER,
+          throughSequence: Number.MAX_SAFE_INTEGER,
+          hasMore: true,
+          entries: [],
+          checkpoint: {
+            memorySpaceId: space,
+            checkpointSequence: Number.MAX_SAFE_INTEGER,
+            retentionFloor: Number.MAX_SAFE_INTEGER,
+            causalBoundary: {
+              checkpointSequence: Number.MAX_SAFE_INTEGER,
+              boundaryId: "f".repeat(64),
+            },
+            pageOrdinal: Number.MAX_SAFE_INTEGER,
+            ...emptyCheckpointInventory(),
+            [key]: [record],
+            nextCursor: "f".repeat(64),
+            bootstrapComplete: false,
+          },
+        },
+        strict,
+      );
+    }
+});

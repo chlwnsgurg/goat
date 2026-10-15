@@ -794,15 +794,15 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const growth = yield* readStorageGrowth(input.environmentId);
           const fts = yield* store.ftsState(input.environmentId);
-          // WP2 local drafts have no canonical hub inventory. Existing snapshot counters
-          // already track their serialized payload and outbox bytes transactionally.
+          // WP2 local drafts have no canonical hub inventory. The private input meter
+          // tracks their serialized payload and outbox bytes transactionally.
           const counters = yield* store.counters(`_local:${input.environmentId}`);
           const value = (dimension: string) =>
             counters.find((counter) => counter.dimension === dimension && counter.scope_key === "")
               ?.value ?? 0;
           const localLimits = [
             ["work_items", value("processing_pending_sync"), M.MEMORY_WORK_MAX_PENDING_ITEMS],
-            ["work_bytes", value("hub_snapshot_bytes"), M.MEMORY_WORK_MAX_PAYLOAD_BYTES],
+            ["work_bytes", value("memory_input_bytes"), M.MEMORY_WORK_MAX_PAYLOAD_BYTES],
           ] as const;
           const quotas: M.MemoryStorageQuota[] = localLimits.map(([dimension, current, limit]) => ({
             dimension,

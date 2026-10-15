@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   checkpointInventorySize,
+  validateCheckpointInventory,
   selectCheckpointMemory,
   selectCheckpointReceipt,
 } from "./MemoryCheckpointInventory.ts";
@@ -30,12 +31,22 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
     scope_key: string;
   }>`SELECT dimension,scope_key FROM memory_quota_counters WHERE space='_checkpoint_dirty'`;
   for (const key of dirty) {
-    const space = yield* decodeSpace(key.dimension);
     const memory = key.scope_key.startsWith("m:");
     const id = key.scope_key.slice(2);
+    if (memory) {
+      const canonical =
+        yield* sql`SELECT 1 FROM memory_identity_ledger WHERE space=${key.dimension} AND memory_id=${id} UNION ALL SELECT 1 FROM memory_quota_counters WHERE space=${key.dimension} AND dimension='hub_snapshot_bytes' AND scope_key=${key.scope_key} LIMIT 1`;
+      if (!canonical.length) {
+        // Local drafts have no canonical identity and cannot appear in a hub checkpoint.
+        yield* sql`DELETE FROM memory_quota_counters WHERE space='_checkpoint_dirty' AND dimension=${key.dimension} AND scope_key=${key.scope_key}`;
+        continue;
+      }
+    }
+    const space = yield* decodeSpace(key.dimension);
     const inventory = memory
       ? yield* selectCheckpointMemory(space, yield* decodeMemory(id), now)
       : yield* selectCheckpointReceipt(space, id);
+    yield* validateCheckpointInventory(space, inventory);
     const size = checkpointInventorySize(inventory);
     if (memory) {
       const reserves = yield* sql<{
