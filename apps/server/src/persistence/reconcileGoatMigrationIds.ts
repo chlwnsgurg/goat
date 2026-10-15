@@ -21,15 +21,6 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "MemoryTaskGrantCeiling",
 ]);
 
-// These ids identify the first releasable memory schema. Older sandbox schemas are not migrated.
-const RELEASED_MEMORY_MIGRATION_IDS = new Map([
-  ["Memory", 71],
-  ["MemoryHubSync", 72],
-  ["MemorySearchCounters", 73],
-  ["MemoryTaskGrantCeiling", 74],
-  ["MemoryImportLineage", 75],
-]);
-
 type MigrationEntry<E> = readonly [
   id: number,
   name: string,
@@ -59,13 +50,15 @@ export const reconcileGoatMigrationIds = Effect.fn("reconcileGoatMigrationIds")(
             SELECT migration_id, name FROM effect_sql_migrations
           `
         : [];
-      const incompatibleLedger = history.some((row) => {
-        const releasedId = RELEASED_MEMORY_MIGRATION_IDS.get(row.name);
-        return releasedId !== undefined && row.migration_id !== releasedId;
-      });
+      const currentIds = new Map(entries.map(([id, name]) => [name, id]));
+      const incompatibleLedger = history.some(
+        (row) => row.name.startsWith("Memory") && currentIds.get(row.name) !== row.migration_id,
+      );
       const unrecordedMemory =
         tables.some((table) => table.name.startsWith("memory_")) &&
-        !history.some((row) => row.name === "Memory" && row.migration_id === 71);
+        !history.some(
+          (row) => row.name === "Memory" && row.migration_id === currentIds.get("Memory"),
+        );
       // Check before both the unchanged-id return and any ledger write: renumbering would hide
       // the only reliable evidence that a sandbox used an unreleased memory schema.
       if (incompatibleLedger || unrecordedMemory) {
@@ -76,7 +69,6 @@ export const reconcileGoatMigrationIds = Effect.fn("reconcileGoatMigrationIds")(
         });
       }
       if (!hasLedger) return [];
-      const currentIds = new Map(entries.map(([id, name]) => [name, id]));
       const goatRows = history.filter((row) => GOAT_MIGRATION_NAMES.has(row.name));
       if (goatRows.every((row) => currentIds.get(row.name) === row.migration_id)) return [];
 
