@@ -1587,6 +1587,7 @@ const resolutionSubmission = Effect.gen(function* () {
     ...base,
     kind: "resolve",
     expectedHeads: claim.conflictHeadSet,
+    payload: { ...base.payload, derivedFromMemoryRevisions: claim.conflictHeadSet },
     revision: { ...base.revision, parents: claim.conflictHeadSet },
     conflictId: claim.conflictId,
     fencingToken: lease.fencingToken,

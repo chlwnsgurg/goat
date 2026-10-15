@@ -5709,3 +5709,160 @@ it.effect.each(["claim", "paired"] as const)(
       );
     }),
 );
+
+it.effect.each(["valid", "limit", "generation-race", "omitted", "admission-race"] as const)(
+  "r2 resolution preserves transitive lineage and fences %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const submitted = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
+      let submission: M.MemoryHubApplyResolutionInput | undefined;
+      let calls = 0;
+      let database: SqlClient.SqlClient | undefined;
+      const source = operation(9100, M.MemoryId.make(id(9100)));
+      if (source.kind !== "upsert") throw new Error("fixture");
+      const client = peer({
+        applyResolution: (_c, input) =>
+          Effect.gen(function* () {
+            submission = input;
+            yield* Deferred.succeed(submitted, undefined);
+            return yield* new M.MemoryHubError({ code: "unavailable" });
+          }),
+        release: () => Deferred.succeed(released, undefined).pipe(Effect.as({ released: true })),
+      });
+      const model = realGeneration({
+        resolveMemoryConflict: (input) =>
+          Effect.gen(function* () {
+            calls++;
+            if (mode === "generation-race") {
+              if (!database) throw new Error("fixture");
+              yield* database`UPDATE memory_items SET status='forgotten' WHERE memory_id=${source.memoryId}`.pipe(
+                Effect.orDie,
+              );
+            }
+            return {
+              result: {
+                text: "synthetic transitive resolution",
+                assertionKind: "inference" as const,
+                evidence: [],
+                judgment: "synthetic lineage judgment",
+              },
+              execution: {
+                requestedModelSelection: input.modelSelection,
+                effectiveProvider: M.ProviderDriverKind.make("codex"),
+                effectiveModel: input.modelSelection.model,
+                providerInstanceId: input.modelSelection.instanceId,
+                environmentId: local,
+              },
+            };
+          }),
+      });
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* ready;
+          yield* commit(source);
+          const target = yield* conflict();
+          const sql = yield* SqlClient.SqlClient;
+          database = sql;
+          const store = yield* Store.MemoryStore;
+          const service = yield* Service.MemoryService;
+          const original = yield* store.loadAggregate(space, target);
+          const deps =
+            mode === "limit"
+              ? Array.from({ length: 100 }, (_, i) => M.MemoryRevisionId.make(id(9200 + i)))
+              : [source.revision.revisionId];
+          for (const head of original.heads)
+            yield* sql`UPDATE memory_payloads SET body_json=json_set(body_json,'$.derivedFromMemoryRevisions',json(${encode(deps)})),dependencies_json=${encode(deps)} WHERE payload_ref=${head}`;
+          const sync = yield* Sync.MemorySyncService;
+          yield* sync.syncOnce;
+          if (mode === "limit" || mode === "generation-race") {
+            yield* Deferred.await(released);
+            yield* sync.shutdown;
+            assert.isUndefined(submission);
+            assert.strictEqual(calls, mode === "limit" ? 0 : 1);
+            assert.deepStrictEqual(
+              (yield* store.loadAggregate(space, target)).heads,
+              original.heads,
+            );
+            return;
+          }
+          yield* Deferred.await(submitted);
+          yield* sync.shutdown;
+          if (!submission || submission.operation.kind !== "resolve") throw new Error("fixture");
+          const op = submission.operation;
+          assert.deepStrictEqual(
+            [...op.payload.derivedFromMemoryRevisions].sort(),
+            [...original.heads, source.revision.revisionId].sort(),
+          );
+          yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${local},${"a".repeat(64)},1,'active')`;
+          const authority: Store.HubAuthority = {
+            principal: {
+              memorySpaceId: space,
+              environmentId: local,
+              credentialVersion: 1,
+              scopes: ["memory:sync"],
+            },
+            now: Clock.currentTimeMillis,
+            reauthorize: Effect.void,
+          };
+          yield* store.transact(
+            store.transitionHubLeaseTx({
+              authority,
+              action: {
+                kind: "claim",
+                request: {
+                  protocolVersion: 1,
+                  memorySpaceId: space,
+                  memoryId: target,
+                  holderEnvironmentId: local,
+                  conflictId: op.conflictId,
+                  conflictHeadSet: original.heads,
+                  attemptId: submission.attemptId,
+                  frozenDefaultModelSelection: selection,
+                },
+              },
+            }),
+          );
+          if (mode === "admission-race")
+            yield* sql`UPDATE memory_items SET status='forgotten' WHERE memory_id=${source.memoryId}`;
+          const candidate =
+            mode === "omitted"
+              ? { ...op, payload: { ...op.payload, derivedFromMemoryRevisions: original.heads } }
+              : op;
+          const receipt = yield* service.admitHubOperation({
+            authority,
+            operation: candidate,
+            resolutionRequest: { ...submission, operation: candidate },
+          });
+          assert.strictEqual(receipt.outcome, mode === "valid" ? "accepted" : "rejected");
+          if (mode !== "valid") return;
+          // Expire the actual original input payloads, not their lineage identity rows.
+          yield* sql`UPDATE memory_payloads SET purge_eligible_after=0,revert_deadline=0 WHERE payload_ref IN (${original.heads[0]!},${original.heads[1]!})`;
+          yield* sql`UPDATE memory_resolutions SET revert_deadline=0 WHERE memory_id=${target}`;
+          yield* sql`UPDATE memory_outbox SET status='completed' WHERE memory_id=${target}`;
+          yield* sql`UPDATE memory_events SET receipt_json=json_set(receipt_json,'$.hubSequence',1) WHERE memory_id=${target}`;
+          yield* sql`INSERT INTO memory_compaction_state(space,published) VALUES (${space},1) ON CONFLICT(space) DO UPDATE SET published=1`;
+          yield* store.prunePayloads(1, 100);
+          for (const head of original.heads)
+            assert.strictEqual(
+              (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${head}`).length,
+              0,
+            );
+          yield* service.forget(
+            {
+              memorySpaceId: space,
+              memoryId: source.memoryId,
+              operationId: M.MemoryOperationId.make(id(9400)),
+              expectedHeads: [source.revision.revisionId],
+            },
+            Effect.void,
+          );
+          assert.strictEqual(
+            (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${target}`).length,
+            0,
+          );
+          assert.strictEqual((yield* store.loadAggregate(space, target)).item?.status, "blocked");
+        }).pipe(Effect.provide(fixture(client, model))),
+      );
+    }),
+);

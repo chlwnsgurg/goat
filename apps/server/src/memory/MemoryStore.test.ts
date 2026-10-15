@@ -4402,6 +4402,16 @@ it.effect.each(["current", "replaced-compactor", "replaced-prune"] as const)(
           );
         }
       }
+      // Revision identities can outlive their bodies for one bounded sweep while
+      // the judgment is still a dependent. Once it is collected, identities can go too.
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: nextFloor,
+          now: expiresAt + M.MEMORY_LOG_RETENTION_MS + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
       for (const revisionId of op.resolution.inputRevisionIds)
         assert.strictEqual(
           (yield* sql`SELECT 1 FROM memory_revisions WHERE space=${space} AND revision_id=${revisionId}`)
@@ -7874,6 +7884,150 @@ it.effect.each(["fts", "substring"] as const)(
       assert.deepStrictEqual(
         [...first.items, ...next.items].map((i) => i.memoryId),
         Array.from({ length: 105 }, (_, n) => id(n + 2)),
+      );
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "r2 compacts dependency bodies but preserves forget identity until dependents are purged",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      yield* TestClock.setTime(Date.parse(now));
+      yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status) VALUES (${space},${env},${hash},1,'active')`;
+      const first = operation(8800);
+      const successor = operation(8801);
+      const derived = operation(8802);
+      if (first.kind !== "upsert" || successor.kind !== "upsert" || derived.kind !== "upsert")
+        throw new Error("fixture");
+      const target = M.MemoryId.make(id(8803));
+      const operations: M.MemoryOperation[] = [
+        first,
+        {
+          ...successor,
+          expectedHeads: [first.revision.revisionId],
+          revision: { ...successor.revision, parents: [first.revision.revisionId] },
+        },
+        {
+          ...derived,
+          memoryId: target,
+          revision: { ...derived.revision, memoryId: target },
+          payload: { ...derived.payload, derivedFromMemoryRevisions: [first.revision.revisionId] },
+        },
+      ];
+      for (const op of operations) {
+        const ledger = yield* store.transact(
+          store.appendHubEntryTx({
+            operation: op,
+            operationDigest: memoryOperationDigest(op),
+            outcome: "accepted",
+            now: Date.parse(now),
+          }),
+        );
+        yield* store.apply({
+          ...decideMemoryOperation(
+            yield* store.loadAggregate(space, op.memoryId),
+            op,
+            Store.hubAdmission,
+            { kind: "allowed" },
+          ),
+          receipt: ledger.entry.receipt,
+        });
+      }
+      const at = Date.parse(now) + 2 * M.MEMORY_LOG_RETENTION_MS;
+      yield* sql`UPDATE memory_payloads SET purge_eligible_after=0 WHERE payload_ref=${first.revision.payloadRef}`;
+      const handle = yield* store.transact(
+        store.prepareHubCheckpointTx({
+          authority: { ...leaseAuthority, now: Effect.succeed(at) },
+          checkpointId: "r2-lineage",
+          snapshotToken: "r2-lineage",
+          hubEnvironmentId: env,
+        }),
+      );
+      yield* store.transact(
+        store.publishCheckpointAndFloorTx({
+          memorySpaceId: space,
+          checkpointId: "r2-lineage",
+          expectedFloor: 0,
+          nextFloor: handle.checkpointSequence,
+          now: at,
+        }),
+      );
+      for (let i = 0; i < 3; i++)
+        yield* store.transact(
+          store.compactEligibleHistoryTx({
+            memorySpaceId: space,
+            expectedFloor: handle.checkpointSequence,
+            now: at + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+            limit: 100,
+          }),
+        );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE payload_ref=${first.revision.payloadRef}`)
+          .length,
+        0,
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_revisions WHERE revision_id=${first.revision.revisionId}`)
+          .length,
+        1,
+      );
+      const snapshotRows = yield* sql<{
+        metadata_json: string;
+      }>`SELECT metadata_json FROM memory_inbox_pending WHERE checkpoint_id='hub:r2-lineage' ORDER BY page_ordinal`;
+      const pages = yield* Effect.forEach(snapshotRows, (row) =>
+        decodeCheckpointPage(row.metadata_json),
+      );
+      const dependency = pages
+        .flatMap((page) => page.revisions)
+        .find((pair) => pair.revision.revisionId === first.revision.revisionId);
+      assert.isDefined(dependency);
+      assert.isNull(dependency!.payload);
+      const forgotten: M.MemoryOperation = {
+        protocolVersion: 1,
+        kind: "forget",
+        memorySpaceId: space,
+        memoryId: memory,
+        operationId: M.MemoryOperationId.make(id(8810)),
+        originEnvironmentId: env,
+        expectedHeads: [successor.revision.revisionId],
+        tombstone: {
+          memorySpaceId: space,
+          memoryId: memory,
+          deleteOperationId: M.MemoryOperationId.make(id(8810)),
+          deletingEnvironmentId: env,
+          deletedAtUtc: M.MemoryUtcTimestamp.make(now),
+          suppressedSourceKeys: [],
+          suppressedContent: [],
+          sourceExclusions: [],
+        },
+      };
+      yield* store.apply(
+        decideMemoryOperation(
+          yield* store.loadAggregate(space, memory),
+          forgotten,
+          Store.hubAdmission,
+          { kind: "allowed" },
+        ),
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_payloads WHERE memory_id=${target}`).length,
+        0,
+      );
+      assert.strictEqual((yield* store.loadAggregate(space, target)).item?.status, "blocked");
+      yield* store.transact(
+        store.compactEligibleHistoryTx({
+          memorySpaceId: space,
+          expectedFloor: handle.checkpointSequence,
+          now: at + M.MEMORY_CHECKPOINT_TOKEN_TTL_MS,
+          limit: 100,
+        }),
+      );
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_revisions WHERE revision_id=${first.revision.revisionId}`)
+          .length,
+        0,
       );
     }).pipe(Effect.provide(live)),
 );
