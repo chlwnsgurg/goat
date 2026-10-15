@@ -146,6 +146,9 @@ Follow-up messages continue the same cloud session. Stop waits for Devin to conf
 If GOAT loses tracking, the thread keeps its session link and blocks further messages while the
 prompt outcome is unknown. Reconnecting does not resend the original message.
 
+If Devin Cloud is not ready, run `goat provider diagnose --driver devinCloud` on the environment's
+machine. It lists what blocks it and the next step for each.
+
 ## Advanced configuration
 
 - **Executable override** runs an existing local executable instead of the managed distribution,

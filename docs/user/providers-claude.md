@@ -29,6 +29,10 @@ message delivery, not completed work. Stop the session on Claude's website;
 Claude Cloud has no supported CLI cancellation command. Your local files and
 checkpoints are not changed by cloud work.
 
+If Claude Cloud is not ready, run `goat provider diagnose --driver claudeCloud` on the
+environment's machine. It lists what blocks it, such as a missing claude.ai login or an
+API-key variable in the environment, and the next step for each.
+
 ## Separate accounts or configurations
 
 Use a separate Claude config directory for each account. This also works for named
