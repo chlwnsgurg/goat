@@ -201,3 +201,5 @@ export const assertUsageCounters = Effect.gen(function* () {
       assert.deepStrictEqual(yield* store.usage(id, scope), yield* scanUsage(id, scope));
   }
 });
+
+export const checkUsage = Effect.tap(() => assertUsageCounters);

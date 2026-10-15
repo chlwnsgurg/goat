@@ -1,4 +1,4 @@
-import { assertUsageCounters } from "./MemoryUsageScan.testkit.ts";
+import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import {
   uuid,
   space,
@@ -99,10 +99,7 @@ describe("MemoryImport lifetime lineage", () => {
       assert.deepStrictEqual(yield* inventory, before);
       yield* store.transact(store.unionImportLineageTx([record(999)], Store.hubAdmission));
       assert.deepStrictEqual(yield* inventory, before);
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "enforces global encoded-byte equality/+1 and rolls back reserve, generation and metadata",
@@ -123,10 +120,7 @@ describe("MemoryImport lifetime lineage", () => {
         if (failure._tag === "MemoryCapacityError")
           assert.strictEqual(failure.dimension, "import_lineage_bytes");
         assert.deepStrictEqual(yield* inventory, before);
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "approved replica restores complete canonical union despite local record and byte limits",
@@ -144,10 +138,7 @@ describe("MemoryImport lifetime lineage", () => {
           ),
         );
         assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 1001);
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 

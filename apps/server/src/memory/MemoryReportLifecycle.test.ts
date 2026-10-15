@@ -1,4 +1,4 @@
-import { assertUsageCounters } from "./MemoryUsageScan.testkit.ts";
+import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -65,10 +65,7 @@ describe("MemoryReportLifecycle", () => {
       );
       assert.strictEqual(rows[0]!.automaticAttempts, 1);
       assert.strictEqual(yield* store.nextReportWakeAt(0, owner), 1000);
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("rejects stale claimant acknowledgement and defer without changing counters", () =>
     Effect.gen(function* () {
@@ -103,10 +100,7 @@ describe("MemoryReportLifecycle", () => {
           claimUntil: 2000,
         }),
       );
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("crashed tenth claim survives restart and never permits an eleventh attempt", () =>
     Effect.gen(function* () {
@@ -131,10 +125,7 @@ describe("MemoryReportLifecycle", () => {
         yield* sql`SELECT state,automatic_attempts,claimed_by,claimed_until FROM memory_report_outbox`,
         [{ state: "failed", automatic_attempts: 10, claimed_by: null, claimed_until: null }],
       );
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("active tenth claim can defer, retains attempts and bounds backoff", () =>
     Effect.gen(function* () {
@@ -158,10 +149,7 @@ describe("MemoryReportLifecycle", () => {
         [{ state: "failed", automatic_attempts: 10, next_attempt_at: 30000 }],
       );
       assert.isNull(yield* store.nextReportWakeAt(0, owner));
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("guard failure rolls acknowledgement and all counters back atomically", () =>
     Effect.gen(function* () {
@@ -182,10 +170,7 @@ describe("MemoryReportLifecycle", () => {
       assert.deepStrictEqual(yield* sql`SELECT state,claimed_until FROM memory_report_outbox`, [
         { state: "pending", claimed_until: 1000 },
       ]);
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect.each([owner, other])(
     "purges exact 30-day delivered details on local owner %s and retains target guard",
@@ -237,10 +222,7 @@ describe("MemoryReportLifecycle", () => {
           (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
           1,
         );
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("resets only exact-owner exhausted failed rows and does not free quota", () =>
     Effect.gen(function* () {
@@ -277,10 +259,7 @@ describe("MemoryReportLifecycle", () => {
         ),
         { resetCount: 0, unchangedCount: 4 },
       );
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "quota equality admits 2000 retained unknown or exhausted rows and +1 refuses explicitly",
@@ -302,10 +281,7 @@ describe("MemoryReportLifecycle", () => {
           yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='processing_admission_failures'`,
           [{ value: 1 }],
         );
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("metadata byte equality admits and +1 refuses while counters roll back", () =>
     Effect.gen(function* () {
@@ -336,10 +312,7 @@ describe("MemoryReportLifecycle", () => {
         )
         .pipe(Effect.exit);
       assert.deepStrictEqual(yield* counters, before);
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("A resolve and B revert keep immutable separate delivery owners", () =>
     Effect.gen(function* () {
@@ -399,10 +372,7 @@ describe("MemoryReportLifecycle", () => {
       }
       assert.strictEqual((yield* acquire(store, 0, owner))[0]!.outcome, "resolved");
       assert.strictEqual((yield* acquire(store, 0, other))[0]!.outcome, "reverted");
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
@@ -430,10 +400,7 @@ it.effect(
         1,
       );
       assert.isNull(yield* store.nextReportMaintenanceAt(owner));
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
 );
 it.effect("active tenth claim can acknowledge and target contradictions stay unavailable", () =>
   Effect.gen(function* () {
@@ -448,10 +415,7 @@ it.effect("active tenth claim can acknowledge and target contradictions stay una
     );
     yield* sql`UPDATE memory_import_keys SET record_json='{"operationId":"00000000-0000-4000-8000-000000000011","outcome":"resolved","resolvingEnvironmentId":"B"}' WHERE key_kind='report_delivered'`;
     assert.isNull(yield* store.readReportTarget(r.reportId));
-  }).pipe(
-    Effect.tap(() => assertUsageCounters),
-    Effect.provide(live),
-  ),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("delivered guards stay charged at the permanent metadata equality and +1 boundary", () =>
@@ -504,10 +468,7 @@ it.effect("delivered guards stay charged at the permanent metadata equality and 
       (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
       1,
     );
-  }).pipe(
-    Effect.tap(() => assertUsageCounters),
-    Effect.provide(live),
-  ),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("r2 M1 normalizes only canonically proven foreign pending intents", () =>
@@ -561,10 +522,7 @@ it.effect("r2 M1 normalizes only canonically proven foreign pending intents", ()
     yield* store.transact(store.normalizeForeignReportIntentsTx(owner));
     assert.deepStrictEqual(yield* counters, after);
     assert.strictEqual((yield* acquire(store, 0, owner)).length, 1);
-  }).pipe(
-    Effect.tap(() => assertUsageCounters),
-    Effect.provide(live),
-  ),
+  }).pipe(checkUsage, Effect.provide(live)),
 );
 
 it.effect("r3 bounds PK pages before foreign filtering and releases the writer between pages", () =>
@@ -618,8 +576,5 @@ it.effect("r3 bounds PK pages before foreign filtering and releases the writer b
       before,
     );
     assert.deepStrictEqual(yield* counters, usage);
-  }).pipe(
-    Effect.tap(() => assertUsageCounters),
-    Effect.provide(live),
-  ),
+  }).pipe(checkUsage, Effect.provide(live)),
 );

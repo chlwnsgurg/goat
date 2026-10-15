@@ -24,7 +24,7 @@ it.effect(
         yield* sql`INSERT INTO memory_items(space,memory_id,scope_json,scope_key,heads_json,status,projection_watermark,item_json,availability_json) VALUES (${space},'memory','{"kind":"user"}','user','["revision"]','active',0,'{}','{}')`;
         yield* sql`INSERT INTO memory_revisions(space,revision_id,memory_id,operation_id,parents_json,scope_json,assertion_kind,provenance_json,payload_ref,created_at) VALUES (${space},'revision','memory','op','[]','{"kind":"user"}','inference','{"sourceThread":"synthetic"}','payload',0)`;
         yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'payload','memory','{"text":"한글"}','[]'),(${space},'history','memory','{"text":"old"}','[]')`;
-        yield* sql`INSERT INTO memory_identity_ledger VALUES (${space},'memory','{}','{}',100,2)`;
+        yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},'memory','{}','{}',100,2)`;
         yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at) VALUES (1,${space},'memory','op','upsert','synthetic','digest','{}','{}',0)`;
         yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json) VALUES (${space},'op','digest',1,'{}','{}')`;
         yield* sql`INSERT INTO memory_import_lineage VALUES (${space},'memory','content','key','{}')`;

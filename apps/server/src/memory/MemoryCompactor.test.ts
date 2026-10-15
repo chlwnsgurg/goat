@@ -1,4 +1,4 @@
-import { assertUsageCounters } from "./MemoryUsageScan.testkit.ts";
+import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import * as Settings from "../serverSettings.ts";
 import { McpServer } from "effect/ai";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -300,10 +300,7 @@ describe("MemoryCompactor", () => {
           assert.strictEqual(match.kind, "source_suppressed");
           assert.strictEqual((yield* replica.readImportLineage(space, memoryId)).length, 202);
         }).pipe(Effect.provide(Layer.fresh(core)));
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 
   it.effect(
@@ -335,10 +332,7 @@ describe("MemoryCompactor", () => {
         );
         assert.strictEqual(recovered.checkpoint!.items[0]!.memoryId, memoryId);
         assert.strictEqual(recovered.checkpoint!.compactReceipts.length, 1);
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("live member pin keeps the prior floor until immutable expiry", () =>
     Effect.gen(function* () {
@@ -361,10 +355,7 @@ describe("MemoryCompactor", () => {
       assert.strictEqual(old.checkpoint!.checkpointSequence, 0);
       yield* TestClock.adjust(M.MEMORY_CHECKPOINT_TOKEN_TTL_MS);
       assert.strictEqual((yield* compactor.compact(principal())).retentionFloor, 1);
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "same-hub producer preserves joined pages, token guard and floor until immutable TTL",
@@ -457,10 +448,7 @@ describe("MemoryCompactor", () => {
           (yield* store.transact(store.readHubRetentionTx(space))).retentionFloor,
           2,
         );
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("a failed staging reservation keeps the old publication and floor intact", () =>
     Effect.gen(function* () {
@@ -532,10 +520,7 @@ describe("MemoryCompactor", () => {
           .count,
         2,
       );
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "producer covers escaped embedded payload, maximal source fields and mixed lifetime lineage",
@@ -570,10 +555,7 @@ describe("MemoryCompactor", () => {
           rows.reduce((sum, r) => sum + new TextEncoder().encode(r.metadata_json).length, 0),
           usage.requiredCheckpointBoundBytes,
         );
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "canonical pinned publication counts shared handles once and admits equality, rolls back plus one",
@@ -676,10 +658,7 @@ describe("MemoryCompactor", () => {
         }>`SELECT sum(length(CAST(metadata_json AS BLOB))) AS bytes,count(DISTINCT checkpoint_id) AS publications FROM memory_inbox_pending WHERE space=${space} AND reason='hub_snapshot'`;
         assert.strictEqual(finalBytes[0]!.publications, 2);
         assert.strictEqual(accepted.publishedPinnedBytes, finalBytes[0]!.bytes);
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "daily scheduling survives service reconstruction and preserves nonexpired history",
@@ -711,10 +690,7 @@ describe("MemoryCompactor", () => {
             .count,
           1,
         );
-      }).pipe(
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect("row and byte triggers publish before the daily deadline", () =>
     Effect.gen(function* () {
@@ -735,10 +711,7 @@ describe("MemoryCompactor", () => {
         (yield* compactor.compactIfNeeded(principal())).checkpointId,
         first.checkpointId,
       );
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "start follows the durable daily deadline after a signal and interrupts its scoped workers",
@@ -843,11 +816,7 @@ describe("MemoryCompactor", () => {
           dailyRun.checkpointId,
         );
         assert.strictEqual(yield* Ref.get(completed), 3);
-      }).pipe(
-        Effect.scoped,
-        Effect.tap(() => assertUsageCounters),
-        Effect.provide(live),
-      ),
+      }).pipe(Effect.scoped, checkUsage, Effect.provide(live)),
   );
   it.effect("members cannot run hub compaction or floor publication", () =>
     Effect.gen(function* () {
@@ -859,10 +828,7 @@ describe("MemoryCompactor", () => {
       );
       const store = yield* Store.MemoryStore;
       assert.isNull((yield* store.transact(store.readHubRetentionTx(space))).checkpointId);
-    }).pipe(
-      Effect.tap(() => assertUsageCounters),
-      Effect.provide(live),
-    ),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 
