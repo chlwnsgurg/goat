@@ -719,6 +719,9 @@ const make = Effect.fnUntraced(function* (
               : undefined;
             if (
               !parent ||
+              current.item?.status !== "active" ||
+              current.heads.length !== 1 ||
+              current.heads[0] !== parent.revision.revisionId ||
               parent.payload?.text !== candidate.payload.text ||
               !accepted ||
               !("hubSequence" in accepted.receipt) ||
@@ -824,6 +827,7 @@ const make = Effect.fnUntraced(function* (
           next,
           commitIntent,
           preserveItem: input.rejectOnly !== undefined,
+          contentFingerprint: candidate.contentFingerprint,
         });
         yield* permit;
         return result;
@@ -1017,7 +1021,14 @@ const make = Effect.fnUntraced(function* (
                 pendingSync: false,
               },
             };
-          const suppressedSourceKeys: M.MemorySourceKey[] = [];
+          // Lifetime evidence survives compaction and is captured before base deletion purges payloads.
+          const lineage = yield* store.readImportLineage(value.memorySpaceId, value.memoryId);
+          const suppressedSourceKeys = lineage.flatMap((r) =>
+            r.kind === "sourceKey" ? [r.sourceKey] : [],
+          );
+          const suppressedContent = lineage.flatMap((r) =>
+            r.kind === "content" ? [r.content] : [],
+          );
           const sourceExclusions: M.MemorySourceExclusion[] = [];
           for (const { revision, payload } of current.revisions) {
             const p = revision.provenance;
@@ -1050,11 +1061,73 @@ const make = Effect.fnUntraced(function* (
                 DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis)),
               ),
               suppressedSourceKeys,
-              suppressedContent: [],
+              suppressedContent,
               sourceExclusions,
             },
           };
-          return yield* apply(op, Store.localIntent, permit);
+          if (old) return yield* apply(old, Store.localIntent, permit);
+          // Every operation stays within the v1 tombstone bound. IDs and digests are immutable;
+          // the base receipt and each expansion retain their own local/remote outcome.
+          const records = [
+            ...suppressedSourceKeys.map((sourceKey) => ({ kind: "sourceKey" as const, sourceKey })),
+            ...suppressedContent.map((content) => ({ kind: "content" as const, content })),
+            ...sourceExclusions.map((exclusion) => ({ kind: "exclusion" as const, exclusion })),
+          ];
+          const operations: Extract<M.MemoryOperation, { kind: "forget" }>[] = [];
+          for (let offset = 0; offset < Math.max(1, records.length); offset += 100) {
+            const fragment = records.slice(offset, offset + 100);
+            const operationId =
+              offset === 0
+                ? value.operationId
+                : M.MemoryOperationId.make(
+                    memoryStableUuid(`${value.operationId}:lineage-fragment:${offset / 100}`),
+                  );
+            operations.push({
+              ...op,
+              operationId,
+              expectedHeads: offset === 0 ? value.expectedHeads : [],
+              tombstone: {
+                ...op.tombstone,
+                deleteOperationId: operationId,
+                suppressedSourceKeys: fragment.flatMap((r) =>
+                  r.kind === "sourceKey" ? [r.sourceKey] : [],
+                ),
+                suppressedContent: fragment.flatMap((r) =>
+                  r.kind === "content" ? [r.content] : [],
+                ),
+                sourceExclusions: fragment.flatMap((r) =>
+                  r.kind === "exclusion" ? [r.exclusion] : [],
+                ),
+              },
+            });
+          }
+          let base: Store.StoredReceipt | undefined;
+          let previous: Store.StoredReceipt | undefined;
+          for (const operation of operations) {
+            const result = yield* apply(operation, Store.localIntent, permit);
+            if (previous) {
+              const linked = yield* store.settleForgetExpansion(value.memorySpaceId, {
+                ...previous,
+                receipt: {
+                  ...previous.receipt,
+                  forgetExpansion: {
+                    requestDigest: previous.operationDigest,
+                    operationId: operation.operationId,
+                    operationDigest: result.operationDigest,
+                    status:
+                      result.receipt.outcome === "rejected"
+                        ? "rejected"
+                        : "pendingSync" in result.receipt && result.receipt.pendingSync
+                          ? "pending"
+                          : "accepted",
+                  },
+                },
+              });
+              if (previous.receipt.operationId === base?.receipt.operationId) base = linked;
+            } else base = result;
+            previous = result;
+          }
+          return base!;
         }),
       )
       .pipe(

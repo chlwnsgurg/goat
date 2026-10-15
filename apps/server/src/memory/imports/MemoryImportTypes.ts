@@ -318,6 +318,7 @@ export type ImportStorePorts = {
     previous: ImportItem | null;
     next: ImportItem;
     preserveItem?: boolean;
+    contentFingerprint: string;
     commitIntent: Effect.Effect<void, MemoryServiceError, Store.Transaction>;
   }) => Store.InTx<M.MemoryImportItemResult, MemoryServiceError>;
 };

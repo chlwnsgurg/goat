@@ -380,7 +380,7 @@ describe("MemoryQuotaService", () => {
       const expansion = result.receipt.forgetExpansion;
       if (!expansion) throw new Error("Missing expansion disposition");
       assert.strictEqual(expansion.requestDigest, request.operationDigest);
-      assert.strictEqual(expansion.status, extra ? "rejected" : "accepted");
+      assert.strictEqual(expansion.status, extra ? "rejected" : "pending");
       assert.notStrictEqual(expansion.operationId, op.operationId);
       const additional = (yield* store.readOperation(space, expansion.operationId))!;
       const additionalReceipt = (yield* store.receipt(space, expansion.operationId))!;
