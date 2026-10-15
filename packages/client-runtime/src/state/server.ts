@@ -127,9 +127,9 @@ export class ServerUpdateTerminalError extends Schema.TaggedError<ServerUpdateTe
   }
 }
 
-// Covers the 120-second trial deadline and a final restart of the previous
-// version when the trial rolls back.
-const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(4);
+// Covers the service launcher's 30-minute trial deadline (PREPARED_TIMEOUT_MS)
+// and a final restart of the previous version when the trial rolls back.
+const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(32);
 
 export function matchesServerUpdateReadyEvent(
   result: ServerSelfUpdateResult,
@@ -914,6 +914,11 @@ export function createServerEnvironmentAtoms<R, E>(
       Atom.withLabel(`environment-data:server:settings:${environmentId}`),
     ),
   );
+  const worktreesDirectorySettingAtom = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => get(settingsValueAtom(environmentId))?.worktreesDirectory ?? null).pipe(
+      Atom.withLabel(`environment-data:server:worktrees-directory-setting:${environmentId}`),
+    ),
+  );
   const usagePricesAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => {
       const overrides = get(settingsValueAtom(environmentId))?.usagePriceOverrides ?? {};
@@ -992,6 +997,14 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:storage-cleanup-report",
       tag: WS_METHODS.serverGetStorageCleanupReport,
       idleTtlMs: 0,
+    }),
+    /** Rechecked whenever the setting changes, and on reopen after five seconds. */
+    worktreesDirectoryStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:worktrees-directory-status",
+      tag: WS_METHODS.serverGetWorktreesDirectoryStatus,
+      idleTtlMs: 0,
+      staleTimeMs: 5_000,
+      refreshTrigger: ({ environmentId }) => worktreesDirectorySettingAtom(environmentId),
     }),
     updateStateAtom,
     settingsValueAtom,

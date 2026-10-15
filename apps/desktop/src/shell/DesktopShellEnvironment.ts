@@ -89,6 +89,7 @@ const LOGIN_SHELL_ENV_NAMES = [
   "WAYLAND_DISPLAY",
   "GOAT_TELEMETRY_ENABLED",
   "T3CODE_TELEMETRY_ENABLED", // goat-rename: legacy
+  "__MISE_DIFF",
 ] as const;
 const WINDOWS_PROFILE_ENV_NAMES = ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"] as const;
 const LOCALE_ENV_NAMES = ["LANG", "LC_ALL", "LC_CTYPE"] as const;
@@ -435,6 +436,10 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
       "XDG_CURRENT_DESKTOP",
       "XDG_SESSION_DESKTOP",
       "XDG_SESSION_TYPE",
+      // mise's record of the PATH entries it added. It must travel with the
+      // shell's PATH, or `mise x` can rebuild PATH behind a same-named wrapper
+      // (`exec mise x claude -- claude`) that then re-runs itself forever.
+      "__MISE_DIFF",
     ] as const;
     for (const name of shellPreferredEnvNames) {
       if (shellEnvironment[name]) {

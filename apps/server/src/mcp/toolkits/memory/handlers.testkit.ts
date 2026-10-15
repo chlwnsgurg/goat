@@ -6,9 +6,9 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 // eslint-disable-next-line goat/no-raw-mcp-registration -- Test harness calls only toolkits registered through McpHttpServer.toolkitRegistration.
 import { McpSchema, McpServer } from "effect/ai";
-import migration from "../../../persistence/Migrations/070_Memory.ts";
-import searchMigration from "../../../persistence/Migrations/072_MemorySearchCounters.ts";
-import hubMigration from "../../../persistence/Migrations/071_MemoryHubSync.ts";
+import migration from "../../../persistence/Migrations/071_Memory.ts";
+import searchMigration from "../../../persistence/Migrations/073_MemorySearchCounters.ts";
+import hubMigration from "../../../persistence/Migrations/072_MemoryHubSync.ts";
 import * as RepositoryResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Store from "../../../memory/MemoryStore.ts";

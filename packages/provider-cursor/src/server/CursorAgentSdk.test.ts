@@ -132,6 +132,7 @@ vi.mock("./sdk.ts", () => ({
     },
   },
   createAgentPlatform: vi.fn(),
+  SqliteLocalAgentStore: { open: vi.fn() },
 }));
 
 const decodeCursorSettings = Schema.decodeEffect(CursorSettings);

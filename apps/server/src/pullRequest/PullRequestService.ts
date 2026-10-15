@@ -208,6 +208,14 @@ type CredentialRef = PullRequestRef & { readonly [credentialNamespace]?: string 
 export class PullRequestService extends Context.Service<
   PullRequestService,
   {
+    readonly findCloudSessionPullRequest: (input: {
+      readonly projectId: ProjectId;
+      readonly repository: string;
+      readonly sessionUrl: string;
+    }) => Effect.Effect<
+      { readonly prUrl: string; readonly branch: string; readonly summary: string } | null,
+      PullRequestError
+    >;
     readonly list: (
       input: PullRequestListInput,
     ) => Effect.Effect<PullRequestListResult, PullRequestError>;
@@ -620,6 +628,14 @@ function withRateLimitBackoff(
     ...(api.withVerifiedCredential === undefined
       ? {}
       : { withVerifiedCredential: api.withVerifiedCredential }),
+    ...(api.findCloudSessionPullRequest === undefined
+      ? {}
+      : {
+          findCloudSessionPullRequest: wrap(
+            "findCloudSessionPullRequest",
+            api.findCloudSessionPullRequest,
+          ),
+        }),
     listChangeRequests: wrap("listChangeRequests", api.listChangeRequests),
     ...(api.listChangeRequestsAcross === undefined
       ? {}
@@ -2105,30 +2121,48 @@ export const make = Effect.gen(function* () {
               );
             }
             // A held pull request is refused before anything reaches the host. Read fresh,
-            // so a hold added moments ago in another client still counts.
+            // so a hold added moments ago in another client still counts. A stack merge lands
+            // every open layer below the target too, and each provider refuses one whose
+            // expected heads are not exactly those layers, so every one of them is checked.
+            const landing = [
+              ...new Set([
+                input.number,
+                ...(input.stackNumber === undefined
+                  ? []
+                  : (input.expectedStackHeads ?? []).map((layer) => layer.number)),
+              ]),
+            ];
             const holdCheck =
               input.action === "merge" || input.action === "enable-auto-merge"
-                ? project.api
-                    .getChangeRequest({
-                      cwd: project.project.workspaceRoot,
-                      repository: project.repository,
-                      host: project.host,
-                      number: input.number,
-                    })
-                    .pipe(
-                      Effect.mapError(toPullRequestError("runAction")),
-                      Effect.flatMap((detail) => {
-                        const reason = pullRequestHoldReason(detail);
-                        return reason === null
-                          ? Effect.void
-                          : Effect.fail(
+                ? Effect.forEach(
+                    landing,
+                    (number) =>
+                      project.api
+                        .getChangeRequest({
+                          cwd: project.project.workspaceRoot,
+                          repository: project.repository,
+                          host: project.host,
+                          number,
+                        })
+                        .pipe(
+                          Effect.mapError(toPullRequestError("runAction")),
+                          Effect.flatMap((detail) => {
+                            const reason = pullRequestHoldReason(detail);
+                            if (reason === null) return Effect.void;
+                            const subject =
+                              number === input.number
+                                ? "This pull request is"
+                                : `Pull request #${number}, which this merge would also land, is`;
+                            return Effect.fail(
                               new PullRequestOperationError({
                                 operation: "runAction",
-                                detail: `This pull request is on hold: ${reason}. Clear the hold before merging.`,
+                                detail: `${subject} on hold: ${reason}. Clear the hold before merging.`,
                               }),
                             );
-                      }),
-                    )
+                          }),
+                        ),
+                    { concurrency: 4, discard: true },
+                  )
                 : Effect.void;
             const mergeSettings =
               project.api.mergeMessageRewrite !== undefined &&
@@ -2828,11 +2862,28 @@ export const make = Effect.gen(function* () {
       ref.repository.toLowerCase(),
       ref.number,
     ]);
-  const refEpoch = (ref: PullRequestRef) =>
-    Math.max(
-      projectEpochs.get(ref.projectId) ?? projectEpochFloor,
-      refEpochs.get(refScope(ref)) ?? 0,
+  /**
+   * The project epoch a pull request was first read merged under. A merged pull request cannot
+   * change again, so a turn in its project no longer moves its key; otherwise every reader showing
+   * it would read the host again after every turn. A refresh or a mutation still moves it.
+   */
+  const mergedEpochs = new Map<string, number>();
+  const refEpoch = (ref: PullRequestRef) => {
+    const scope = refScope(ref);
+    return Math.max(
+      mergedEpochs.get(scope) ?? projectEpochs.get(ref.projectId) ?? projectEpochFloor,
+      refEpochs.get(scope) ?? 0,
     );
+  };
+  const noteMerged = (ref: PullRequestRef) => {
+    const scope = refScope(ref);
+    if (mergedEpochs.has(scope)) return;
+    if (mergedEpochs.size >= REF_EPOCH_CAPACITY) {
+      const oldest = mergedEpochs.keys().next().value;
+      if (oldest !== undefined) mergedEpochs.delete(oldest);
+    }
+    mergedEpochs.set(scope, projectEpochs.get(ref.projectId) ?? projectEpochFloor);
+  };
   // Keys carry the reference back out of the cache loader, so the slot layout is shared with
   // `refOfCacheKey` rather than read positionally at every loader.
   const refCacheKey = (ref: CredentialRef) =>
@@ -3241,6 +3292,7 @@ export const make = Effect.gen(function* () {
     // regression and never ask the host again.
     const read = Cache.get(detailCache, key).pipe(
       Effect.tap((value) => {
+        if (value.state === "merged") noteMerged(input);
         const summary = summaryFromDetail(value, lastGoodSummary.peek(key));
         return noteDetailReading(input, summary).pipe(
           Effect.andThen(
@@ -3565,7 +3617,112 @@ export const make = Effect.gen(function* () {
         );
       });
 
+  const cloudResultCodec = Schema.fromJsonString(
+    Schema.NullOr(
+      Schema.Struct({ prUrl: Schema.String, branch: Schema.String, summary: Schema.String }),
+    ),
+  );
+  const findCloudSessionPullRequest: PullRequestService["Service"]["findCloudSessionPullRequest"] =
+    Effect.fn("PullRequestService.findCloudSessionPullRequest")(function* (input) {
+      const operation = "findCloudSessionPullRequest";
+      const canonical = normalizeGitRemoteUrl(input.repository);
+      if (!/^github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(canonical)) {
+        return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
+      }
+      if (!/^https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]{1,256}$/.test(input.sessionUrl)) {
+        return yield* new PullRequestOperationError({
+          operation,
+          detail: "PR observation requires a canonical Claude cloud session URL.",
+        });
+      }
+      const repository = canonical.slice("github.com/".length);
+      // Unlike linked local PRs, a cloud source must never borrow another project's checkout.
+      const { supported } = yield* listWorkspaceProjects({ projectId: input.projectId });
+      const project = supported.find(
+        (item) =>
+          item.api.kind === "github" &&
+          item.host === "github.com" &&
+          item.repository.toLowerCase() === repository.toLowerCase(),
+      );
+      if (
+        project === undefined ||
+        project.api.findCloudSessionPullRequest === undefined ||
+        project.api.withVerifiedCredential === undefined
+      ) {
+        return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
+      }
+      const read = project.api.findCloudSessionPullRequest;
+      return yield* project.api
+        .withVerifiedCredential(
+          { cwd: project.project.workspaceRoot, host: project.host },
+          (identity) =>
+            Effect.gen(function* () {
+              const bucket = Math.floor((yield* Clock.currentTimeMillis) / 60_000);
+              const key = [
+                "cloud-session-pr",
+                input.projectId,
+                project.project.workspaceRoot,
+                project.host,
+                project.repository.toLowerCase(),
+                input.sessionUrl,
+                identity.credentialFingerprint,
+                String(bucket),
+              ]
+                .map(encodeURIComponent)
+                .join(":");
+              const lookup = read({
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                repository: project.repository,
+                sessionUrl: input.sessionUrl,
+              }).pipe(Effect.mapError(toPullRequestError(operation)));
+              const encodedRead = lookup.pipe(
+                Effect.flatMap((value) =>
+                  Schema.encodeEffect(cloudResultCodec)(value).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new PullRequestOperationError({
+                          operation,
+                          detail: "Could not encode PR observation for the read cache.",
+                          cause,
+                        }),
+                    ),
+                  ),
+                ),
+              );
+              const payload = yield* readCache.get(key, encodedRead, [
+                `project:${input.projectId}`,
+              ]);
+              return yield* Schema.decodeEffect(cloudResultCodec)(payload).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new PullRequestOperationError({
+                      operation,
+                      detail: "Could not decode cached PR observation.",
+                      cause,
+                    }),
+                ),
+              );
+            }),
+        )
+        .pipe(
+          Effect.catchTags({
+            PullRequestProviderError: (cause) =>
+              Effect.fail(
+                isProviderUnusable(cause)
+                  ? toUnavailableError(cause)
+                  : new PullRequestOperationError({
+                      operation,
+                      detail: "Could not verify project source-control access for PR observation.",
+                      cause,
+                    }),
+              ),
+          }),
+        );
+    });
+
   return PullRequestService.of({
+    findCloudSessionPullRequest,
     routing,
     routingIdentity,
     withRoutingCredential,
