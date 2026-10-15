@@ -156,6 +156,10 @@ describe.skipIf(!chromiumInstalled)("server browser element refs", () => {
         actionTimeline: [],
       });
       expect(result.screenshot).toMatchObject({ width: 800, height: 3000, clipped: false });
+      const image = Buffer.from(result.screenshot.data, "base64");
+      expect(image.readUInt32BE(16)).toBe(800);
+      expect(image.readUInt32BE(20)).toBe(3000);
+      expect(result.screenshot.byteLength).toBe(image.length);
       expect(result.screenshot.byteLength).toBeLessThanOrEqual(8 * 1024 * 1024);
     } finally {
       await retina.close();

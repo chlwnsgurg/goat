@@ -84,19 +84,43 @@ describe("bounded full-page snapshots", () => {
     });
   });
 
-  it("uses CSS dimensions and measures Retina output without clipping content", async () => {
+  it("reduces Retina output to CSS resolution without clipping content", async () => {
     const { take, send } = fixture({ deviceScale: 2 });
     expect((await take(true)).screenshot).toMatchObject({
-      width: 3000,
-      height: 8000,
+      width: 1500,
+      height: 4000,
       clipped: false,
     });
     expect(send).toHaveBeenLastCalledWith(
       "Page.captureScreenshot",
       expect.objectContaining({
-        clip: { x: 0, y: 0, width: 1500, height: 4000, scale: 1 },
+        clip: { x: 0, y: 0, width: 1500, height: 4000, scale: 0.5 },
       }),
     );
+  });
+
+  it("bounds actual Retina image pixels and reports clipped document content", async () => {
+    const { take } = fixture({ width: 5000, height: 20000, deviceScale: 2 });
+    const screenshot = (await take(true)).screenshot;
+    const image = Buffer.from(screenshot.data, "base64");
+    expect(screenshot).toMatchObject({
+      width: 3840,
+      height: 16384,
+      clipped: true,
+      byteLength: image.length,
+    });
+    expect(image.readUInt32BE(16)).toBe(3840);
+    expect(image.readUInt32BE(20)).toBe(16384);
+    expect(image.length).toBeLessThanOrEqual(8 * 1024 * 1024);
+  });
+
+  it("rejects images that exceed pixel bounds at every scale", async () => {
+    const { take, send } = fixture();
+    send
+      .mockResolvedValue({ data: png(3841, 16385) })
+      .mockResolvedValueOnce({ cssContentSize: { width: 5000, height: 20000 } });
+    await expect(take(true)).rejects.toThrow(/3840 × 16384 pixel/);
+    expect(send).toHaveBeenCalledTimes(5);
   });
 
   it("reduces scale to meet the byte cap without claiming content was clipped", async () => {

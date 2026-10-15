@@ -181,7 +181,7 @@ export const captureViewport = async (
 
 // Bounds, PNG checks, and scale retries adapted from Emanuele-web04/synara @ 566efb1b1.
 // Copyright (c) 2026 Emanuele Di Pietro. MIT license; see the repository LICENSE.
-/** Captures the authenticated document without changing its viewport, scroll, or emulation. */
+/** Captures at CSS resolution or lower without changing viewport, scroll, or emulation. */
 const captureFullPage = async (cdp: CDPSession) => {
   const { cssContentSize } = await cdp.send("Page.getLayoutMetrics");
   if (!Number.isFinite(cssContentSize.width) || !Number.isFinite(cssContentSize.height)) {
@@ -193,8 +193,8 @@ const captureFullPage = async (cdp: CDPSession) => {
   const width = Math.min(MAX_FULL_PAGE_WIDTH, Math.max(1, Math.ceil(cssContentSize.width)));
   const height = Math.min(MAX_FULL_PAGE_HEIGHT, Math.max(1, Math.ceil(cssContentSize.height)));
   const clipped = width < cssContentSize.width || height < cssContentSize.height;
-  // CSS clips and image pixels differ across native and emulated Retina tabs. Validate
-  // the actual PNG rather than assuming devicePixelRatio determines CDP's output size.
+  // CSS clips and image pixels differ across native and emulated Retina tabs. Bound
+  // the actual PNG to the CSS clip so Retina captures cannot exceed CSS resolution.
   for (const scale of [1, 0.75, 0.5, 0.25]) {
     const { data } = await cdp.send("Page.captureScreenshot", {
       format: "png",
@@ -217,13 +217,7 @@ const captureFullPage = async (cdp: CDPSession) => {
     }
     const imageWidth = header.readUInt32BE(16);
     const imageHeight = header.readUInt32BE(20);
-    if (
-      imageWidth < 1 ||
-      imageHeight < 1 ||
-      imageWidth > MAX_FULL_PAGE_WIDTH ||
-      imageHeight > MAX_FULL_PAGE_HEIGHT
-    )
-      continue;
+    if (imageWidth < 1 || imageHeight < 1 || imageWidth > width || imageHeight > height) continue;
     return {
       mimeType: "image/png" as const,
       data,
