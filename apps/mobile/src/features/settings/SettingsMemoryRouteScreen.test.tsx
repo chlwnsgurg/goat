@@ -558,7 +558,14 @@ describe("native Memory with shared factory", () => {
       ...nativeItem,
       payload: {
         ...nativeItem.payload,
-        evidence: [{ origin: "thread", sourceThread, messageIds: ["synthetic-message"] }],
+        evidence: [
+          {
+            origin: "thread",
+            sourceThread,
+            watermark: { fromEventId: "e1", toEventId: "e2", throughSequence: 2 },
+            messageIds: ["synthetic-message"],
+          },
+        ],
       },
     });
     const history = revertHistory();

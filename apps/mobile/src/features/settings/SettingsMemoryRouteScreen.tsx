@@ -1340,9 +1340,6 @@ function MemoryAdministration({
   }
   async function loadAdministration() {
     if (!active()) return;
-    const refresh = onSyncRefresh();
-    await refresh;
-    if (!active()) return;
     const h = await getHub({ environmentId, input: {} });
     if (!active()) return;
     if (AsyncResult.isFailure(h)) throw squashAtomCommandFailure(h);
@@ -1351,6 +1348,7 @@ function MemoryAdministration({
     if (!active()) return;
     if (AsyncResult.isFailure(o)) throw squashAtomCommandFailure(o);
     if (AsyncResult.isSuccess(o)) setOwner(o.value);
+    await onSyncRefresh();
   }
   async function loadBinding() {
     if (
