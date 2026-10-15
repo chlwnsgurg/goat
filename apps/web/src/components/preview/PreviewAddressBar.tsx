@@ -172,7 +172,9 @@ export function PreviewAddressBar(props: PreviewAddressBarProps) {
             </InputGroupAddon>
           ) : null}
         </InputGroup>
-        <AutocompletePopup anchor={anchorRef} className="w-(--anchor-width)">
+        {/* At least as wide as the address bar; long results widen it up to the
+            available space instead of overflowing a fixed-width popup. */}
+        <AutocompletePopup anchor={anchorRef}>
           <AutocompleteList>
             {suggestions.map((suggestion) => (
               <AutocompleteItem key={suggestion.id} value={suggestion}>
