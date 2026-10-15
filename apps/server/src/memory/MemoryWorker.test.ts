@@ -20,6 +20,7 @@ import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { decideMemoryOperation } from "./MemoryDecider.ts";
@@ -44,6 +45,7 @@ const setup = Layer.effectDiscard(
     yield* lineageMigration;
     yield* checkpointMigration;
     yield* reportMigration;
+    yield* usageMigration;
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
     yield* sql`CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY,deleted_at TEXT)`;
