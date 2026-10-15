@@ -208,6 +208,7 @@ import {
 } from "~/lib/openPullRequestLink";
 import { useOpenLink } from "../browser/useOpenLink";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { copyFilePath } from "../filePathCopy";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
 import {
   isBrowserPreviewFile,
@@ -1204,7 +1205,7 @@ interface MarkdownFileLinkProps {
   href: string;
   targetPath: string;
   iconPath: string;
-  displayPath: string;
+  copyRelativePath: string | null;
   /** What the files panel opens: workspace-relative inside the workspace, the
       absolute host path outside it, null when the panel cannot show the file. */
   panelPath: string | null;
@@ -1955,7 +1956,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   href,
   targetPath,
   iconPath,
-  displayPath,
+  copyRelativePath,
   panelPath,
   line,
   label,
@@ -2096,45 +2097,6 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     })();
   }, [onReveal, targetPath]);
 
-  const handleCopy = useCallback(
-    (value: string, title: string) => {
-      if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: `Failed to copy ${title.toLowerCase()}`,
-            description: "Clipboard API unavailable.",
-          }),
-        );
-        return;
-      }
-
-      void navigator.clipboard.writeText(value).then(
-        () => {
-          toastManager.add({
-            type: "success",
-            title: `${title} copied`,
-            description: value,
-          });
-        },
-        (error) => {
-          reportMarkdownActionFailure(
-            { operation: "copy-file-path", target: targetPath, copyTarget: title },
-            error,
-          );
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: `Failed to copy ${title.toLowerCase()}`,
-              description: error instanceof Error ? error.message : "An error occurred.",
-            }),
-          );
-        },
-      );
-    },
-    [targetPath],
-  );
-
   const showFileContextMenu = useCallback(
     async (position: { x: number; y: number }) => {
       const api = readLocalApi();
@@ -2149,7 +2111,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               ? ([{ id: "open-in-browser", label: "Open in integrated browser" }] as const)
               : []),
             ...(onReveal && revealLabel ? ([{ id: "reveal", label: revealLabel }] as const) : []),
-            { id: "copy-relative", label: "Copy relative path" },
+            ...(copyRelativePath !== null
+              ? ([{ id: "copy-relative", label: "Copy relative path" }] as const)
+              : []),
             { id: "copy-full", label: "Copy full path" },
           ] as const,
           position,
@@ -2171,12 +2135,12 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           handleRevealInFileManager();
           return;
         }
-        if (clicked === "copy-relative") {
-          handleCopy(displayPath, "Relative path");
+        if (clicked === "copy-relative" && copyRelativePath !== null) {
+          await copyFilePath(copyRelativePath, "Relative path");
           return;
         }
         if (clicked === "copy-full") {
-          handleCopy(targetPath, "Full path");
+          await copyFilePath(targetPath, "Full path");
         }
       } catch (cause) {
         reportMarkdownActionFailure(
@@ -2186,8 +2150,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       }
     },
     [
-      displayPath,
-      handleCopy,
+      copyRelativePath,
       handleOpenInBrowser,
       handleOpenInEditor,
       handleRevealInFileManager,
@@ -2306,7 +2269,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.targetPath === next.targetPath &&
     previous.iconPath === next.iconPath &&
     previous.environmentId === next.environmentId &&
-    previous.displayPath === next.displayPath &&
+    previous.copyRelativePath === next.copyRelativePath &&
     previous.panelPath === next.panelPath &&
     previous.line === next.line &&
     previous.label === next.label &&
@@ -2680,7 +2643,7 @@ function useChatMarkdownState({
           href={fileLinkMeta.targetPath}
           targetPath={fileLinkMeta.targetPath}
           iconPath={fileLinkMeta.filePath}
-          displayPath={fileLinkMeta.displayPath}
+          copyRelativePath={fileLinkMeta.workspaceRelativePath}
           panelPath={panelPath}
           line={fileLinkMeta.line}
           label={fileLinkLabel(
