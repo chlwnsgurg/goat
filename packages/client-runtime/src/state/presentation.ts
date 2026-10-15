@@ -16,6 +16,46 @@ import {
 } from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import { hasRelayRoute } from "../connection/routes.ts";
+import type { EnvironmentShellState } from "./shell.ts";
+
+export type EnvironmentShellSync =
+  | "live"
+  | "synchronizing"
+  | "cached"
+  | "empty"
+  | "error"
+  | "stale";
+
+/** Keep transport availability separate from whether its shell data is current. */
+export function createEnvironmentShellSyncAtom(
+  shellStateValueAtom: (environmentId: EnvironmentId) => Atom.Atom<EnvironmentShellState>,
+) {
+  return Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get): EnvironmentShellSync => {
+      const shell = get(shellStateValueAtom(environmentId));
+      if (Option.isSome(shell.error)) {
+        return Option.isSome(shell.snapshot) ? "stale" : "error";
+      }
+      return shell.status;
+    }),
+  );
+}
+
+export function shellSyncMessage(sync: EnvironmentShellSync | null): string | null {
+  switch (sync) {
+    case "error":
+      return "Could not sync environment data. Try syncing again.";
+    case "stale":
+      return "Could not sync environment data. Displayed threads may be out of date.";
+    case "cached":
+      return "Showing saved threads. They may be out of date.";
+    case "empty":
+    case "synchronizing":
+      return "Syncing environment data. Displayed threads may be out of date.";
+    default:
+      return null;
+  }
+}
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
   if (left.size !== right.size) {
