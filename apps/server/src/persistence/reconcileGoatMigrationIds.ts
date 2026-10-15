@@ -15,6 +15,7 @@ export const GOAT_MIGRATION_NAMES: ReadonlySet<string> = new Set([
   "ThreadRunResults",
   "RemoteReportRelay",
   "ProjectionTurnItemRequestIndex",
+  "Memory",
 ]);
 
 type MigrationEntry<E> = readonly [
@@ -22,6 +23,40 @@ type MigrationEntry<E> = readonly [
   name: string,
   migration: Effect.Effect<unknown, E, SqlClient.SqlClient>,
 ];
+
+/** Read-only preflight: preview reconciliation must not mutate incompatible memory sandboxes. */
+export const assertMemoryMigrationsCompatible = Effect.fn("assertMemoryMigrationsCompatible")(
+  function* <E>(entries: ReadonlyArray<MigrationEntry<E>>) {
+    const sql = yield* SqlClient.SqlClient;
+    const tables = yield* sql<{ readonly name: string }>`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND (name = 'effect_sql_migrations' OR name GLOB 'memory_*')
+    `;
+    const hasLedger = tables.some((table) => table.name === "effect_sql_migrations");
+    const history = hasLedger
+      ? yield* sql<{ readonly migration_id: number; readonly name: string }>`
+          SELECT migration_id, name FROM effect_sql_migrations
+        `
+      : [];
+    const currentIds = new Map(entries.map(([id, name]) => [name, id]));
+    const incompatibleLedger = history.some(
+      (row) => row.name.startsWith("Memory") && currentIds.get(row.name) !== row.migration_id,
+    );
+    const unrecordedMemory =
+      tables.some((table) => table.name.startsWith("memory_")) &&
+      !history.some(
+        (row) => row.name === "Memory" && row.migration_id === currentIds.get("Memory"),
+      );
+    // Preserve the evidence of unreleased memory before any startup reconciliation writes.
+    if (incompatibleLedger || unrecordedMemory) {
+      return yield* new Migrator.MigrationError({
+        kind: "BadState",
+        message:
+          "Unreleased memory DB is incompatible; reset this sandbox's memory development state and restart.",
+      });
+    }
+  },
+);
 
 /**
  * The migrator skips every id at or below the highest one recorded, so a database that recorded a
@@ -36,10 +71,10 @@ export const reconcileGoatMigrationIds = Effect.fn("reconcileGoatMigrationIds")(
   const sql = yield* SqlClient.SqlClient;
   return yield* sql.withTransaction(
     Effect.gen(function* () {
-      const tables = yield* sql`
-        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
-      `;
-      if (tables.length === 0) return [];
+      yield* assertMemoryMigrationsCompatible(entries);
+      const ledger =
+        yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+      if (ledger.length === 0) return [];
       const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
         SELECT migration_id, name FROM effect_sql_migrations
       `;

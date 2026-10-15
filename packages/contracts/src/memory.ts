@@ -153,6 +153,7 @@ export const MEMORY_REPORT_DETAIL_RETENTION_MS = 2592000000;
 export const MEMORY_SOURCE_READ_MAX_PER_ENVIRONMENT = 32;
 export const MEMORY_SOURCE_READ_MAX_PER_HUB = 128;
 export const MEMORY_SOURCE_READ_OUTCOME_MAX_BYTES = 65536;
+export const MEMORY_PENDING_FORGET_INTENTS_MAX = 2000;
 export const MEMORY_REPORT_MAX_PENDING_ITEMS = 2000;
 export const MEMORY_REPORT_MAX_PENDING_BYTES = 2097152;
 export const MEMORY_REPORT_MAX_AUTOMATIC_ATTEMPTS = 10;
@@ -277,10 +278,12 @@ export const MemoryFailureCode = Schema.Literals([
   "base_compacted",
   "revert_expired",
   "scanner_pending",
+  "forget_pending",
 ]);
 export type MemoryFailureCode = typeof MemoryFailureCode.Type;
 
 export const MemoryDeferredReason = Schema.Literals([
+  "forget_pending",
   "scanner_pending",
   "secret_detected",
   "missing_parent",
@@ -591,6 +594,7 @@ export const MemoryItem = bounded(
       status: Schema.Literal("blocked"),
       scope: MemoryScope,
       failureCode: Schema.Literals([
+        "forget_pending",
         "scanner_pending",
         "secret_detected",
         "source_invalidated",
@@ -1170,13 +1174,35 @@ export type MemoryContextCandidates = Pick<
   "memorySpaceId" | "projectionWatermark" | "items"
 >;
 
+const MemoryForgetRetry = struct({
+  operationId: MemoryOperationId,
+  operationDigest: digest,
+});
+
+const MemoryForgetExpansion = struct({
+  requestDigest: digest,
+  operationId: MemoryOperationId,
+  operationDigest: digest,
+  status: Schema.Literals(["accepted", "pending", "rejected"]),
+});
+
 export const MemoryMutationReceipt = struct({
   operationId: MemoryOperationId,
   memoryId: MemoryId,
-  outcome: Schema.Literals(["accepted", "noop", "conflicted", "deleted"]),
+  outcome: Schema.Literals(["accepted", "noop", "conflicted", "deleted", "rejected"]),
+  failureCode: Schema.optionalKey(MemoryFailureCode),
+  capacity: Schema.optionalKey(MemoryCapacityExceeded),
+  forgetExpansion: Schema.optionalKey(MemoryForgetExpansion),
+  forgetRetryOf: Schema.optionalKey(MemoryForgetRetry),
   revisionId: Schema.NullOr(MemoryRevisionId),
   pendingSync: Schema.Boolean,
-});
+}).check(
+  Schema.makeFilter(
+    (v) =>
+      (v.outcome === "rejected") === (v.failureCode !== undefined) &&
+      (v.failureCode === "capacity_exceeded") === (v.capacity !== undefined),
+  ),
+);
 export type MemoryMutationReceipt = typeof MemoryMutationReceipt.Type;
 
 export const MemoryRevertStatus = Schema.Literals([
@@ -1718,6 +1744,7 @@ export const GenerateMemorySummaryInput = struct({
   sourceThread: ScopedThreadRef,
   sourceWatermark: MemorySourceWatermark,
   messages: array(struct({ messageId: MessageId, text: Schema.String, completed: Schema.Boolean })),
+  previousSummary: Schema.optionalKey(MemoryPayload),
   modelSelection: MemoryModelSelection,
 }).check(
   Schema.makeFilter((v) => jsonBytes(v) <= 262144 && unique(v.messages.map((m) => m.messageId))),
@@ -1787,6 +1814,17 @@ export function validateMemoryGenerationResult(
             e.importSourceId === source.importSourceId &&
             e.messageIds.every((id) => source.messageIds.includes(id)),
         );
+    if (
+      input.previousSummary?.evidence.some(
+        (source) =>
+          e.origin === source.origin &&
+          same(e.sourceThread, source.sourceThread) &&
+          same(e.watermark, source.watermark) &&
+          e.importSourceId === source.importSourceId &&
+          e.messageIds.every((id) => source.messageIds.includes(id)),
+      )
+    )
+      return true;
     return (
       e.origin === "thread" &&
       e.messageIds.length > 0 &&
@@ -1830,6 +1868,8 @@ export interface MemoryHubPrincipal {
 }
 
 export const MemoryHubReceipt = struct({
+  forgetExpansion: Schema.optionalKey(MemoryForgetExpansion),
+  forgetRetryOf: Schema.optionalKey(MemoryForgetRetry),
   operationId: MemoryOperationId,
   memoryId: MemoryId,
   operationDigest: digest,

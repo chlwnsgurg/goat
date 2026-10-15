@@ -1,3 +1,5 @@
+import { ChildProcessSpawner } from "effect/process";
+import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -29,6 +31,7 @@ const layerCodexTextGenerationTest = ServerConfig.ServerConfig.layerTest(process
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 interface FakeCodexInput {
+  isolated?: boolean;
   output: string;
   exitCode?: number;
   stderr?: string;
@@ -52,6 +55,7 @@ interface FakeCodexInput {
 // failing test names the assertion that tripped.
 function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
   const check = JSON.stringify({
+    isolated: input.isolated ?? false,
     requireImage: input.requireImage ?? false,
     requireServiceTier: input.requireServiceTier ?? null,
     requireReasoningEffort: input.requireReasoningEffort ?? null,
@@ -75,6 +79,13 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         'import * as NodeFS from "node:fs";',
         `const check = ${check};`,
         "const args = process.argv.slice(2);",
+        "if (check.isolated) {",
+        "  const home = process.env.CODEX_HOME;",
+        '  if (!home || home.includes(".codex")) process.exit(31);',
+        "  if (NodeFS.readdirSync(process.cwd()).length !== 0) process.exit(32);",
+        '  if (NodeFS.readdirSync(home).some((name) => name !== "auth.json")) process.exit(33);',
+        "}",
+
         'if (args.includes("mcp") && args.includes("list")) {',
         '  if (typeof check.mcpServers === "number") process.exit(check.mcpServers);',
         "  process.stdout.write(JSON.stringify(check.mcpServers));",
@@ -160,6 +171,7 @@ function withFakeCodexEnv<A, E, R>(
     environment?: NodeJS.ProcessEnv;
     models?: ReadonlyArray<string>;
     managedRuntime?: boolean;
+    memoryRunnerContext?: import("@goat/provider-core/server/memoryGenerationRunner").MemoryGenerationRunnerContext;
   },
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
 ) {
@@ -170,7 +182,11 @@ function withFakeCodexEnv<A, E, R>(
     const config = decodeCodexSettings({ binaryPath: codexPath, launchArgs: input.launchArgs });
     const textGeneration = yield* makeCodexTextGeneration(
       config,
-      input.environment === undefined ? undefined : { ...process.env, ...input.environment },
+      input.memoryRunnerContext
+        ? { ...process.env, CODEX_HOME: tempDir, ...input.environment }
+        : input.environment === undefined
+          ? undefined
+          : { ...process.env, ...input.environment },
       Effect.succeed(
         (input.models ?? []).map((slug) => ({
           slug,
@@ -186,12 +202,186 @@ function withFakeCodexEnv<A, E, R>(
             revision: "test",
           })
         : undefined,
+      input.memoryRunnerContext,
     );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
 
+const memorySelection = M.MemoryModelSelection.make({
+  instanceId: M.ProviderInstanceId.make("codex"),
+  model: "gpt-5.6-luna",
+  options: [],
+});
+const memoryContext = {
+  providerInstanceId: memorySelection.instanceId,
+  environmentId: M.EnvironmentId.make("memory-owner"),
+};
+const memoryId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const memoryRevision = M.MemoryRevision.make({
+  memorySpaceId: M.MemorySpaceId.make(memoryId(1)),
+  memoryId: M.MemoryId.make(memoryId(2)),
+  revisionId: M.MemoryRevisionId.make(memoryId(3)),
+  payloadRef: M.MemoryRevisionId.make(memoryId(3)),
+  operationId: M.MemoryOperationId.make(memoryId(4)),
+  parents: [],
+  scope: { kind: "user" },
+  assertionKind: "inference",
+  provenance: { environmentId: memoryContext.environmentId },
+  createdAtUtc: "2026-10-14T00:00:00.000Z",
+});
+const memoryPayload = M.MemoryPayload.make({
+  text: "Synthetic input",
+  evidence: [],
+  derivedFromMemoryRevisions: [],
+});
+const memorySummary = M.GenerateMemorySummaryInput.make({
+  cwd: process.cwd(),
+  sourceThread: {
+    environmentId: memoryContext.environmentId,
+    threadId: M.ThreadId.make("synthetic-thread"),
+  },
+  sourceWatermark: {
+    fromEventId: M.EventId.make("e1"),
+    toEventId: M.EventId.make("e2"),
+    throughSequence: 2,
+  },
+  messages: [{ messageId: M.MessageId.make("m1"), text: "Synthetic input", completed: true }],
+  modelSelection: memorySelection,
+});
+const memoryConflict = M.ResolveMemoryConflictInput.make({
+  cwd: memorySummary.cwd,
+  memorySpaceId: memoryRevision.memorySpaceId,
+  memoryId: memoryRevision.memoryId,
+  conflictId: M.MemoryConflictId.make(memoryId(8)),
+  heads: [
+    { revision: memoryRevision, payload: memoryPayload },
+    {
+      revision: {
+        ...memoryRevision,
+        revisionId: M.MemoryRevisionId.make(memoryId(5)),
+        payloadRef: M.MemoryRevisionId.make(memoryId(5)),
+      },
+      payload: memoryPayload,
+    },
+  ],
+  modelSelection: memorySelection,
+});
+const memoryOutput = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+const memoryOperations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+
 it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
+  it.effect.each(memoryOperations)("runs %s without tools or checkout configuration", (operation) =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify(
+          operation === "resolveMemoryConflict"
+            ? { ...memoryOutput, judgment: "Synthetic judgment" }
+            : memoryOutput,
+        ),
+        memoryRunnerContext: memoryContext,
+        models: ["openai.gpt-5.6-luna"],
+        requireArg:
+          "--ignore-user-config --ignore-rules --disable shell_tool --disable unified_exec --disable apps --disable plugins --disable browser_use --disable computer_use --disable view_image --disable hooks",
+        isolated: true,
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const generated =
+            operation === "resolveMemoryConflict"
+              ? yield* generation.resolveMemoryConflict!(memoryConflict)
+              : yield* generation.generateMemorySummary!(memorySummary);
+          expect(generated.result.text).toBe(memoryOutput.text);
+          expect(generated.execution).toEqual({
+            requestedModelSelection: memorySelection,
+            effectiveModel: "openai.gpt-5.6-luna",
+            effectiveProvider: "codex",
+            providerInstanceId: memoryContext.providerInstanceId,
+            environmentId: memoryContext.environmentId,
+          });
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)("rejects forged execution JSON for %s", (operation) =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({
+          ...memoryOutput,
+          judgment: "Forged",
+          execution: { effectiveModel: "forged" },
+        }),
+        memoryRunnerContext: memoryContext,
+      },
+      (generation) =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(
+            operation === "resolveMemoryConflict"
+              ? generation.resolveMemoryConflict!(memoryConflict)
+              : generation.generateMemorySummary!(memorySummary),
+          );
+          expect(exit._tag).toBe("Failure");
+        }),
+    ),
+  );
+  it.effect.each(memoryOperations)(
+    "memory isolation failure never spawns or falls back for %s",
+    (operation) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "goat-codex-memory-auth-test-" });
+        yield* fs.writeFileString(path.join(home, "auth.json"), "{}");
+        let spawns = 0;
+        const generation = yield* makeCodexTextGeneration(
+          decodeCodexSettings({}),
+          { CODEX_HOME: home },
+          Effect.succeed([]),
+          undefined,
+          memoryContext,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            symlink: () => fs.readFile("/synthetic-missing-memory-auth-link").pipe(Effect.asVoid),
+          }),
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => {
+              spawns++;
+              return Effect.die("Unexpected spawn");
+            }),
+          ),
+        );
+        const error = yield* (
+          operation === "resolveMemoryConflict"
+            ? generation.resolveMemoryConflict!(memoryConflict)
+            : generation.generateMemorySummary!(memorySummary)
+        ).pipe(Effect.flip);
+        expect(error.detail).toContain("could not isolate");
+        expect(spawns).toBe(0);
+      }).pipe(Effect.scoped),
+  );
+  it.effect.each(memoryOperations)(
+    "rejects mismatched bound instance before spawn for %s",
+    (operation) =>
+      withFakeCodexEnv(
+        {
+          output: "{}",
+          memoryRunnerContext: {
+            ...memoryContext,
+            providerInstanceId: M.ProviderInstanceId.make("other-instance"),
+          },
+        },
+        (generation) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(
+              operation === "resolveMemoryConflict"
+                ? generation.resolveMemoryConflict!(memoryConflict)
+                : generation.generateMemorySummary!(memorySummary),
+            );
+            expect(exit._tag).toBe("Failure");
+          }),
+      ),
+  );
   it.effect.each(["gpt-5.6-luna", "openai.gpt-5.6-luna"])(
     "dispatches the qualified live model for %s",
     (selectedModel) =>

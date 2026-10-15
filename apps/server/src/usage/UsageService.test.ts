@@ -1,3 +1,4 @@
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 // @effect-diagnostics nodeBuiltinImport:off - the suite seeds and grows real
 // transcript trees on disk, outside the service's Effect FileSystem.
 import * as NodeChildProcess from "node:child_process";
@@ -129,7 +130,15 @@ const layerService = (input: {
     CursorAccountReader.layer.pipe(Layer.provide(CursorKeychain.layer)),
   ).pipe(
     Layer.provideMerge(AntigravityUsage.layer),
-    Layer.provideMerge(ProviderHostLive.layer),
+    Layer.provideMerge(
+      ProviderHostLive.layer.pipe(
+        Layer.provide(
+          Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("memory-host-fixture")),
+          }),
+        ),
+      ),
+    ),
     Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
     Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
     Layer.provideMerge(

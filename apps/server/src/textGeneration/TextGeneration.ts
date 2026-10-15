@@ -21,6 +21,13 @@ export type {
   ReviewGuideGenerationResult,
   ThreadTitleGenerationInput,
   ThreadTitleGenerationResult,
+  ResolveMemoryConflictInput,
+  ResolveMemoryConflictResult,
+  ResolveMemoryConflictExecutionResult,
+  GenerateMemorySummaryInput,
+  GenerateMemorySummaryResult,
+  GenerateMemorySummaryExecutionResult,
+  MemoryGenerationExecution,
 } from "@goat/provider-core/server/textGeneration";
 
 /**
@@ -36,7 +43,9 @@ type TextGenerationOp =
   | "generateBranchName"
   | "generateThreadTitle"
   | "generateChannelReception"
-  | "generateReviewGuide";
+  | "generateReviewGuide"
+  | "resolveMemoryConflict"
+  | "generateMemorySummary";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -50,7 +59,10 @@ const resolveInstance = (
         : Effect.fail(
             new TextGenerationError({
               operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
+              detail:
+                operation === "resolveMemoryConflict" || operation === "generateMemorySummary"
+                  ? "route_unavailable"
+                  : `No provider instance registered for id '${instanceId}'.`,
             }),
           ),
     ),
@@ -61,6 +73,32 @@ export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   return TextGeneration.of({
+    resolveMemoryConflict: (input) =>
+      resolveInstance(registry, "resolveMemoryConflict", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) =>
+          textGeneration.resolveMemoryConflict === undefined
+            ? Effect.fail(
+                new TextGenerationError({
+                  operation: "resolveMemoryConflict",
+                  detail: "unsupported_operation",
+                }),
+              )
+            : textGeneration.resolveMemoryConflict(input),
+        ),
+      ),
+    generateMemorySummary: (input) =>
+      resolveInstance(registry, "generateMemorySummary", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) =>
+          textGeneration.generateMemorySummary === undefined
+            ? Effect.fail(
+                new TextGenerationError({
+                  operation: "generateMemorySummary",
+                  detail: "unsupported_operation",
+                }),
+              )
+            : textGeneration.generateMemorySummary(input),
+        ),
+      ),
     generateCommitMessage: (input) =>
       resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),

@@ -247,6 +247,10 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
     undefined,
     snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
     resolveRuntime,
+    {
+      providerInstanceId: instanceId,
+      ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+    },
   );
   const protect = <A>(operation: string, effect: Effect.Effect<A, TextGenerationError>) =>
     runtime.auth.controller.withAccess!(effect).pipe(
@@ -256,10 +260,29 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
           new TextGenerationError({
             operation,
             detail: "detail" in cause ? cause.detail : "Codex text generation failed.",
+            cause,
           }),
       ),
     );
   const textGeneration: ProviderInstance["textGeneration"] = {
+    resolveMemoryConflict: (value) =>
+      nativeGeneration.resolveMemoryConflict === undefined
+        ? Effect.fail(
+            new TextGenerationError({
+              operation: "resolveMemoryConflict",
+              detail: "unsupported_operation",
+            }),
+          )
+        : protect("resolveMemoryConflict", nativeGeneration.resolveMemoryConflict(value)),
+    generateMemorySummary: (value) =>
+      nativeGeneration.generateMemorySummary === undefined
+        ? Effect.fail(
+            new TextGenerationError({
+              operation: "generateMemorySummary",
+              detail: "unsupported_operation",
+            }),
+          )
+        : protect("generateMemorySummary", nativeGeneration.generateMemorySummary(value)),
     generateCommitMessage: (value) =>
       protect("generateCommitMessage", nativeGeneration.generateCommitMessage(value)),
     generatePrContent: (value) =>

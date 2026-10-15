@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { reconcileGoatMigrationIds } from "./reconcileGoatMigrationIds.ts";
 import { migrationEntries, migrationManifest, runMigrations } from "./Migrations.ts";
 
 // GOAT builds record GOAT's own migrations right after the last upstream one they knew:
@@ -57,6 +58,7 @@ describe("GOAT migration ids", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
+        [71, "Memory"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -75,6 +77,7 @@ describe("GOAT migration ids", () => {
         [68, "ThreadRunResults"],
         [69, "RemoteReportRelay"],
         [70, "ProjectionTurnItemRequestIndex"],
+        [71, "Memory"],
       ]);
       assert.isTrue(yield* hasReviewGuides);
       assert.deepStrictEqual(yield* history, migrationManifest);
@@ -98,9 +101,113 @@ describe("GOAT migration ids", () => {
           ],
           62,
         );
-        assert.deepStrictEqual(yield* runMigrations(), [[62, "ThreadFailureLookupIndex"]]);
+        assert.deepStrictEqual(yield* runMigrations(), [
+          [62, "ThreadFailureLookupIndex"],
+          [71, "Memory"],
+        ]);
         assert.deepStrictEqual(yield* history, migrationManifest);
         assert.deepStrictEqual(yield* runMigrations(), []);
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
+
+// Synthetic ledgers/tables only: the rejection must preserve all startup evidence.
+describe("unreleased memory DB", () => {
+  it.effect("rejects an old memory ledger before moving any GOAT ids", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 70 });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE effect_sql_migrations SET migration_id = 169 WHERE name = 'RemoteReportRelay'`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70 + 100, 'Memory')`;
+      // The old Memory id may collide with dev's index, so model the actual pre-sync ledger.
+      yield* sql`DELETE FROM effect_sql_migrations WHERE name = 'ProjectionTurnItemRequestIndex'`;
+      yield* sql`UPDATE effect_sql_migrations SET migration_id = 70 WHERE name = 'Memory'`;
+      const before = yield* history;
+      const result = yield* Effect.flip(runMigrations());
+      assert.strictEqual(result._tag, "MigrationError");
+      if (result._tag !== "MigrationError") return yield* result;
+      assert.strictEqual(result.kind, "BadState");
+      assert.include(result.message, "Unreleased memory DB is incompatible");
+      assert.deepStrictEqual(yield* history, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("rejects old memory when other GOAT ids already match", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 70 });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM effect_sql_migrations WHERE name = 'ProjectionTurnItemRequestIndex'`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70, 'Memory')`;
+      const before = yield* history;
+      const result = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));
+      if (result._tag !== "MigrationError") return yield* result;
+      assert.strictEqual(result.kind, "BadState");
+      assert.deepStrictEqual(yield* history, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("rejects memory tables without a ledger and preserves their contents", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE memory_items (body TEXT)`;
+      yield* sql`INSERT INTO memory_items VALUES ('synthetic sandbox fixture')`;
+      const result = yield* Effect.flip(runMigrations());
+      if (result._tag !== "MigrationError") return yield* result;
+      assert.strictEqual(result.kind, "BadState");
+      assert.deepStrictEqual(yield* sql`SELECT body FROM memory_items`, [
+        { body: "synthetic sandbox fixture" },
+      ]);
+      assert.strictEqual(
+        (yield* sql`SELECT name FROM sqlite_master WHERE name='effect_sql_migrations'`).length,
+        0,
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("rejects unrecorded memory tables in an ordinary dev ledger", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 70 });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE memory_payloads (body TEXT)`;
+      const before = yield* history;
+      const result = yield* Effect.flip(runMigrations());
+      if (result._tag !== "MigrationError") return yield* result;
+      assert.strictEqual(result.kind, "BadState");
+      assert.deepStrictEqual(yield* history, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("upgrades an ordinary dev DB without memory and restarts normally", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 70 });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE unrelated_state (value TEXT)`;
+      yield* sql`INSERT INTO unrelated_state VALUES ('keep')`;
+      assert.deepStrictEqual(
+        yield* runMigrations(),
+        migrationManifest.filter(([id]) => id > 70),
+      );
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* sql`SELECT value FROM unrelated_state`, [{ value: "keep" }]);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+});
+
+it.effect("validates later Memory migrations against the registry without a fixed id list", () =>
+  Effect.gen(function* () {
+    yield* runMigrations();
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO effect_sql_migrations (migration_id,name) VALUES (999,'MemoryFutureFixture')`;
+    const unknown = yield* Effect.flip(reconcileGoatMigrationIds(migrationEntries));
+    if (unknown._tag !== "MigrationError") return yield* unknown;
+    assert.strictEqual(unknown.kind, "BadState");
+    const incoming = [...migrationEntries, [999, "MemoryFutureFixture", Effect.void] as const];
+    assert.deepStrictEqual(yield* reconcileGoatMigrationIds(incoming), []);
+    yield* sql`UPDATE effect_sql_migrations SET migration_id=998 WHERE name='MemoryFutureFixture'`;
+    const before = yield* history;
+    const stale = yield* Effect.flip(reconcileGoatMigrationIds(incoming));
+    if (stale._tag !== "MigrationError") return yield* stale;
+    assert.strictEqual(stale.kind, "BadState");
+    assert.deepStrictEqual(yield* history, before);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);

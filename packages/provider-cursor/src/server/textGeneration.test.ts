@@ -1,4 +1,6 @@
-import type { RunResult, SdkCredentialStore, StoredSdkCredentials } from "@cursor/sdk";
+import * as M from "@goat/contracts";
+import * as HostProcess from "@goat/shared/HostProcess";
+import type { SDKMessage, RunResult, SdkCredentialStore, StoredSdkCredentials } from "@cursor/sdk";
 import { ProviderInstanceId, TextGenerationError } from "@goat/contracts";
 import { CursorSettings } from "../settings.ts";
 import { describe, expect, it } from "@effect/vitest";
@@ -18,6 +20,7 @@ import { makeCursorTextGeneration } from "./textGeneration.ts";
 import * as CursorSdk from "./CursorSdk.ts";
 
 const cursorSdkMock = vi.hoisted(() => ({
+  resume: vi.fn(),
   create: vi.fn<(options: unknown) => Promise<unknown>>(),
   send: vi.fn<(prompt: string) => Promise<unknown>>(),
   close: vi.fn(),
@@ -33,12 +36,13 @@ const cursorSdkMock = vi.hoisted(() => ({
 }));
 
 vi.mock("./sdk.ts", () => ({
-  Agent: { create: cursorSdkMock.create },
+  Agent: { create: cursorSdkMock.create, resume: cursorSdkMock.resume },
   createAgentPlatform: vi.fn(),
   SqliteLocalAgentStore: { open: cursorSdkMock.storeOpen },
 }));
 
 let hasCustomPolicy = false;
+let memoryEvents: Array<SDKMessage> = [];
 const layerFs = FileSystem.layerNoop({
   exists: () => Effect.succeed(hasCustomPolicy),
   makeTempDirectoryScoped: () => Effect.succeed("/isolated-text-generation"),
@@ -50,6 +54,8 @@ const cursorSettings = decodeCursorSettings({ enabled: true });
 
 beforeEach(() => {
   hasCustomPolicy = false;
+  memoryEvents = [];
+  cursorSdkMock.resume.mockReset();
   cursorSdkMock.create.mockReset();
   cursorSdkMock.send.mockReset();
   cursorSdkMock.create.mockImplementation(async (options) => {
@@ -57,6 +63,9 @@ beforeEach(() => {
       status: "running",
       cancel: cursorSdkMock.cancel,
       wait: () => cursorSdkMock.prompt(prompt, options),
+      stream: async function* () {
+        yield* memoryEvents;
+      },
     }));
     return {
       close: cursorSdkMock.close,
@@ -80,7 +89,393 @@ beforeEach(() => {
   });
 });
 
+const memorySelection = M.MemoryModelSelection.make({
+  instanceId: M.ProviderInstanceId.make("cursor"),
+  model: "auto",
+  options: [],
+});
+const memoryContext = {
+  providerInstanceId: memorySelection.instanceId,
+  environmentId: M.EnvironmentId.make("memory-owner"),
+};
+const memoryId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const memoryRevision = M.MemoryRevision.make({
+  memorySpaceId: M.MemorySpaceId.make(memoryId(1)),
+  memoryId: M.MemoryId.make(memoryId(2)),
+  revisionId: M.MemoryRevisionId.make(memoryId(3)),
+  payloadRef: M.MemoryRevisionId.make(memoryId(3)),
+  operationId: M.MemoryOperationId.make(memoryId(4)),
+  parents: [],
+  scope: { kind: "user" },
+  assertionKind: "inference",
+  provenance: { environmentId: memoryContext.environmentId },
+  createdAtUtc: "2026-10-14T00:00:00.000Z",
+});
+const memoryPayload = M.MemoryPayload.make({
+  text: "Synthetic input",
+  evidence: [],
+  derivedFromMemoryRevisions: [],
+});
+const memorySummary = M.GenerateMemorySummaryInput.make({
+  cwd: "/synthetic-checkout",
+  sourceThread: {
+    environmentId: memoryContext.environmentId,
+    threadId: M.ThreadId.make("synthetic-thread"),
+  },
+  sourceWatermark: {
+    fromEventId: M.EventId.make("e1"),
+    toEventId: M.EventId.make("e2"),
+    throughSequence: 2,
+  },
+  messages: [{ messageId: M.MessageId.make("m1"), text: "Synthetic input", completed: true }],
+  modelSelection: memorySelection,
+});
+const memoryConflict = M.ResolveMemoryConflictInput.make({
+  cwd: memorySummary.cwd,
+  memorySpaceId: memoryRevision.memorySpaceId,
+  memoryId: memoryRevision.memoryId,
+  conflictId: M.MemoryConflictId.make(memoryId(8)),
+  heads: [
+    { revision: memoryRevision, payload: memoryPayload },
+    {
+      revision: {
+        ...memoryRevision,
+        revisionId: M.MemoryRevisionId.make(memoryId(5)),
+        payloadRef: M.MemoryRevisionId.make(memoryId(5)),
+      },
+      payload: memoryPayload,
+    },
+  ],
+  modelSelection: memorySelection,
+});
+const memoryOutput = { text: "Synthetic result", assertionKind: "inference", evidence: [] };
+const memoryOperations = ["resolveMemoryConflict", "generateMemorySummary"] as const;
+
+const runMemory = (
+  generation: Effect.Success<ReturnType<typeof makeCursorTextGeneration>>,
+  operation: (typeof memoryOperations)[number],
+  selection = memorySelection,
+) =>
+  operation === "resolveMemoryConflict"
+    ? generation.resolveMemoryConflict!({ ...memoryConflict, modelSelection: selection })
+    : generation.generateMemorySummary!({ ...memorySummary, modelSelection: selection });
+const mockMemoryOutput = (operation: (typeof memoryOperations)[number], extra = {}) =>
+  cursorSdkMock.prompt.mockResolvedValue({
+    id: "synthetic-memory-run",
+    status: "finished",
+    result: JSON.stringify({
+      ...memoryOutput,
+      ...(operation === "resolveMemoryConflict" ? { judgment: "Synthetic judgment" } : {}),
+      ...extra,
+    }),
+  });
+const decodeToolPolicy = Schema.decodeUnknownSync(
+  Schema.Struct({ tools: Schema.Array(Schema.String) }),
+);
+const provideMemoryTest = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.provide(layerTest),
+    Effect.provideService(HostProcess.HomeDirectory, "/synthetic-cursor-home"),
+  );
 describe("CursorTextGeneration", () => {
+  it.effect.each(memoryOperations)(
+    "rejects assistant tool-use blocks and user input for %s",
+    (operation) =>
+      Effect.gen(function* () {
+        mockMemoryOutput(operation);
+        const generation = yield* makeCursorTextGeneration(
+          cursorSettings,
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        for (const event of [
+          {
+            type: "assistant" as const,
+            agent_id: "synthetic-agent",
+            run_id: "synthetic-run",
+            message: {
+              role: "assistant" as const,
+              content: [{ type: "tool_use" as const, id: "tool", name: "mcp", input: {} }],
+            },
+          },
+          {
+            type: "request" as const,
+            agent_id: "synthetic-agent",
+            run_id: "synthetic-run",
+            request_id: "request",
+          },
+          { type: "task" as const, agent_id: "synthetic-agent", run_id: "synthetic-run" },
+        ]) {
+          memoryEvents = [event];
+          const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+          expect(error.detail).toContain("attempted tools");
+        }
+        expect(cursorSdkMock.close).toHaveBeenCalledTimes(3);
+      }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)(
+    "cancels a stalled memory run on its deadline for %s",
+    (operation) =>
+      Effect.gen(function* () {
+        let started!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        cursorSdkMock.prompt.mockImplementationOnce(() => {
+          started();
+          return new Promise(() => {});
+        });
+        const generation = yield* makeCursorTextGeneration(
+          cursorSettings,
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        const child = yield* runMemory(generation, operation).pipe(Effect.flip, Effect.forkScoped);
+        yield* Effect.promise(() => entered);
+        yield* TestClock.adjust("180 seconds");
+        expect((yield* Fiber.join(child)).detail).toContain("timed out");
+        expect(cursorSdkMock.cancel).toHaveBeenCalledOnce();
+        expect(cursorSdkMock.close).toHaveBeenCalledOnce();
+      }).pipe(provideMemoryTest, Effect.scoped),
+  );
+
+  it.effect.each(memoryOperations)("runs %s without built-in MCP or subagent tools", (operation) =>
+    Effect.gen(function* () {
+      mockMemoryOutput(operation);
+      let accessCalls = 0;
+      const generation = yield* makeCursorTextGeneration(
+        cursorSettings,
+        { CURSOR_API_KEY: "synthetic-key" },
+        undefined,
+        (effect) =>
+          Effect.sync(() => {
+            accessCalls++;
+          }).pipe(Effect.andThen(effect)),
+        memoryContext,
+      );
+      const selection = M.MemoryModelSelection.make({
+        ...memorySelection,
+        options: [
+          { id: "thinking", value: "high" },
+          { id: "fastMode", value: true },
+        ],
+      });
+      const generated = yield* runMemory(generation, operation, selection);
+      expect(generated.result.text).toBe(memoryOutput.text);
+      expect(generated.execution).toEqual({
+        requestedModelSelection: selection,
+        effectiveProvider: "cursor",
+        effectiveModel: "default",
+        providerInstanceId: memoryContext.providerInstanceId,
+        environmentId: memoryContext.environmentId,
+      });
+      expect(cursorSdkMock.create).toHaveBeenCalledOnce();
+      expect(cursorSdkMock.create).toHaveBeenCalledWith({
+        apiKey: "synthetic-key",
+        mode: "plan",
+        model: {
+          id: "default",
+          params: [
+            { id: "thinking", value: "high" },
+            { id: "fast", value: "true" },
+          ],
+        },
+        tools: [],
+        disallowedTools: ["mcp", "task"],
+        mcpServers: {},
+        local: {
+          cwd: "/isolated-text-generation",
+          store: { dispose: cursorSdkMock.storeDispose },
+          autoReview: false,
+          sandboxOptions: { enabled: true },
+          settingSources: [],
+          enableAgentRetries: false,
+        },
+      });
+      expect(cursorSdkMock.resume).not.toHaveBeenCalled();
+      expect(accessCalls).toBe(1);
+      expect(cursorSdkMock.close).toHaveBeenCalledOnce();
+    }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)(
+    "rejects tool events followed by apparent success for %s",
+    (operation) =>
+      Effect.gen(function* () {
+        mockMemoryOutput(operation);
+        memoryEvents = [
+          {
+            type: "tool_call",
+            agent_id: "synthetic-agent",
+            run_id: "synthetic-run",
+            call_id: "synthetic-call",
+            name: "shell",
+            status: "running",
+          },
+        ];
+        const generation = yield* makeCursorTextGeneration(
+          cursorSettings,
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+        expect(error.operation).toBe(operation);
+        expect(error.detail).toContain("attempted tools");
+        expect(cursorSdkMock.cancel).toHaveBeenCalledOnce();
+        expect(cursorSdkMock.close).toHaveBeenCalledOnce();
+      }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)(
+    "both memory operations reject SDK tool execution: %s",
+    (operation) =>
+      Effect.gen(function* () {
+        let sideEffects = 0;
+        // The fake SDK enforces its public allowlist before invoking the requested tool.
+        cursorSdkMock.prompt.mockImplementation(async (_prompt, options) => {
+          const policy = decodeToolPolicy(options);
+          if (policy.tools.includes("shell")) sideEffects++;
+          return { id: "synthetic-run", status: "error", error: { message: "Tool unavailable" } };
+        });
+        const generation = yield* makeCursorTextGeneration(
+          cursorSettings,
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+        expect(error.operation).toBe(operation);
+        expect(sideEffects).toBe(0);
+        expect(cursorSdkMock.resume).not.toHaveBeenCalled();
+      }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)(
+    "memory requests refuse unsafe sandbox fallback: %s",
+    (operation) =>
+      Effect.gen(function* () {
+        cursorSdkMock.create.mockRejectedValue(new Error("sandboxing is not supported"));
+        const generation = yield* makeCursorTextGeneration(
+          cursorSettings,
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+        expect(error.operation).toBe(operation);
+        expect(error.detail).toContain("requires its isolated sandbox");
+        expect(cursorSdkMock.create).toHaveBeenCalledOnce();
+        expect(cursorSdkMock.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            tools: [],
+            local: expect.objectContaining({ sandboxOptions: { enabled: true } }),
+          }),
+        );
+        expect(cursorSdkMock.send).not.toHaveBeenCalled();
+        expect(cursorSdkMock.resume).not.toHaveBeenCalled();
+      }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)("fails an unavailable SDK no-tool policy for %s", (operation) =>
+    Effect.gen(function* () {
+      cursorSdkMock.create.mockRejectedValue(
+        new Error("ConfigurationError: tools policy unavailable"),
+      );
+      const generation = yield* makeCursorTextGeneration(
+        cursorSettings,
+        { CURSOR_API_KEY: "synthetic-key" },
+        undefined,
+        undefined,
+        memoryContext,
+      );
+      const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+      expect(error.operation).toBe(operation);
+      expect(cursorSdkMock.create).toHaveBeenCalledOnce();
+      expect(cursorSdkMock.send).not.toHaveBeenCalled();
+    }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)("rejects forged execution JSON for %s", (operation) =>
+    Effect.gen(function* () {
+      mockMemoryOutput(operation, {
+        execution: { effectiveModel: "forged", environmentId: "forged" },
+      });
+      const generation = yield* makeCursorTextGeneration(
+        cursorSettings,
+        { CURSOR_API_KEY: "synthetic-key" },
+        undefined,
+        undefined,
+        memoryContext,
+      );
+      const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+      expect(error.operation).toBe(operation);
+      expect(cursorSdkMock.close).toHaveBeenCalledOnce();
+    }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)(
+    "rejects missing and mismatched owner identity before SDK invocation for %s",
+    (operation) =>
+      Effect.gen(function* () {
+        for (const context of [
+          undefined,
+          { providerInstanceId: memorySelection.instanceId },
+          { ...memoryContext, providerInstanceId: M.ProviderInstanceId.make("other-instance") },
+        ]) {
+          const generation = yield* makeCursorTextGeneration(
+            cursorSettings,
+            { CURSOR_API_KEY: "synthetic-key" },
+            undefined,
+            undefined,
+            context,
+          );
+          const error = yield* runMemory(generation, operation).pipe(Effect.flip);
+          expect(error.operation).toBe(operation);
+        }
+        expect(cursorSdkMock.create).not.toHaveBeenCalled();
+        expect(cursorSdkMock.prompt).not.toHaveBeenCalled();
+      }).pipe(provideMemoryTest),
+  );
+  it.effect.each(memoryOperations)(
+    "disabled credential and custom sandbox guards are reported safely: %s",
+    (operation) =>
+      Effect.gen(function* () {
+        const disabled = yield* makeCursorTextGeneration(
+          { ...cursorSettings, enabled: false },
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        expect((yield* runMemory(disabled, operation).pipe(Effect.flip)).detail).toContain(
+          "disabled",
+        );
+        const missing = yield* makeCursorTextGeneration(
+          cursorSettings,
+          {},
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        expect((yield* runMemory(missing, operation).pipe(Effect.flip)).detail).toContain(
+          "Sign in",
+        );
+        hasCustomPolicy = true;
+        const custom = yield* makeCursorTextGeneration(
+          cursorSettings,
+          { CURSOR_API_KEY: "synthetic-key" },
+          undefined,
+          undefined,
+          memoryContext,
+        );
+        expect((yield* runMemory(custom, operation).pipe(Effect.flip)).detail).toContain(
+          "custom ~/.cursor/sandbox.json",
+        );
+        expect(cursorSdkMock.create).not.toHaveBeenCalled();
+      }).pipe(provideMemoryTest),
+  );
   it.effect("resolves the browser credential for every request after an account change", () =>
     Effect.gen(function* () {
       let apiKey = "first-browser-key";

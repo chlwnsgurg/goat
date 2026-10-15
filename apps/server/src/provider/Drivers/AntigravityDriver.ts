@@ -444,6 +444,10 @@ export const AntigravityDriver: ProviderDriver<
           }),
       });
       const textGeneration = yield* makeAntigravityTextGeneration({
+        memoryRunnerContext: {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
         profileDirectory,
         defaultModel,
         withProcess: authFlow.withProcess,

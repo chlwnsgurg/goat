@@ -147,6 +147,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
           enabled,
           config,
         });
+      const host = yield* ProviderHost.ProviderHost;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -277,6 +278,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv, Path.Pat
         effectiveConfig,
         processEnv,
         snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
+        undefined,
+        {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
       );
       const snapshotForCwd = (cwd: string) =>
         !effectiveConfig.enabled

@@ -212,6 +212,10 @@ export const CursorDriver: ProviderDriver<
         processEnv,
         auth.requireApiKey,
         auth.withAccess,
+        {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
       );
 
       const checkProvider = auth.readApiKey.pipe(

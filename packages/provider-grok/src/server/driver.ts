@@ -143,7 +143,12 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv, Path.Path> 
             }),
         ),
       );
-      const textGeneration = yield* makeGrokTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeGrokTextGeneration(effectiveConfig, processEnv, {
+        memoryRunnerContext: {
+          providerInstanceId: instanceId,
+          ...(host.environmentId === undefined ? {} : { environmentId: host.environmentId }),
+        },
+      });
 
       const checkProvider = checkGrokProviderStatus(effectiveConfig, processEnv, cwd).pipe(
         Effect.flatMap((snapshot) =>

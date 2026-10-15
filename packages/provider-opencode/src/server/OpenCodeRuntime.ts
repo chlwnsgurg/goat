@@ -730,6 +730,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         .spawn(
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
             detached: hostPlatform !== "win32",
+            cwd: input.directory,
             shell: spawnCommand.shell,
             env: {
               ...input.environment,
