@@ -3,22 +3,22 @@ import type {
   UserInputAttachmentAnswerPayload,
   UserInputAttachments,
 } from "@goat/contracts";
-import { Image, Linking, Pressable, View } from "react-native";
+import { Image } from "expo-image";
+import { Linking, Pressable, View } from "react-native";
 import {
   getQuestionAnswerText,
   getQuestionAnswerAttribution,
 } from "@goat/client-runtime/work-log/user-input";
 import { AppText as Text } from "../../components/AppText";
+import { assetImageSource } from "../../lib/assetImageSource";
 import { useAssetUrl } from "../../state/assets";
 
 function AnswerFile(props: {
   environmentId: EnvironmentId;
   attachment: UserInputAttachments[string][number];
 }) {
-  const url = useAssetUrl(props.environmentId, {
-    _tag: "attachment",
-    attachmentId: props.attachment.id,
-  });
+  const resource = { _tag: "attachment", attachmentId: props.attachment.id } as const;
+  const url = useAssetUrl(props.environmentId, resource);
   return (
     <Pressable
       accessibilityRole="link"
@@ -30,7 +30,12 @@ function AnswerFile(props: {
       className="gap-1"
     >
       {props.attachment.type === "image" && url ? (
-        <Image source={{ uri: url }} style={{ width: 160, height: 96 }} resizeMode="contain" />
+        <Image
+          source={assetImageSource(props.environmentId, resource, url)}
+          cachePolicy="memory-disk"
+          style={{ width: 160, height: 96 }}
+          contentFit="contain"
+        />
       ) : null}
       <Text className="text-sm text-foreground underline">{props.attachment.name}</Text>
     </Pressable>

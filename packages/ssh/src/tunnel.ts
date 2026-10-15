@@ -484,20 +484,38 @@ const preferred = Number.parseInt(raw, 10);
 const start = Number.isInteger(preferred) ? preferred : defaultPort;
 const end = start + scanWindow;
 
-function tryPort(port) {
+function canBind(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
     server.unref();
     server.once("error", () => resolve(false));
     server.listen(port, "127.0.0.1", () => {
-      server.close((error) => resolve(error ? false : port));
+      server.close((error) => resolve(!error));
     });
+  });
+}
+
+// macOS lets the bind above succeed while another process listens on
+// *:<port>, so also skip any port that already answers on loopback.
+function answersOnLoopback(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ port, host: "127.0.0.1" });
+    socket.setTimeout(1000);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => resolve(false));
   });
 }
 
 (async () => {
   for (let port = start; port < end; port += 1) {
-    const available = await tryPort(port);
+    const available = (await canBind(port)) && !(await answersOnLoopback(port));
     if (available) {
       process.stdout.write(String(port));
       return;
@@ -888,7 +906,11 @@ else
     process_table="$(ps -e -o pid= 2>/dev/null)" || return 1
     printf '%s\n' "$process_table" | awk -v p="$1" '$1==p { found=1 } END { print found ? "present" : "absent" }'
   }
-  server_alive() { kill -0 "$1" 2>/dev/null; }
+  # An exited, unreaped server still passes kill -0; it cannot be reused.
+  server_alive() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+    case "$(ps -o stat= -p "$1" 2>/dev/null || true)" in *Z*) return 1 ;; esac
+  }
   server_kill() { kill "$1" 2>/dev/null; }
   server_uid() { ps -o uid= -p "$1" 2>/dev/null; }
   server_start() { process_start "$1"; }
@@ -1535,7 +1557,7 @@ wait_for_pid_exit() {
 }
 reuse_live_server() {
     REMOTE_PORT="$LIVE_PORT"
-    if ! wait_ready "@@GOAT_REUSE_READY_TIMEOUT_MS@@"; then
+    if ! wait_ready "@@GOAT_READY_TIMEOUT_MS@@"; then
       printf 'Selected live server did not answer; it was left running.\\n' >&2; exit 1
     fi
     recheck_selected_before_use

@@ -43,6 +43,8 @@ import {
   OrchestratorThreadAboveModeLimitError,
 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { buildUnavailableProviderSnapshot } from "../provider/unavailableProviderSnapshot.ts";
@@ -59,6 +61,11 @@ import { fakeCloudCapabilities } from "../orchestration-v2/testkit/FakeCloudAdap
 import * as CloudSource from "../orchestration-v2/CloudTaskSourceService.ts";
 
 const isJson = Schema.is(Schema.Json);
+
+const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+);
 
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
@@ -193,7 +200,7 @@ describe("OrchestratorMcpService", () => {
         assert.notEqual(commandIds[0], commandIds[1]);
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -299,7 +306,7 @@ describe("OrchestratorMcpService", () => {
         assert.equal(yield* Ref.get(dispatched), 1);
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -385,7 +392,7 @@ describe("OrchestratorMcpService", () => {
         assert.deepEqual(yield* Ref.get(dispatched), []);
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -475,7 +482,7 @@ describe("OrchestratorMcpService", () => {
         );
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -571,7 +578,7 @@ describe("OrchestratorMcpService", () => {
         );
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -664,7 +671,7 @@ describe("OrchestratorMcpService", () => {
         assert.deepEqual(yield* Ref.get(dispatched), []);
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -820,7 +827,7 @@ describe("OrchestratorMcpService", () => {
         };
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -1064,7 +1071,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(isJson(status), true);
         }).pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(ServerSettings.layerTest()),
               Layer.provide(dependencies),
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
@@ -1159,7 +1166,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(view.cloudTask, undefined);
           assert.equal(view.childThreadId, "remote");
           assert.equal(hostReads, unavailable === "settled" || unavailable === "read-only" ? 0 : 1);
-        }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
       }),
   );
   it.effect(
@@ -1304,7 +1311,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           );
         }).pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
               Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(layerDependencies),
@@ -1369,7 +1376,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           );
         }).pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
               Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(layerDependencies),
@@ -1477,7 +1484,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(request.modelSelection.model, "ant-model");
         }).pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
               Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(layerDependencies),
@@ -1581,7 +1588,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(request.modelSelection.model, "ant-model");
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -1648,7 +1655,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         );
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -1702,7 +1709,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(error.code, "invalid_request");
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -1815,7 +1822,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(request.modelSelection.instanceId, altInstanceId);
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -1948,7 +1955,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(retryCommand.modelSelection.instanceId, codexInstanceId);
         }).pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
               Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(layerDependencies),
@@ -2061,7 +2068,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(yield* Ref.get(dispatched), 1);
       }).pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
             Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
             Layer.provide(layerDependencies),
@@ -2304,7 +2311,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             }
           }).pipe(
             Effect.provide(
-              OrchestratorMcpService.layer.pipe(
+              layerOrchestratorService.pipe(
                 Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
                 Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
                 Layer.provide(layerDependencies),
@@ -2443,7 +2450,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       );
       const service = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
         Effect.provide(
-          OrchestratorMcpService.layer.pipe(
+          layerOrchestratorService.pipe(
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(dependencies),
             Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
@@ -2535,7 +2542,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       boundThread: OrchestrationV2ThreadShell | null,
       upserted: Ref.Ref<number>,
     ) =>
-      OrchestratorMcpService.layer.pipe(
+      layerOrchestratorService.pipe(
         Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
         Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
         Layer.provide(
@@ -2642,7 +2649,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             ),
           ),
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
               Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(
@@ -2728,7 +2735,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         // The edit's own check reads the thread; the read after the save fails.
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(Layer.mock(RemoteDispatchCoordinator.RemoteDispatchCoordinator)({})),
               Layer.provide(Layer.mock(SshRemoteDispatch.SshRemoteDispatch)({})),
               Layer.provide(
@@ -2878,7 +2885,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           }
           assert.equal(sourceReads, 1);
           assert.deepEqual(commands, []);
-        }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
       }),
   );
 });
@@ -3007,6 +3014,6 @@ it.effect.each([
         }
         assert.equal(parent.subagents[0]?.completionDelivery?.state, "pending");
         if (scenario.cloud) assert.deepEqual(child.providerThreads[0]?.cloudTask, cloudTask);
-      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
     }),
 );

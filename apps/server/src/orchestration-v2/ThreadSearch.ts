@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
+import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 
 /** Carries no query text: search input is user content. */
 export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
@@ -327,10 +328,16 @@ export const make = Effect.gen(function* () {
 
   const search: ThreadSearch["Service"]["search"] = Effect.fn("ThreadSearch.search")(
     function* (input) {
-      const rows = yield* searchRows({
-        pattern: `%${escapeLikePattern(input.query)}%`,
-        limit: input.limit ?? 50,
-      }).pipe(Effect.mapError(mapError));
+      // The scan reads every message, so run it on the reader worker rather
+      // than the event loop.
+      const rows = yield* sql
+        .withTransaction(
+          searchRows({
+            pattern: `%${escapeLikePattern(input.query)}%`,
+            limit: input.limit ?? 50,
+          }),
+        )
+        .pipe(NodeSqliteClient.readOnly, Effect.mapError(mapError));
       return {
         matches: rows.map((row) => ({
           threadId: row.threadId,

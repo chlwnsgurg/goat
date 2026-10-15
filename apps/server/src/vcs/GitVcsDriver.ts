@@ -28,6 +28,7 @@ import {
   type VcsInitInput,
   type VcsListRefsInput,
   type VcsListRefsResult,
+  type WorktreesDirectoryStatus,
   type VcsPullResult,
   type VcsRemoveWorktreeInput,
   type VcsStatusInput,
@@ -133,6 +134,15 @@ export interface CreateWorktreeProgress {
    * cancel.
    */
   readonly onWorktreeClaimed?: (path: string) => Effect.Effect<void, never>;
+  /**
+   * Fires before checkout when the configured `worktreesDirectory` is
+   * unavailable and the worktree goes to the default directory instead.
+   */
+  readonly onWorktreesDirectoryFallback?: (
+    status: WorktreesDirectoryStatus & {
+      readonly unavailable: NonNullable<WorktreesDirectoryStatus["unavailable"]>;
+    },
+  ) => Effect.Effect<void, never>;
   readonly onCheckoutProgress?: (input: {
     percent: number;
     completed: number;
@@ -361,6 +371,11 @@ export class GitVcsDriver extends Context.Service<
     readonly readConfigValue: (
       cwd: string,
       key: string,
+    ) => Effect.Effect<string | null, GitCommandError>;
+    /** Returns the branch name of a local or remote-tracking ref, excluding tags and commits. */
+    readonly resolveBranchName: (
+      cwd: string,
+      refName: string,
     ) => Effect.Effect<string | null, GitCommandError>;
     readonly listRefs: (
       input: VcsListRefsInput,
@@ -855,7 +870,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       "sparse.expectFilesOutsideOfPatterns=false",
     ];
     const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
-    const indexId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+    const indexId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
     const tempIndexPath = path.join(gitCommonDir, `goat-checkpoint-index-${indexId}`);
     const commitEnv: NodeJS.ProcessEnv = {
       ...process.env,

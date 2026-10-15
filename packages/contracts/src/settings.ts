@@ -729,6 +729,26 @@ export const ClaudeSettings = makeProviderSettingsSchema(
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
 
+export const ClaudeCloudSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    sourceInstanceId: ProviderInstanceId.pipe(
+      Schema.withDecodingDefault(Effect.succeed(ProviderInstanceId.make("claudeAgent"))),
+      Schema.annotateKey({
+        title: "Claude login instance",
+        description:
+          "ID of the local Claude instance whose binary and claude.ai login this cloud provider uses.",
+        providerSettingsForm: { placeholder: "claudeAgent", clearWhenEmpty: "omit" },
+      }),
+    ),
+  },
+  { order: ["sourceInstanceId"] },
+);
+export type ClaudeCloudSettings = typeof ClaudeCloudSettings.Type;
+
 /**
  * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
  * in the browser. The API key and Agent Platform methods take credentials from
@@ -1019,6 +1039,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "pullRequestMergeMethod",
   "sidebarAutoSettleOnMerge",
   "sidebarAutoSettleAfterDays",
+  "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
   "standingInstructions",
@@ -1077,6 +1098,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
+  sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   standingInstructions: Schema.optionalKey(StandingInstructions),
@@ -1128,6 +1150,51 @@ export const StorageCleanupReport = Schema.Struct({
   bytesFreed: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;
+
+/** Why the configured `worktreesDirectory` cannot hold new worktrees right now. */
+export const WorktreesDirectoryUnavailableReason = Schema.Literals([
+  "invalid",
+  "unmounted",
+  "missing",
+  "not-a-directory",
+  "not-writable",
+]);
+export type WorktreesDirectoryUnavailableReason = typeof WorktreesDirectoryUnavailableReason.Type;
+
+/**
+ * Where this server creates new worktrees right now. `unavailable` is set
+ * when a custom location is configured but cannot be used, in which case
+ * `directory` is the default `<GOAT home>/worktrees` fallback.
+ */
+export const WorktreesDirectoryStatus = Schema.Struct({
+  configured: Schema.String,
+  directory: Schema.String,
+  unavailable: Schema.NullOr(
+    Schema.Struct({
+      reason: WorktreesDirectoryUnavailableReason,
+      /** The resolved configured path, or null when the setting is not a usable absolute path. */
+      path: Schema.NullOr(Schema.String),
+    }),
+  ),
+});
+export type WorktreesDirectoryStatus = typeof WorktreesDirectoryStatus.Type;
+
+export function describeWorktreesDirectoryUnavailable(
+  reason: WorktreesDirectoryUnavailableReason,
+): string {
+  switch (reason) {
+    case "invalid":
+      return "is not an absolute folder on this machine";
+    case "unmounted":
+      return "is on a drive that is not connected";
+    case "missing":
+      return "does not exist and its parent folder is missing";
+    case "not-a-directory":
+      return "is not a folder";
+    case "not-writable":
+      return "is not writable";
+  }
+}
 
 export const StorageCleanupSettings = Schema.Struct({
   worktreeKeepWhen: WorktreeKeepWhen.pipe(
@@ -1274,6 +1341,9 @@ export const ServerSettings = Schema.Struct({
   ),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -1654,6 +1724,7 @@ export const ServerSettingsPatch = Schema.Struct({
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
+  sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
