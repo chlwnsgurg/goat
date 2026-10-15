@@ -545,19 +545,29 @@ const make = Effect.fnUntraced(function* (
       Effect.gen(function* () {
         const { candidate, next, previous, registration } = input;
         // L4 may pass an unfinished frozen selection. Results are materialized here, IDs never regenerated.
-        const itemResult: M.MemoryImportItemResult = input.selection.result ?? {
-          sourceItemKey: next.sourceItemKey,
-          outcome: next.outcome,
-          memoryId:
-            next.outcome === "suppressed" || next.outcome === "rejected" ? null : next.memoryId,
-          revisionId:
-            next.outcome === "suppressed" || next.outcome === "rejected"
-              ? null
-              : next.outcome === "noop"
-                ? ((next.pending ?? next.accepted)?.revisionId ?? null)
-                : input.selection.revisionId,
-          ...(next.outcome === "rejected" && next.rejected ? { issue: next.rejected.issue } : {}),
-        };
+        const itemResult: M.MemoryImportItemResult = input.rejectOnly
+          ? {
+              sourceItemKey: next.sourceItemKey,
+              outcome: "rejected",
+              memoryId: null,
+              revisionId: null,
+              ...input.rejectOnly,
+            }
+          : (input.selection.result ?? {
+              sourceItemKey: next.sourceItemKey,
+              outcome: next.outcome,
+              memoryId:
+                next.outcome === "suppressed" || next.outcome === "rejected" ? null : next.memoryId,
+              revisionId:
+                next.outcome === "suppressed" || next.outcome === "rejected"
+                  ? null
+                  : next.outcome === "noop"
+                    ? ((next.pending ?? next.accepted)?.revisionId ?? null)
+                    : input.selection.revisionId,
+              ...(next.outcome === "rejected" && next.rejected
+                ? { issue: next.rejected.issue }
+                : {}),
+            });
         const selection = { ...input.selection, result: itemResult };
         const selections = input.batch.selections.map((s) =>
           s.selector.sourceItemKey === next.sourceItemKey ? selection : s,
@@ -588,10 +598,12 @@ const make = Effect.fnUntraced(function* (
             input.selection,
             input.batch.selections.find((s) => s.selector.sourceItemKey === next.sourceItemKey),
           ) ||
-          !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope)
+          (!input.rejectOnly && !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope))
         )
           return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
-        yield* requireScope(next.scope);
+        yield* requireScope(selection.selector.scope);
+        if (input.rejectOnly && (!previous || !NodeUtil.isDeepStrictEqual(next, previous)))
+          return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
         // Sync readiness is observed outside SQL; published local state is authoritative after lock.
         const ready = yield* query(
           sql`SELECT 1 FROM memory_compaction_state WHERE space=${batch.memorySpaceId} AND published=1`,
@@ -608,9 +620,32 @@ const make = Effect.fnUntraced(function* (
             !NodeUtil.isDeepStrictEqual(savedRegistration, registration) ||
             registration.version !== input.registrationVersion ||
             !NodeUtil.isDeepStrictEqual(next.accepted, previous?.accepted ?? null) ||
-            next.outcome !== selection.result?.outcome
+            (!input.rejectOnly && next.outcome !== selection.result?.outcome)
           )
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          if (selection.selector.project) {
+            const project = selection.selector.project;
+            yield* projectRoot(project);
+            const binding = (yield* store.getProjectBinding(batch.memorySpaceId, project)) ?? {
+              memorySpaceId: batch.memorySpaceId,
+              project,
+              projectKey: null,
+              repositoryKey: null,
+              version: 0,
+            };
+            if (
+              !input.projectBinding ||
+              !NodeUtil.isDeepStrictEqual(binding, input.projectBinding) ||
+              selection.selector.scope.kind !== "project" ||
+              !NodeUtil.isDeepStrictEqual(binding.projectKey, selection.selector.scope.projectKey)
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          } else if (selection.selector.scope.kind === "project" || input.projectBinding !== null) {
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          }
+          if (previous && !NodeUtil.isDeepStrictEqual(previous.scope, next.scope))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          if (input.rejectOnly) return;
           const match = yield* store.findImportMatchTx({
             ...batch,
             source: {
@@ -653,26 +688,6 @@ const make = Effect.fnUntraced(function* (
             !current.heads.every((h) => input.expectedHeads.includes(h))
           )
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
-          if (selection.selector.project) {
-            const project = selection.selector.project;
-            yield* projectRoot(project);
-            const binding = (yield* store.getProjectBinding(batch.memorySpaceId, project)) ?? {
-              memorySpaceId: batch.memorySpaceId,
-              project,
-              projectKey: null,
-              repositoryKey: null,
-              version: 0,
-            };
-            if (
-              !input.projectBinding ||
-              !NodeUtil.isDeepStrictEqual(binding, input.projectBinding) ||
-              next.scope.kind !== "project" ||
-              !NodeUtil.isDeepStrictEqual(binding.projectKey, next.scope.projectKey)
-            )
-              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
-          } else if (next.scope.kind === "project" || input.projectBinding !== null) {
-            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
-          }
           if (next.outcome === "noop") {
             const observation = previous?.pending ?? previous?.accepted;
             const payload = current.revisions.find(
@@ -690,7 +705,12 @@ const make = Effect.fnUntraced(function* (
           }
           // Updated imports branch only from their last accepted observation, never a pending proposal.
           let parents = previous?.accepted ? [previous.accepted.revisionId] : [];
-          if (next.outcome === "aliased" && !previous && input.parents.length === 1) {
+          if (
+            next.outcome === "aliased" &&
+            !previous?.accepted &&
+            !previous?.pending &&
+            input.parents.length === 1
+          ) {
             const parent = current.revisions.find(
               (r) => r.revision.revisionId === input.parents[0],
             );
@@ -803,6 +823,7 @@ const make = Effect.fnUntraced(function* (
           previous,
           next,
           commitIntent,
+          preserveItem: input.rejectOnly !== undefined,
         });
         yield* permit;
         return result;
@@ -844,6 +865,48 @@ const make = Effect.fnUntraced(function* (
       ),
     readItem: (input, permit) => importTransaction(input, permit, store.readImportItemTx(input)),
     findMatch: (input, permit) => importTransaction(input, permit, store.findImportMatchTx(input)),
+    prepareTarget: (input, permit) =>
+      importTransaction(
+        input,
+        permit,
+        Effect.gen(function* () {
+          yield* requireScope(input.scope);
+          const current = yield* store.loadAggregate(input.memorySpaceId, input.memoryId);
+          if (current.identity && !NodeUtil.isDeepStrictEqual(current.identity.scope, input.scope))
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          const acceptedParent =
+            input.acceptedRevisionId === null
+              ? null
+              : (yield* store.readAncestry(input.memorySpaceId, input.memoryId, [
+                  input.acceptedRevisionId,
+                ])).parents[0]!;
+          const head =
+            current.item?.status === "active" &&
+            current.heads.length === 1 &&
+            !current.pendingForget &&
+            !current.tombstone
+              ? current.revisions.find((r) => r.revision.revisionId === current.heads[0])
+              : undefined;
+          const approval = head
+            ? yield* store.receipt(input.memorySpaceId, head.revision.operationId)
+            : undefined;
+          return {
+            identity: current.identity ?? null,
+            heads: current.heads,
+            forgotten: current.tombstone !== undefined,
+            pendingForget: current.pendingForget !== undefined,
+            acceptedParent,
+            alias:
+              head?.payload &&
+              approval &&
+              "hubSequence" in approval.receipt &&
+              approval.receipt.hubSequence !== null &&
+              approval.receipt.outcome !== "rejected"
+                ? { revision: head.revision, payload: head.payload }
+                : null,
+          };
+        }),
+      ),
     binding: getProjectBinding,
     resolveProjectKey,
     commit: commitImport,

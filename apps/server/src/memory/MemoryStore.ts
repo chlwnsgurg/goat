@@ -5880,12 +5880,13 @@ const make = Effect.gen(function* () {
         return yield* new MemoryStoreConflict({ code: "revision_changed" });
       yield* input.commitIntent;
       // Item, detailed receipt and session CAS share the intent/quota/outbox journal.
-      yield* stored(
-        "import-item-write",
-        sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,source_item_key,memory_id,scope_json,registration_json,outcome,observed_at_utc)
+      if (!input.preserveItem)
+        yield* stored(
+          "import-item-write",
+          sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,source_item_key,memory_id,scope_json,registration_json,outcome,observed_at_utc)
       VALUES (${importId(["item", next.memorySpaceId, next.environmentId, next.sourceId, next.sourceItemKey])},${next.memorySpaceId},${next.environmentId},'item',${next.sourceId},${next.sourceItemKey},${next.memoryId},${yield* scopeCodec.encode(next.scope)},${yield* importItemCodec.encode(next)},${next.outcome},${batch.createdAtUtc})
       ON CONFLICT(receipt_id) DO UPDATE SET registration_json=excluded.registration_json,memory_id=excluded.memory_id,scope_json=excluded.scope_json,outcome=excluded.outcome,observed_at_utc=excluded.observed_at_utc`,
-      );
+        );
       const charged =
         selection.result.outcome === "created" || selection.result.outcome === "revised";
       const op = yield* readOperation(batch.memorySpaceId, selection.operationId);

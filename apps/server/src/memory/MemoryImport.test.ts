@@ -623,6 +623,12 @@ describe("MemoryImport durable ports", () => {
             receipt: { ...noop.batch.receipt, items: [], state: "partial", remaining: 1 },
           },
         };
+        const target = yield* service.importPorts.prepareTarget(
+          { ...address, memoryId, scope: { kind: "user" }, acceptedRevisionId: null },
+          Effect.void,
+        );
+        assert.deepStrictEqual(target.heads, [first.selection.revisionId]);
+        assert.strictEqual(target.alias, null);
         const before = yield* durableInventory;
         const scope: M.MemoryScope = {
           kind: "thread",
@@ -741,6 +747,268 @@ describe("MemoryImport durable ports", () => {
         assert.strictEqual(result._tag, "Failure");
         assert.deepStrictEqual(yield* durableInventory, before);
       }).pipe(Effect.provide(importLive)),
+  );
+});
+
+describe("MemoryImport M3c final fences", () => {
+  for (const outcome of ["rejected", "suppressed"] as const) {
+    for (const race of ["binding", "deletion"] as const) {
+      it.effect(`metadata ${outcome} refuses ${race} before durable mutation`, () =>
+        Effect.gen(function* () {
+          yield* setupImport;
+          const service = yield* Service.MemoryService;
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`CREATE TABLE projection_projects(project_id TEXT PRIMARY KEY,workspace_root TEXT,deleted_at TEXT)`;
+          yield* sql`INSERT INTO projection_projects VALUES ('synthetic-project','/synthetic',NULL)`;
+          const project: M.ScopedProjectRef = {
+            environmentId,
+            projectId: M.ProjectId.make("synthetic-project"),
+          };
+          const projectKey: M.MemoryProjectKey = { kind: "explicit", sharedProjectId: uuid(80) };
+          const binding: M.MemoryProjectBinding = {
+            memorySpaceId: space,
+            project,
+            projectKey,
+            repositoryKey: null,
+            version: 1,
+          };
+          yield* store.putProjectBinding(binding, null, 0);
+          const first = prepared();
+          const scope: M.MemoryScope = { kind: "project", projectKey };
+          const selection = {
+            ...first.selection,
+            selector: { ...first.selection.selector, scope, project },
+            result: null,
+          };
+          const p: PreparedImportCommit = {
+            ...first,
+            selection,
+            batch: { ...first.batch, selections: [selection] },
+            projectBinding: binding,
+            next: {
+              ...first.next,
+              scope,
+              outcome,
+              pending: null,
+              rejected:
+                outcome === "rejected"
+                  ? {
+                      sourceFingerprint: first.candidate.sourceFingerprint,
+                      issue: "source_changed",
+                    }
+                  : null,
+            },
+          };
+          // A genuine delete fence makes suppressed a valid metadata-only outcome.
+          yield* service.forget(
+            {
+              memorySpaceId: space,
+              memoryId,
+              operationId: M.MemoryOperationId.make(uuid(700)),
+              expectedHeads: [],
+            },
+            Effect.void,
+          );
+          yield* store.transact(
+            store.unionImportLineageTx(
+              [
+                {
+                  memorySpaceId: space,
+                  memoryId,
+                  kind: "sourceKey",
+                  sourceKey: {
+                    environmentId,
+                    sourceId,
+                    sourceItemKey: first.candidate.sourceItemKey,
+                  },
+                },
+              ],
+              Store.approvedReplica,
+            ),
+          );
+          if (race === "binding") yield* store.putProjectBinding({ ...binding, version: 2 }, 1, 0);
+          else yield* sql`UPDATE projection_projects SET deleted_at='2026-10-15'`;
+          const before = yield* durableInventory;
+          const failure = yield* service.importPorts.commit(p, Effect.void).pipe(Effect.flip);
+          if (failure._tag !== "MemoryStoreConflict")
+            return assert.fail("expected final fence conflict");
+          assert.strictEqual(failure.code, race === "binding" ? "revision_changed" : "not_found");
+          assert.deepStrictEqual(yield* durableInventory, before);
+          if (race === "binding" && outcome === "suppressed") {
+            const good = { ...p, projectBinding: { ...binding, version: 2 } };
+            assert.strictEqual(
+              (yield* service.importPorts.commit(good, Effect.void)).outcome,
+              "suppressed",
+            );
+          }
+        }).pipe(Effect.provide(importLive)),
+      );
+    }
+  }
+  it.effect(
+    "reject-only preserves item scope and capacity details while later selections proceed",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const service = yield* Service.MemoryService;
+        const first = prepared();
+        yield* service.importPorts.commit(first, Effect.void);
+        const reg = (yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        ))!;
+        const attempt = prepared(reg, 30, first.next);
+        const scope: M.MemoryScope = {
+          kind: "thread",
+          thread: { environmentId, threadId: M.ThreadId.make("synthetic-thread") },
+        };
+        const selection = {
+          ...attempt.selection,
+          selector: { ...attempt.selection.selector, scope },
+          result: null,
+        };
+        const p: PreparedImportCommit = {
+          ...attempt,
+          selection,
+          batch: { ...attempt.batch, selections: [selection] },
+          next: first.next,
+          rejectOnly: { issue: "mapping_changed" },
+        };
+        const { rejectOnly: _rejectOnly, ...normal } = p;
+        const invalid = {
+          ...normal,
+          next: {
+            ...first.next,
+            scope,
+            outcome: "rejected" as const,
+            pending: null,
+            rejected: {
+              sourceFingerprint: p.candidate.sourceFingerprint,
+              issue: "mapping_changed" as const,
+            },
+          },
+        };
+        const before = yield* durableInventory;
+        assert.strictEqual(
+          (yield* service.importPorts.commit(invalid, Effect.void).pipe(Effect.flip))._tag,
+          "MemoryStoreConflict",
+        );
+        assert.deepStrictEqual(yield* durableInventory, before);
+        const result = yield* service.importPorts.commit(p, Effect.void);
+        assert.strictEqual(result.issue, "mapping_changed");
+        assert.deepStrictEqual(
+          yield* service.importPorts.readItem(first.next, Effect.void),
+          first.next,
+        );
+        const updated = (yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        ))!;
+        const second = prepared(updated, 50, first.next);
+        const otherSelection = { ...second.selection, result: null };
+        const capacity: M.MemoryCapacityExceeded = {
+          code: "capacity_exceeded",
+          dimension: "import_session_bytes",
+          current: 2097153,
+          limit: 2097152,
+          reclaimable: 0,
+        };
+        const denied = {
+          ...second,
+          selection: otherSelection,
+          batch: { ...second.batch, selections: [otherSelection] },
+          next: first.next,
+          rejectOnly: { issue: "capacity_exceeded" as const, capacity },
+        };
+        assert.deepStrictEqual(
+          (yield* service.importPorts.commit(denied, Effect.void)).capacity,
+          capacity,
+        );
+        assert.deepStrictEqual(
+          yield* service.importPorts.readItem(first.next, Effect.void),
+          first.next,
+        );
+      }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("rejected-only aliases a real approved target with previous CAS intact", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const rejected = prepared();
+      const selection = { ...rejected.selection, result: null };
+      const item: ImportItem = {
+        ...rejected.next,
+        pending: null,
+        outcome: "rejected",
+        rejected: {
+          sourceFingerprint: rejected.candidate.sourceFingerprint,
+          issue: "source_changed",
+        },
+      };
+      yield* service.importPorts.commit(
+        {
+          ...rejected,
+          selection,
+          batch: { ...rejected.batch, selections: [selection] },
+          next: item,
+        },
+        Effect.void,
+      );
+      const targetOp = M.MemoryOperationId.make(uuid(200));
+      const targetReceipt = yield* service.upsert(
+        {
+          memorySpaceId: space,
+          memoryId,
+          operationId: targetOp,
+          baseBoundary: null,
+          expectedHeads: [],
+          scope: { kind: "user" },
+          assertionKind: "inference",
+          payload: rejected.candidate.payload,
+        },
+        Effect.void,
+      );
+      const targetRev = targetReceipt.receipt.revisionId!;
+      const operation = (yield* store.readOperation(space, targetOp))!;
+      yield* store.acknowledgeOutbox(`sync:${space}:${targetOp}`, yield* remoteApproval(operation));
+      const target = yield* service.importPorts.prepareTarget(
+        { ...address, memoryId, scope: { kind: "user" }, acceptedRevisionId: null },
+        Effect.void,
+      );
+      assert.deepStrictEqual(target.heads, [targetRev]);
+      assert.strictEqual(target.alias?.revision.revisionId, targetRev);
+      const reg = (yield* service.importPorts.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const alias = prepared(reg, 30, item);
+      const aliasSelection = { ...alias.selection, result: null };
+      const p: PreparedImportCommit = {
+        ...alias,
+        selection: aliasSelection,
+        batch: { ...alias.batch, selections: [aliasSelection] },
+        candidate: { ...alias.candidate, payload: rejected.candidate.payload },
+        next: { ...alias.next, outcome: "aliased" },
+        expectedHeads: target.heads,
+        parents: [targetRev],
+      };
+      const before = yield* durableInventory;
+      const stale = yield* service.importPorts
+        .commit({ ...p, previous: null }, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(stale._tag, "MemoryStoreConflict");
+      assert.deepStrictEqual(yield* durableInventory, before);
+      assert.strictEqual((yield* service.importPorts.commit(p, Effect.void)).outcome, "aliased");
+      const op = yield* store.readOperation(space, p.selection.operationId);
+      if (op?.kind !== "upsert") return assert.fail("expected alias intent");
+      assert.deepStrictEqual(op.revision.parents, [targetRev]);
+      assert.deepStrictEqual(
+        (yield* service.importPorts.readItem(item, Effect.void))?.pending,
+        p.next.pending,
+      );
+    }).pipe(Effect.provide(importLive)),
   );
 });
 
