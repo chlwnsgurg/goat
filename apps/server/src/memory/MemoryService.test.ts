@@ -3129,6 +3129,7 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       const { op } = yield* stageReportRevert;
       const foreign = M.EnvironmentId.make("foreign");
+      let parents = op.revision.parents;
       for (let n = 0; n <= M.MEMORY_REPORT_MAX_PENDING_ITEMS; n++) {
         const operationId = M.MemoryOperationId.make(id(10000 + n));
         const revisionId = M.MemoryRevisionId.make(id(20000 + n));
@@ -3136,8 +3137,10 @@ it.effect(
           ...op,
           operationId,
           originEnvironmentId: foreign,
+          expectedHeads: parents,
           revision: {
             ...op.revision,
+            parents,
             operationId,
             revisionId,
             payloadRef: revisionId,
@@ -3151,6 +3154,7 @@ it.effect(
           outcome: "accepted",
           hubSequence: n + 1,
         });
+        parents = [revisionId];
       }
       assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
         { count: 0 },
