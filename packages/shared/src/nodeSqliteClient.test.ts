@@ -1183,7 +1183,9 @@ const checkpointWorkerReply = (worker: NodeWorkerThreads.Worker) =>
       }),
   );
 
-it.effect("checkpoints the WAL on the worker instead of the writer", () =>
+// The real worker can race the writer with WAL recovery. Let the writer's
+// recovery retry advance on the live clock rather than an unadvanced TestClock.
+it.live("checkpoints the WAL on the worker instead of the writer", () =>
   withCheckpointClient((sql, filename) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
