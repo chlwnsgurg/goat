@@ -87,37 +87,39 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
       };
     }),
   ),
-  goat_environment_preferences_update: McpToolAccess.writesEnvironment((input, check) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
-      const update = Effect.gen(function* () {
-        // The turn may have ended, or the thread's modes changed, while this waited for the lock.
-        yield* check;
-        const { settings } = yield* access;
-        const { projectStandingInstructions, ...patch } = input;
-        const projectSettingsOverrides =
-          projectStandingInstructions === undefined
-            ? undefined
-            : projectStandingInstructionsPatch(
-                (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
-                  .projectSettingsOverrides,
-                projectStandingInstructions,
-              );
-        return preferences(
-          yield* settings
-            .updateSettings(
-              projectSettingsOverrides === undefined
-                ? patch
-                : { ...patch, projectSettingsOverrides },
-            )
-            .pipe(Effect.mapError(unavailable)),
-        );
-      });
-      // A thread caller serializes with its own turn; a client has no thread to lock.
-      return yield* scope.thread === undefined
-        ? update
-        : executor.withLock(scope.thread.threadId, update);
-    }),
+  goat_environment_preferences_update: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input, check) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+        const update = Effect.gen(function* () {
+          // The turn may have ended, or the thread's modes changed, while this waited for the lock.
+          yield* check;
+          const { settings } = yield* access;
+          const { projectStandingInstructions, ...patch } = input;
+          const projectSettingsOverrides =
+            projectStandingInstructions === undefined
+              ? undefined
+              : projectStandingInstructionsPatch(
+                  (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
+                    .projectSettingsOverrides,
+                  projectStandingInstructions,
+                );
+          return preferences(
+            yield* settings
+              .updateSettings(
+                projectSettingsOverrides === undefined
+                  ? patch
+                  : { ...patch, projectSettingsOverrides },
+              )
+              .pipe(Effect.mapError(unavailable)),
+          );
+        });
+        // A thread caller serializes with its own turn; a client has no thread to lock.
+        return yield* scope.thread === undefined
+          ? update
+          : executor.withLock(scope.thread.threadId, update);
+      }),
+    ),
   ),
 });

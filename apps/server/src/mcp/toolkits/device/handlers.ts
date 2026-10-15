@@ -238,18 +238,20 @@ const handlers = {
       };
     }).pipe(Effect.mapError(toolError)),
   ),
-  device_close: McpToolAccess.actsAsCaller((input) =>
-    Effect.gen(function* () {
-      const scope = yield* requireDeviceAccess;
-      const devices = yield* DeviceService.DeviceService;
-      yield* devices.close({
-        threadId: scope.thread.threadId,
-        ...(input.hostId === undefined ? {} : { hostId: input.hostId }),
-        ...(input.deviceId === undefined ? {} : { deviceId: input.deviceId }),
-        ...(input.shutdown === undefined ? {} : { shutdown: input.shutdown }),
-      });
-      return {};
-    }).pipe(Effect.mapError(toolError)),
+  device_close: McpToolAccess.destructive(
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const scope = yield* requireDeviceAccess;
+        const devices = yield* DeviceService.DeviceService;
+        yield* devices.close({
+          threadId: scope.thread.threadId,
+          ...(input.hostId === undefined ? {} : { hostId: input.hostId }),
+          ...(input.deviceId === undefined ? {} : { deviceId: input.deviceId }),
+          ...(input.shutdown === undefined ? {} : { shutdown: input.shutdown }),
+        });
+        return {};
+      }).pipe(Effect.mapError(toolError)),
+    ),
   ),
 } satisfies McpToolAccess.Handlers<typeof DeviceToolkit.tools>;
 

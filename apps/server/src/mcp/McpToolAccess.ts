@@ -4,10 +4,12 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@goat/contracts";
+import type { AgentSurfaceEffect } from "@goat/contracts/agentSurface";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Struct from "effect/Struct";
-import type * as Layer from "effect/Layer";
+import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
 import type { Tool, Toolkit } from "effect/ai";
 
@@ -44,6 +46,7 @@ const refuseOutsideConstruction = (token: symbol) => {
 
 /** Builds a declaration; only the declaration functions below call it. */
 let declare: <P, A, E, R>(
+  effect: AgentSurfaceEffect,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => Declaration<(params: P) => Effect.Effect<A, E, R>>;
 
@@ -58,7 +61,7 @@ let checkedHandler: CheckedHandler;
 
 /** Only `toLayer` below builds one. */
 let handlersLayer: <Tools extends Record<string, Tool.Any>, EX, RX>(
-  layer: Layer.Layer<Tool.HandlersFor<Tools>, EX, RX>,
+  layer: Layer.Layer<Tool.HandlersFor<Tools> | ToolEffects, EX, RX>,
 ) => HandlersLayer<Tools, EX, RX>;
 
 /**
@@ -87,15 +90,32 @@ export class Declaration<out Handler> {
   // in to module-scoped functions. Copying a declaration's fields onto
   // anything else fails to typecheck and, at runtime, to run.
   readonly #handle: Handler;
-  private constructor(token: typeof builtHere, handle: Handler) {
+  readonly effect: AgentSurfaceEffect;
+  private constructor(token: typeof builtHere, effect: AgentSurfaceEffect, handle: Handler) {
     refuseOutsideConstruction(token);
     this.#handle = handle;
+    this.effect = effect;
   }
   static {
-    declare = (handle) => new Declaration(builtHere, handle);
+    declare = (effect, handle) => new Declaration(builtHere, effect, handle);
     checkedHandler = Struct.lambda<CheckedHandler>((declaration) => declaration.#handle);
   }
 }
+
+/** Marks a potentially destructive write while preserving its existing caller checks. */
+export const destructive = <P, A, E, R>(
+  declaration: Declaration<(params: P) => Effect.Effect<A, E, R>>,
+) => {
+  if (declaration.effect === "read")
+    throw new TypeError("A read declaration cannot be destructive.");
+  return declare("destructive", checkedHandler(declaration));
+};
+
+/** Scoped to one registration so concurrently built toolkits cannot overwrite each other's effects. */
+export class ToolEffects extends Context.Service<
+  ToolEffects,
+  Readonly<Record<string, AgentSurfaceEffect>>
+>()("goat/mcp/McpToolAccess/ToolEffects") {}
 
 /** A client approved for read-only access changes nothing. */
 const refuseReadOnlyClient = McpInvocationContext.McpInvocationContext.pipe(
@@ -134,7 +154,7 @@ const requireThreadCaller = McpInvocationContext.McpInvocationContext.pipe(
 
 /** Changes nothing, so every caller may call it. */
 export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => handle(params));
+  declare("read", (params: P) => handle(params));
 
 /**
  * Changes nothing, but when `reachesHost` says the call goes to another
@@ -146,7 +166,7 @@ export const readsOrReachesHost = <P, A, E, R>(
   reachesHost: (params: P) => boolean,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) =>
-  declare((params: P) =>
+  declare("read", (params: P) =>
     reachesHost(params)
       ? orchestratingCaller.pipe(Effect.flatMap(() => handle(params)))
       : handle(params),
@@ -154,7 +174,7 @@ export const readsOrReachesHost = <P, A, E, R>(
 
 /** Reads what belongs to the calling T3 thread, such as its preview tabs or devices. */
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))));
+  declare("read", (params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))));
 
 /**
  * Acts as the calling T3 thread (its subagents, preview tabs, devices,
@@ -162,7 +182,7 @@ export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A
  * T3 thread has one.
  */
 export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) =>
+  declare("write", (params: P) =>
     requireThreadCaller.pipe(
       Effect.flatMap(() => writingCaller),
       Effect.flatMap(() => handle(params)),
@@ -171,7 +191,7 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
 
 /** Changes something that belongs to no thread, such as a pending upload or a scheduled task. */
 export const writes = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => orchestratingCaller.pipe(Effect.flatMap(() => handle(params))));
+  declare("write", (params: P) => orchestratingCaller.pipe(Effect.flatMap(() => handle(params))));
 
 /**
  * Changes something that belongs to no thread under a capability of the tool's own, such as
@@ -179,7 +199,7 @@ export const writes = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>
  * handler checks its capability, as the capability toolkits do.
  */
 export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => writingCaller.pipe(Effect.flatMap(() => handle(params))));
+  declare("write", (params: P) => writingCaller.pipe(Effect.flatMap(() => handle(params))));
 
 /**
  * Changes the threads `threads` names. An omitted id is the caller's own
@@ -192,7 +212,7 @@ export const writesThreads = <P, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
   options: { readonly refusalSuffix?: string } = {},
 ) =>
-  declare((params: P) =>
+  declare("write", (params: P) =>
     Effect.gen(function* () {
       const caller = yield* writingCaller;
       for (const threadId of threads(params)) {
@@ -254,7 +274,7 @@ export const startsThreads = <P, A, E, R>(
   },
   handle: (params: P, modes: StartedModes) => Effect.Effect<A, E, R>,
 ) =>
-  declare((params: P) =>
+  declare("write", (params: P) =>
     Effect.gen(function* () {
       const { limits } = yield* writingCaller;
       const requested = modes(params);
@@ -286,7 +306,7 @@ export const writesEnvironment = <P, A, E, R>(
   const check = orchestratingCaller.pipe(
     Effect.tap((caller) => assertFullAccess(caller, fullAccessRequired)),
   );
-  return declare((params: P) => check.pipe(Effect.flatMap(() => handle(params, check))));
+  return declare("write", (params: P) => check.pipe(Effect.flatMap(() => handle(params, check))));
 };
 
 /** What a declaration's own check needs. */
@@ -306,7 +326,7 @@ export const removesCheckouts = <P, A, E, R>(
   reachesHost: (params: P) => boolean,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) =>
-  declare((params: P) =>
+  declare("destructive", (params: P) =>
     removes(params)
       ? orchestratingCaller.pipe(
           Effect.tap((caller) => assertFullAccess(caller, removesCheckoutsRequired)),
@@ -339,10 +359,10 @@ export type Handlers<Tools extends Record<string, Tool.Any>> = Declarations<
  * registers. Like a declaration it is nominal, so nothing else passes for one.
  */
 export class HandlersLayer<Tools extends Record<string, Tool.Any>, EX = never, RX = never> {
-  readonly #layer: Layer.Layer<Tool.HandlersFor<Tools>, EX, RX>;
+  readonly #layer: Layer.Layer<Tool.HandlersFor<Tools> | ToolEffects, EX, RX>;
   private constructor(
     token: typeof builtHere,
-    layer: Layer.Layer<Tool.HandlersFor<Tools>, EX, RX>,
+    layer: Layer.Layer<Tool.HandlersFor<Tools> | ToolEffects, EX, RX>,
   ) {
     refuseOutsideConstruction(token);
     this.#layer = layer;
@@ -365,11 +385,25 @@ const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handle
 export const toLayer = <Tools extends Record<string, Tool.Any>, EX = never, RX = never>(
   toolkit: Toolkit.Toolkit<Tools>,
   build: Handlers<Tools> | Effect.Effect<Handlers<Tools>, EX, RX>,
-): HandlersLayer<Tools, EX, Exclude<RX, Scope.Scope>> =>
-  handlersLayer(
-    toolkit.toLayer(
-      Effect.isEffect(build)
-        ? Effect.map(build, checkedHandlers<Toolkit.HandlersFrom<Tools>>)
-        : checkedHandlers(build),
+): HandlersLayer<Tools, EX, Exclude<RX, Scope.Scope>> => {
+  const checked = (declarations: Handlers<Tools>) => ({
+    handlers: checkedHandlers<Toolkit.HandlersFrom<Tools>>(declarations),
+    effects: Object.fromEntries(
+      Object.entries<Declaration<unknown>>(declarations).map(([name, declaration]) => [
+        name,
+        declaration.effect,
+      ]),
+    ),
+  });
+  const prepared = Effect.isEffect(build)
+    ? Effect.map(build, checked)
+    : Effect.succeed(checked(build));
+  return handlersLayer(
+    Layer.effectContext(
+      Effect.gen(function* () {
+        const { handlers, effects } = yield* prepared;
+        return Context.add(yield* toolkit.toHandlers(handlers), ToolEffects, effects);
+      }),
     ),
   );
+};

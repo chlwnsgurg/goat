@@ -70,26 +70,28 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         );
     }),
   ),
-  run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const scheduler = yield* ScheduledTasks.ScheduledTaskService;
-      const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
-      if (!tasks.some((task) => task.id === input.taskId))
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message: "The scheduled task was not found.",
-        });
-      const { task } = yield* scheduler
-        .runNow({ id: input.taskId })
-        .pipe(Effect.mapError(unavailable));
-      return {
-        taskId: task.id,
-        threadId: task.threadId,
-        lastRunStatus: task.lastRunStatus,
-        runCount: task.runCount,
-        nextRunAt: task.nextRunAt,
-      };
-    }),
+  run_scheduled_task_now: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) =>
+      Effect.gen(function* () {
+        const scheduler = yield* ScheduledTasks.ScheduledTaskService;
+        const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
+        if (!tasks.some((task) => task.id === input.taskId))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The scheduled task was not found.",
+          });
+        const { task } = yield* scheduler
+          .runNow({ id: input.taskId })
+          .pipe(Effect.mapError(unavailable));
+        return {
+          taskId: task.id,
+          threadId: task.threadId,
+          lastRunStatus: task.lastRunStatus,
+          runCount: task.runCount,
+          nextRunAt: task.nextRunAt,
+        };
+      }),
+    ),
   ),
   // Reaching another machine uses this machine's SSH keys, as goat_thread_list does.
   goat_thread_search: McpToolAccess.readsOrReachesHost(
@@ -101,45 +103,49 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return yield* search.search(scope, input);
       }),
   ),
-  goat_thread_fork: writesThread((input) =>
-    Effect.gen(function* () {
-      const { threads, projection } = yield* readThread(input.threadId);
-      const commandId = yield* newCommandId();
-      const targetThreadId = ThreadId.make(`${commandId}:fork`);
-      const result = yield* threads
-        .dispatch({
-          type: "thread.fork",
-          commandId,
-          sourceThreadId: projection.thread.id,
-          targetThreadId,
-          sourcePoint: input.sourcePoint,
-          ...(input.title === undefined ? {} : { title: input.title }),
-          createdBy: "agent",
-          creationSource: "mcp",
-        })
-        .pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence, targetThreadId };
-    }),
-  ),
-  goat_thread_merge_back: McpToolAccess.writesThreads(
-    (input) => [input.targetThreadId, input.sourceThreadId],
-    (input) =>
+  goat_thread_fork: McpToolAccess.destructive(
+    writesThread((input) =>
       Effect.gen(function* () {
-        const context = yield* readThread(input.targetThreadId);
-        const source = yield* readThread(input.sourceThreadId);
-        const result = yield* context.threads
+        const { threads, projection } = yield* readThread(input.threadId);
+        const commandId = yield* newCommandId();
+        const targetThreadId = ThreadId.make(`${commandId}:fork`);
+        const result = yield* threads
           .dispatch({
-            type: "thread.merge_back",
-            commandId: yield* newCommandId(),
-            sourceThreadId: source.projection.thread.id,
-            targetThreadId: input.targetThreadId,
+            type: "thread.fork",
+            commandId,
+            sourceThreadId: projection.thread.id,
+            targetThreadId,
             sourcePoint: input.sourcePoint,
+            ...(input.title === undefined ? {} : { title: input.title }),
             createdBy: "agent",
             creationSource: "mcp",
           })
           .pipe(Effect.mapError(dispatchFailure));
-        return { sequence: result.sequence, targetThreadId: input.targetThreadId };
+        return { sequence: result.sequence, targetThreadId };
       }),
+    ),
+  ),
+  goat_thread_merge_back: McpToolAccess.destructive(
+    McpToolAccess.writesThreads(
+      (input) => [input.targetThreadId, input.sourceThreadId],
+      (input) =>
+        Effect.gen(function* () {
+          const context = yield* readThread(input.targetThreadId);
+          const source = yield* readThread(input.sourceThreadId);
+          const result = yield* context.threads
+            .dispatch({
+              type: "thread.merge_back",
+              commandId: yield* newCommandId(),
+              sourceThreadId: source.projection.thread.id,
+              targetThreadId: input.targetThreadId,
+              sourcePoint: input.sourcePoint,
+              createdBy: "agent",
+              creationSource: "mcp",
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+          return { sequence: result.sequence, targetThreadId: input.targetThreadId };
+        }),
+    ),
   ),
   goat_thread_transfers: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
@@ -169,23 +175,25 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  goat_thread_configure: writesThread((input) =>
-    Effect.gen(function* () {
-      const {
-        threads,
-        projection: { thread },
-      } = yield* readThread(input.threadId);
-      const type = modelSelectionCommandType(thread.providerInstanceId, input.modelSelection);
-      const result = yield* threads
-        .dispatch({
-          type,
-          threadId: thread.id,
-          commandId: yield* newCommandId(),
-          modelSelection: input.modelSelection,
-        })
-        .pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
-    }),
+  goat_thread_configure: McpToolAccess.destructive(
+    writesThread((input) =>
+      Effect.gen(function* () {
+        const {
+          threads,
+          projection: { thread },
+        } = yield* readThread(input.threadId);
+        const type = modelSelectionCommandType(thread.providerInstanceId, input.modelSelection);
+        const result = yield* threads
+          .dispatch({
+            type,
+            threadId: thread.id,
+            commandId: yield* newCommandId(),
+            modelSelection: input.modelSelection,
+          })
+          .pipe(Effect.mapError(dispatchFailure));
+        return { sequence: result.sequence };
+      }),
+    ),
   ),
   goat_pending_request_list: McpToolAccess.readsOrReachesHost(
     (input) =>
@@ -209,18 +217,20 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return yield* service.read(scope, input);
       }),
   ),
-  goat_pending_request_respond: McpToolAccess.writesThreads(
-    (input) => (input.host === undefined ? [input.threadId] : []),
-    (input) =>
-      Effect.gen(function* () {
-        const service = yield* PendingQuestionsMcpService.PendingQuestionsMcpService;
-        const scope = yield* McpInvocationContext.McpInvocationContext;
-        return yield* service.respond(scope, input);
-      }),
-    {
-      refusalSuffix:
-        " This question needs a person: forward it to the user in your own thread, or let them answer it in the asking thread.",
-    },
+  goat_pending_request_respond: McpToolAccess.destructive(
+    McpToolAccess.writesThreads(
+      (input) => (input.host === undefined ? [input.threadId] : []),
+      (input) =>
+        Effect.gen(function* () {
+          const service = yield* PendingQuestionsMcpService.PendingQuestionsMcpService;
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          return yield* service.respond(scope, input);
+        }),
+      {
+        refusalSuffix:
+          " This question needs a person: forward it to the user in your own thread, or let them answer it in the asking thread.",
+      },
+    ),
   ),
   goat_queue_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
@@ -250,69 +260,79 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       );
     }),
   ),
-  goat_queue_edit: writesThread((input) =>
-    dispatch(input.threadId, (common) => ({
-      ...common,
-      type: "queued-run.edit",
-      runId: input.queuedRunId,
-      text: input.text,
-    })),
+  goat_queue_edit: McpToolAccess.destructive(
+    writesThread((input) =>
+      dispatch(input.threadId, (common) => ({
+        ...common,
+        type: "queued-run.edit",
+        runId: input.queuedRunId,
+        text: input.text,
+      })),
+    ),
   ),
-  goat_queue_cancel: writesThread((input) =>
-    dispatch(input.threadId, (common) => ({
-      ...common,
-      type: "queued-run.cancel",
-      runId: input.queuedRunId,
-    })),
+  goat_queue_cancel: McpToolAccess.destructive(
+    writesThread((input) =>
+      dispatch(input.threadId, (common) => ({
+        ...common,
+        type: "queued-run.cancel",
+        runId: input.queuedRunId,
+      })),
+    ),
   ),
-  goat_queue_reorder: writesThread((input) =>
-    dispatch(input.threadId, (common) => ({
-      ...common,
-      type: "queued-run.reorder",
-      runId: input.queuedRunId,
-      beforeRunId: input.beforeRunId,
-    })),
+  goat_queue_reorder: McpToolAccess.destructive(
+    writesThread((input) =>
+      dispatch(input.threadId, (common) => ({
+        ...common,
+        type: "queued-run.reorder",
+        runId: input.queuedRunId,
+        beforeRunId: input.beforeRunId,
+      })),
+    ),
   ),
-  goat_queue_promote_to_steer: writesThread((input) =>
-    dispatch(input.threadId, (common) => ({
-      ...common,
-      type: "queued-message.promote-to-steer",
-      queuedRunId: input.queuedRunId,
-      targetRunId: input.targetRunId,
-    })),
+  goat_queue_promote_to_steer: McpToolAccess.destructive(
+    writesThread((input) =>
+      dispatch(input.threadId, (common) => ({
+        ...common,
+        type: "queued-message.promote-to-steer",
+        queuedRunId: input.queuedRunId,
+        targetRunId: input.targetRunId,
+      })),
+    ),
   ),
-  goat_thread_organize: writesThread((input) =>
-    Effect.gen(function* () {
-      const { threads, projection, caller } = yield* readThread(input.threadId);
-      const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
-      if (input.action === "settle") {
-        return yield* threads
-          .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
-          .pipe(Effect.mapError(dispatchFailure));
-      }
-      let command: OrchestrationV2Command;
-      switch (input.action) {
-        case "snooze":
-          if (input.snoozedUntil === undefined) {
-            return yield* new OrchestratorMcpFailure({
-              code: "invalid_request",
-              message: "snooze requires snoozedUntil.",
-            });
-          }
-          command = { ...common, type: "thread.snooze", snoozedUntil: input.snoozedUntil };
-          break;
-        case "unsnooze":
-        case "unsettle":
-          command = { ...common, type: `thread.${input.action}`, reason: "user" };
-          break;
-        case "mark_unread":
-          command = { ...common, type: "thread.mark-unread" };
-          break;
-        default:
-          command = { ...common, type: `thread.${input.action}` };
-      }
-      const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
-    }),
+  goat_thread_organize: McpToolAccess.destructive(
+    writesThread((input) =>
+      Effect.gen(function* () {
+        const { threads, projection, caller } = yield* readThread(input.threadId);
+        const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
+        if (input.action === "settle") {
+          return yield* threads
+            .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
+            .pipe(Effect.mapError(dispatchFailure));
+        }
+        let command: OrchestrationV2Command;
+        switch (input.action) {
+          case "snooze":
+            if (input.snoozedUntil === undefined) {
+              return yield* new OrchestratorMcpFailure({
+                code: "invalid_request",
+                message: "snooze requires snoozedUntil.",
+              });
+            }
+            command = { ...common, type: "thread.snooze", snoozedUntil: input.snoozedUntil };
+            break;
+          case "unsnooze":
+          case "unsettle":
+            command = { ...common, type: `thread.${input.action}`, reason: "user" };
+            break;
+          case "mark_unread":
+            command = { ...common, type: "thread.mark-unread" };
+            break;
+          default:
+            command = { ...common, type: `thread.${input.action}` };
+        }
+        const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
+        return { sequence: result.sequence };
+      }),
+    ),
   ),
 });

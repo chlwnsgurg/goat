@@ -1,4 +1,5 @@
-import { GOAT_THREAD_LINK_PROTOCOL } from "@goat/contracts/legacyT3Names";
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import { McpAttachmentInput } from "../attachment/input.ts";
 import { NotifyTargetInput } from "../../completionWebhook.ts";
 import {
@@ -50,16 +51,13 @@ const hostProjectDependencies = [
   ...shared.dependencies,
   HostThreadsMcpService.HostThreadsMcpService,
 ];
-const ON_ANOTHER_MACHINE =
-  " Pass host (an SSH alias from goat_ssh_host_list) for another machine's GOAT environment; its project ids belong to that machine, so pass the same host wherever you use them, such as goat_thread_list. That needs a caller allowed to use this machine's SSH keys. host_unavailable means the machine, SSH, or its GOAT server could not be reached.";
+
 const resultHost = Schema.optional(Schema.String).annotate({
   description: "The SSH host this came from; absent for this environment.",
 });
-const ProjectListTool = Tool.make("goat_project_list", {
+const ProjectListTool = Tool.make(agentSurfaceRegistry["project.list"].name, {
   ...shared,
-  description:
-    "List registered projects in this environment. Pages use the current project snapshot and may shift between calls." +
-    ON_ANOTHER_MACHINE,
+  description: agentSurfaceRegistry["project.list"].description,
   parameters: Schema.Struct({
     host: Schema.optional(OrchestratorMcpHost),
     cursor: Schema.optional(NonNegativeInt),
@@ -71,56 +69,44 @@ const ProjectListTool = Tool.make("goat_project_list", {
     host: resultHost,
   }),
   dependencies: hostProjectDependencies,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const ProjectReadTool = Tool.make("goat_project_read", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["project.list"]));
+const ProjectReadTool = Tool.make(agentSurfaceRegistry["project.read"].name, {
   ...shared,
-  description:
-    "Read a registered project in this environment, including its workspace and saved scripts." +
-    ON_ANOTHER_MACHINE,
+  description: agentSurfaceRegistry["project.read"].description,
   parameters: Schema.Struct({ projectId: ProjectId, host: Schema.optional(OrchestratorMcpHost) }),
   success: Schema.Struct({ ...Project.fields, host: resultHost }),
   dependencies: hostProjectDependencies,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const ProjectCreateTool = Tool.make("goat_project_create", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["project.read"]));
+const ProjectCreateTool = Tool.make(agentSurfaceRegistry["project.create"].name, {
   ...shared,
-  description:
-    "Register a project directory through the existing project service. Set createWorkspaceRootIfMissing to create a directory. Omit workspaceRoot to start a new project from just its title: the app makes a Git repository for it in its own projects folder, with a README, an icon, and a first commit (commitError says why a commit failed; the project exists either way). Each call creates a new request; an existing registered workspace is rejected. Clone separately with goat_project_clone when needed.",
+  description: agentSurfaceRegistry["project.create"].description,
   parameters: Schema.Struct({
     ...ProjectCreatePayload.fields,
     workspaceRoot: Schema.optional(ProjectCreatePayload.fields.workspaceRoot),
   }),
   success: Schema.Struct({ ...Project.fields, commitError: Schema.optional(Schema.String) }),
   dependencies: [...shared.dependencies, ManagedProjectFolders.ManagedProjectFolders],
-}).annotate(Tool.Destructive, true);
-const ProjectUpdateTool = Tool.make("goat_project_update", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["project.create"]));
+const ProjectUpdateTool = Tool.make(agentSurfaceRegistry["project.update"].name, {
   ...shared,
-  description:
-    "Update a registered project's settings. Omitted fields are preserved. Uses the same project service as the app.",
+  description: agentSurfaceRegistry["project.update"].description,
   parameters: Schema.Struct({ projectId: ProjectId, ...ProjectUpdatePayload.fields }),
-}).annotate(Tool.Destructive, true);
-const ProjectDeleteTool = Tool.make("goat_project_delete", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["project.update"]));
+const ProjectDeleteTool = Tool.make(agentSurfaceRegistry["project.delete"].name, {
   ...shared,
-  description:
-    "Delete a project using the existing project deletion lifecycle. Nonempty projects require force=true. This does not delete the repository directory or promise a deleted-thread count.",
+  description: agentSurfaceRegistry["project.delete"].description,
   parameters: Schema.Struct({ projectId: ProjectId, force: Schema.optionalKey(Schema.Boolean) }),
-}).annotate(Tool.Destructive, true);
-const ProjectCloneTool = Tool.make("goat_project_clone", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["project.delete"]));
+const ProjectCloneTool = Tool.make(agentSurfaceRegistry["project.clone"].name, {
   ...shared,
-  description:
-    "Clone a repository using the app's source-control service. This only clones; register the returned cwd with goat_project_create. An existing destination is not adopted or removed on failure.",
+  description: agentSurfaceRegistry["project.clone"].description,
   parameters: SourceControlCloneRepositoryInput,
   success: SourceControlCloneRepositoryResult,
   dependencies: [
     ...shared.dependencies,
     SourceControlRepositoryService.SourceControlRepositoryService,
   ],
-})
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["project.clone"]));
 export const ThreadLaunchParameters = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   scratch: Schema.optional(
@@ -200,12 +186,9 @@ export const ThreadLaunchSuccess = Schema.Struct({
   ),
 });
 
-const ThreadLaunchTool = Tool.make("goat_thread_launch", {
+const ThreadLaunchTool = Tool.make(agentSurfaceRegistry["thread.launch"].name, {
   ...shared,
-  description:
-    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree, and for work that owns a goal, runs a loop (HOTL, cxc-loop, repeated PABCD), or spans several cycles, even when the user calls it a subagent: top-level threads appear in the sidebar, where the user can open, steer, and resume them. Use delegate_task for bounded child subagents that report back and end. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings from the calling thread; a caller outside a GOAT thread must pass projectId and gets the project\'s default model. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId. A calling GOAT thread is woken with a message when the run of the new thread ends or waits on a question, so do not poll it with goat_thread_wait; notifyOnCompletion:false or goat_thread_unwatch stops run-end and host-outage reports. Only local user-input questions still arrive. SSH-host questions then need goat_thread_wait({host}) or goat_pending_request_list({scope:"launched", hosts}). Approvals are no longer reported; check goat_thread_read or tell the user the thread may be waiting. To link a thread for the user, write `[title](' +
-    GOAT_THREAD_LINK_PROTOCOL +
-    "://v1/<threadId>)` with the threadId exactly as returned, not URL-encoded; GOAT shows the thread's current title. After errors or lost responses, inspect goat_thread_list before retrying. Attachments must be pending uploads. The new thread may not run with broader runtime or interaction modes than the caller: the calling GOAT thread's own modes, or the permission mode an outside agent was approved with. A cloud provider runs without creating a local worktree or running setup. Most cloud providers start from the published source branch and refuse an unavailable or unpublished source with a reason; providers that upload the project folder (such as Claude Cloud) start from its current branch, and local changes may be included. Choose a project repository; scratch is unavailable for cloud tasks. Follow-ups target the same cloud session when its capabilities permit them.",
+  description: agentSurfaceRegistry["thread.launch"].description,
   parameters: ThreadLaunchParameters,
   success: ThreadLaunchSuccess,
   dependencies: [
@@ -213,9 +196,7 @@ const ThreadLaunchTool = Tool.make("goat_thread_launch", {
     ThreadLaunchMcpService.ThreadLaunchMcpService,
     ThreadManagementService.ThreadManagementService,
   ],
-})
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.launch"]));
 
 export const ProjectToolkit = Toolkit.make(
   ThreadLaunchTool,

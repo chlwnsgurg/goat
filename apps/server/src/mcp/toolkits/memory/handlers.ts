@@ -182,23 +182,27 @@ const handlers = {
         .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
     }).pipe(Effect.mapError(memoryError)),
   ),
-  memory_forget: McpToolAccess.writesWithCapability((input) =>
-    Effect.gen(function* () {
-      const service = yield* MemoryService.MemoryService;
-      return yield* service
-        .forget(yield* decodeForget(input), yield* invocationPermit("write"))
-        .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
-    }).pipe(Effect.mapError(memoryError)),
+  memory_forget: McpToolAccess.destructive(
+    McpToolAccess.writesWithCapability((input) =>
+      Effect.gen(function* () {
+        const service = yield* MemoryService.MemoryService;
+        return yield* service
+          .forget(yield* decodeForget(input), yield* invocationPermit("write"))
+          .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
+      }).pipe(Effect.mapError(memoryError)),
+    ),
   ),
-  memory_revert_resolution: McpToolAccess.writesWithCapability((input) =>
-    Effect.gen(function* () {
-      const service = yield* MemoryService.MemoryService;
-      return yield* service.revertResolution(
-        yield* decodeRevertResolution(input),
-        yield* invocationPermit("write"),
-        yield* callerThread,
-      );
-    }).pipe(Effect.mapError(memoryError)),
+  memory_revert_resolution: McpToolAccess.destructive(
+    McpToolAccess.writesWithCapability((input) =>
+      Effect.gen(function* () {
+        const service = yield* MemoryService.MemoryService;
+        return yield* service.revertResolution(
+          yield* decodeRevertResolution(input),
+          yield* invocationPermit("write"),
+          yield* callerThread,
+        );
+      }).pipe(Effect.mapError(memoryError)),
+    ),
   ),
 } satisfies McpToolAccess.Handlers<typeof MemoryToolkit.tools>;
 export const layer = McpToolAccess.toLayer(MemoryToolkit, handlers);

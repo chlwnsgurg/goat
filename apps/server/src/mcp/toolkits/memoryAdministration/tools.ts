@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import * as M from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
@@ -6,9 +8,8 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { memoryInputSchema } from "../memory/tools.ts";
 export const MemoryAdministrationToolkit = Toolkit.make(
-  Tool.dynamic("memory_hub_disable", {
-    description:
-      "Disable the memory hub using settings:write and a versioned compare-and-swap. Returns only the disabled settings view; no credential.",
+  Tool.dynamic(agentSurfaceRegistry["memory.hub_disable"].name, {
+    description: agentSurfaceRegistry["memory.hub_disable"].description,
     parameters: memoryInputSchema(M.MemoryHubDisableInput),
     success: M.MemoryHubDisableResult,
     failure: Schema.Union([M.MemoryRpcError, M.OrchestratorMcpFailure]),
@@ -17,7 +18,5 @@ export const MemoryAdministrationToolkit = Toolkit.make(
     .addDependency(McpInvocationContext.McpInvocationContext)
     .addDependency(MemorySyncService.MemorySyncService)
     .addDependency(ThreadManagementService.ThreadManagementService)
-    .annotate(Tool.Readonly, false)
-    .annotate(Tool.Destructive, true)
-    .annotate(Tool.OpenWorld, false),
+    .annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["memory.hub_disable"])),
 );

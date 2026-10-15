@@ -51,76 +51,82 @@ export const layer = McpToolAccess.toLayer(
     // Which caller prepared each pending upload, so only that caller can discard it.
     const uploadOwners = new Map<string, { readonly owner: string; readonly issuedAt: number }>();
     return {
-      goat_attachment_prepare_upload: McpToolAccess.writes((input) =>
-        Effect.gen(function* () {
-          const result = yield* Upload.issueAttachmentUploadUrl(input.upload).pipe(
-            Effect.mapError(unavailable),
-          );
-          const now = yield* Clock.currentTimeMillis;
-          for (const [id, entry] of uploadOwners) {
-            if (now - entry.issuedAt > UPLOAD_OWNER_TTL_MS) uploadOwners.delete(id);
-          }
-          uploadOwners.set(result.attachmentId, { owner: yield* uploadOwner, issuedAt: now });
-          return result;
-        }),
-      ),
-      goat_attachment_discard: McpToolAccess.writes((input) =>
-        Effect.gen(function* () {
-          if (uploadOwners.get(input.attachmentId)?.owner !== (yield* uploadOwner)) {
-            return yield* new OrchestratorMcpFailure({
-              code: "invalid_request",
-              message: "Only the caller that prepared a pending upload can discard it.",
-            });
-          }
-          yield* Upload.deletePendingAttachment(input.attachmentId);
-          uploadOwners.delete(input.attachmentId);
-          return {};
-        }),
-      ),
-      goat_thread_send_attachments: McpToolAccess.writesThreads(
-        (input) => [input.threadId],
-        (input) =>
+      goat_attachment_prepare_upload: McpToolAccess.destructive(
+        McpToolAccess.writes((input) =>
           Effect.gen(function* () {
-            const { caller, projection } = yield* readThread(input.threadId, ["messages"]);
-            if (projection.thread.archivedAt !== null)
+            const result = yield* Upload.issueAttachmentUploadUrl(input.upload).pipe(
+              Effect.mapError(unavailable),
+            );
+            const now = yield* Clock.currentTimeMillis;
+            for (const [id, entry] of uploadOwners) {
+              if (now - entry.issuedAt > UPLOAD_OWNER_TTL_MS) uploadOwners.delete(id);
+            }
+            uploadOwners.set(result.attachmentId, { owner: yield* uploadOwner, issuedAt: now });
+            return result;
+          }),
+        ),
+      ),
+      goat_attachment_discard: McpToolAccess.destructive(
+        McpToolAccess.writes((input) =>
+          Effect.gen(function* () {
+            if (uploadOwners.get(input.attachmentId)?.owner !== (yield* uploadOwner)) {
               return yield* new OrchestratorMcpFailure({
                 code: "invalid_request",
-                message: "Unarchive the target thread before sending attachments.",
+                message: "Only the caller that prepared a pending upload can discard it.",
               });
-            const attachments = yield* resolveAttachmentReferences(
-              input.attachments,
-              projection.messages.flatMap((message) => message.attachments),
-            );
-            const commandId = yield* newCommandId();
-            const messageId = MessageId.make(commandId);
-            const result = yield* ThreadMessageIntake.sendToThread({
-              projectId: projection.thread.projectId,
-              threadId: projection.thread.id,
-              commandId,
-              messageId,
-              ...(caller === undefined ? {} : { senderThreadId: caller.id }),
-              text: input.message ?? "",
-              attachments,
-              mode: "steer_when_ready",
-              createdBy: "agent",
-              creationSource: "mcp",
-            }).pipe(
-              Effect.mapError((error) =>
-                error._tag === "AttachmentClaimError"
-                  ? new OrchestratorMcpFailure({
-                      code: "orchestration_error",
-                      message: error.message,
-                    })
-                  : unavailable(),
-              ),
-            );
-            return {
-              threadId: projection.thread.id,
-              messageId,
-              runId: result.run.id,
-              status: result.run.status,
-            };
+            }
+            yield* Upload.deletePendingAttachment(input.attachmentId);
+            uploadOwners.delete(input.attachmentId);
+            return {};
           }),
+        ),
+      ),
+      goat_thread_send_attachments: McpToolAccess.destructive(
+        McpToolAccess.writesThreads(
+          (input) => [input.threadId],
+          (input) =>
+            Effect.gen(function* () {
+              const { caller, projection } = yield* readThread(input.threadId, ["messages"]);
+              if (projection.thread.archivedAt !== null)
+                return yield* new OrchestratorMcpFailure({
+                  code: "invalid_request",
+                  message: "Unarchive the target thread before sending attachments.",
+                });
+              const attachments = yield* resolveAttachmentReferences(
+                input.attachments,
+                projection.messages.flatMap((message) => message.attachments),
+              );
+              const commandId = yield* newCommandId();
+              const messageId = MessageId.make(commandId);
+              const result = yield* ThreadMessageIntake.sendToThread({
+                projectId: projection.thread.projectId,
+                threadId: projection.thread.id,
+                commandId,
+                messageId,
+                ...(caller === undefined ? {} : { senderThreadId: caller.id }),
+                text: input.message ?? "",
+                attachments,
+                mode: "steer_when_ready",
+                createdBy: "agent",
+                creationSource: "mcp",
+              }).pipe(
+                Effect.mapError((error) =>
+                  error._tag === "AttachmentClaimError"
+                    ? new OrchestratorMcpFailure({
+                        code: "orchestration_error",
+                        message: error.message,
+                      })
+                    : unavailable(),
+                ),
+              );
+              return {
+                threadId: projection.thread.id,
+                messageId,
+                runId: result.run.id,
+                status: result.run.status,
+              };
+            }),
+        ),
       ),
     };
   }),

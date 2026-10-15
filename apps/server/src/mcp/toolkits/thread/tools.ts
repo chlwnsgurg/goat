@@ -1,3 +1,5 @@
+import { agentSurfaceRegistry } from "@goat/contracts/agentSurface";
+import { agentSurfaceAnnotations } from "../../agentSurface.ts";
 import {
   ScheduledTaskId,
   ScheduledTask,
@@ -35,9 +37,8 @@ import * as PendingQuestionsMcpService from "../../PendingQuestionsMcpService.ts
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ThreadSearchMcpService from "../../ThreadSearchMcpService.ts";
 
-const ThreadOrganizeTool = Tool.make("goat_thread_organize", {
-  description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply. Settling this thread takes effect when your turn completes, returning settlesWhenTurnEnds=true; a turn that fails or is interrupted, or a queued message, leaves it active.",
+const ThreadOrganizeTool = Tool.make(agentSurfaceRegistry["thread.organize"].name, {
+  description: agentSurfaceRegistry["thread.organize"].description,
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -64,9 +65,7 @@ const ThreadOrganizeTool = Tool.make("goat_thread_organize", {
     ThreadManagementService.ThreadManagementService,
     Crypto.Crypto,
   ],
-})
-  .annotate(Tool.Title, "Organize a thread")
-  .annotate(Tool.Destructive, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.organize"]));
 
 const queueTarget = { threadId: Schema.optional(ThreadId), queuedRunId: RunId };
 const commandTool = {
@@ -84,10 +83,9 @@ const queueEntry = Schema.Struct({
   text: Schema.String,
   truncated: Schema.Boolean,
 });
-const QueueListTool = Tool.make("goat_queue_list", {
+const QueueListTool = Tool.make(agentSurfaceRegistry["queue.list"].name, {
   ...commandTool,
-  description:
-    "List queued messages in delivery order. Results are a live offset page; use goat_thread_read for full thread history.",
+  description: agentSurfaceRegistry["queue.list"].description,
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     cursor: Schema.optional(NonNegativeInt),
@@ -97,42 +95,36 @@ const QueueListTool = Tool.make("goat_queue_list", {
     items: Schema.Array(queueEntry),
     nextCursor: Schema.NullOr(NonNegativeInt),
   }),
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const QueueReadTool = Tool.make("goat_queue_read", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["queue.list"]));
+const QueueReadTool = Tool.make(agentSurfaceRegistry["queue.read"].name, {
   ...commandTool,
-  description: "Read up to 16,000 characters of a queued message. Omit threadId for this thread.",
+  description: agentSurfaceRegistry["queue.read"].description,
   parameters: Schema.Struct(queueTarget),
   success: queueEntry,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const QueueEditTool = Tool.make("goat_queue_edit", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["queue.read"]));
+const QueueEditTool = Tool.make(agentSurfaceRegistry["queue.edit"].name, {
   ...commandTool,
-  description:
-    "Replace a queued message's text, preserving its attachments. The service rejects runs that are no longer queued.",
+  description: agentSurfaceRegistry["queue.edit"].description,
   parameters: Schema.Struct({
     ...queueTarget,
     text: Schema.String.check(Schema.isMaxLength(100000)),
   }),
-}).annotate(Tool.Destructive, true);
-const QueueCancelTool = Tool.make("goat_queue_cancel", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["queue.edit"]));
+const QueueCancelTool = Tool.make(agentSurfaceRegistry["queue.cancel"].name, {
   ...commandTool,
-  description: "Cancel a queued run using the existing queue command.",
+  description: agentSurfaceRegistry["queue.cancel"].description,
   parameters: Schema.Struct(queueTarget),
-}).annotate(Tool.Destructive, true);
-const QueueReorderTool = Tool.make("goat_queue_reorder", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["queue.cancel"]));
+const QueueReorderTool = Tool.make(agentSurfaceRegistry["queue.reorder"].name, {
   ...commandTool,
-  description: "Move a queued run before another queued run, or to the end with beforeRunId=null.",
+  description: agentSurfaceRegistry["queue.reorder"].description,
   parameters: Schema.Struct({ ...queueTarget, beforeRunId: Schema.NullOr(RunId) }),
-}).annotate(Tool.Destructive, true);
-const QueuePromoteTool = Tool.make("goat_queue_promote_to_steer", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["queue.reorder"]));
+const QueuePromoteTool = Tool.make(agentSurfaceRegistry["queue.promote_to_steer"].name, {
   ...commandTool,
-  description:
-    "Deliver a queued message as steering to the specified active run. Existing provider and run-state rules apply.",
+  description: agentSurfaceRegistry["queue.promote_to_steer"].description,
   parameters: Schema.Struct({ ...queueTarget, targetRunId: RunId }),
-}).annotate(Tool.Destructive, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["queue.promote_to_steer"]));
 
 const pendingTool = {
   failure: OrchestratorMcpFailure,
@@ -144,38 +136,28 @@ const pendingTool = {
     Crypto.Crypto,
   ],
 };
-const PendingRequestListTool = Tool.make("goat_pending_request_list", {
+const PendingRequestListTool = Tool.make(agentSurfaceRegistry["pending_request.list"].name, {
   ...pendingTool,
-  description:
-    "List pending user-input questions. Approvals are human-only and excluded, except that an MCP client token with orchestration:approve also gets approvalRequestIds for one thread. Omit threadId for this thread, or pass host and threadId for another machine. scope='launched' shows your launched threads' questions locally and on connected hosts plus hosts[]. Host fan-out caps at 16; unavailableHosts reports skipped aliases and hosts that could not be queried. Results cap at 100; when truncated, answer questions or narrow with host and threadId. Launcher filters are reserved for outside host transport.",
+  description: agentSurfaceRegistry["pending_request.list"].description,
   parameters: OrchestratorMcpPendingRequestListInput,
   success: OrchestratorMcpPendingRequestListResult,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const PendingRequestReadTool = Tool.make("goat_pending_request_read", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pending_request.list"]));
+const PendingRequestReadTool = Tool.make(agentSurfaceRegistry["pending_request.read"].name, {
   ...pendingTool,
-  description:
-    "Read a pending or resolved user question, including status, responder and resolution time when available. A caller with orchestration:approve can also read an approval, returned with approval.kind and approval.prompt. Pass host and threadId for another machine. Answer with goat_pending_request_respond or forward to the user; old remotes may omit status and provenance.",
+  description: agentSurfaceRegistry["pending_request.read"].description,
   parameters: OrchestratorMcpPendingRequestReadInput,
   success: OrchestratorMcpPendingRequestReadResult,
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const PendingRequestRespondTool = Tool.make("goat_pending_request_respond", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pending_request.read"]));
+const PendingRequestRespondTool = Tool.make(agentSurfaceRegistry["pending_request.respond"].name, {
   ...pendingTool,
-  description:
-    "Answer a pending user-input question with answers and a required reason (1–2000 characters, including non-whitespace text). Pass host and threadId for another machine; remote writes need default interaction mode. Approvals are human-only, except for an MCP client token with orchestration:approve, which answers one with decision ('accept' or 'decline') instead of answers. Forward humanRequired questions to the user. respondedBy is reserved for outside host transport; thread callers must omit it.",
+  description: agentSurfaceRegistry["pending_request.respond"].description,
   parameters: OrchestratorMcpPendingRequestRespondInput,
   success: OrchestratorMcpPendingRequestRespondResult,
-})
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["pending_request.respond"]));
 
-const ThreadConfigurationTool = Tool.make("goat_thread_configuration", {
+const ThreadConfigurationTool = Tool.make(agentSurfaceRegistry["thread.configuration"].name, {
   ...commandTool,
-  description:
-    "Read a thread's provider/model selection and modes. Omit threadId for this thread. orchestrator_capabilities lists available providers and models.",
+  description: agentSurfaceRegistry["thread.configuration"].description,
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   success: Schema.Struct({
     threadId: ThreadId,
@@ -183,45 +165,40 @@ const ThreadConfigurationTool = Tool.make("goat_thread_configuration", {
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
   }),
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
-const ThreadConfigureTool = Tool.make("goat_thread_configure", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.configuration"]));
+const ThreadConfigureTool = Tool.make(agentSurfaceRegistry["thread.configure"].name, {
   ...commandTool,
-  description:
-    "Set a thread's provider, model and options with the existing selection command. Omit threadId for this thread. This does not change permission modes. Use orchestrator_capabilities to choose a selection.",
+  description: agentSurfaceRegistry["thread.configure"].description,
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     modelSelection: ModelSelection,
   }),
-}).annotate(Tool.Destructive, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.configure"]));
 
 const transferResult = Schema.Struct({ sequence: NonNegativeInt, targetThreadId: ThreadId });
-const ThreadForkTool = Tool.make("goat_thread_fork", {
+const ThreadForkTool = Tool.make(agentSurfaceRegistry["thread.fork"].name, {
   ...commandTool,
-  description:
-    "Fork a thread from a stable run or checkpoint using the existing fork command. Omit threadId to fork this thread. The fork inherits the source configuration. Acceptance does not mean a provider turn has completed.",
+  description: agentSurfaceRegistry["thread.fork"].description,
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     sourcePoint: OrchestrationV2ThreadForkSourcePoint,
     title: Schema.optional(TrimmedNonEmptyString),
   }),
   success: transferResult,
-}).annotate(Tool.Destructive, true);
-const ThreadMergeBackTool = Tool.make("goat_thread_merge_back", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.fork"]));
+const ThreadMergeBackTool = Tool.make(agentSurfaceRegistry["thread.merge_back"].name, {
   ...commandTool,
-  description:
-    "Merge context from a thread back to a related thread in the same project. Omit sourceThreadId to merge from this thread. Existing lineage and transfer rules apply.",
+  description: agentSurfaceRegistry["thread.merge_back"].description,
   parameters: Schema.Struct({
     sourceThreadId: Schema.optional(ThreadId),
     targetThreadId: ThreadId,
     sourcePoint: OrchestrationV2ThreadForkSourcePoint,
   }),
   success: transferResult,
-}).annotate(Tool.Destructive, true);
-const ThreadTransfersTool = Tool.make("goat_thread_transfers", {
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.merge_back"]));
+const ThreadTransfersTool = Tool.make(agentSurfaceRegistry["thread.transfers"].name, {
   ...commandTool,
-  description: "Read context transfer status for a thread. Omit threadId for this thread.",
+  description: agentSurfaceRegistry["thread.transfers"].description,
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   success: Schema.Struct({
     transfers: Schema.Array(
@@ -233,25 +210,19 @@ const ThreadTransfersTool = Tool.make("goat_thread_transfers", {
       }),
     ),
   }),
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.transfers"]));
 
-const ThreadSearchTool = Tool.make("goat_thread_search", {
+const ThreadSearchTool = Tool.make(agentSurfaceRegistry["thread.search"].name, {
   ...commandTool,
-  description:
-    "Find threads whose title or finished user/assistant messages contain query (case-insensitive substring). Each match is one thread, newest first, with host, title, project, status, updatedAt and a snippet; source says whether a user message, assistant message, or only the title matched. Searches one project (projectId, else the calling thread's project) unless allProjects; a caller outside a GOAT thread searches every project. Filter by statuses, updatedAfter/updatedBefore, and includeArchived. With host, searches that machine (every project there unless projectId names one of its projects). hosts searches those SSH hosts, and allHosts this environment plus every SSH host it is connected to; matches are merged newest first, and hosts that cannot be searched are listed in unavailableHosts without failing the call and left out of later pages. Page with nextCursor, passing the same arguments. Each environment considers its newest 1000 matching threads; truncated says one had more, so narrow the filters. Read a match with goat_thread_read, passing its host and threadId.",
+  description: agentSurfaceRegistry["thread.search"].description,
   parameters: OrchestratorMcpThreadSearchInput,
   success: OrchestratorMcpThreadSearchResult,
   dependencies: [...commandTool.dependencies, ThreadSearchMcpService.ThreadSearchMcpService],
-})
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.search"]));
 
-const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
+const ScheduledTaskRunTool = Tool.make(agentSurfaceRegistry["schedule.run"].name, {
   ...commandTool,
-  description:
-    "Run a scheduled task now through the existing scheduler. Requires a full-access/default caller. Each call is a new manual run; completion means dispatch/bookkeeping completed, not that the provider turn finished.",
+  description: agentSurfaceRegistry["schedule.run"].description,
   parameters: Schema.Struct({ taskId: ScheduledTaskId }),
   success: Schema.Struct({
     taskId: ScheduledTaskId,
@@ -261,13 +232,10 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
     nextRunAt: ScheduledTask.fields.nextRunAt,
   }),
   dependencies: [...commandTool.dependencies, ScheduledTaskService.ScheduledTaskService],
-})
-  .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["schedule.run"]));
 
-const ThreadReportResultTool = Tool.make("goat_thread_report_result", {
-  description:
-    "Record the structured result of this thread's current run, so whoever dispatched it can read the outcome from goat_thread_read or goat_thread_wait instead of parsing your messages. Call it once you finish a dispatched task, and again to replace it if the result changes. outcome is succeeded, failed, blocked (you need something you cannot get), or cancelled. Report only facts you checked: pull request URLs you opened or updated, the test command you ran with its counts, and commit SHAs you pushed. Pull requests linked to this thread and its branch are added automatically. Recording a result does not end the run.",
+const ThreadReportResultTool = Tool.make(agentSurfaceRegistry["thread.report_result"].name, {
+  description: agentSurfaceRegistry["thread.report_result"].description,
   parameters: ThreadResultReport,
   success: ThreadResult,
   failure: OrchestratorMcpFailure,
@@ -277,10 +245,7 @@ const ThreadReportResultTool = Tool.make("goat_thread_report_result", {
     ThreadManagementService.ThreadManagementService,
     ThreadResultService.ThreadResultService,
   ],
-})
-  .annotate(Tool.Title, "Report this thread's result")
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+}).annotateMerge(agentSurfaceAnnotations(agentSurfaceRegistry["thread.report_result"]));
 
 export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,

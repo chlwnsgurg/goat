@@ -53,14 +53,16 @@ const readOnHost = <A extends object, E>(
   });
 
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
-  goat_thread_launch: McpToolAccess.startsThreads(
-    (input) => input,
-    (input, modes) =>
-      Effect.gen(function* () {
-        const scope = yield* McpInvocationContext.McpInvocationContext;
-        const launches = yield* ThreadLaunchMcpService.ThreadLaunchMcpService;
-        return yield* launches.launch(scope, input, modes);
-      }),
+  goat_thread_launch: McpToolAccess.destructive(
+    McpToolAccess.startsThreads(
+      (input) => input,
+      (input, modes) =>
+        Effect.gen(function* () {
+          const scope = yield* McpInvocationContext.McpInvocationContext;
+          const launches = yield* ThreadLaunchMcpService.ThreadLaunchMcpService;
+          return yield* launches.launch(scope, input, modes);
+        }),
+    ),
   ),
   goat_project_list: McpToolAccess.readsOrReachesHost(reachesHost, ({ host, ...input }) =>
     Effect.gen(function* () {
@@ -88,78 +90,87 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       return result.value;
     }),
   ),
-  goat_project_create: McpToolAccess.writesEnvironment(({ workspaceRoot, ...input }) =>
-    Effect.gen(function* () {
-      const projects = yield* Project.ProjectService;
-      if (workspaceRoot === undefined) {
-        // Project creation records no model default (only an update does), so
-        // reject what this mode would otherwise drop silently.
-        if (
-          input.scripts !== undefined ||
-          input.createWorkspaceRootIfMissing !== undefined ||
-          input.defaultModelSelection !== undefined
-        )
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message:
-              "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with goat_project_update.",
-          });
-        const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
-        const created = yield* folders
-          .createNamedProject({ name: input.title })
-          .pipe(
+  goat_project_create: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment(({ workspaceRoot, ...input }) =>
+      Effect.gen(function* () {
+        const projects = yield* Project.ProjectService;
+        if (workspaceRoot === undefined) {
+          // Project creation records no model default (only an update does), so
+          // reject what this mode would otherwise drop silently.
+          if (
+            input.scripts !== undefined ||
+            input.createWorkspaceRootIfMissing !== undefined ||
+            input.defaultModelSelection !== undefined
+          )
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with goat_project_update.",
+            });
+          const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+          const created = yield* folders.createNamedProject({ name: input.title }).pipe(
             Effect.mapError(
               (error) =>
-                new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+                new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: error.message,
+                }),
             ),
           );
-        const project = yield* projects
-          .getById(created.projectId)
-          .pipe(
-            Effect.mapError(unavailable),
-            Effect.flatMap(
-              Option.match({ onNone: () => Effect.fail(unavailable()), onSome: Effect.succeed }),
-            ),
-          );
-        return {
-          ...project,
-          ...(created.commitError === undefined ? {} : { commitError: created.commitError }),
-        };
-      }
-      const commandId = yield* newCommandId();
-      return yield* projects
-        .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
-        .pipe(Effect.mapError(projectFailure));
-    }),
+          const project = yield* projects
+            .getById(created.projectId)
+            .pipe(
+              Effect.mapError(unavailable),
+              Effect.flatMap(
+                Option.match({ onNone: () => Effect.fail(unavailable()), onSome: Effect.succeed }),
+              ),
+            );
+          return {
+            ...project,
+            ...(created.commitError === undefined ? {} : { commitError: created.commitError }),
+          };
+        }
+        const commandId = yield* newCommandId();
+        return yield* projects
+          .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
+          .pipe(Effect.mapError(projectFailure));
+      }),
+    ),
   ),
-  goat_project_update: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const projects = yield* Project.ProjectService;
-      return yield* projects
-        .update({ ...input, commandId: yield* newCommandId() })
-        .pipe(Effect.mapError(projectFailure));
-    }),
+  goat_project_update: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) =>
+      Effect.gen(function* () {
+        const projects = yield* Project.ProjectService;
+        return yield* projects
+          .update({ ...input, commandId: yield* newCommandId() })
+          .pipe(Effect.mapError(projectFailure));
+      }),
+    ),
   ),
-  goat_project_delete: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const projects = yield* Project.ProjectService;
-      return yield* projects
-        .delete({ ...input, commandId: yield* newCommandId() })
-        .pipe(Effect.mapError(projectFailure));
-    }),
+  goat_project_delete: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) =>
+      Effect.gen(function* () {
+        const projects = yield* Project.ProjectService;
+        return yield* projects
+          .delete({ ...input, commandId: yield* newCommandId() })
+          .pipe(Effect.mapError(projectFailure));
+      }),
+    ),
   ),
-  goat_project_clone: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const repositories = yield* Repositories.SourceControlRepositoryService;
-      return yield* repositories.cloneRepository(input).pipe(
-        Effect.mapError(
-          (error) =>
-            new OrchestratorMcpFailure({
-              code: "orchestration_error",
-              message: error.detail,
-            }),
-        ),
-      );
-    }),
+  goat_project_clone: McpToolAccess.destructive(
+    McpToolAccess.writesEnvironment((input) =>
+      Effect.gen(function* () {
+        const repositories = yield* Repositories.SourceControlRepositoryService;
+        return yield* repositories.cloneRepository(input).pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: error.detail,
+              }),
+          ),
+        );
+      }),
+    ),
   ),
 });

@@ -1,3 +1,4 @@
+import { HTML_RENDER_COLUMN_WIDTH } from "@goat/contracts/agentSurface/html";
 import {
   GOAT_DARK_THEME_COLORS,
   GOAT_LIGHT_THEME_COLORS,
@@ -39,7 +40,7 @@ export const HTML_RENDER_MEASURE_WIDTHS = [320, 375, 430, 520, 640, 728, 860, 10
  * The reply column's frame width at the default chat width. Agents preview at
  * it, and it picks the measured height when a client cannot know its width.
  */
-export const HTML_RENDER_COLUMN_WIDTH = 728;
+export { HTML_RENDER_COLUMN_WIDTH };
 
 const MAX_MEASURED_HEIGHTS = 24;
 
@@ -246,28 +247,6 @@ export function htmlRenderTheme(
     },
   };
 }
-
-/** Agent-facing reference for the injected variables, used in tool descriptions. */
-export const HTML_RENDER_THEME_GUIDE = [
-  "GOAT injects its active theme as CSS custom properties on :root, and they follow the user's theme and light/dark mode live:",
-  "--background (page background, identical to the thread around the frame), --foreground, --muted, --muted-foreground,",
-  "--card, --card-foreground, --popover, --popover-foreground, --secondary, --secondary-foreground, --border, --input, --ring,",
-  "--primary, --primary-foreground (solid buttons), --accent, --accent-foreground (brand accent), --accent-surface, --accent-surface-foreground,",
-  "--destructive, --destructive-foreground, --destructive-surface, --warning, --warning-foreground, --warning-surface,",
-  "--success, --success-foreground, --info, --info-foreground, --code-background, --code-foreground,",
-  "--chart-1 … --chart-6 (categorical series for charts), --radius, --font-sans, --font-mono.",
-  "The base stylesheet sets html background/color/font from these, body margin to 0, and hides the page's scrollbar; your own CSS overrides it.",
-].join(" ");
-
-/** Agent-facing layout rules for a page that sits inside a reply. */
-export const HTML_RENDER_LAYOUT_GUIDE = [
-  `The frame is borderless on the thread's background, as wide as the reply column (${HTML_RENDER_COLUMN_WIDTH}px on desktop by default, wider if the reader widens chat, about 360px on phones), and its left edge lines up with your reply text.`,
-  "The page sits on the thread's own background, so by default leave html, body, and the outermost element with no background color. This overrides general style preferences such as a fixed black page background.",
-  "Use a fluid width with no horizontal padding on the outermost element, and no outer card, border, or banner title: the page is part of your reply.",
-  "If a box needs its own background (a mock of a specific screen, a panel that must stand apart), give it at least 16px of padding on every side and var(--radius) corners, so content never touches its edge.",
-  "Give charts fixed pixel heights rather than heights that scale with width.",
-  "Let content set the page's height. Avoid viewport-based heights such as 100vh or height:100% on html or body; the frame grows to fit the page, so they can make it grow again and again.",
-].join(" ");
 
 // The bridge between a render and its client speaks the MCP Apps protocol
 // (JSON-RPC over postMessage), so the same host code can later drive upstream

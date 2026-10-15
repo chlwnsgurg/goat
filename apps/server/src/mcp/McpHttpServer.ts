@@ -817,47 +817,68 @@ const argumentKeys = (payload: unknown) =>
  * another result, keep lenient decoding. The refusal is an ordinary
  * invalid_request result, which SshRemoteDispatch also reads back from a remote.
  */
-const refuseUndeclaredArguments = <A, E, R>(register: Effect.Effect<A, E, R>) =>
-  McpServer.McpServer.pipe(
-    Effect.flatMap((server) =>
-      register.pipe(
-        Effect.provideService(
-          McpServer.McpServer,
-          McpServer.McpServer.of({
-            ...server,
-            addTool: (registration) => {
-              const inputSchema = registration.tool.inputSchema;
-              // A parameter schema with an index signature declares its own extra keys.
-              if (typeof inputSchema.additionalProperties === "object")
-                return server.addTool(registration);
-              const properties = inputSchema.properties ?? {};
-              return server.addTool({
-                ...registration,
-                tool: new McpSchema.Tool({
-                  ...registration.tool,
-                  inputSchema: { ...inputSchema, additionalProperties: false },
-                }),
-                handle: (payload) => {
-                  const undeclared = argumentKeys(payload).filter(
-                    (key) => !Object.hasOwn(properties, key),
-                  );
-                  return undeclared.length === 0
-                    ? registration.handle(payload)
-                    : Effect.succeed(
-                        undeclaredArgumentsResult(
-                          registration.tool.name,
-                          undeclared,
-                          Object.keys(properties),
-                        ),
-                      );
+const applyToolContracts = <A, E, R>(register: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const effects = yield* McpToolAccess.ToolEffects;
+    return yield* register.pipe(
+      Effect.provideService(
+        McpServer.McpServer,
+        McpServer.McpServer.of({
+          ...server,
+          addTool: (registration) => {
+            const effect = effects[registration.tool.name];
+            if (effect === undefined) {
+              return Effect.die(
+                new TypeError(`Missing access declaration for ${registration.tool.name}`),
+              );
+            }
+            registration = {
+              ...registration,
+              tool: new McpSchema.Tool({
+                ...registration.tool,
+                annotations: {
+                  ...registration.tool.annotations,
+                  readOnlyHint: effect === "read",
+                  destructiveHint: effect === "destructive",
                 },
-              });
-            },
-          }),
-        ),
+              }),
+              annotations: registration.annotations.pipe(
+                Context.add(Tool.Readonly, effect === "read"),
+                Context.add(Tool.Destructive, effect === "destructive"),
+              ),
+            };
+            const inputSchema = registration.tool.inputSchema;
+            // A parameter schema with an index signature declares its own extra keys.
+            if (typeof inputSchema.additionalProperties === "object")
+              return server.addTool(registration);
+            const properties = inputSchema.properties ?? {};
+            return server.addTool({
+              ...registration,
+              tool: new McpSchema.Tool({
+                ...registration.tool,
+                inputSchema: { ...inputSchema, additionalProperties: false },
+              }),
+              handle: (payload) => {
+                const undeclared = argumentKeys(payload).filter(
+                  (key) => !Object.hasOwn(properties, key),
+                );
+                return undeclared.length === 0
+                  ? registration.handle(payload)
+                  : Effect.succeed(
+                      undeclaredArgumentsResult(
+                        registration.tool.name,
+                        undeclared,
+                        Object.keys(properties),
+                      ),
+                    );
+              },
+            });
+          },
+        }),
       ),
-    ),
-  );
+    );
+  });
 
 /**
  * `McpServer.toolkit` for handlers that declared their access (see
@@ -874,7 +895,7 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
 ) => {
   const registration = Layer.effectDiscard(
-    refuseUndeclaredArguments(McpServer.registerToolkit(toolkit)),
+    applyToolContracts(McpServer.registerToolkit(toolkit)),
   ).pipe(Layer.provide(McpServer.McpServer.layer));
   // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off - the auth middleware provides it per request.
   const registered = registration as Layer.Layer<
@@ -890,65 +911,81 @@ const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, 
   register: Effect.Effect<A, E, R>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
 ) =>
-  Layer.effectDiscard(refuseUndeclaredArguments(register)).pipe(
+  Layer.effectDiscard(applyToolContracts(register)).pipe(
     Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)),
   );
 
+/** The registration layers mounted by /mcp, including image and memory tools.
+ * Kept separate from domain construction so catalog contracts can be checked without live state. */
+export const catalogRegistrations = {
+  htmlRender: toolkitRegistration(HtmlRenderToolkit, HtmlHandlers.layerRender),
+  htmlPreview: imageToolRegistration(registerHtmlPreview(), HtmlHandlers.layerPreview),
+  previewStandard: toolkitRegistration(PreviewStandardToolkit, PreviewHandlers.layerStandard),
+  previewSnapshot: imageToolRegistration(registerPreviewSnapshot(), PreviewHandlers.layerSnapshot),
+  orchestrator: toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer),
+  thread: toolkitRegistration(ThreadToolkit, ThreadHandlers.layer),
+  worktree: toolkitRegistration(WorktreeToolkit, WorktreeHandlers.layer),
+  previewControls: toolkitRegistration(PreviewControlsToolkit, PreviewControlsHandlers.layer),
+  environment: toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
+  hostStatus: toolkitRegistration(HostStatusToolkit, HostStatusHandlers.layer),
+  project: toolkitRegistration(ProjectToolkit, ProjectHandlers.layer),
+  connection: toolkitRegistration(ConnectionToolkit, ConnectionHandlers.layer),
+  remoteReport: toolkitRegistration(RemoteReportToolkit, RemoteReportHandlers.layer),
+  ssh: toolkitRegistration(SshToolkit, SshHandlers.layer),
+  attachment: toolkitRegistration(AttachmentToolkit, AttachmentHandlers.layer),
+  channel: toolkitRegistration(ChannelToolkit, ChannelHandlers.layer),
+  pullRequests: toolkitRegistration(PullRequestsToolkit, PullRequestsHandlers.layer),
+  deviceStandard: toolkitRegistration(DeviceStandardToolkit, DeviceHandlers.layerStandard),
+  deviceScreenshot: imageToolRegistration(
+    registerDeviceScreenshot(),
+    DeviceHandlers.layerScreenshot,
+  ),
+  memory: toolkitRegistration(MemoryToolkit, MemoryHandlers.layer),
+  memoryAdministration: toolkitRegistration(
+    MemoryAdministrationToolkit,
+    MemoryAdministrationHandlers.layer,
+  ),
+};
+
 export const layerHtmlToolkit = Layer.mergeAll(
-  toolkitRegistration(HtmlRenderToolkit, HtmlHandlers.layerRender),
-  imageToolRegistration(registerHtmlPreview(), HtmlHandlers.layerPreview),
+  catalogRegistrations.htmlRender,
+  catalogRegistrations.htmlPreview,
 ).pipe(Layer.provide(HtmlRender.layer));
 
-const layerPreviewStandardToolkitRegistration = toolkitRegistration(
-  PreviewStandardToolkit,
-  PreviewHandlers.layerStandard,
-);
+const layerPreviewStandardToolkitRegistration = catalogRegistrations.previewStandard;
 
-const layerPreviewSnapshotRegistration = imageToolRegistration(
-  registerPreviewSnapshot(),
-  PreviewHandlers.layerSnapshot,
-);
+const layerPreviewSnapshotRegistration = catalogRegistrations.previewSnapshot;
 
 export const layerPreviewToolkit = Layer.mergeAll(
   layerPreviewStandardToolkitRegistration,
   layerPreviewSnapshotRegistration,
 );
 
-export const layerOrchestratorToolkit = toolkitRegistration(
-  OrchestratorToolkit,
-  OrchestratorHandlers.layer,
-).pipe(
+export const layerOrchestratorToolkit = catalogRegistrations.orchestrator.pipe(
   Layer.provide(HostThreadsMcpService.layer),
   Layer.provide(OrchestratorMcpService.layer),
   Layer.provide(ThreadMetadataMcpService.layer),
 );
 
-export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer).pipe(
+export const layerThreadToolkit = catalogRegistrations.thread.pipe(
   Layer.provide(ThreadSearchMcpService.layer),
   Layer.provide(PendingQuestionsMcpService.layer),
   Layer.provide(HostThreadsMcpService.layer),
   Layer.provide(OrchestratorMcpService.layer),
 );
 
-const layerWorktreeToolkitRegistration = toolkitRegistration(
-  WorktreeToolkit,
-  WorktreeHandlers.layer,
-).pipe(
+const layerWorktreeToolkitRegistration = catalogRegistrations.worktree.pipe(
   Layer.provide(WorktreeMcpService.layer),
   Layer.provide(WorktreeInventoryService.layer),
   Layer.provide(HostThreadsMcpService.layer),
   Layer.provide(OrchestratorMcpService.layer),
 );
 
-const layerPreviewControlsRegistration = toolkitRegistration(
-  PreviewControlsToolkit,
-  PreviewControlsHandlers.layer,
-);
+const layerPreviewControlsRegistration = catalogRegistrations.previewControls;
 
-export const layerEnvironmentToolkit = toolkitRegistration(
-  EnvironmentToolkit,
-  EnvironmentHandlers.layer,
-).pipe(Layer.provide(ThreadCommandExecutor.layer));
+export const layerEnvironmentToolkit = catalogRegistrations.environment.pipe(
+  Layer.provide(ThreadCommandExecutor.layer),
+);
 
 /**
  * Host status for both the goat_host_status tool and the `server.getHostStatus`
@@ -964,50 +1001,29 @@ export const layerHostStatusService = HostStatusMcpService.layer.pipe(
 );
 
 /** Reads HostStatusMcpService from the server's context; see `layerHostStatusService`. */
-export const layerHostStatusToolkit = toolkitRegistration(
-  HostStatusToolkit,
-  HostStatusHandlers.layer,
-);
+export const layerHostStatusToolkit = catalogRegistrations.hostStatus;
 
-const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer).pipe(
+const layerProjectRegistration = catalogRegistrations.project.pipe(
   Layer.provide(ThreadLaunchMcpService.layer),
   Layer.provide(HostThreadsMcpService.layer),
   Layer.provide(OrchestratorMcpService.layer),
 );
 
-export const layerConnectionToolkit = toolkitRegistration(
-  ConnectionToolkit,
-  ConnectionHandlers.layer,
-);
+export const layerConnectionToolkit = catalogRegistrations.connection;
 
-const layerRemoteReportRegistration = toolkitRegistration(
-  RemoteReportToolkit,
-  RemoteReportHandlers.layer,
-);
+const layerRemoteReportRegistration = catalogRegistrations.remoteReport;
 
-const layerSshToolkitRegistration = toolkitRegistration(SshToolkit, SshHandlers.layer);
+const layerSshToolkitRegistration = catalogRegistrations.ssh;
 
-export const layerAttachmentToolkit = toolkitRegistration(
-  AttachmentToolkit,
-  AttachmentHandlers.layer,
-);
+export const layerAttachmentToolkit = catalogRegistrations.attachment;
 
-const layerChannelToolkit = toolkitRegistration(ChannelToolkit, ChannelHandlers.layer);
+const layerChannelToolkit = catalogRegistrations.channel;
 
-export const layerPullRequestsToolkit = toolkitRegistration(
-  PullRequestsToolkit,
-  PullRequestsHandlers.layer,
-);
+export const layerPullRequestsToolkit = catalogRegistrations.pullRequests;
 
-const layerDeviceStandardToolkitRegistration = toolkitRegistration(
-  DeviceStandardToolkit,
-  DeviceHandlers.layerStandard,
-);
+const layerDeviceStandardToolkitRegistration = catalogRegistrations.deviceStandard;
 
-const layerDeviceScreenshotRegistration = imageToolRegistration(
-  registerDeviceScreenshot(),
-  DeviceHandlers.layerScreenshot,
-);
+const layerDeviceScreenshotRegistration = catalogRegistrations.deviceScreenshot;
 
 export const layerDeviceToolkit = Layer.mergeAll(
   layerDeviceStandardToolkitRegistration,
@@ -1052,8 +1068,5 @@ export const layer = Layer.mergeAll(
 );
 
 // L5 composes these after the domain and committed policy producers are ready.
-export const layerMemoryToolkit = toolkitRegistration(MemoryToolkit, MemoryHandlers.layer);
-export const layerMemoryAdministrationToolkit = toolkitRegistration(
-  MemoryAdministrationToolkit,
-  MemoryAdministrationHandlers.layer,
-);
+export const layerMemoryToolkit = catalogRegistrations.memory;
+export const layerMemoryAdministrationToolkit = catalogRegistrations.memoryAdministration;
