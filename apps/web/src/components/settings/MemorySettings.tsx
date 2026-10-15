@@ -625,11 +625,7 @@ function MemoryDetails({
                     <p>Effective model: {display.effectiveModel}</p>
                     <p>Resolved on {deviceName(display.resolvingEnvironmentId)}</p>
                     <p>Revert deadline: {display.revertDeadlineUtc}</p>
-                    <p>
-                      {entry.payload
-                        ? JSON.stringify(entry.payload)
-                        : "Retained judgment unavailable."}
-                    </p>
+                    <p>{entry.payload?.judgment ?? "Retained judgment unavailable."}</p>
                     {item ? (
                       <MemoryRevertControl
                         environmentId={environmentId}
