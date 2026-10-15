@@ -137,6 +137,126 @@ layer("NodeSqliteClient", (it) => {
   );
 });
 
+// Recovery can fail before SQLite calls its busy handler. Inject only that
+// native boundary error; successful attempts still execute against a real DB.
+const recoveryBusy = () => Object.assign(new Error("database is locked"), { errcode: 261 });
+
+it.effect("waits for WAL recovery when executing writer statements", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE recovery_entries(value INTEGER)`;
+    const operations = [
+      () => sql`INSERT INTO recovery_entries VALUES (1) RETURNING value`,
+      () => sql`SELECT value FROM recovery_entries`.values,
+      () => sql`SELECT value FROM recovery_entries`.valuesUnprepared,
+      () => sql`SELECT value FROM recovery_entries`.unprepared,
+    ];
+    for (const operation of operations) {
+      const attempted = yield* Deferred.make<void>();
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementationOnce(() => {
+            Deferred.doneUnsafe(attempted, Effect.void);
+            throw recoveryBusy();
+          }),
+        ),
+        () =>
+          Effect.gen(function* () {
+            const fiber = yield* operation().pipe(Effect.forkChild);
+            yield* Deferred.await(attempted);
+            yield* TestClock.adjust("10 millis");
+            yield* Fiber.join(fiber);
+          }),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+    }
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.StatementSync.prototype, "run").mockImplementationOnce(() => {
+          throw recoveryBusy();
+        }),
+      ),
+      () =>
+        Effect.gen(function* () {
+          const fiber = yield* sql`INSERT INTO recovery_entries VALUES (2)`.pipe(Effect.forkChild);
+          yield* TestClock.adjust("10 millis");
+          yield* Fiber.join(fiber);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+    assert.deepEqual(yield* sql`SELECT value FROM recovery_entries`.values, [[1], [2]]);
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("waits for WAL recovery when preparing a writer statement", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const attempted = yield* Deferred.make<void>();
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.DatabaseSync.prototype, "prepare").mockImplementationOnce(() => {
+          Deferred.doneUnsafe(attempted, Effect.void);
+          throw recoveryBusy();
+        }),
+      ),
+      () =>
+        Effect.gen(function* () {
+          const fiber = yield* sql`SELECT 42 AS value`.pipe(Effect.forkChild);
+          yield* Deferred.await(attempted);
+          yield* TestClock.adjust("10 millis");
+          assert.deepEqual(yield* Fiber.join(fiber), [{ value: 42 }]);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("bounds WAL recovery retries and preserves the lock failure", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const attempted = yield* Deferred.make<void>();
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementation(() => {
+          Deferred.doneUnsafe(attempted, Effect.void);
+          throw recoveryBusy();
+        }),
+      ),
+      (spy) =>
+        Effect.gen(function* () {
+          const fiber = yield* sql`SELECT 1`.pipe(Effect.flip, Effect.forkChild);
+          yield* Deferred.await(attempted);
+          yield* TestClock.adjust("5 seconds");
+          const error = yield* Fiber.join(fiber);
+          assert.equal(error.reason._tag, "LockTimeoutError");
+          assert.equal(spy.mock.calls.length, 501);
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("does not retry a stale WAL snapshot or unrelated SQLite errors", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    for (const errcode of [5, 517, 6, 19]) {
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(NodeSqlite.StatementSync.prototype, "all").mockImplementation(() => {
+            throw Object.assign(new Error("sqlite failure"), { errcode });
+          }),
+        ),
+        (spy) =>
+          Effect.gen(function* () {
+            yield* sql`SELECT 1`.pipe(Effect.flip);
+            assert.equal(spy.mock.calls.length, 1);
+          }),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+    }
+  }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
 const largeText = "x".repeat(64 * 1024 + 1);
 
 it.effect("keeps large text and blob parameters off cached statements", () =>
