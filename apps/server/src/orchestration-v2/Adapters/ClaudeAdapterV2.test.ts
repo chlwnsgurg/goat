@@ -11667,6 +11667,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           .pipe(Effect.exit);
         assert.isTrue(Exit.isFailure(failedStart));
         // No live process ever existed: do not emit a fabricated empty roster.
+        yield* observations.awaitEventsRecorded;
         assert.lengthOf(providerThreadRosterEvents(events), 0);
       }).pipe(Effect.provide(layerAdapterTest)),
     ),
