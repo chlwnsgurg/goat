@@ -1,3 +1,4 @@
+import { isMemoryEnvironmentAvailable } from "./MemorySettings.logic";
 import { useMemo } from "react";
 import { AuthEnvironmentMaintainScope } from "@goat/contracts";
 
@@ -34,6 +35,12 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
   return useMemo(
     () =>
       filterAvailableSettingsSearchItems({
+        hasMemory: environments.some(
+          (environment) =>
+            (scopeSearch.machine === undefined ||
+              environment.environmentId === scopeSearch.machine) &&
+            isMemoryEnvironmentAvailable(environment.serverConfig?.environment.capabilities),
+        ),
         localEnvironmentDisabled,
         hasCloudPublicConfig: hasCloudPublicConfig(),
         hasEnvironment: environments.some((environment) => environment.serverConfig !== null),

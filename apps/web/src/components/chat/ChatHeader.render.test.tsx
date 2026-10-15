@@ -3,6 +3,8 @@ import type { EnvironmentProject } from "@goat/client-runtime/state/shell";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+vi.mock("../settings/MemorySettings", () => ({ MemorySettingsEntry: () => null }));
+
 vi.mock("~/hooks/useThreadActionMenu", () => ({
   useThreadActionMenu: () => ({ openMenu: () => {}, closeMenu: () => {} }),
 }));

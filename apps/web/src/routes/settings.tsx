@@ -51,6 +51,7 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
   const autoSettlementAvailability = searchTarget?.requiresThreadAutoSettlement
     ? getThreadAutoSettlementSearchAvailability(environments, scope)
     : null;
+  if (pathname === "/settings/memory") return children;
   if (
     scope.kind !== "unavailable" &&
     searchTarget &&

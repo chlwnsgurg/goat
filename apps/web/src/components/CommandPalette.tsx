@@ -1,4 +1,5 @@
-"use client";
+import { validateMemorySettingsSearch } from "./settings/MemorySettings.logic";
+("use client");
 
 import { threadPullRequestLinkMode } from "@goat/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@goat/shared/threadPullRequests";
@@ -2343,6 +2344,30 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
+  const memoryEnvironmentId = activeThread?.environmentId ?? null;
+  if (
+    environments.some(
+      (item) =>
+        (memoryEnvironmentId === null || item.environmentId === memoryEnvironmentId) &&
+        item.serverConfig?.environment.capabilities.memory?.protocolVersion === 1,
+    )
+  ) {
+    actionItems.push({
+      kind: "action",
+      value: "action:memory",
+      searchTerms: ["memory", "forget", "conflict", "revert", "sync", "import"],
+      title: "Open memory",
+      icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpen(false);
+        await navigate({
+          to: "/settings/memory",
+          search: validateMemorySettingsSearch({ environmentId: memoryEnvironmentId ?? undefined }),
+          hash: "",
+        });
+      },
+    });
+  }
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const settingsSearchItems: CommandPaletteActionItem[] = searchSettings(
     deferredQuery,
