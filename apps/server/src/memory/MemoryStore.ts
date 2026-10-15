@@ -1298,6 +1298,12 @@ export class MemoryStore extends Context.Service<
       memorySpaceId: M.MemorySpaceId;
       entry: Extract<M.MemoryHubEntry, { kind: "metadata" }>;
     }) => InTx<void>;
+    readonly normalizeForeignReportIntentsTx: (localEnvironmentId: M.EnvironmentId) => InTx<void>;
+    readonly reconcileOperationReportTx: (input: {
+      operation: M.MemoryOperation;
+      receipt: M.MemoryHubReceipt;
+      localEnvironmentId: M.EnvironmentId;
+    }) => InTx<void>;
     readonly reconcileResolutionReportTx: (input: {
       record: M.MemoryCompactReceipt;
       localEnvironmentId: M.EnvironmentId;
@@ -3314,7 +3320,12 @@ const make = Effect.gen(function* () {
             claimedBy: null,
             claimedUntil: null,
           });
-        if (!reconnect && accepted && (op.kind === "resolve" || op.kind === "revert")) {
+        if (
+          !reconnect &&
+          accepted &&
+          decision.admission.kind === "localIntent" &&
+          (op.kind === "resolve" || op.kind === "revert")
+        ) {
           const resolutionId =
             op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId;
           const reportId = resolutionReportId(op.memorySpaceId, op.operationId, resolutionId);
@@ -11038,6 +11049,92 @@ const make = Effect.gen(function* () {
         sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${input.memorySpaceId},'hubReceipt',${entry.receipt.operationId},${entry.memoryId},${yield* hubEntryCodec.encode(entry)}) ON CONFLICT(space,key_kind,key) DO NOTHING`,
       );
   });
+  // Canonical operation settlement retains shared evidence independently of local delivery.
+  const reconcileOperationReportTx: MemoryStore["Service"]["reconcileOperationReportTx"] =
+    Effect.fn("MemoryStore.reconcileOperationReportTx")(function* (input) {
+      yield* Transaction;
+      const { operation: op, receipt } = input;
+      if (
+        (op.kind !== "resolve" && op.kind !== "revert") ||
+        receipt.hubSequence === null ||
+        !["accepted", "conflicted"].includes(receipt.outcome)
+      )
+        return;
+      if (
+        receipt.operationId !== op.operationId ||
+        receipt.memoryId !== op.memoryId ||
+        receipt.operationDigest !== hashText(M.encodeMemoryOperation(op)) ||
+        !M.validateMemoryResolutionApproval(
+          op.kind,
+          op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId,
+          receipt,
+        )
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const existing = yield* stored(
+        "operation-report-compact",
+        sql<{
+          compact_json: string;
+        }>`SELECT compact_json FROM memory_compact_receipts WHERE space=${op.memorySpaceId} AND operation_id=${op.operationId}`,
+      );
+      const resolutionId =
+        op.kind === "resolve" ? op.resolution.resolutionId : op.revertsResolutionId;
+      const record: M.MemoryCompactReceipt = existing[0]
+        ? yield* compactCodec.decode(existing[0].compact_json, strict)
+        : {
+            memorySpaceId: op.memorySpaceId,
+            originEnvironmentId: op.originEnvironmentId,
+            operationKind: op.kind,
+            receipt,
+            revisionId: op.revision.revisionId,
+            resolutionId,
+            revertsResolutionId: op.kind === "revert" ? resolutionId : null,
+            attemptId: op.kind === "resolve" ? op.operationId : null,
+            fencingToken: op.kind === "resolve" ? op.fencingToken : null,
+            reportGuard: {
+              reportId: resolutionReportId(op.memorySpaceId, op.operationId, resolutionId),
+              resolvingEnvironmentId: op.originEnvironmentId,
+              resolutionId,
+              outcome: op.kind === "resolve" ? "resolved" : "reverted",
+            },
+          };
+      if (
+        record.operationKind !== op.kind ||
+        record.originEnvironmentId !== op.originEnvironmentId ||
+        record.resolutionId !== resolutionId ||
+        record.revisionId !== op.revision.revisionId ||
+        (yield* receiptCodec.encode(record.receipt)) !== (yield* receiptCodec.encode(receipt))
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (!existing.length) yield* persistCompactReceipt(record);
+      yield* reconcileResolutionReportTx({ record, localEnvironmentId: input.localEnvironmentId });
+    });
+  // Runs once with the real environment identity; ambiguous legacy rows remain retained.
+  const normalizeForeignReportIntentsTx: MemoryStore["Service"]["normalizeForeignReportIntentsTx"] =
+    Effect.fn("MemoryStore.normalizeForeignReportIntentsTx")(function* (localEnvironmentId) {
+      yield* Transaction;
+      const rows = yield* stored(
+        "foreign-report-evidence",
+        sql<{
+          compact_json: string;
+        }>`SELECT c.compact_json FROM memory_report_outbox r JOIN memory_compact_receipts c ON c.space=r.space AND c.operation_id=r.operation_id WHERE r.resolving_environment_id!=${localEnvironmentId} AND r.state!='delivered'`,
+      );
+      for (const row of rows) {
+        const record = yield* compactCodec
+          .decode(row.compact_json, strict)
+          .pipe(Effect.catch(() => Effect.succeed(undefined)));
+        if (
+          record?.reportGuard &&
+          record.reportGuard.reportId ===
+            resolutionReportId(
+              record.memorySpaceId,
+              record.receipt.operationId,
+              record.reportGuard.resolutionId,
+            )
+        )
+          yield* reconcileResolutionReportTx({ record, localEnvironmentId });
+      }
+    });
   const reconcileResolutionReportTx: MemoryStore["Service"]["reconcileResolutionReportTx"] =
     Effect.fn("MemoryStore.reconcileResolutionReportTx")(function* (input) {
       yield* Transaction;
@@ -11065,7 +11162,15 @@ const make = Effect.gen(function* () {
       )
         return { reportId, deliverable: false };
       const deliverable = guard.resolvingEnvironmentId === input.localEnvironmentId;
-      if (!deliverable) return { reportId, deliverable };
+      if (!deliverable) {
+        // Only the exact canonical foreign delivery intent is disposable. Shared receipt
+        // and delivered guards remain authoritative; unknown/contradictory rows stay put.
+        yield* stored(
+          "foreign-report-intent",
+          sql`DELETE FROM memory_report_outbox WHERE report_id=${reportId} AND space=${record.memorySpaceId} AND memory_id=${record.receipt.memoryId} AND operation_id=${record.receipt.operationId} AND resolution_id=${guard.resolutionId} AND resolving_environment_id=${guard.resolvingEnvironmentId} AND outcome=${guard.outcome} AND state!='delivered'`,
+        );
+        return { reportId, deliverable };
+      }
       const delivered = yield* stored(
         "report-delivered-guard",
         sql`SELECT 1 FROM memory_import_keys WHERE space=${record.memorySpaceId} AND key_kind='report_delivered' AND key=${reportId}`,
@@ -11125,6 +11230,8 @@ const make = Effect.gen(function* () {
     reserveHubCheckpointTx: (input) => withHubBudget(reserveHubCheckpointTx(input)),
     settleMetadataEntryTx,
     reconcileResolutionReportTx,
+    reconcileOperationReportTx,
+    normalizeForeignReportIntentsTx,
     acquireSyncWorkTx,
     retrySyncWorkTx,
     readWorkHold,

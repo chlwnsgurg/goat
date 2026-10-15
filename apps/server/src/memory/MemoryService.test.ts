@@ -38,14 +38,17 @@ const database = Layer.effectDiscard(
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const store = Store.layer.pipe(Layer.provideMerge(database));
-const serviceLive = (serviceLayer = Service.layer) =>
+const serviceLive = (
+  serviceLayer = Service.layer,
+  readSettings: Settings.MemoryHubCommittedSettings["Service"]["read"] = Effect.succeed({
+    settings: { mode: "hub" as const, memorySpaceId: space },
+    version: 1,
+  }),
+) =>
   serviceLayer.pipe(
     Layer.provide(
       Layer.succeed(Settings.MemoryHubCommittedSettings, {
-        read: Effect.succeed({
-          settings: { mode: "hub" as const, memorySpaceId: space },
-          version: 1,
-        }),
+        read: readSettings,
       }),
     ),
     Layer.provide(
@@ -2069,6 +2072,15 @@ it.effect.each(["lost-response", "known-approval"] as const)(
             entries: [{ kind: "operation", operation: op, receipt, hubSequence: 7 }],
           },
         });
+        assert.strictEqual(yield* service.nextReportWakeAt(0), 0);
+        const reports = yield* service.acquireReports({
+          owner: environmentId,
+          now: 0,
+          until: 1000,
+          limit: 32,
+        });
+        assert.strictEqual(reports.length, 1);
+        assert.strictEqual(reports[0]!.outcome, "resolved");
       } else {
         saved = (yield* store.transact(
           store.transitionResolutionTicketTx({
@@ -2954,3 +2966,289 @@ it.effect("Settings retry reset reauthorizes after waiting for the SQL writer", 
     }),
   ).pipe(Effect.provide(live)),
 );
+
+// Real retained resolution and staged operation; report approval is never seeded by SQL.
+const stageReportRevert = Effect.gen(function* () {
+  const service = yield* Service.MemoryService;
+  const store = yield* Store.MemoryStore;
+  const sql = yield* SqlClient.SqlClient;
+  yield* service.upsert(input(), Effect.void);
+  const original = (yield* store.loadAggregate(space, memoryId)).revisions[0]!;
+  const second = { ...input(4), expectedHeads: [original.revision.revisionId] };
+  yield* service.upsert(second, Effect.void);
+  const current = yield* store.loadAggregate(space, memoryId);
+  const result = current.revisions.find((r) => r.revision.operationId === second.operationId)!;
+  const resolutionId = M.MemoryResolutionId.make(id(90));
+  const selection: M.MemoryModelSelection = {
+    instanceId: M.ProviderInstanceId.make("fixture"),
+    model: "fixture",
+  };
+  const inputIds = [original.revision.revisionId, M.MemoryRevisionId.make(id(91))].sort();
+  const resolution: M.MemoryResolution = {
+    resolutionId,
+    memorySpaceId: space,
+    memoryId,
+    inputRevisionIds: inputIds,
+    inputPayloadRefs: inputIds,
+    judgmentRef: resolutionId,
+    requestedModelSelection: selection,
+    effectiveProvider: M.ProviderDriverKind.make("codex"),
+    effectiveModel: "fixture",
+    resolvingEnvironmentId: environmentId,
+    fencingToken: 1,
+    resultRevisionId: result.revision.revisionId,
+    appliedAtUtc: M.MemoryUtcTimestamp.make("2026-10-14T00:00:00.000Z"),
+    revertDeadlineUtc: M.MemoryUtcTimestamp.make("2026-11-13T00:00:00.000Z"),
+  };
+  yield* sql`INSERT INTO memory_resolutions(space,resolution_id,memory_id,input_revision_ids_json,input_payload_refs_json,judgment_payload_ref,requested_model_selection_json,effective_provider_model_json,resolving_environment_id,fencing_token,result_revision_id,applied_at,revert_deadline,resolution_json) VALUES (${space},${resolutionId},${memoryId},${yield* encodeRevisionIds(inputIds)},${yield* encodeRevisionIds(inputIds)},${resolutionId},${yield* encodeSelectionJson(selection)},'{}',${environmentId},1,${result.revision.revisionId},${Date.parse(resolution.appliedAtUtc)},${Date.parse(resolution.revertDeadlineUtc)},${yield* encodeResolution(resolution)})`;
+  assert.deepStrictEqual((yield* store.loadAggregate(space, memoryId)).resolutions, [resolution]);
+  yield* TestClock.setTime(Date.parse("2026-10-14T00:00:00.000Z"));
+
+  const request: M.MemoryRevertResolutionInput = {
+    memorySpaceId: space,
+    memoryId,
+    operationId: M.MemoryOperationId.make(id(6)),
+    resolutionId,
+    restoredRevisionId: original.revision.revisionId,
+    expectedHeads: [result.revision.revisionId],
+  };
+  assert.strictEqual((yield* service.revertResolution(request, Effect.void)).status, "pending");
+  const workId = `revert:${space}:${request.operationId}`;
+  const op = yield* store.readWorkOperation(workId);
+  if (op?.kind !== "revert") throw new Error("revert fixture");
+  return { request, op, workId };
+});
+for (const route of ["ack", "pull", "hub-local"] as const) {
+  it.effect(`r2 H1 approves operation report through ${route}`, () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const { op, workId } = yield* stageReportRevert;
+      assert.isNull(yield* service.nextReportWakeAt(0));
+      assert.deepStrictEqual(
+        yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
+        [],
+      );
+      const receipt: M.MemoryHubReceipt = {
+        operationId: op.operationId,
+        memoryId,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "accepted",
+        hubSequence: 1,
+      };
+      if (route === "ack") {
+        const args = {
+          memorySpaceId: space,
+          hubEnvironmentId: environmentId,
+          localEnvironmentId: environmentId,
+          workId,
+          operation: { operationId: op.operationId, operationDigest: receipt.operationDigest },
+          receipt,
+          reauthorize: Effect.void,
+        };
+        yield* service.settleHubAcknowledgement(args);
+        yield* service.settleHubAcknowledgement(args);
+      } else if (route === "pull") {
+        yield* service.receiveHubPage({
+          memorySpaceId: space,
+          hubEnvironmentId: environmentId,
+          localEnvironmentId: environmentId,
+          expectedSequence: 0,
+          reauthorize: Effect.void,
+          page: {
+            entries: [{ kind: "operation", operation: op, receipt, hubSequence: 1 }],
+            throughSequence: 1,
+            highWatermark: 1,
+            hasMore: false,
+          },
+        });
+      } else {
+        yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
+        assert.strictEqual(
+          (yield* service.admitHubOperation({
+            operation: op,
+            authority: {
+              principal: {
+                memorySpaceId: space,
+                environmentId,
+                credentialVersion: 1,
+                scopes: ["memory:sync"],
+              },
+              now: Clock.currentTimeMillis,
+              reauthorize: Effect.void,
+            },
+          })).outcome,
+          "accepted",
+        );
+      }
+      assert.strictEqual(yield* service.nextReportWakeAt(0), 0);
+      const reports = yield* service.acquireReports({
+        owner: environmentId,
+        now: 0,
+        until: 1000,
+        limit: 32,
+      });
+      assert.strictEqual(reports.length, 1);
+      assert.strictEqual(reports[0]!.outcome, "reverted");
+      assert.strictEqual(reports[0]!.resolvingEnvironmentId, environmentId);
+    }).pipe(Effect.provide(live)),
+  );
+}
+for (const hubSequence of [null, 1]) {
+  it.effect(`r2 H1 refuses report approval for rejected ACK ${hubSequence}`, () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const { op, workId } = yield* stageReportRevert;
+      yield* service.settleHubAcknowledgement({
+        memorySpaceId: space,
+        hubEnvironmentId: environmentId,
+        localEnvironmentId: environmentId,
+        workId,
+        operation: { operationId: op.operationId, operationDigest: memoryOperationDigest(op) },
+        reauthorize: Effect.void,
+        receipt: {
+          operationId: op.operationId,
+          memoryId,
+          operationDigest: memoryOperationDigest(op),
+          outcome: "rejected",
+          hubSequence,
+          failureCode: "revert_expired",
+        },
+      });
+      assert.isNull(yield* service.nextReportWakeAt(0));
+      assert.deepStrictEqual(
+        yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
+        [],
+      );
+    }).pipe(Effect.provide(live)),
+  );
+}
+it.effect(
+  "r2 M1 foreign operation backlog leaves local report capacity available",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      const sql = yield* SqlClient.SqlClient;
+      const { op } = yield* stageReportRevert;
+      const foreign = M.EnvironmentId.make("foreign");
+      for (let n = 0; n <= M.MEMORY_REPORT_MAX_PENDING_ITEMS; n++) {
+        const operationId = M.MemoryOperationId.make(id(10000 + n));
+        const revisionId = M.MemoryRevisionId.make(id(20000 + n));
+        const operation: M.MemoryOperation = {
+          ...op,
+          operationId,
+          originEnvironmentId: foreign,
+          revision: {
+            ...op.revision,
+            operationId,
+            revisionId,
+            payloadRef: revisionId,
+            provenance: { environmentId: foreign },
+          },
+        };
+        yield* service.applyReceived(operation, {
+          operationId,
+          memoryId,
+          operationDigest: memoryOperationDigest(operation),
+          outcome: "accepted",
+          hubSequence: n + 1,
+        });
+      }
+      assert.deepStrictEqual(yield* sql`SELECT count(*) AS count FROM memory_report_outbox`, [
+        { count: 0 },
+      ]);
+      assert.strictEqual(
+        (yield* sql`SELECT 1 FROM memory_compact_receipts`).length,
+        M.MEMORY_REPORT_MAX_PENDING_ITEMS + 1,
+      );
+      yield* service.applyReceived(op, {
+        operationId: op.operationId,
+        memoryId,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "accepted",
+        hubSequence: 3000,
+      });
+      assert.strictEqual(yield* service.nextReportWakeAt(0), 0);
+      assert.strictEqual(
+        (yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }))
+          .length,
+        1,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='report_items'`,
+        [{ value: 1 }],
+      );
+    }).pipe(Effect.provide(live)),
+  { timeout: 120000 },
+);
+
+for (const mode of ["disabled", "other-space", "writer-wait"] as const) {
+  it.effect(`r2 H2 rechecks revert sharing on ${mode} including staged replay`, () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let blocked = false;
+        const readSettings: Settings.MemoryHubCommittedSettings["Service"]["read"] = Effect.sync(
+          () => ({
+            settings: blocked
+              ? mode === "other-space"
+                ? { mode: "hub" as const, memorySpaceId: M.MemorySpaceId.make(id(999)) }
+                : { mode: "disabled" as const }
+              : { mode: "hub" as const, memorySpaceId: space },
+            version: 1,
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* Service.MemoryService;
+          const storage = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          const { request } = yield* stageReportRevert;
+          const fresh = { ...request, operationId: M.MemoryOperationId.make(id(8)) };
+          if (mode === "writer-wait") {
+            const locked = yield* Deferred.make<void>();
+            const release = yield* Deferred.make<void>();
+            const started = yield* Deferred.make<void>();
+            let permitCalls = 0;
+            const holder = yield* storage
+              .transact(
+                Deferred.succeed(locked, undefined).pipe(Effect.andThen(Deferred.await(release))),
+              )
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(locked);
+            const waiter = yield* Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(
+                service.revertResolution(
+                  fresh,
+                  Effect.sync(() => {
+                    permitCalls++;
+                  }),
+                ),
+              ),
+              Effect.exit,
+              Effect.forkChild,
+            );
+            yield* Deferred.await(started);
+            assert.strictEqual(permitCalls, 0);
+            blocked = true;
+            yield* Deferred.succeed(release, undefined);
+            yield* Fiber.join(holder);
+            assert.strictEqual((yield* Fiber.join(waiter))._tag, "Failure");
+          } else blocked = true;
+          for (const value of [fresh, request]) {
+            const error = yield* service.revertResolution(value, Effect.void).pipe(Effect.flip);
+            assert.strictEqual("code" in error ? error.code : null, "bootstrap_required");
+          }
+          assert.strictEqual((yield* sql`SELECT 1 FROM memory_revert_intents`).length, 1);
+          assert.strictEqual(
+            (yield* service.read({ memorySpaceId: space, memoryId }, Effect.void)).status,
+            "active",
+          );
+          const history = yield* service.history(
+            { memorySpaceId: space, memoryId, limit: 100 },
+            Effect.void,
+          );
+          assert.isNotEmpty(history.resolutions);
+        }).pipe(Effect.provide(serviceLive(Service.layer, readSettings)));
+      }),
+    ),
+  );
+}

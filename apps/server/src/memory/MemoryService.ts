@@ -393,6 +393,7 @@ const make = Effect.fnUntraced(function* (
   const quota = yield* Quota.MemoryQuotaService;
   const identity = yield* Environment.ServerEnvironmentIdentity;
   const environmentId = yield* identity.getEnvironmentId;
+  yield* store.transact(store.normalizeForeignReportIntentsTx(environmentId));
   const sql = yield* SqlClient.SqlClient;
   const query = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(
@@ -651,7 +652,17 @@ const make = Effect.fnUntraced(function* (
         if (admission.kind !== "approvedReplica") yield* requireImportNotSuppressed(op);
         const decision = yield* decide(current, op, admission, approval, ancestry);
         return yield* quota.commit(decision, environmentId, permit);
-      }),
+      }).pipe(
+        Effect.tap(() =>
+          admission.kind === "approvedReplica" && approval
+            ? store.reconcileOperationReportTx({
+                operation: op,
+                receipt: approval,
+                localEnvironmentId: environmentId,
+              })
+            : Effect.void,
+        ),
+      ),
     );
   });
   const requireImportAddress = (address: ImportAddress) =>
@@ -1493,6 +1504,7 @@ const make = Effect.fnUntraced(function* (
     return yield* store.transact(
       Effect.gen(function* () {
         yield* permit;
+        yield* requireSharing(value.memorySpaceId);
         yield* requireCaller(sourceThread);
         const current = yield* store.loadAggregate(value.memorySpaceId, value.memoryId);
         if (current.identity) yield* requireScope(current.identity.scope);

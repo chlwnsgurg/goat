@@ -353,17 +353,17 @@ describe("MemoryReportLifecycle", () => {
             outcome: kind === "resolve" ? "resolved" : "reverted",
           },
         });
-        assert.isTrue(
-          (yield* store.transact(
-            store.reconcileResolutionReportTx({ record, localEnvironmentId: env }),
-          )).deliverable,
-        );
         assert.isFalse(
           (yield* store.transact(
             store.reconcileResolutionReportTx({
               record,
               localEnvironmentId: env === owner ? other : owner,
             }),
+          )).deliverable,
+        );
+        assert.isTrue(
+          (yield* store.transact(
+            store.reconcileResolutionReportTx({ record, localEnvironmentId: env }),
           )).deliverable,
         );
       }
@@ -465,5 +465,59 @@ it.effect("delivered guards stay charged at the permanent metadata equality and 
       (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
       1,
     );
+  }).pipe(Effect.provide(live)),
+);
+
+it.effect("r2 M1 normalizes only canonically proven foreign pending intents", () =>
+  Effect.gen(function* () {
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    const operationId = M.MemoryOperationId.make(id(11));
+    const resolutionId = M.MemoryResolutionId.make(id(7));
+    const rid = Store.resolutionReportId(space, operationId, resolutionId);
+    const record: M.MemoryCompactReceipt = {
+      memorySpaceId: space,
+      originEnvironmentId: other,
+      operationKind: "revert",
+      receipt: {
+        operationId,
+        memoryId: memory,
+        operationDigest: "a".repeat(64),
+        outcome: "accepted",
+        hubSequence: 1,
+      },
+      revisionId: M.MemoryRevisionId.make(id(31)),
+      resolutionId,
+      revertsResolutionId: resolutionId,
+      attemptId: null,
+      fencingToken: null,
+      reportGuard: {
+        reportId: rid,
+        resolvingEnvironmentId: other,
+        resolutionId,
+        outcome: "reverted",
+      },
+    };
+    yield* store.persistCompactReceipt(record);
+    yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolution_id,resolving_environment_id,outcome,state,created_at) VALUES (${rid},${space},${memory},${operationId},${resolutionId},${other},'reverted','pending',0)`;
+    yield* insert(2, "revert", other, 0); // No canonical evidence: retain.
+    yield* insert(3); // Local: retain.
+    const before = yield* sql<{
+      value: number;
+    }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='report_items'`;
+    yield* store.transact(store.normalizeForeignReportIntentsTx(owner));
+    assert.deepStrictEqual(
+      yield* sql`SELECT report_id FROM memory_report_outbox ORDER BY report_id`,
+      [{ report_id: reportId(2) }, { report_id: reportId(3) }],
+    );
+    assert.deepStrictEqual(
+      yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='report_items'`,
+      [{ value: before[0]!.value - 1 }],
+    );
+    assert.strictEqual((yield* sql`SELECT 1 FROM memory_compact_receipts`).length, 1);
+    const after = yield* counters;
+    yield* store.transact(store.normalizeForeignReportIntentsTx(owner));
+    assert.deepStrictEqual(yield* counters, after);
+    assert.strictEqual((yield* acquire(store, 0, owner)).length, 1);
   }).pipe(Effect.provide(live)),
 );
