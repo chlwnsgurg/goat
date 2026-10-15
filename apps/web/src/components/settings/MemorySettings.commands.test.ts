@@ -171,3 +171,32 @@ it("runs browser recovery through the actual import command and refuses apply af
     f.registry.dispose();
   }
 });
+it("reconcile uses current settings grants and forwards the diagnostics version", async () => {
+  const f = harness();
+  const transport = vi.fn(
+    (_input: {
+      environmentId: EnvironmentId;
+      memorySpaceId: MemorySpaceId;
+      expectedVersion: number;
+    }) => Effect.succeed({ version: 7, rearmedClasses: [] }),
+  );
+  const command = createEnvironmentRpcCommand(f.runtime, {
+    label: "reconcile",
+    tag: WS_METHODS.memoryHubReconcile,
+    execute: transport,
+  });
+  const input = { environmentId: env, memorySpaceId: space, expectedVersion: 7 };
+  try {
+    f.allow(["memory:read"]);
+    expect((await command.run(f.registry, { environmentId: env, input }))._tag).toBe("Failure");
+    expect(transport).not.toHaveBeenCalled();
+    f.allow(["settings:write"]);
+    expect((await command.run(f.registry, { environmentId: env, input }))._tag).toBe("Success");
+    expect(transport.mock.calls[0]?.[0]).toEqual(input);
+    f.allow([]);
+    expect((await command.run(f.registry, { environmentId: env, input }))._tag).toBe("Failure");
+    expect(transport).toHaveBeenCalledOnce();
+  } finally {
+    f.registry.dispose();
+  }
+});

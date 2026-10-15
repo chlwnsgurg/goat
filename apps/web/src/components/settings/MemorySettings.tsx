@@ -1,3 +1,4 @@
+import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
 import { MemoryImportSettings } from "./MemoryImportSettings";
 import { MemoryAgentAccessSettings } from "./MemoryAgentAccessSettings";
 import { MemoryReportRetrySettings } from "./MemoryReportRetrySettings";
@@ -239,6 +240,13 @@ function MemoryDestinationContent({
     <>
       <MemoryAgentAccessSettings environmentId={environmentId} />
       {sync ? <MemoryStatusRows sync={sync} /> : null}
+      {sync ? (
+        <MemoryHubDiagnosticsSettings
+          environmentId={environmentId}
+          sync={sync}
+          onRefresh={refreshBootstrap}
+        />
+      ) : null}
       {canRead && sync?.state === "bootstrapping" && sync.memorySpaceId ? (
         <MemoryBootstrapRefresh
           environmentId={environmentId}
@@ -724,7 +732,10 @@ function MemoryDetails({
           {item && item.status !== "forgotten" && value ? (
             <>
               {value.resolutions.length > 0 ? (
-                <h3 className="text-sm font-medium">Resolution history</h3>
+                <div>
+                  <h3 className="text-sm font-medium">Resolution history</h3>
+                  <p>History updates live. Start at the first page to see new changes.</p>
+                </div>
               ) : null}
               {value.resolutions.map((entry) => {
                 const display = presentMemoryResolution(entry);
@@ -950,6 +961,7 @@ export function MemoryRevertControl({
     <div>
       <p>{display.windowLabel}</p>
       {display.timeNotice ? <p>{display.timeNotice}</p> : null}
+      {display.notice ? <p role="status">{display.notice}</p> : null}
       {display.reason ? <p>{display.reason}</p> : null}
       {!canWrite ? <p>Memory write permission is required to revert.</p> : null}
       {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}

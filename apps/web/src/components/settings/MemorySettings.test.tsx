@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
+import { MemoryRunAccessLabel } from "./MemoryRunAccessLabel";
 import { memorySyncFixture } from "../../test/memorySyncFixture";
 import { act, useSyncExternalStore, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -103,6 +105,8 @@ vi.mock("../../state/memory", async () => {
           "projectBindingGet",
           "projectBindingUpdate",
           "syncStatus",
+          "hubDiagnostics",
+          "hubReconcile",
           "upsert",
           "forget",
           "revertResolution",
@@ -163,7 +167,10 @@ vi.mock("../../state/use-atom-command", () => ({
   },
 }));
 vi.mock("../../state/environments", () => ({
-  useEnvironment: () => state.environment,
+  useEnvironment: () => {
+    useFixtureVersion();
+    return state.environment;
+  },
   useEnvironments: () => ({ environments: state.environments }),
 }));
 vi.mock("../../state/session", async (original) => ({
@@ -1549,7 +1556,7 @@ it("removes an open editor and history when shared admission removes the derived
 });
 
 // WP6 controls exercise the actual workflow/store; command transport is the fixture boundary.
-async function renderControl(element: ReactNode) {
+async function renderControl(element: ReactNode | (() => ReactNode)) {
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   const get = registry.get.bind(registry);
@@ -1560,7 +1567,11 @@ async function renderControl(element: ReactNode) {
   const render = () =>
     act(async () => {
       notifyFixture();
-      root.render(<RegistryContext value={registry}>{element}</RegistryContext>);
+      root.render(
+        <RegistryContext value={registry}>
+          {typeof element === "function" ? element() : element}
+        </RegistryContext>,
+      );
     });
   await render();
   return { registry, render };
@@ -1975,4 +1986,138 @@ it("awaits importer removal before submitting a binding CAS change", async () =>
   } finally {
     unregister();
   }
+});
+
+it("gates diagnostics by capability and rearms with its version, then reloads both views", async () => {
+  const refresh = vi.fn();
+  state.responses.set(
+    "hubDiagnostics",
+    success({
+      version: 7,
+      publication: { state: "last_valid" },
+      readiness: "ready",
+      connection: "unreachable",
+      recoverableHolds: ["availability"],
+      permanentHolds: [],
+      reconcile: "available",
+    }),
+  );
+  state.responses.set("hubReconcile", success({}));
+  const view = await renderControl(
+    <MemoryHubDiagnosticsSettings
+      environmentId={envId}
+      sync={memorySyncFixture}
+      onRefresh={refresh}
+    />,
+  );
+  expect(container.textContent).not.toContain("Reconcile");
+  state.environment = {
+    serverConfig: {
+      environment: { capabilities: { memory: { protocolVersion: 1, hubDiagnostics: true } } },
+    },
+  };
+  await view.render();
+  expect(container.textContent).toContain("Last valid settings in use");
+  expect(container.textContent).toContain("Hub disconnected");
+  await click("Reconcile");
+  expect(state.calls).toHaveBeenCalledWith({
+    environmentId: envId,
+    input: {
+      environmentId: envId,
+      memorySpaceId: memorySyncFixture.memorySpaceId,
+      expectedVersion: 7,
+    },
+  });
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain("Synchronization may still be in progress");
+  state.allowed = false;
+  await view.render();
+  expect(
+    Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Reconcile")!
+      .disabled,
+  ).toBe(true);
+  expect(container.textContent).not.toContain("Last valid settings in use");
+});
+it("distinguishes a saved memory ceiling from current permission and drops unknown evidence", async () => {
+  let current: import("@goat/contracts").MemoryCurrentAccess | undefined = {
+    access: "none",
+    reason: "environment_off",
+  };
+  const view = await renderControl(() => (
+    <MemoryRunAccessLabel memoryGrantCeiling="read_write" currentMemoryAccess={current} />
+  ));
+  expect(container.textContent).toContain("Saved limit: Read and write");
+  expect(container.textContent).toContain("Allowed now: None");
+  current = undefined;
+  await view.render();
+  expect(container.textContent).not.toContain("Allowed now");
+});
+
+it("renders save failure, retries only on click and shows totals across chunks", async () => {
+  const sourceId = id(61);
+  const inputs: MemoryImportProviderInput[] = [];
+  state.executors.set("importProvider", async (request) => {
+    const input = (request as { input: MemoryImportProviderInput }).input;
+    inputs.push(input);
+    if (input.action === "discover")
+      return {
+        action: "discover",
+        sources: [
+          { sourceId, format: "codex", parserVersion: "one", profile: "fixture", label: "fixture" },
+        ],
+      };
+    if (input.action === "preview")
+      return {
+        action: "preview",
+        sourceId,
+        sessionId: "fixture",
+        items: Array.from({ length: 33 }, (_, i) => ({
+          sourceItemKey: `item-${i}`,
+          sourceFingerprint: "a".repeat(64),
+          byteCount: 1,
+          mappingRequired: false,
+        })),
+      };
+    if (input.action === "apply")
+      return {
+        action: "apply",
+        syncStatus: memorySyncFixture,
+        receipt: {
+          operationId: input.operationId,
+          sourceId,
+          sessionId: "fixture",
+          sessionNewItems: 0,
+          sessionBodyBytes: 0,
+          state: "completed",
+          remaining: 0,
+          items: input.items.map((item) => ({
+            sourceItemKey: item.sourceItemKey,
+            outcome: "rejected",
+            issue: "source_changed",
+          })),
+        },
+      };
+    throw new Error("Unexpected request");
+  });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  await chooseControl("codex");
+  await chooseControl("user", 1);
+  await click("Discover profiles");
+  await click("Preview profile 1");
+  await act(async () => {
+    for (const checkbox of container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+      checkbox.click();
+  });
+  await click("Confirm selection");
+  const save = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new Error("quota");
+  });
+  await click("Apply import");
+  expect(container.textContent).toContain("Retry saving import");
+  expect(inputs.filter((i) => i.action === "apply")).toHaveLength(0);
+  save.mockRestore();
+  await click("Retry saving import");
+  expect(inputs.filter((i) => i.action === "apply")).toHaveLength(2);
+  expect(container.textContent).toContain("33 rejected");
+  expect(container.textContent).toContain("2 chunks completed");
 });

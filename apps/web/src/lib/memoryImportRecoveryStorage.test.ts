@@ -142,7 +142,8 @@ it("blocks apply until storage succeeds and never admits after storage failure",
   vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
     throw new Error("quota");
   });
-  await expect(next.workflow.apply()).rejects.toThrow("quota");
+  await next.workflow.apply();
+  expect(next.workflow.getSnapshot().phase).toBe("save_failed");
   expect(next.calls.filter((input) => input.action === "apply")).toHaveLength(0);
 });
 it("Stop allows the admitted chunk to settle and stops subsequent chunks", async () => {

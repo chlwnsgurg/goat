@@ -9,7 +9,7 @@ import {
   type MemoryImportSource,
   type MemoryImportPreviewItem,
 } from "@goat/contracts";
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { readEnvironmentScope, readPreparedConnection } from "../../state/session";
 import { memoryEnvironment } from "../../state/memory";
 import {
@@ -43,7 +43,10 @@ export function MemoryImportSettings({
       return null;
     }
   });
-  const [progress, setProgress] = useState(() => workflow?.getState());
+  const progress = useSyncExternalStore(
+    workflow?.subscribe ?? (() => () => {}),
+    workflow?.getSnapshot ?? (() => undefined),
+  );
   const [format, setFormat] = useState<MemoryImportFormat | null>(null);
   const [sources, setSources] = useState<readonly MemoryImportSource[]>([]);
   const [items, setItems] = useState<readonly MemoryImportPreviewItem[]>([]);
@@ -55,24 +58,20 @@ export function MemoryImportSettings({
   const authorized = useRef(canImport);
   const generation = useRef(0);
   const previousScope = useRef<MemoryScopeSelection | null>(null);
-  const run = useCallback(
-    async (action: () => Promise<unknown>) => {
-      const token = generation.current;
-      setBusy(true);
-      setError(null);
-      try {
-        await action();
-      } catch {
-        if (mounted.current && token === generation.current)
-          setError("Import request failed. Check the result before previewing again.");
-      }
-      if (mounted.current && token === generation.current) {
-        setProgress(workflow?.getState());
-        setBusy(false);
-      }
-    },
-    [workflow],
-  );
+  const run = useCallback(async (action: () => Promise<unknown>) => {
+    const token = generation.current;
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch {
+      if (mounted.current && token === generation.current)
+        setError("Import request failed. Check the result before previewing again.");
+    }
+    if (mounted.current && token === generation.current) {
+      setBusy(false);
+    }
+  }, []);
   useEffect(() => {
     mounted.current = true;
     if (canImport) authorized.current = true;
@@ -97,7 +96,6 @@ export function MemoryImportSettings({
         .then(() => {
           if (mounted.current) {
             setBusy(false);
-            setProgress(workflow.getState());
           }
         })
         .catch(() => {
@@ -134,7 +132,7 @@ export function MemoryImportSettings({
           JSON.stringify(previous.scope.projectKey) !== JSON.stringify(next.scope.projectKey));
       if (!bindingChanged) {
         workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
-        setProgress(workflow.getState());
+
         setBusy(false);
         return;
       }
@@ -144,7 +142,7 @@ export function MemoryImportSettings({
         .then(() => {
           if (!mounted.current || token !== generation.current) return;
           workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
-          setProgress(workflow.getState());
+
           setBusy(false);
         })
         .catch(() => {
@@ -167,12 +165,15 @@ export function MemoryImportSettings({
       setSources([]);
       await workflow.removeDestination();
       if (mounted.current) {
-        setProgress(workflow.getState());
         setBusy(false);
       }
     });
   }, [environmentId, memorySpaceId, workflow]);
-  const locked = busy || progress?.phase === "previewed";
+  const locked =
+    busy ||
+    ["previewed", "save_failed", "recovery", "saving", "applying", "checking"].includes(
+      progress?.phase ?? "",
+    );
   return (
     <SettingsSection title="Import memories">
       <SettingsRow
@@ -194,7 +195,6 @@ export function MemoryImportSettings({
               setItems([]);
               setSelected([]);
               workflow?.invalidate();
-              setProgress(workflow?.getState());
             }}
           >
             <SelectTrigger aria-label="Import provider">
@@ -297,7 +297,6 @@ export function MemoryImportSettings({
                       ...scope,
                     })),
                 );
-                setProgress(workflow.getState());
               } catch {
                 setError("Preview again before confirming your selection.");
               }
@@ -324,7 +323,7 @@ export function MemoryImportSettings({
                 disabled={busy}
                 onClick={() => {
                   workflow?.invalidate();
-                  setProgress(workflow?.getState());
+
                   setItems([]);
                   setSelected([]);
                 }}
@@ -339,11 +338,20 @@ export function MemoryImportSettings({
             disabled={!busy}
             onClick={() => {
               workflow?.stop();
-              setProgress(workflow?.getState());
             }}
           >
             Stop import
           </Button>
+          {progress?.phase === "save_failed" ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canImport || busy}
+              onClick={() => void run(() => workflow!.retry())}
+            >
+              Retry saving import
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="outline"
@@ -364,9 +372,9 @@ export function MemoryImportSettings({
             <p>
               {progress.receipt.state === "partial"
                 ? "Partial import; some memories may have been applied."
-                : "Import receipt received."}{" "}
-              {progress.receipt.items.filter((item) => item.outcome === "rejected").length}{" "}
-              rejected. Acceptance does not mean content is available on every device.
+                : "Import results received across all chunks."}{" "}
+              {progress.totals.outcomes.rejected ?? 0} rejected. Acceptance does not mean content is
+              available on every device.
             </p>
           ) : null}
           {error ? <p role="alert">{error}</p> : null}

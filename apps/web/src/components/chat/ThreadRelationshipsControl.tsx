@@ -1,4 +1,4 @@
-import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation";
+import { MemoryRunAccessLabel } from "../settings/MemoryRunAccessLabel";
 import { useAtomValue } from "@effect/atom-react";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
@@ -301,7 +301,15 @@ export function ThreadRelationshipsPanel(props: {
   const projection = useThreadProjection(ref)?.projection ?? null;
   const providers = useServerConfigs().get(props.environmentId)?.providers;
   const runtimeSubagents = useMemo(
-    () => projectedSubagentsToRuntime(projection?.subagents ?? []),
+    () =>
+      projectedSubagentsToRuntime(projection?.subagents ?? []).map((agent, index) => {
+        const record = projection?.subagents[index];
+        return {
+          ...agent,
+          memoryGrantCeiling: record?.memoryGrantCeiling,
+          currentMemoryAccess: record?.currentMemoryAccess,
+        };
+      }),
     [projection?.subagents],
   );
   const subagentsByThreadId = useMemo(() => {
@@ -317,6 +325,7 @@ export function ThreadRelationshipsPanel(props: {
             threadId: subagent.threadId,
             runId: subagent.runId,
             memoryGrantCeiling: subagent.memoryGrantCeiling,
+            currentMemoryAccess: subagent.currentMemoryAccess,
             nativeTaskRef: subagent.nativeTaskRef,
             nativeStatus: subagent.status,
             driver: subagent.driver,
@@ -762,16 +771,7 @@ export function ThreadRelationshipsPanel(props: {
                     header={
                       <div>
                         {relationshipLink}
-                        {agent.memoryGrantCeiling && agent.memoryGrantCeiling !== "none" ? (
-                          <span className="text-xs text-muted-foreground">
-                            Memory:{" "}
-                            {
-                              presentMemoryRunAccess({
-                                memoryGrantCeiling: agent.memoryGrantCeiling,
-                              }).savedCeiling
-                            }
-                          </span>
-                        ) : null}
+                        <MemoryRunAccessLabel {...agent} />
                       </div>
                     }
                   />
@@ -841,15 +841,7 @@ export function ThreadRelationshipsPanel(props: {
                   ) : (
                     relationshipLink
                   )}
-                  {agent?.memoryGrantCeiling && agent.memoryGrantCeiling !== "none" ? (
-                    <span className="text-xs text-muted-foreground">
-                      Memory:{" "}
-                      {
-                        presentMemoryRunAccess({ memoryGrantCeiling: agent.memoryGrantCeiling })
-                          .savedCeiling
-                      }
-                    </span>
-                  ) : null}
+                  {agent ? <MemoryRunAccessLabel {...agent} /> : null}
                   {canStop && agent ? (
                     <div className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 pointer-coarse:pointer-events-auto pointer-coarse:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
                       <Tooltip>
