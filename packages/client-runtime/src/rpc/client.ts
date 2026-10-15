@@ -3,6 +3,7 @@ import {
   clientRpcRequiredScopes,
   authScopeRequiredResponse,
   type EnvironmentId,
+  type MemoryHistoryInput,
   type ClientGuardedRpcTag,
   ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
@@ -200,6 +201,13 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
   yield* guard.authorize(supervisor.target.environmentId, method, input);
 });
 
+/** Strip history extensions against the session that will actually dispatch the request. */
+function memoryHistoryDispatchInput(input: MemoryHistoryInput, refusedReverts: boolean) {
+  if (refusedReverts) return input;
+  const { includeRefusedReverts: _refused, ...legacyInput } = input;
+  return legacyInput;
+}
+
 export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
 >(tag: TTag, input: EnvironmentRpcInput<TTag>) {
@@ -210,6 +218,7 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   });
   const session = yield* currentSession();
   yield* authorizeRequest(tag, input);
+  let dispatchInput = input;
   if (tag.startsWith("memory.")) {
     const config = yield* session.initialConfig.pipe(
       Effect.mapError(
@@ -220,6 +229,12 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
           }),
       ),
     );
+    if (tag === WS_METHODS.memoryHistory) {
+      dispatchInput = memoryHistoryDispatchInput(
+        input as MemoryHistoryInput,
+        config.environment.capabilities.memory?.refusedReverts === true,
+      ) as EnvironmentRpcInput<TTag>;
+    }
     if (
       !supportsMemoryProtocol(config.environment.capabilities) ||
       (tag === WS_METHODS.memoryImportProvider &&
@@ -240,7 +255,7 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  return yield* method(dispatchInput).pipe(Effect.ensuring(completeObservation));
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(

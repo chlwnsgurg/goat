@@ -37,6 +37,7 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import { requestMemoryQuery } from "../rpc/client.ts";
 import {
   createMemoryEnvironmentAtoms,
   createMemoryTombstoneLedger,
@@ -282,13 +283,10 @@ const harness = Effect.fn(function* (
     ]),
   );
   const clock = yield* Clock.Clock;
+  const environments = { run, followStream, entries } as unknown as EnvironmentRegistry["Service"];
   const runtime = Atom.runtime(
     Layer.merge(
-      Layer.succeed(EnvironmentRegistry, {
-        run,
-        followStream,
-        entries,
-      } as unknown as EnvironmentRegistry["Service"]),
+      Layer.succeed(EnvironmentRegistry, environments),
       Layer.succeed(Clock.Clock, clock),
     ),
   );
@@ -326,6 +324,7 @@ const harness = Effect.fn(function* (
     otherQueue,
     rpc,
     runtime,
+    environments,
     ledger,
     recreate: () => createMemoryEnvironmentAtoms(runtime, ledger),
     historyInputs,
@@ -1736,9 +1735,14 @@ it.effect(
     ),
 );
 
-it.effect.each([undefined, false, true])(
-  "history gates refused opt-in on advertised capability: %s",
-  (supported) =>
+it.effect.each([
+  { advertised: undefined, dispatched: undefined },
+  { advertised: false, dispatched: false },
+  { advertised: true, dispatched: true },
+  { advertised: true, dispatched: undefined },
+])(
+  "history gates refused opt-in on atom and dispatch capabilities: %s",
+  ({ advertised: supported, dispatched }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const h = yield* harness();
@@ -1754,6 +1758,24 @@ it.effect.each([undefined, false, true])(
             },
           },
         } as ServerConfig);
+        yield* SubscriptionRef.set(
+          h.active,
+          Option.some({
+            client: h.rpc,
+            initialConfig: Effect.succeed({
+              ...config,
+              environment: {
+                ...config.environment,
+                capabilities: {
+                  memory: {
+                    protocolVersion: 1,
+                    ...(dispatched === undefined ? {} : { refusedReverts: dispatched }),
+                  },
+                },
+              },
+            } as ServerConfig),
+          } as unknown as RpcSession),
+        );
         const exposure = h.memory.exposureAtom(target);
         h.registry.mount(exposure);
         yield* Queue.offer(h.queue, signal("reset"));
@@ -1768,8 +1790,28 @@ it.effect.each([undefined, false, true])(
         yield* Deferred.succeed(h.reply, item);
         yield* waitFor(h.registry, body, Boolean);
         expect(h.historyInputs).toEqual([
-          { ...readTarget.input, limit: 10, ...(supported ? { includeRefusedReverts: true } : {}) },
+          {
+            ...readTarget.input,
+            limit: 10,
+            ...(supported && dispatched ? { includeRefusedReverts: true } : {}),
+          },
         ]);
       }),
     ),
+);
+
+// Direct helper callers bypass atom opt-in and still use the selected session gate.
+it.effect("direct history helper strips caller opt-in for an unsupported session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* harness();
+      yield* Deferred.succeed(h.reply, item);
+      const input = { ...readTarget.input, limit: 10, includeRefusedReverts: true as const };
+      yield* requestMemoryQuery(h.runtime, h.registry, env, WS_METHODS.memoryHistory, input).pipe(
+        Effect.provideService(EnvironmentRegistry, h.environments),
+      );
+      expect(h.historyInputs).toEqual([{ ...readTarget.input, limit: 10 }]);
+      expect(input.includeRefusedReverts).toBe(true);
+    }),
+  ),
 );
