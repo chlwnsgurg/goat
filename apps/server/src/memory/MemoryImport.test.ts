@@ -2242,7 +2242,7 @@ describe("MemoryImport M3d alias ownership", () => {
 });
 
 // Service-level source workload. Factory integration remains a separate L4 gate.
-const committedNoop = Effect.fnUntraced(function* (n: number, at = stamp) {
+const committedNoop = Effect.fnUntraced(function* (n: number, at = stamp, partial = false) {
   const ports = (yield* Service.MemoryService).importPorts;
   const reg = (yield* ports.readRegistration({ ...address, sourceId, by: "source" }, Effect.void))!;
   const previous = (yield* ports.readItem(
@@ -2257,7 +2257,25 @@ const committedNoop = Effect.fnUntraced(function* (n: number, at = stamp) {
     previous,
     next: { ...previous, outcome: "noop" as const },
     selection,
-    batch: { ...base.batch, createdAtUtc: at, selections: [selection] },
+    expectedHeads: [(previous.pending ?? previous.accepted)!.revisionId],
+    batch: {
+      ...base.batch,
+      createdAtUtc: at,
+      sessionId: reg.session!.sessionId,
+      receipt: { ...base.batch.receipt, sessionId: reg.session!.sessionId },
+      selections: partial
+        ? [
+            selection,
+            {
+              ...selection,
+              selector: { ...selection.selector, sourceItemKey: "unfinished" },
+              memoryId: M.MemoryId.make(uuid(n + 4)),
+              operationId: M.MemoryOperationId.make(uuid(n + 5)),
+              revisionId: M.MemoryRevisionId.make(uuid(n + 6)),
+            },
+          ]
+        : [selection],
+    },
   };
   yield* ports.commit(value, Effect.void);
   return value;
@@ -2282,7 +2300,34 @@ describe("MemoryImport shared settled noop", () => {
         const sql = yield* SqlClient.SqlClient;
         const a = yield* committedNoop(400);
         const expected = yield* service.importPorts.readReceipt(a.batch, Effect.void);
+        const reg = (yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        ))!;
+        yield* service.importPorts.saveRegistration(
+          {
+            ...address,
+            expectedVersion: reg.version,
+            next: {
+              ...reg,
+              version: reg.version + 1,
+              session: {
+                ...reg.session!,
+                sessionId: "session-2",
+                newItems: 0,
+                bodyBytes: 0,
+                applied: [],
+              },
+            },
+          },
+          Effect.void,
+        );
         const b = yield* committedNoop(410);
+        const otherReceipt = yield* service.importPorts.readReceipt(b.batch, Effect.void);
+        assert.strictEqual(otherReceipt.sessionId, "session-2");
+        assert.strictEqual(otherReceipt.sessionBodyBytes, 0);
+        assert.strictEqual(expected.sessionBodyBytes, 16);
+        assert.deepStrictEqual(otherReceipt.items, expected.items);
         const objects = yield* sql`SELECT * FROM memory_import_noop_results`;
         assert.strictEqual(objects.length, 1);
         const guards = yield* sql<{
@@ -2344,6 +2389,29 @@ describe("MemoryImport shared settled noop", () => {
       assert.strictEqual(changed._tag, "MemoryImportRpcError");
     }).pipe(Effect.provide(importLive)),
   );
+  it.effect("rolls back object insertion and final-reference retirement failures atomically", () =>
+    Effect.gen(function* () {
+      yield* approvedImport;
+      const ports = (yield* Service.MemoryService).importPorts;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TRIGGER fail_noop BEFORE INSERT ON memory_import_noop_results BEGIN SELECT RAISE(ABORT,'synthetic fault'); END`;
+      const before = yield* durableInventory;
+      assert.strictEqual((yield* committedNoop(400).pipe(Effect.exit))._tag, "Failure");
+      assert.deepStrictEqual(yield* durableInventory, before);
+      yield* sql`DROP TRIGGER fail_noop`;
+      const a = yield* committedNoop(400);
+      yield* sql`CREATE TRIGGER fail_gc BEFORE DELETE ON memory_import_noop_results BEGIN SELECT RAISE(ABORT,'synthetic fault'); END`;
+      const retained = yield* durableInventory;
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS);
+      assert.strictEqual(
+        (yield* ports.readReceipt(a.batch, Effect.void).pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      assert.deepStrictEqual(yield* durableInventory, retained);
+      yield* sql`DROP TRIGGER fail_gc`;
+      assert.strictEqual((yield* ports.preflightBatch(a.batch, Effect.void)).kind, "retired");
+    }).pipe(Effect.provide(importLive)),
+  );
   it.effect("fails closed on collision, broken reference and forged cross-origin result", () =>
     Effect.gen(function* () {
       yield* approvedImport;
@@ -2395,6 +2463,11 @@ describe("MemoryImport shared settled noop", () => {
         const a = prepared();
         yield* ports.commit(a, Effect.void);
         const b = yield* committedNoop(400);
+        const partial = yield* committedNoop(420, stamp, true);
+        assert.strictEqual(
+          (yield* ports.preflightBatch(partial.batch, Effect.void)).kind,
+          "partial",
+        );
         assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 0);
         const op = (yield* store.readOperation(space, a.selection.operationId))!;
         yield* store.acknowledgeOutbox(
@@ -2406,6 +2479,12 @@ describe("MemoryImport shared settled noop", () => {
           (yield* ports.readReceipt(b.batch, Effect.void)).items[0]!.outcome,
           "noop",
         );
+        const partialAfter = yield* ports.preflightBatch(partial.batch, Effect.void);
+        assert.strictEqual(partialAfter.kind, "partial");
+        if (partialAfter.kind === "partial") {
+          assert.strictEqual(partialAfter.batch.selections[0]!.settled, true);
+          assert.strictEqual(partialAfter.batch.selections[1]!.result, null);
+        }
         const c = yield* committedNoop(410);
         assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
         const before = yield* durableInventory;
