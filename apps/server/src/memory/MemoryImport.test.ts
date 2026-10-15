@@ -3,8 +3,6 @@ import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as TestClock from "effect/testing/TestClock";
-import * as Compactor from "./MemoryCompactor.ts";
-import * as Hub from "./MemoryHubService.ts";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
@@ -317,15 +315,6 @@ const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
       service.admitHubOperationTx({ authority, operation }),
     );
   }).pipe(Effect.provide(Layer.fresh(importLive)));
-const compactorLive = Compactor.layer.pipe(
-  Layer.provideMerge(importLive),
-  Layer.provideMerge(Hub.activityLayer),
-  Layer.provide(
-    Layer.succeed(Hub.MemoryHubConfiguration, {
-      read: Effect.succeed({ memorySpaceId: space, hubEnvironmentId: environmentId }),
-    }),
-  ),
-);
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const retired = Effect.fnUntraced(function* (p: PreparedImportCommit) {
   const sql = yield* SqlClient.SqlClient;
@@ -789,7 +778,6 @@ describe("MemoryImport settlement", () => {
     () =>
       Effect.gen(function* () {
         yield* setupImport;
-        yield* seedMember;
         const service = yield* Service.MemoryService;
         const store = yield* Store.MemoryStore;
         const first = prepared();
@@ -799,8 +787,7 @@ describe("MemoryImport settlement", () => {
         ))!;
         const receipt = yield* remoteApproval(operation);
         yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
-        // Still pending on the origin: an ordinary compaction must keep the detailed receipt.
-        yield* (yield* Compactor.MemoryCompactor).compact(authority.principal);
+        // Still pending on the origin: expiry cannot discard the detailed receipt.
         assert.strictEqual(
           (yield* store.transact(store.readImportBatchTx(first.batch)))?.kind,
           "detailed",
@@ -809,6 +796,7 @@ describe("MemoryImport settlement", () => {
           service.settleHubEntryTx({
             memorySpaceId: space,
             localEnvironmentId: environmentId,
+            hubEnvironmentId: environmentId,
             entry: {
               kind: "operation",
               hubSequence: receipt.hubSequence!,
@@ -824,7 +812,6 @@ describe("MemoryImport settlement", () => {
           ))!.pending,
           null,
         );
-        yield* (yield* Compactor.MemoryCompactor).compact(authority.principal);
         assert.strictEqual(
           (yield* store.transact(store.readImportBatchTx(first.batch)))?.kind,
           "retired",
@@ -838,6 +825,6 @@ describe("MemoryImport settlement", () => {
           .preflightBatch({ ...first.batch, selectionDigest: "f".repeat(64) }, Effect.void)
           .pipe(Effect.flip);
         assert.strictEqual(changed._tag, "MemoryImportRpcError");
-      }).pipe(Effect.provide(compactorLive)),
+      }).pipe(Effect.provide(importLive)),
   );
 });

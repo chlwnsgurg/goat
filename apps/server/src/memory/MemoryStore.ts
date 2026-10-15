@@ -3630,6 +3630,12 @@ const make = Effect.gen(function* () {
             "ack-settle",
             sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(acknowledged)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
           );
+        if (
+          result.outcome !== "rejected" &&
+          result.hubSequence !== null &&
+          "revision" in work.metadata
+        )
+          yield* persistImportLineageTx(lineageForRevision(work.metadata.revision));
         yield* settleImportOperationTx(
           yield* stored("import-settlement-space", decodeMemorySpaceId(work.space)),
           result,
@@ -5755,6 +5761,12 @@ const make = Effect.gen(function* () {
   const readImportBatchTx: ImportStorePorts["readImportBatchTx"] = Effect.fnUntraced(
     function* (input) {
       yield* Transaction;
+      yield* retireImportBatchesTx(
+        input.memorySpaceId,
+        yield* Clock.currentTimeMillis,
+        1,
+        input.operationId,
+      );
       const rows = yield* stored(
         "import-batch-read",
         sql<{
@@ -6008,6 +6020,7 @@ const make = Effect.gen(function* () {
     space: M.MemorySpaceId,
     now: number,
     limit: number,
+    operationId: M.MemoryOperationId | null = null,
   ) {
     yield* Transaction;
     const rows = yield* stored(
@@ -6015,6 +6028,7 @@ const make = Effect.gen(function* () {
       sql<{ receipt_id: string; completed_items_json: string }>`
       SELECT receipt_id,completed_items_json FROM memory_import_receipts b WHERE space=${space} AND record_kind='batch'
       AND json_extract(completed_items_json,'$.kind')='detailed'
+      AND (${operationId} IS NULL OR batch_operation_id=${operationId})
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
       AND NOT EXISTS (SELECT 1 FROM json_each(completed_items_json,'$.selections') s JOIN memory_import_receipts i
         ON i.space=b.space AND i.environment_id=b.environment_id AND i.record_kind='item'
