@@ -8432,7 +8432,7 @@ it.effect(
           .map((r) => r.detail)
           .join("\n");
         // Keep the actual SQLite plan in the focused-run evidence artifact.
-        console.info("A2 QUERY PLAN", table, details);
+        yield* Effect.logInfo("A2 QUERY PLAN", table, details);
         assert.match(details, /SEARCH/);
         assert.match(details, /\(space=\? AND memory_id=\?/);
         if (table === "memory_report_outbox") assert.include(details, "memory_report_memory_idx");
