@@ -1128,6 +1128,9 @@ it.effect("does not hand out a worker that reports ready after another read time
   ),
 );
 
+// Tests using this client run on it.live: its real worker can race the writer
+// with WAL recovery, and the writer's recovery retry waits on the clock, which
+// an unadvanced TestClock never moves.
 const withCheckpointClient = <A, E>(
   use: (
     sql: SqlClient.SqlClient,
@@ -1183,8 +1186,6 @@ const checkpointWorkerReply = (worker: NodeWorkerThreads.Worker) =>
       }),
   );
 
-// The real worker can race the writer with WAL recovery. Let the writer's
-// recovery retry advance on the live clock rather than an unadvanced TestClock.
 it.live("checkpoints the WAL on the worker instead of the writer", () =>
   withCheckpointClient((sql, filename) =>
     Effect.gen(function* () {
@@ -1222,7 +1223,7 @@ it.live("checkpoints the WAL on the worker instead of the writer", () =>
   ),
 );
 
-it.effect("hands checkpoints back to the writer when the worker stops", () =>
+it.live("hands checkpoints back to the writer when the worker stops", () =>
   withCheckpointClient((sql) =>
     Effect.gen(function* () {
       yield* Effect.promise(() => startedWorkers.at(-1)!.terminate());
@@ -1234,7 +1235,7 @@ it.effect("hands checkpoints back to the writer when the worker stops", () =>
   ),
 );
 
-it.effect("warns once and hands checkpoints back when the worker fails at startup", () => {
+it.live("warns once and hands checkpoints back when the worker fails at startup", () => {
   const { warnings, layer: logs } = captureWarnings();
   const reason = "SQLite 3.50.4 has no NOOP checkpoint";
   return Effect.acquireUseRelease(
@@ -1268,7 +1269,7 @@ it.effect("warns once and hands checkpoints back when the worker fails at startu
   ).pipe(Effect.provide(logs));
 });
 
-it.effect("does not warn when the client stops its checkpoint worker", () => {
+it.live("does not warn when the client stops its checkpoint worker", () => {
   const { warnings, layer: logs } = captureWarnings();
   return Effect.gen(function* () {
     yield* withCheckpointClient(() => Effect.void);
