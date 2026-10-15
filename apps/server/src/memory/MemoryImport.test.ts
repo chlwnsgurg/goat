@@ -2338,7 +2338,11 @@ describe("MemoryImport physical-growth source harness", () => {
                       const receipt = yield* store.transact(
                         service.admitHubOperationTx({ authority, operation }),
                       );
-                      assert.notStrictEqual(receipt.outcome, "rejected");
+                      assert.notStrictEqual(
+                        receipt.outcome,
+                        "rejected",
+                        encodeUnknown({ phase, round, index, receipt }),
+                      );
                       yield* store.acknowledgeOutbox(
                         `sync:${space}:${selection.operationId}`,
                         receipt,
