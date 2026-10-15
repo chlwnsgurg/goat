@@ -2137,227 +2137,253 @@ const growthLayer = (filename: string) => {
   );
 };
 describe("MemoryImport physical-growth source harness", () => {
-  it.effect("records deterministic 64 noop / 16 change / 32 forget-rebuild workload", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-growth-" });
-        const filename = `${directory}/synthetic.sqlite`;
-        yield* Effect.gen(function* () {
-          yield* TestClock.setTime(Date.parse(stamp));
-          yield* setupImport;
-          yield* seedMember;
-          const service = yield* Service.MemoryService;
-          const ports = service.importPorts;
-          const store = yield* Store.MemoryStore;
-          const worker = yield* Worker.MemoryWorker;
-          const compactor = yield* Compactor.MemoryCompactor;
-          const quota = yield* Quota.MemoryQuotaService;
-          const sql = yield* SqlClient.SqlClient;
-          const items = Array.from({ length: 64 }, (_, i) => ({
-            sourceItemKey: `growth-${i}`,
-            memoryId: M.MemoryId.make(uuid(10000 + Math.floor(i / 4))),
-          }));
-          const text = (identity: number, round: number) => {
-            const prefix = `Synthetic growth ${identity} round ${round} `;
-            return (
-              prefix +
-              "가".repeat(1300) +
-              "x".repeat(4096 - new TextEncoder().encode(prefix).length - 3900)
-            );
-          };
-          const digest = (value: string) =>
-            Service.memoryStableUuid(value).replaceAll("-", "").repeat(2);
-          let allocation = 20000;
-          const runRound = (phase: "seed" | "noop" | "change", round: number) =>
-            Effect.gen(function* () {
-              for (let chunk = 0; chunk < 2; chunk++) {
-                const reg = (yield* ports.readRegistration(
-                  { ...address, sourceId, by: "source" },
-                  Effect.void,
-                ))!;
-                const frozen = items.slice(chunk * 32, (chunk + 1) * 32).map((item, offset) => {
-                  allocation += 3;
-                  const body = text(
-                    Math.floor((chunk * 32 + offset) / 4),
-                    phase === "change" ? round : 0,
-                  );
-                  return {
-                    selector: {
-                      sourceItemKey: item.sourceItemKey,
-                      sourceFingerprint: digest(body),
-                      scope: { kind: "user" as const },
-                    },
-                    memoryId: item.memoryId,
-                    operationId: M.MemoryOperationId.make(uuid(allocation)),
-                    revisionId: M.MemoryRevisionId.make(uuid(allocation + 1)),
-                    result: null,
-                  };
-                });
-                allocation += 3;
-                const batchId = M.MemoryOperationId.make(uuid(allocation));
-                let batch: PreparedImportCommit["batch"] = {
-                  ...address,
-                  kind: "detailed",
-                  codecVersion: 1,
-                  sourceId,
-                  sessionId: reg.session!.sessionId,
-                  operationId: batchId,
-                  selectionDigest: digest(`${phase}/${round}/${chunk}`),
-                  selections: frozen,
-                  createdAtUtc: stamp,
-                  receipt: {
-                    operationId: batchId,
-                    sourceId,
-                    sessionId: reg.session!.sessionId,
-                    state: "partial",
-                    remaining: 32,
-                    items: [],
-                    sessionNewItems: 0,
-                    sessionBodyBytes: 0,
-                  },
-                };
-                for (const selection of frozen) {
-                  const index = items.findIndex(
-                    (i) => i.sourceItemKey === selection.selector.sourceItemKey,
-                  );
-                  const body = text(Math.floor(index / 4), phase === "change" ? round : 0);
-                  const previous =
-                    (yield* ports.readItem(
-                      { ...address, sourceId, sourceItemKey: selection.selector.sourceItemKey },
-                      Effect.void,
-                    )) ?? null;
-                  const target = yield* ports.prepareTarget(
-                    {
-                      ...address,
-                      memoryId: selection.memoryId,
-                      scope: { kind: "user" },
-                      acceptedRevisionId: previous?.accepted?.revisionId ?? null,
-                    },
-                    Effect.void,
-                  );
-                  const outcome: M.MemoryImportOutcome =
-                    phase === "noop"
-                      ? "noop"
-                      : previous
-                        ? target.heads.length === 1 &&
-                          target.heads[0] === previous.accepted?.revisionId
-                          ? "revised"
-                          : "conflicted"
-                        : target.alias
-                          ? "aliased"
-                          : "created";
-                  const candidate = {
-                    sourceItemKey: selection.selector.sourceItemKey,
-                    sourceFingerprint: selection.selector.sourceFingerprint,
-                    contentFingerprint: digest(body),
-                    byteCount: 4096,
-                    payload: {
-                      text: body,
-                      evidence: [
-                        { origin: "import" as const, importSourceId: sourceId, messageIds: [] },
-                      ],
-                      derivedFromMemoryRevisions: [],
-                    },
-                  };
-                  const next: ImportItem = {
-                    ...address,
-                    sourceId,
-                    codecVersion: 1,
-                    sourceItemKey: candidate.sourceItemKey,
-                    memoryId: selection.memoryId,
-                    scope: { kind: "user" },
-                    accepted: previous?.accepted ?? null,
-                    pending:
-                      outcome === "noop"
-                        ? (previous?.pending ?? null)
-                        : {
-                            sourceFingerprint: candidate.sourceFingerprint,
-                            contentFingerprint: candidate.contentFingerprint,
-                            revisionId: selection.revisionId,
-                            operationId: selection.operationId,
-                          },
-                    rejected: null,
-                    outcome,
-                  };
-                  const currentReg = (yield* ports.readRegistration(
+  it.effect(
+    "records deterministic 64 noop / 16 change / 32 forget-rebuild workload",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const directory = yield* fs.makeTempDirectoryScoped({ prefix: "wp5-growth-" });
+          const filename = `${directory}/synthetic.sqlite`;
+          yield* Effect.gen(function* () {
+            yield* TestClock.setTime(Date.parse(stamp));
+            yield* setupImport;
+            yield* seedMember;
+            const service = yield* Service.MemoryService;
+            const ports = service.importPorts;
+            const store = yield* Store.MemoryStore;
+            const worker = yield* Worker.MemoryWorker;
+            const compactor = yield* Compactor.MemoryCompactor;
+            const quota = yield* Quota.MemoryQuotaService;
+            const sql = yield* SqlClient.SqlClient;
+            const items = Array.from({ length: 64 }, (_, i) => ({
+              sourceItemKey: `growth-${i}`,
+              memoryId: M.MemoryId.make(uuid(10000 + Math.floor(i / 4))),
+            }));
+            const text = (identity: number, round: number) => {
+              const prefix = `Synthetic growth ${identity} round ${round} `;
+              return (
+                prefix +
+                "가".repeat(1300) +
+                "x".repeat(4096 - new TextEncoder().encode(prefix).length - 3900)
+              );
+            };
+            const digest = (value: string) =>
+              Service.memoryStableUuid(value).replaceAll("-", "").repeat(2);
+            let allocation = 20000;
+            const runRound = (phase: "seed" | "noop" | "change", round: number) =>
+              Effect.gen(function* () {
+                if (phase === "change") {
+                  const previousRegistration = (yield* ports.readRegistration(
                     { ...address, sourceId, by: "source" },
                     Effect.void,
                   ))!;
-                  yield* ports.commit(
+                  yield* ports.saveRegistration(
                     {
-                      registration: currentReg,
-                      registrationVersion: currentReg.version,
-                      batch,
-                      selection: batch.selections.find(
-                        (s) => s.operationId === selection.operationId,
-                      )!,
-                      candidate,
-                      previous,
-                      next,
-                      expectedHeads: target.heads,
-                      parents: previous?.accepted
-                        ? [previous.accepted.revisionId]
-                        : target.alias
-                          ? [target.alias.revision.revisionId]
-                          : [],
-                      projectBinding: null,
+                      ...address,
+                      expectedVersion: previousRegistration.version,
+                      next: {
+                        ...previousRegistration,
+                        version: previousRegistration.version + 1,
+                        session: {
+                          ...previousRegistration.session!,
+                          sessionId: `growth-change-${round}`,
+                          newItems: 0,
+                          bodyBytes: 0,
+                          applied: [],
+                        },
+                      },
                     },
                     Effect.void,
                   );
-                  if (outcome !== "noop") {
-                    const operation = (yield* store.readWorkOperation(
-                      `sync:${space}:${selection.operationId}`,
-                    ))!;
-                    const receipt = yield* store.transact(
-                      service.admitHubOperationTx({ authority, operation }),
-                    );
-                    assert.notStrictEqual(receipt.outcome, "rejected");
-                    yield* store.acknowledgeOutbox(
-                      `sync:${space}:${selection.operationId}`,
-                      receipt,
-                    );
-                  }
-                  const preflight = yield* ports.preflightBatch(
-                    { ...batch, selectionDigest: batch.selectionDigest },
-                    Effect.void,
-                  );
-                  if (preflight.kind === "partial") batch = preflight.batch;
                 }
-              }
-              yield* worker.drain;
-            });
-          const sample = (phase: string, iteration: number) =>
-            Effect.gen(function* () {
-              yield* worker.drain;
-              const checkpoint = yield* sql.unsafe<{
-                busy: number;
-                log: number;
-                checkpointed: number;
-              }>("PRAGMA wal_checkpoint(PASSIVE)");
-              const pages = (yield* sql.unsafe<{ page_count: number }>("PRAGMA page_count"))[0]!
-                .page_count;
-              const pageSize = (yield* sql.unsafe<{ page_size: number }>("PRAGMA page_size"))[0]!
-                .page_size;
-              const free = (yield* sql.unsafe<{ freelist_count: number }>(
-                "PRAGMA freelist_count",
-              ))[0]!.freelist_count;
-              const walBytes = yield* fs.stat(`${filename}-wal`).pipe(
-                Effect.map((s) => Number(s.size)),
-                Effect.orElseSucceed(() => null),
-              );
-              const growth = yield* quota.recordStorageSample(environmentId, { walBytes });
-              const counts = (yield* sql<{
-                identities: number;
-                bodies: number;
-                bodyBytes: number;
-                revisions: number;
-                lineage: number;
-                fts: number;
-                active: number;
-                receipts: number;
-                suppression: number;
-              }>`SELECT
+                for (let chunk = 0; chunk < 2; chunk++) {
+                  const reg = (yield* ports.readRegistration(
+                    { ...address, sourceId, by: "source" },
+                    Effect.void,
+                  ))!;
+                  const frozen = items.slice(chunk * 32, (chunk + 1) * 32).map((item, offset) => {
+                    allocation += 3;
+                    const body = text(
+                      Math.floor((chunk * 32 + offset) / 4),
+                      phase === "change" ? round : 0,
+                    );
+                    return {
+                      selector: {
+                        sourceItemKey: item.sourceItemKey,
+                        sourceFingerprint: digest(body),
+                        scope: { kind: "user" as const },
+                      },
+                      memoryId: item.memoryId,
+                      operationId: M.MemoryOperationId.make(uuid(allocation)),
+                      revisionId: M.MemoryRevisionId.make(uuid(allocation + 1)),
+                      result: null,
+                    };
+                  });
+                  allocation += 3;
+                  const batchId = M.MemoryOperationId.make(uuid(allocation));
+                  let batch: PreparedImportCommit["batch"] = {
+                    ...address,
+                    kind: "detailed",
+                    codecVersion: 1,
+                    sourceId,
+                    sessionId: reg.session!.sessionId,
+                    operationId: batchId,
+                    selectionDigest: digest(`${phase}/${round}/${chunk}`),
+                    selections: frozen,
+                    createdAtUtc: stamp,
+                    receipt: {
+                      operationId: batchId,
+                      sourceId,
+                      sessionId: reg.session!.sessionId,
+                      state: "partial",
+                      remaining: 32,
+                      items: [],
+                      sessionNewItems: 0,
+                      sessionBodyBytes: 0,
+                    },
+                  };
+                  for (const selection of frozen) {
+                    const index = items.findIndex(
+                      (i) => i.sourceItemKey === selection.selector.sourceItemKey,
+                    );
+                    const body = text(Math.floor(index / 4), phase === "change" ? round : 0);
+                    const previous =
+                      (yield* ports.readItem(
+                        { ...address, sourceId, sourceItemKey: selection.selector.sourceItemKey },
+                        Effect.void,
+                      )) ?? null;
+                    const target = yield* ports.prepareTarget(
+                      {
+                        ...address,
+                        memoryId: selection.memoryId,
+                        scope: { kind: "user" },
+                        acceptedRevisionId: previous?.accepted?.revisionId ?? null,
+                      },
+                      Effect.void,
+                    );
+                    const outcome: M.MemoryImportOutcome =
+                      phase === "noop"
+                        ? "noop"
+                        : previous
+                          ? target.heads.length === 1 &&
+                            target.heads[0] === previous.accepted?.revisionId
+                            ? "revised"
+                            : "conflicted"
+                          : target.alias
+                            ? "aliased"
+                            : "created";
+                    const candidate = {
+                      sourceItemKey: selection.selector.sourceItemKey,
+                      sourceFingerprint: selection.selector.sourceFingerprint,
+                      contentFingerprint: digest(body),
+                      byteCount: 4096,
+                      payload: {
+                        text: body,
+                        evidence: [
+                          { origin: "import" as const, importSourceId: sourceId, messageIds: [] },
+                        ],
+                        derivedFromMemoryRevisions: [],
+                      },
+                    };
+                    const next: ImportItem = {
+                      ...address,
+                      sourceId,
+                      codecVersion: 1,
+                      sourceItemKey: candidate.sourceItemKey,
+                      memoryId: selection.memoryId,
+                      scope: { kind: "user" },
+                      accepted: previous?.accepted ?? null,
+                      pending:
+                        outcome === "noop"
+                          ? (previous?.pending ?? null)
+                          : {
+                              sourceFingerprint: candidate.sourceFingerprint,
+                              contentFingerprint: candidate.contentFingerprint,
+                              revisionId: selection.revisionId,
+                              operationId: selection.operationId,
+                            },
+                      rejected: null,
+                      outcome,
+                    };
+                    const currentReg = (yield* ports.readRegistration(
+                      { ...address, sourceId, by: "source" },
+                      Effect.void,
+                    ))!;
+                    yield* ports.commit(
+                      {
+                        registration: currentReg,
+                        registrationVersion: currentReg.version,
+                        batch,
+                        selection: batch.selections.find(
+                          (s) => s.operationId === selection.operationId,
+                        )!,
+                        candidate,
+                        previous,
+                        next,
+                        expectedHeads: target.heads,
+                        parents: previous?.accepted
+                          ? [previous.accepted.revisionId]
+                          : target.alias
+                            ? [target.alias.revision.revisionId]
+                            : [],
+                        projectBinding: null,
+                      },
+                      Effect.void,
+                    );
+                    if (outcome !== "noop") {
+                      const operation = (yield* store.readWorkOperation(
+                        `sync:${space}:${selection.operationId}`,
+                      ))!;
+                      const receipt = yield* store.transact(
+                        service.admitHubOperationTx({ authority, operation }),
+                      );
+                      assert.notStrictEqual(receipt.outcome, "rejected");
+                      yield* store.acknowledgeOutbox(
+                        `sync:${space}:${selection.operationId}`,
+                        receipt,
+                      );
+                    }
+                    const preflight = yield* ports.preflightBatch(
+                      { ...batch, selectionDigest: batch.selectionDigest },
+                      Effect.void,
+                    );
+                    if (preflight.kind === "partial") batch = preflight.batch;
+                  }
+                }
+                yield* worker.drain;
+              });
+            const sample = (phase: string, iteration: number) =>
+              Effect.gen(function* () {
+                yield* worker.drain;
+                const checkpoint = yield* sql.unsafe<{
+                  busy: number;
+                  log: number;
+                  checkpointed: number;
+                }>("PRAGMA wal_checkpoint(PASSIVE)");
+                const pages = (yield* sql.unsafe<{ page_count: number }>("PRAGMA page_count"))[0]!
+                  .page_count;
+                const pageSize = (yield* sql.unsafe<{ page_size: number }>("PRAGMA page_size"))[0]!
+                  .page_size;
+                const free = (yield* sql.unsafe<{ freelist_count: number }>(
+                  "PRAGMA freelist_count",
+                ))[0]!.freelist_count;
+                const walBytes = yield* fs.stat(`${filename}-wal`).pipe(
+                  Effect.map((s) => Number(s.size)),
+                  Effect.orElseSucceed(() => null),
+                );
+                const growth = yield* quota.recordStorageSample(environmentId, { walBytes });
+                const counts = (yield* sql<{
+                  identities: number;
+                  bodies: number;
+                  bodyBytes: number;
+                  revisions: number;
+                  lineage: number;
+                  fts: number;
+                  active: number;
+                  receipts: number;
+                  suppression: number;
+                }>`SELECT
             (SELECT count(*) FROM memory_identity_ledger WHERE space=${space}) AS identities,
             (SELECT count(*) FROM memory_payloads WHERE space=${space}) AS bodies,
             (SELECT coalesce(sum(length(CAST(body_json AS BLOB))),0) FROM memory_payloads WHERE space=${space}) AS bodyBytes,
@@ -2366,135 +2392,136 @@ describe("MemoryImport physical-growth source harness", () => {
             (SELECT count(*) FROM memory_items_fts) AS fts,
             (SELECT count(*) FROM memory_items WHERE space=${space} AND status='active') AS active,
             (SELECT count(*) FROM memory_import_receipts WHERE space=${space}) AS receipts,
-            (SELECT count(*) FROM memory_suppressions WHERE space=${space}) AS suppression`)[0]!;
-              const metrics = {
-                phase,
-                iteration,
-                clock: yield* Clock.currentTimeMillis,
-                seed: "wp5-growth-v1",
-                allowanceBytes: 1048576,
-                drain: "MemoryWorker.drain",
-                pageSize,
-                pages,
-                free,
-                usedBytes: (pages - free) * pageSize,
-                allocatedBytes: pages * pageSize,
-                walBytes,
-                checkpoint: checkpoint[0] ?? null,
-                sample: growth.current,
-                counts,
-              };
-              yield* Effect.logInfo(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
-              return metrics;
-            });
-          yield* runRound("seed", 0);
-          const baseline = yield* sample("seed", 0);
-          assert.strictEqual(baseline.counts.identities, 16);
-          assert.strictEqual(baseline.counts.bodies, 16);
-          const noopSamples: (typeof baseline)[] = [];
-          for (let round = 1; round <= 64; round++) {
-            yield* runRound("noop", round);
-            if (round % 16 === 0) {
-              const measured = yield* sample("noop", round);
-              assert.deepStrictEqual(
-                [
-                  measured.counts.identities,
-                  measured.counts.bodies,
-                  measured.counts.bodyBytes,
-                  measured.counts.revisions,
-                  measured.counts.lineage,
-                  measured.counts.fts,
-                ],
-                [
-                  baseline.counts.identities,
-                  baseline.counts.bodies,
-                  baseline.counts.bodyBytes,
-                  baseline.counts.revisions,
-                  baseline.counts.lineage,
-                  baseline.counts.fts,
-                ],
-              );
-              noopSamples.push(measured);
-            }
-          }
-          for (let round = 1; round <= 16; round++) {
-            yield* runRound("change", round);
-            if (round % 4 === 0) yield* sample("change", round);
-          }
-          const changed = yield* sample("change", 16);
-          const oldHeads = new Map<M.MemoryId, M.MemoryRevisionId>();
-          for (let index = 0; index < 16; index++) {
-            const id = M.MemoryId.make(uuid(10000 + index));
-            const target = yield* store.loadAggregate(space, id);
-            oldHeads.set(id, target.heads[0]!);
-            const operationId = M.MemoryOperationId.make(uuid(90000 + index));
-            yield* service.forget(
-              { memorySpaceId: space, memoryId: id, operationId, expectedHeads: target.heads },
-              Effect.void,
-            );
-            const operation = (yield* store.readWorkOperation(`sync:${space}:${operationId}`))!;
-            const receipt = yield* store.transact(
-              service.admitHubOperationTx({ authority, operation }),
-            );
-            yield* store.acknowledgeOutbox(`sync:${space}:${operationId}`, receipt);
-          }
-          yield* worker.drain;
-          const horizon = Math.max(
-            M.MEMORY_IMPORT_BATCH_RETENTION_MS,
-            M.MEMORY_LOG_RETENTION_MS,
-            M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS,
-          );
-          const rebuildSamples: (typeof baseline)[] = [];
-          for (let cycle = 1; cycle <= 32; cycle++) {
-            yield* TestClock.setTime(Date.parse(stamp) + cycle * (horizon - 1));
-            yield* compactor.compact(authority.principal);
-            yield* worker.drain;
-            for (const [id, revisionId] of oldHeads) {
-              const current = yield* store.loadAggregate(space, id);
-              yield* store.enqueueWork({
-                id: `growth-rebuild:${cycle}:${id}`,
-                space,
-                memoryId: id,
-                kind: "rebuild",
-                status: "pending",
-                metadata: { kind: "rebuild", revisionId, generation: current.generation },
-                payloadRef: null,
-                attempt: 0,
-                nextAttemptAt: 0,
-                claimedBy: null,
-                claimedUntil: null,
+            (SELECT count(*) FROM memory_import_keys WHERE space=${space} AND key_kind IN ('sourceKey','content','sourceExclusion')) AS suppression`)[0]!;
+                const metrics = {
+                  phase,
+                  iteration,
+                  clock: yield* Clock.currentTimeMillis,
+                  seed: "wp5-growth-v1",
+                  allowanceBytes: 1048576,
+                  drain: "MemoryWorker.drain",
+                  pageSize,
+                  pages,
+                  free,
+                  usedBytes: (pages - free) * pageSize,
+                  allocatedBytes: pages * pageSize,
+                  walBytes,
+                  checkpoint: checkpoint[0] ?? null,
+                  sample: growth.current,
+                  counts,
+                };
+                yield* Effect.logInfo(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
+                return metrics;
               });
+            yield* runRound("seed", 0);
+            const baseline = yield* sample("seed", 0);
+            assert.strictEqual(baseline.counts.identities, 16);
+            assert.strictEqual(baseline.counts.bodies, 16);
+            const noopSamples: (typeof baseline)[] = [];
+            for (let round = 1; round <= 64; round++) {
+              yield* runRound("noop", round);
+              if (round % 16 === 0) {
+                const measured = yield* sample("noop", round);
+                assert.deepStrictEqual(
+                  [
+                    measured.counts.identities,
+                    measured.counts.bodies,
+                    measured.counts.bodyBytes,
+                    measured.counts.revisions,
+                    measured.counts.lineage,
+                    measured.counts.fts,
+                  ],
+                  [
+                    baseline.counts.identities,
+                    baseline.counts.bodies,
+                    baseline.counts.bodyBytes,
+                    baseline.counts.revisions,
+                    baseline.counts.lineage,
+                    baseline.counts.fts,
+                  ],
+                );
+                noopSamples.push(measured);
+              }
+            }
+            for (let round = 1; round <= 16; round++) {
+              yield* runRound("change", round);
+              if (round % 4 === 0) yield* sample("change", round);
+            }
+            const changed = yield* sample("change", 16);
+            const oldHeads = new Map<M.MemoryId, M.MemoryRevisionId>();
+            for (let index = 0; index < 16; index++) {
+              const id = M.MemoryId.make(uuid(10000 + index));
+              const target = yield* store.loadAggregate(space, id);
+              oldHeads.set(id, target.heads[0]!);
+              const operationId = M.MemoryOperationId.make(uuid(90000 + index));
+              yield* service.forget(
+                { memorySpaceId: space, memoryId: id, operationId, expectedHeads: target.heads },
+                Effect.void,
+              );
+              const operation = (yield* store.readWorkOperation(`sync:${space}:${operationId}`))!;
+              const receipt = yield* store.transact(
+                service.admitHubOperationTx({ authority, operation }),
+              );
+              yield* store.acknowledgeOutbox(`sync:${space}:${operationId}`, receipt);
             }
             yield* worker.drain;
-            const measured = yield* sample("rebuild", cycle);
-            assert.strictEqual(measured.counts.bodies, 0);
-            assert.strictEqual(measured.counts.fts, 0);
-            rebuildSamples.push(measured);
-          }
-          // Keep unsupported metrics explicit. Source measurements do not certify packaging.
-          const spread = (samples: readonly (typeof baseline)[]) =>
-            Math.max(...samples.map((s) => s.usedBytes)) -
-            Math.min(...samples.map((s) => s.usedBytes));
-          yield* Effect.logInfo(
-            `WP5_GROWTH_GATES ${encodeUnknown({ noopSpreadBytes: spread(noopSamples), rebuildSpreadBytes: spread(rebuildSamples.slice(8)), activeAfterChange: changed.counts.active, allowanceBytes: 1048576, packaged: "NOT_RUN" })}`,
-          );
-          assert.strictEqual(
-            changed.counts.active,
-            16,
-            "all changed aliases must converge to 16 live identities",
-          );
-          assert.isAtMost(
-            spread(noopSamples),
-            1048576,
-            "noop physical growth must plateau after warmup",
-          );
-          assert.isAtMost(
-            spread(rebuildSamples.slice(8)),
-            1048576,
-            "forget-rebuild physical growth must plateau after warmup",
-          );
-        }).pipe(Effect.provide(growthLayer(filename)));
-      }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+            const horizon = Math.max(
+              M.MEMORY_IMPORT_BATCH_RETENTION_MS,
+              M.MEMORY_LOG_RETENTION_MS,
+              M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS,
+            );
+            const rebuildSamples: (typeof baseline)[] = [];
+            for (let cycle = 1; cycle <= 32; cycle++) {
+              yield* TestClock.setTime(Date.parse(stamp) + cycle * (horizon - 1));
+              yield* compactor.compact(authority.principal);
+              yield* worker.drain;
+              for (const [id, revisionId] of oldHeads) {
+                const current = yield* store.loadAggregate(space, id);
+                yield* store.enqueueWork({
+                  id: `growth-rebuild:${cycle}:${id}`,
+                  space,
+                  memoryId: id,
+                  kind: "rebuild",
+                  status: "pending",
+                  metadata: { kind: "rebuild", revisionId, generation: current.generation },
+                  payloadRef: null,
+                  attempt: 0,
+                  nextAttemptAt: 0,
+                  claimedBy: null,
+                  claimedUntil: null,
+                });
+              }
+              yield* worker.drain;
+              const measured = yield* sample("rebuild", cycle);
+              assert.strictEqual(measured.counts.bodies, 0);
+              assert.strictEqual(measured.counts.fts, 0);
+              rebuildSamples.push(measured);
+            }
+            // Keep unsupported metrics explicit. Source measurements do not certify packaging.
+            const spread = (samples: readonly (typeof baseline)[]) =>
+              Math.max(...samples.map((s) => s.usedBytes)) -
+              Math.min(...samples.map((s) => s.usedBytes));
+            yield* Effect.logInfo(
+              `WP5_GROWTH_GATES ${encodeUnknown({ noopSpreadBytes: spread(noopSamples), rebuildSpreadBytes: spread(rebuildSamples.slice(8)), activeAfterChange: changed.counts.active, allowanceBytes: 1048576, packaged: "NOT_RUN" })}`,
+            );
+            assert.strictEqual(
+              changed.counts.active,
+              16,
+              "all changed aliases must converge to 16 live identities",
+            );
+            assert.isAtMost(
+              spread(noopSamples),
+              1048576,
+              "noop physical growth must plateau after warmup",
+            );
+            assert.isAtMost(
+              spread(rebuildSamples.slice(8)),
+              1048576,
+              "forget-rebuild physical growth must plateau after warmup",
+            );
+          }).pipe(Effect.provide(growthLayer(filename)));
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+    { timeout: 1800000 },
   );
 });
