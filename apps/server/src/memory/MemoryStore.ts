@@ -1678,7 +1678,7 @@ export class MemoryStore extends Context.Service<
       delivery: M.MemoryReportDelivery;
       owner: M.EnvironmentId;
       claimUntil: number;
-    }) => Effect.Effect<boolean, MemoryStorageError | MemoryStoreConflict>;
+    }) => Effect.Effect<boolean, MemoryStorageError | MemoryStoreConflict | MemoryCapacityError>;
     readonly deferClaimedReport: (input: {
       reportId: string;
       owner: M.EnvironmentId;
@@ -5289,25 +5289,27 @@ const make = Effect.gen(function* () {
     "MemoryStore.acknowledgeClaimedReport",
   )(function* (input) {
     return yield* transact(
-      Effect.gen(function* () {
-        const d = yield* stored("report-ack-codec", decodeReport(input.delivery, strict));
-        if (
-          d.state !== "delivered" ||
-          !d.reportThread ||
-          d.sequence === null ||
-          d.reportThread.environmentId !== input.owner
-        )
-          return false;
-        const now = yield* Clock.currentTimeMillis;
-        const rows = yield* stored(
-          "report-ack-cas",
-          sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${d.reportId} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND resolving_environment_id=${input.owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed'))`,
-        );
-        if (!rows.length) return false;
-        yield* acknowledgeReport(d);
-        yield* markRunnable;
-        return true;
-      }),
+      withHubBudget(
+        Effect.gen(function* () {
+          const d = yield* stored("report-ack-codec", decodeReport(input.delivery, strict));
+          if (
+            d.state !== "delivered" ||
+            !d.reportThread ||
+            d.sequence === null ||
+            d.reportThread.environmentId !== input.owner
+          )
+            return false;
+          const now = yield* Clock.currentTimeMillis;
+          const rows = yield* stored(
+            "report-ack-cas",
+            sql`SELECT 1 FROM memory_report_outbox WHERE report_id=${d.reportId} AND claimed_by=${input.owner} AND claimed_until=${input.claimUntil} AND claimed_until>${now} AND resolving_environment_id=${input.owner} AND state!='delivered' AND report_approved=1 AND report_kind IN ('resolve','revert','conflict_failure') AND ((report_kind='resolve' AND outcome='resolved') OR (report_kind='revert' AND outcome='reverted') OR (report_kind='conflict_failure' AND outcome='failed'))`,
+          );
+          if (!rows.length) return false;
+          yield* acknowledgeReport(d);
+          yield* markRunnable;
+          return true;
+        }),
+      ),
     );
   });
   const deferClaimedReport: MemoryStore["Service"]["deferClaimedReport"] = Effect.fn(

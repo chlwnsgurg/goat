@@ -413,3 +413,56 @@ it.effect("active tenth claim can acknowledge and target contradictions stay una
     assert.isNull(yield* store.readReportTarget(r.reportId));
   }).pipe(Effect.provide(live)),
 );
+
+it.effect("delivered guards stay charged at the permanent metadata equality and +1 boundary", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(0);
+    const store = yield* Store.MemoryStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* insert(1);
+    yield* insert(2);
+    const reports = yield* store.acquireReports({ owner, now: 0, until: 1000, limit: 2 });
+    const used = Effect.map(
+      sql<{
+        value: number;
+      }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='hub_metadata' AND scope_key=''`,
+      (rows) => rows[0]!.value,
+    );
+    const before = yield* used;
+    let delta = 0;
+    yield* store
+      .transact(
+        Effect.gen(function* () {
+          yield* store.acknowledgeClaimedReport({
+            delivery: delivered(reports[0]!),
+            owner,
+            claimUntil: 1000,
+          });
+          delta = (yield* used) - before;
+          return yield* Effect.fail("rollback");
+        }),
+      )
+      .pipe(Effect.exit);
+    assert.isTrue(delta > 0);
+    yield* sql`UPDATE memory_quota_counters SET value=${M.MEMORY_PERMANENT_METADATA_MAX_BYTES - delta} WHERE space='_hub_global' AND dimension='hub_metadata' AND scope_key=''`;
+    assert.isTrue(
+      yield* store.acknowledgeClaimedReport({
+        delivery: delivered(reports[0]!),
+        owner,
+        claimUntil: 1000,
+      }),
+    );
+    assert.strictEqual(yield* used, M.MEMORY_PERMANENT_METADATA_MAX_BYTES);
+    yield* sql`UPDATE memory_quota_counters SET value=${M.MEMORY_PERMANENT_METADATA_MAX_BYTES - delta + 1} WHERE space='_hub_global' AND dimension='hub_metadata' AND scope_key=''`;
+    const snapshot = yield* counters;
+    const error = yield* store
+      .acknowledgeClaimedReport({ delivery: delivered(reports[1]!), owner, claimUntil: 1000 })
+      .pipe(Effect.flip);
+    assert.strictEqual(error._tag, "MemoryCapacityError");
+    assert.deepStrictEqual(yield* counters, snapshot);
+    assert.strictEqual(
+      (yield* sql`SELECT 1 FROM memory_import_keys WHERE key_kind='report_delivered'`).length,
+      1,
+    );
+  }).pipe(Effect.provide(live)),
+);
