@@ -1687,7 +1687,8 @@ export const MemoryHubSettingsView = struct({
 }).check(
   Schema.makeFilter(
     (view) =>
-      (view.settings.mode === "hub" || view.members.length === 0) &&
+      ((view.settings.mode === "hub" && view.settings.memorySpaceId !== null) ||
+        view.members.length === 0) &&
       unique(view.members.map((member) => member.environmentId)),
   ),
 );

@@ -2230,7 +2230,7 @@ describe("MemoryStore hub administration", () => {
         memorySpaceId: space,
         environmentId: env,
         expectedCredentialVersion: null,
-        next: { credentialDigest: "a".repeat(64), credentialVersion: 1 },
+        next: { credentialDigest: "a".repeat(64) },
         now: 100,
       };
       const member = yield* store.transact(store.activateHubMemberTx(activation));
@@ -2243,7 +2243,7 @@ describe("MemoryStore hub administration", () => {
           ...activation,
           requestId: rotate.requestId,
           expectedCredentialVersion: 1,
-          next: { credentialDigest: "c".repeat(64), credentialVersion: 2 },
+          next: { credentialDigest: "c".repeat(64) },
         }),
       );
       assert.isUndefined(yield* store.findHubMemberByCredential("a".repeat(64)));
@@ -2293,7 +2293,7 @@ describe("MemoryStore hub administration", () => {
               memorySpaceId: space,
               environmentId: env,
               expectedCredentialVersion: null,
-              next: { credentialDigest: "a".repeat(64), credentialVersion: 1 },
+              next: { credentialDigest: "a".repeat(64) },
               now: 0,
             });
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
@@ -2346,7 +2346,7 @@ describe("MemoryStore hub administration", () => {
           memorySpaceId: space,
           environmentId: env,
           expectedCredentialVersion: null,
-          next: { credentialDigest: hash, credentialVersion: 1 },
+          next: { credentialDigest: hash },
           now: 0,
         };
         yield* store
@@ -2799,6 +2799,26 @@ describe("MemoryStore transient source relay", () => {
         }>`SELECT record_json FROM memory_import_keys WHERE key_kind='hub_source_fences'`;
         assert.strictEqual(fences.length, 1);
       }).pipe(Effect.provide(live)),
+  );
+
+  it.effect("refuses absent requester revoke without a durable membership high-water", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const store = yield* Store.MemoryStore;
+      const result = yield* store
+        .transact(
+          store.respondHubSourceReadTx(authority(owner), {
+            protocolVersion: 1,
+            kind: "revoke",
+            memorySpaceId: space,
+            requesterEnvironmentId: M.EnvironmentId.make("absent"),
+            ownerPolicyEpoch: 2,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.strictEqual(result._tag, "MemoryHubError");
+      if (result._tag === "MemoryHubError") assert.strictEqual(result.code, "identity_mismatch");
+    }).pipe(Effect.provide(live)),
   );
 
   it.effect.each(["legacy", "digest", "deadline", "credential"] as const)(

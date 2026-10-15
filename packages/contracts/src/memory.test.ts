@@ -1866,6 +1866,7 @@ describe("hub settings roster boundary", () => {
       rejects(M.MemoryHubSettingsView, { ...view, members: [{ ...member, ...patch }] });
     for (const settings of [
       { mode: "disabled" },
+      { mode: "hub", memorySpaceId: null },
       {
         mode: "member",
         hubEnvironmentId: "hub",
