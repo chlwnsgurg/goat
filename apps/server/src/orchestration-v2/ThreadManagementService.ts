@@ -699,6 +699,17 @@ const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const policy = yield* readMemoryPolicy;
+      // Only this destination can pass the per-record checks below. Share its
+      // execution judgment lazily within this response, never across requests.
+      const memoryAccessInputs = yield* Effect.cached(
+        Effect.suspend(
+          () =>
+            sessions.memoryAccessInputs?.(
+              projection.thread.id,
+              projection.thread.providerInstanceId,
+            ) ?? Effect.succeed(undefined),
+        ),
+      );
       const scheduledMessages = new Set(
         projection.messages
           ?.filter((message) => message.scheduledTaskId !== undefined)
@@ -739,12 +750,7 @@ const make = Effect.gen(function* () {
             destination.providerInstanceId !== instanceId
           )
             return saved;
-          const inputs =
-            threadId === null
-              ? undefined
-              : yield* (
-                  sessions.memoryAccessInputs?.(threadId, instanceId) ?? Effect.succeed(undefined)
-                );
+          const inputs = yield* memoryAccessInputs;
           const matches =
             inputs !== undefined &&
             inputs.memoryGrantCeiling === record.memoryGrantCeiling &&

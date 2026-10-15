@@ -90,6 +90,7 @@ it.effect(
         memoryGrantCeiling: "read_write" as const,
       };
       let inputs: Sessions.ProviderMemoryPrepareInput | undefined = { ...prepared, readOnly: true };
+      let memoryAccessInputCalls = 0;
       let currentMemoryGrant = "read" as "read" | "read_write";
       const settingsLayer = Settings.layerTest();
       const layer = Threads.layer.pipe(
@@ -99,11 +100,12 @@ it.effect(
             Receipts.layer.pipe(Layer.provide(Persistence.layerMemory)),
             Layer.mock(Sessions.ProviderSessionManagerV2)({
               memoryAccessInputs: (_thread, provider) =>
-                Effect.sync(() =>
-                  provider === shell.providerInstanceId && inputs
+                Effect.sync(() => {
+                  memoryAccessInputCalls++;
+                  return provider === shell.providerInstanceId && inputs
                     ? { ...inputs, currentMemoryGrant }
-                    : undefined,
-                ),
+                    : undefined;
+                }),
             }),
             Layer.mock(Orchestrator.OrchestratorV2)({
               getThreadProjection: () => Effect.succeed(source),
@@ -179,6 +181,37 @@ it.effect(
         expect((yield* threads.getThreadProjection(shell.id)).runs[0]?.currentMemoryAccess).toEqual(
           { access: "read_write", reason: "ceiling" },
         );
+        // Full records may include an unbounded history of positive ceilings.
+        const pastRuns = Array.from({ length: 32 }, (_, index) => ({
+          ...run,
+          id: RunId.make(`past-access-run-${index}`),
+          ordinal: index + 2,
+        }));
+        recordsSource = { ...source, runs: [...pastRuns, run] };
+        memoryAccessInputCalls = 0;
+        const records = yield* threads.getThreadRecords(shell.id, ["runs"]);
+        expect(memoryAccessInputCalls).toBe(1);
+        for (const past of records.runs.slice(0, -1)) {
+          expect(past).not.toHaveProperty("currentMemoryAccess");
+        }
+        expect(records.runs.at(-1)?.currentMemoryAccess).toEqual({
+          access: "read_write",
+          reason: "ceiling",
+        });
+        // A new response must evaluate execution policy again.
+        currentMemoryGrant = "read";
+        const nextRecords = yield* threads.getThreadRecords(shell.id, ["runs"]);
+        expect(memoryAccessInputCalls).toBe(2);
+        expect(nextRecords.runs.at(-1)?.currentMemoryAccess?.access).toBe("read");
+        for (const past of nextRecords.runs.slice(0, -1)) {
+          expect(past).not.toHaveProperty("currentMemoryAccess");
+        }
+        currentMemoryGrant = "read_write";
+        // Destination rejection does not force the lazy execution judgment.
+        recordsSource = { ...recordsSource, thread: { ...source.thread, archivedAt: now } };
+        memoryAccessInputCalls = 0;
+        yield* threads.getThreadRecords(shell.id, ["runs"]);
+        expect(memoryAccessInputCalls).toBe(0);
         for (const destination of [
           { ...source.thread, archivedAt: now },
           { ...source.thread, deletedAt: now },
