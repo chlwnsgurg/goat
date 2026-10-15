@@ -202,7 +202,9 @@ export const buildMemoryImportFixture = (
   Effect.gen(function* () {
     const sandbox = yield* Effect.acquireRelease(
       Effect.sync(() =>
-        NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "goat-memory-import-fixture-")),
+        NodeFS.mkdtempSync(
+          NodePath.join(NodeFS.realpathSync(NodeOS.tmpdir()), "goat-memory-import-fixture-"),
+        ),
       ),
       (path) => Effect.sync(() => NodeFS.rmSync(path, { recursive: true, force: true })),
     );

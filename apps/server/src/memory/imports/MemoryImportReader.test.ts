@@ -5,6 +5,9 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Reader from "./MemoryImportReader.ts";
+import type { MemoryImportFixture } from "./MemoryImportFixtures.fixture.ts";
 import {
   MEMORY_IMPORT_FIXTURE_PROFILES,
   buildMemoryImportFault,
@@ -194,4 +197,317 @@ describe("MemoryImportFixtures frozen API", () => {
       assert.deepEqual(item.aliases, changed[index]!.aliases);
     }
   });
+});
+
+const readerConfig = (
+  fixture: MemoryImportFixture,
+  root = fixture.trustedRoot,
+): Reader.MemoryImportReaderConfig => ({
+  stateDir: fixture.stateDir,
+  roots: [{ format: fixture.snapshot.format, rootSlot: "fixture-root", path: root }],
+  gitExecutable: "/usr/bin/git",
+  descriptorExecutable: "/usr/bin/python3",
+});
+const residue = (fixture: MemoryImportFixture) =>
+  NodeFS.readdirSync(NodePath.join(fixture.stateDir, "memory-import", "snapshots"));
+
+describe("MemoryImportReader", () => {
+  it.effect.each(MEMORY_IMPORT_FIXTURE_PROFILES)(
+    "reads %s without changing original bytes or Git state",
+    (profile) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture(profile);
+          const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          const value = yield* reader.read({ slot: fixture.snapshot.slot });
+          assert.deepEqual(value.files, fixture.snapshot.files);
+          assert.equal(value.profile, profile);
+          assert.equal(value.commitOid, fixture.snapshot.commitOid);
+          assert.equal(value.sourceLocator.includes(fixture.sandbox), false);
+          assert.equal("sourceId" in value, false);
+          assert.equal("environmentId" in value, false);
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+          const discovered = yield* reader.discover({ format: fixture.snapshot.format });
+          assert.equal(discovered.length, 1);
+          assert.deepEqual(discovered[0]!.slot, fixture.snapshot.slot);
+          assert.equal(discovered[0]!.parserVersion, profile);
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+        }),
+      ),
+  );
+
+  const faults = [
+    ["symlink-root", "path_rejected"],
+    ["symlink-ancestor", "path_rejected"],
+    ["symlink-file", "path_rejected"],
+    ["traversal", "path_rejected"],
+    ["malformed-utf8", "invalid_utf8"],
+    ["nul", "path_rejected"],
+    ["oversized-file", "limit_exceeded"],
+    ["secret-header", "secret_detected"],
+    ["git-symlink", "path_rejected"],
+    ["gitlink", "path_rejected"],
+    ["gitfile", "path_rejected"],
+    ["commondir", "path_rejected"],
+    ["alternates", "path_rejected"],
+    ["http-alternates", "path_rejected"],
+    ["metadata-symlink", "path_rejected"],
+    ["config-include", "path_rejected"],
+    ["missing-object", "source_unreadable"],
+  ] as const;
+  it.effect.each(faults)("refuses %s with no source changes", ([fault, issue]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const gitFault = [
+          "git-symlink",
+          "gitlink",
+          "gitfile",
+          "commondir",
+          "alternates",
+          "http-alternates",
+          "metadata-symlink",
+          "config-include",
+          "missing-object",
+        ].includes(fault);
+        const fixture = yield* buildMemoryImportFixture(
+          gitFault ? "omo-memory-core-beta63" : "codex-handbook-v1",
+        );
+        const input = buildMemoryImportFault(fixture, fault);
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture, input.root));
+        const before = captureMemoryImportInventory(fixture.sandbox);
+        const failure = yield* Effect.flip(reader.read({ slot: input.slot }));
+        assert.equal(failure.issue, issue);
+        assert.equal(failure.message.includes(fixture.sandbox), false);
+        assert.deepEqual(captureMemoryImportInventory(fixture.sandbox), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("accepts exactly 256 KiB, refuses +1 without partial text", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1", {
+          files: { "extensions/ad_hoc/notes/equal.md": "a".repeat(262144) },
+        });
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        assert.equal(
+          (yield* reader.read({ slot: fixture.snapshot.slot })).files[0]!.byteCount,
+          262144,
+        );
+        NodeFS.appendFileSync(
+          NodePath.join(fixture.sourceRoot, "extensions/ad_hoc/notes/equal.md"),
+          "a",
+        );
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "limit_exceeded",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("counts excluded entries at equality and +1", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        // Three builder files plus 509 excluded entries = 512 visited entries.
+        for (let i = 0; i < 509; i++)
+          NodeFS.writeFileSync(NodePath.join(fixture.sourceRoot, `excluded-${i}`), "");
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        assert.equal((yield* reader.read({ slot: fixture.snapshot.slot })).files.length, 1);
+        NodeFS.writeFileSync(NodePath.join(fixture.sourceRoot, "excluded-plus-one"), "");
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "limit_exceeded",
+        );
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect("bounds traversal depth at equality and +1 even for excluded directories", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const path = NodePath.join(
+          fixture.sourceRoot,
+          ...Array.from({ length: 7 }, () => "nested"),
+        );
+        NodeFS.mkdirSync(path, { recursive: true });
+        NodeFS.writeFileSync(NodePath.join(path, "leaf"), "");
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        yield* reader.read({ slot: fixture.snapshot.slot });
+        NodeFS.mkdirSync(NodePath.join(path, "one-more"));
+        NodeFS.writeFileSync(NodePath.join(path, "one-more", "leaf"), "");
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "limit_exceeded",
+        );
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
+
+  it.effect(
+    "reserves two slots before allocation, refuses a third and shares accounting across readers",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+          const a = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+          const b = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          const results = yield* Effect.all(
+            [a, b, a].map((reader) => Effect.result(reader.read({ slot: fixture.snapshot.slot }))),
+            { concurrency: "unbounded" },
+          );
+          assert.equal(results.filter((value) => value._tag === "Success").length, 2);
+          const failures = results.filter((value) => value._tag === "Failure");
+          assert.equal(failures.length, 1);
+          assert.equal(
+            failures[0]!._tag === "Failure" && failures[0]!.failure.issue,
+            "limit_exceeded",
+          );
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+          yield* a.read({ slot: fixture.snapshot.slot });
+        }),
+      ),
+  );
+
+  it.effect("interruption releases all owned snapshots before returning", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        const fiber = yield* Effect.forkChild(reader.read({ slot: fixture.snapshot.slot }));
+        yield* Fiber.interrupt(fiber);
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+        yield* reader.read({ slot: fixture.snapshot.slot });
+      }),
+    ),
+  );
+
+  it.effect("closed acquisition cannot be reused", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const reader = yield* Effect.scoped(
+          Reader.acquireMemoryImportReader(readerConfig(fixture)),
+        );
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "source_unreadable",
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "startup removes bounded residue and rejects foreign entries or symlink ancestors",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+          const config = readerConfig(fixture);
+          yield* Reader.cleanupMemoryImportSnapshots(config);
+          const base = NodePath.join(fixture.stateDir, "memory-import", "snapshots");
+          const old = NodePath.join(base, "snapshot-00000000-0000-0000-0000-000000000000");
+          NodeFS.mkdirSync(old, { mode: 0o700 });
+          NodeFS.writeFileSync(NodePath.join(old, "raw"), "Synthetic residue", { mode: 0o600 });
+          yield* Reader.cleanupMemoryImportSnapshots(config);
+          assert.deepEqual(residue(fixture), []);
+          NodeFS.symlinkSync(
+            fixture.sourceRoot,
+            NodePath.join(base, "snapshot-00000000-0000-0000-0000-000000000000"),
+          );
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          assert.equal(
+            (yield* Effect.flip(Reader.cleanupMemoryImportSnapshots(config))).issue,
+            "path_rejected",
+          );
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        }),
+      ),
+  );
+
+  it.effect("startup cannot clean active readers", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
+        const config = readerConfig(fixture);
+        yield* Reader.acquireMemoryImportReader(config);
+        assert.equal(
+          (yield* Effect.flip(Reader.cleanupMemoryImportSnapshots(config))).issue,
+          "source_unreadable",
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "Git isolation ignores inherited config injection and executes only against owned snapshots",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+          const wrapper = NodePath.join(fixture.sandbox, "git-isolation");
+          NodeFS.writeFileSync(
+            wrapper,
+            `#!/bin/sh
+[ -z "\${GIT_CONFIG_COUNT+x}" ] || exit 91
+[ -z "\${GIT_ASKPASS+x}" ] || exit 92
+[ -z "\${HTTPS_PROXY+x}" ] || exit 93
+[ "$GIT_NO_LAZY_FETCH" = 1 ] || exit 94
+[ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 95
+[ "$GIT_ALLOW_PROTOCOL" = "" ] || exit 96
+[ "$GIT_NO_REPLACE_OBJECTS" = 1 ] || exit 97
+case "$GIT_DIR" in */memory-import/snapshots/snapshot-*/repo) ;; *) exit 98;; esac
+case "$PWD" in */memory-import/snapshots/snapshot-*/cwd) ;; *) exit 99;; esac
+exec /usr/bin/git "$@"
+`,
+            { mode: 0o700 },
+          );
+          const config = { ...readerConfig(fixture), gitExecutable: wrapper };
+          const reader = yield* Reader.acquireMemoryImportReader(config);
+          const before = captureMemoryImportInventory(fixture.sourceRoot);
+          const value = yield* reader.read({ slot: fixture.snapshot.slot });
+          assert.deepEqual(value.files, fixture.snapshot.files);
+          assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+          assert.deepEqual(residue(fixture), []);
+        }),
+      ),
+  );
+
+  it.effect("unsupported Git version is typed unavailable, without touching source", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("omo-memory-core-beta63");
+        const wrapper = NodePath.join(fixture.sandbox, "unsupported-git");
+        NodeFS.writeFileSync(wrapper, "#!/bin/sh\nprintf 'git version 2.39.0\\n'\n", {
+          mode: 0o700,
+        });
+        const reader = yield* Reader.acquireMemoryImportReader({
+          ...readerConfig(fixture),
+          gitExecutable: wrapper,
+        });
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        assert.equal(
+          (yield* Effect.flip(reader.read({ slot: fixture.snapshot.slot }))).issue,
+          "source_unreadable",
+        );
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
 });
