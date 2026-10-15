@@ -204,6 +204,7 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "worktree-status",
   ),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
+  preview_logs: tool(["Read", "Reading", "Read", "preview browser logs"], "browser", "browser"),
   preview_open: tool(
     ["Open", "Opening", "Opened", "a page in the preview browser"],
     "browser",

@@ -7,6 +7,8 @@ import {
   PreviewAutomationError,
   PreviewAutomationEvaluateInput,
   PreviewAutomationHoverInput,
+  PreviewAutomationLogs,
+  PreviewAutomationLogsInput,
   PreviewAutomationNavigateInput,
   PreviewAutomationOpenInput,
   PreviewAutomationPressInput,
@@ -166,6 +168,17 @@ export const PreviewSnapshotTool = safeBrowserTool(
   }).annotate(Tool.Title, "Inspect browser page"),
 );
 
+const PreviewLogsTool = readonlyBrowserTool(
+  Tool.make("preview_logs", {
+    description:
+      "Read bounded per-tab console messages, uncaught page errors with stacks, and network metadata, newest first. Network records show the latest request/response/finished/failed phase per request, with elapsed duration when its start was observed. Defaults to 50 entries per stream (maximum 100) within a shared 24 KB entry budget; droppedCount counts buffer evictions before filtering and omittedCount counts retained matches excluded by limits. Filter consoleLevels/text or network url/method/status/failed; includeConsole/includeErrors/includeNetwork default to true. URL credentials and URL query values are redacted, and fragments are dropped. In free-form text, URL tokens start with scheme:// and stop at whitespace, quotes, angle brackets, or closing brackets/parentheses. Within the output limits, other free-form console/error text is returned as the page produced it and is not scrubbed for secrets. Headers and bodies are never collected. Works on server-hosted tabs, including desktop-rendered server tabs, and can observe another agent's or a human-controlled tab. Does not collect DOM/ARIA, take screenshots, clear logs, or invalidate snapshot refs. Native desktop-only hosts may not support it.",
+    parameters: PreviewAutomationLogsInput,
+    success: PreviewAutomationLogs,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Read browser diagnostics"),
+);
+
 const PreviewClickTool = browserTool(
   Tool.make("preview_click", {
     description:
@@ -321,6 +334,7 @@ export const PreviewToolkit = Toolkit.make(
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewSnapshotTool,
+  PreviewLogsTool,
   PreviewClickTool,
   PreviewTypeTool,
   PreviewHoverTool,
@@ -336,6 +350,7 @@ export const PreviewToolkit = Toolkit.make(
 );
 
 export const PreviewStandardToolkit = Toolkit.make(
+  PreviewLogsTool,
   PreviewDialogTool,
   PreviewStatusTool,
   PreviewOpenTool,

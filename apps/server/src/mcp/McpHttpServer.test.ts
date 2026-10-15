@@ -5,6 +5,7 @@ import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  PREVIEW_AUTOMATION_SERVER_OPERATIONS,
   OrchestratorMcpFailure,
   PreviewTabId,
   ProviderInstanceId,
@@ -887,6 +888,15 @@ it.effect("registers annotated tools and preserves authenticated request context
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
       const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const logsResult = {
+        console: {
+          entries: [{ level: "warning", text: "fixture", timestamp: "2026-10-15T00:00:00.000Z" }],
+          droppedCount: 2,
+          omittedCount: 1,
+        },
+        errors: { entries: [], droppedCount: 0, omittedCount: 0 },
+        network: { entries: [], droppedCount: 0, omittedCount: 0 },
+      };
       const toolIcon = {
         _tag: "website" as const,
         pageUrl: "http://example.test/",
@@ -898,6 +908,7 @@ it.effect("registers annotated tools and preserves authenticated request context
       const events = yield* broker.connect({
         clientId: "mcp-test-client",
         environmentId,
+        supportedOperations: PREVIEW_AUTOMATION_SERVER_OPERATIONS,
       });
       yield* Stream.runForEach(events, (event) => {
         if (event.type === "connected") return Effect.void;
@@ -910,18 +921,20 @@ it.effect("registers annotated tools and preserves authenticated request context
           result:
             event.request.operation === "snapshot"
               ? snapshotResult
-              : event.request.operation === "evaluate"
-                ? ["Connect", "Continue"]
-                : event.request.operation === "press"
-                  ? undefined
-                  : {
-                      available: true,
-                      visible: true,
-                      tabId,
-                      url: "http://example.test/",
-                      title: "Example",
-                      loading: false,
-                    },
+              : event.request.operation === "logs"
+                ? logsResult
+                : event.request.operation === "evaluate"
+                  ? ["Connect", "Continue"]
+                  : event.request.operation === "press"
+                    ? undefined
+                    : {
+                        available: true,
+                        visible: true,
+                        tabId,
+                        url: "http://example.test/",
+                        title: "Example",
+                        loading: false,
+                      },
         });
       }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
@@ -961,6 +974,30 @@ it.effect("registers annotated tools and preserves authenticated request context
         available: true,
         tabId,
       });
+
+      const logsTool = server.tools.find(({ tool }) => tool.name === "preview_logs");
+      expect(logsTool?.tool.annotations).toMatchObject({
+        readOnlyHint: true,
+        idempotentHint: true,
+        destructiveHint: false,
+      });
+      const beforeLogs = routedRequests.length;
+      const logs = yield* server
+        .callTool({
+          name: "preview_logs",
+          arguments: { tabId: alternateTabId, consoleLevels: ["warning"] },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(logs.isError).toBe(false);
+      expect(logs.structuredContent).toEqual(logsResult);
+      expect(logs.content.every((content) => content.type === "text")).toBe(true);
+      expect(routedRequests.slice(beforeLogs)).toMatchObject([
+        { operation: "logs", tabId: alternateTabId },
+      ]);
+      expect(routedRequests.length).toBe(beforeLogs + 1);
 
       const malformed = yield* server
         .callTool({ name: "preview_click", arguments: { selector: "" } })

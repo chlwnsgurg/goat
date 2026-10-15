@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type PreviewAutomationSnapshot,
+  type PreviewAutomationLogs,
   type PreviewAutomationStatus,
 } from "@goat/contracts";
 import * as Clock from "effect/Clock";
@@ -365,6 +366,59 @@ it.live.each([
     ).pipe(Effect.provide(layer)),
 );
 
+it.live("logs read filtered diagnostics without page capture or invalidating snapshot refs", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      const cdp = contexts[0]!.sessions[0]!;
+      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+        scope,
+        tabId,
+        operation: "snapshot",
+        input: {},
+      });
+      const ref = /\[ref=([^\]]+)\]/.exec(String(snapshot.accessibilityTree))![1]!;
+      page.emit("console", { type: () => "warning", text: () => "fixture warning" });
+      page.emit("console", { type: () => "log", text: () => "unrelated" });
+      const error = new Error("fixture uncaught");
+      error.stack =
+        "Error: fixture uncaught\n at https://user:pass@example.test/app.js?token=secret:4:2";
+      page.emit("pageerror", error);
+      page.evaluate.mockClear();
+      page.ariaSnapshot.mockClear();
+      cdp.send.mockClear();
+      const logs = yield* broker.invoke<PreviewAutomationLogs>({
+        scope,
+        tabId,
+        operation: "logs",
+        input: { consoleLevels: ["warning"], text: "fixture" },
+      });
+      expect(logs.console.entries.map((entry) => entry.text)).toEqual(["fixture warning"]);
+      expect(logs.errors.entries[0]).toMatchObject({ message: "fixture uncaught" });
+      expect(logs.errors.entries[0]?.stack).toContain("app.js?token=");
+      expect(JSON.stringify(logs)).not.toContain("secret");
+      expect(JSON.stringify(logs)).not.toContain("user:pass");
+      expect(page.evaluate).not.toHaveBeenCalled();
+      expect(page.ariaSnapshot).not.toHaveBeenCalled();
+      expect(cdp.send).not.toHaveBeenCalled();
+      const locator = {
+        scrollIntoViewIfNeeded: async () => {},
+        boundingBox: async () => null,
+        click: vi.fn(async () => {}),
+      };
+      page.locator.mockImplementationOnce(() => locator as never);
+      yield* broker.invoke({
+        scope,
+        tabId,
+        operation: "click",
+        input: { locator: `aria-ref=${ref}` },
+      });
+      expect(locator.click).toHaveBeenCalledOnce();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("readiness none responds immediately but takeover input waits for navigation commit", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -490,6 +544,17 @@ it.live("enforces provider ownership and explicit targets when a session has mul
         operation: "snapshot",
         input: {},
       });
+      contexts[0]!.page.emit("console", {
+        type: () => "log",
+        text: () => "another agent's evidence",
+      });
+      const diagnostics = yield* broker.invoke<PreviewAutomationLogs>({
+        scope: asSession("agent-b"),
+        tabId,
+        operation: "logs",
+        input: {},
+      });
+      expect(diagnostics.console.entries[0]?.text).toBe("another agent's evidence");
       const foreignEvaluate = yield* broker
         .invoke<void>({
           scope: asSession("agent-b"),
@@ -1568,6 +1633,13 @@ it.live("agents read a human's tab with no arguments and act on it only while no
         operation: "snapshot",
         input: {},
       });
+      contexts[0]!.page.emit("console", { type: () => "log", text: () => "human tab evidence" });
+      const diagnostics = yield* broker.invoke<PreviewAutomationLogs>({
+        scope,
+        operation: "logs",
+        input: {},
+      });
+      expect(diagnostics.console.entries[0]?.text).toBe("human tab evidence");
       // Acting is refused while the user controls the tab.
       const refused = yield* broker
         .invoke<void>({
