@@ -4,6 +4,12 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Snapshot from "../../../memory/MemorySnapshot.ts";
+import * as Sync from "../../../memory/MemorySyncService.ts";
+import * as Projection from "../../../orchestration-v2/ProjectionStore.ts";
+import * as Environment from "../../../environment/ServerEnvironment.ts";
+import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
 import * as Service from "../../../memory/MemoryService.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
 import * as Fixture from "./handlers.testkit.ts";
@@ -24,6 +30,49 @@ const ref = (name = "r5-caller") => ({
 const setup = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`CREATE TABLE orchestration_events(application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
+});
+const admitSnapshot = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const service = yield* Service.MemoryService;
+  const store = yield* Store.MemoryStore;
+  yield* sql`CREATE TABLE IF NOT EXISTS projection_projects(project_id TEXT,workspace_root TEXT,deleted_at TEXT)`;
+  yield* sql`INSERT INTO projection_projects SELECT 'project:mcp-test','/synthetic',NULL WHERE NOT EXISTS(SELECT 1 FROM projection_projects)`;
+  return yield* Effect.gen(function* () {
+    const policy = { grant: "read" as const, policyEpoch: 1 };
+    return yield* (yield* Snapshot.MemorySnapshot).forThread(
+      ref().threadId,
+      policy,
+      Effect.succeed(policy),
+    );
+  }).pipe(
+    Effect.provide(
+      Snapshot.layer.pipe(
+        Layer.provide(Layer.succeed(Service.MemoryService, service)),
+        Layer.provide(Layer.succeed(Store.MemoryStore, store)),
+        Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
+        Layer.provide(
+          Layer.succeed(Environment.ServerEnvironmentIdentity, {
+            getEnvironmentId: Effect.succeed(ref().environmentId),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(Sync.MemorySyncService)({
+            readLocalReadiness: () =>
+              Effect.succeed({ memorySpaceId: Fixture.space, bootstrap: "ready" as const }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(Projection.ProjectionStoreV2)({
+            getThreadShell: (threadId) =>
+              Effect.succeed({
+                ...liveThreadShell(threadId),
+                activityRunStatus: "running" as const,
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
 });
 const counts = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -52,12 +101,12 @@ it.effect(
       const store = yield* Store.MemoryStore;
       const service = yield* Service.MemoryService;
       const a = yield* seed(16000);
-      yield* store.appendThreadLineage(ref(), Fixture.space, [a.revision]);
+      expect(yield* admitSnapshot).toBeDefined();
       const input = Fixture.upsert(16001);
       const first = yield* Fixture.call("memory_upsert", input, caller());
       expect(first.result.isError).not.toBe(true);
       const b = yield* seed(16002);
-      yield* store.appendThreadLineage(ref(), Fixture.space, [b.revision]);
+      expect((yield* admitSnapshot)?.items.map((item) => item.revisionId)).toContain(b.revision);
       const before = yield* counts;
       expect((yield* Fixture.call("memory_upsert", input, caller())).body).toEqual(first.body);
       const variants = [
@@ -214,7 +263,9 @@ it.effect.each(["memory_read", "memory_list", "memory_search", "memory_history"]
             }
           : name === "memory_search"
             ? { memorySpaceId: Fixture.space, query: "19001", mode: "substring", limit: 1 }
-            : { memorySpaceId: Fixture.space, memoryId: b.input.memoryId, limit: 1 };
+            : name === "memory_history"
+              ? { memorySpaceId: Fixture.space, memoryId: b.input.memoryId, limit: 1 }
+              : { memorySpaceId: Fixture.space, memoryId: b.input.memoryId };
       expect((yield* Fixture.call(name, input, caller())).result.isError).not.toBe(true);
       expect(new Set((yield* store.readThreadLineage(ref(), Fixture.space)).revisions)).toEqual(
         new Set([a.revision, b.revision]),

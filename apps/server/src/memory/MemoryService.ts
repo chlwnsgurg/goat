@@ -586,8 +586,10 @@ const make = Effect.fnUntraced(function* (
     thread?: M.ScopedThreadRef,
   ) {
     yield* requireCaller(thread);
-    if (thread && (yield* store.readThreadLineage(thread, space)).state !== "tracked")
+    const lineage = thread ? yield* store.readThreadLineage(thread, space) : undefined;
+    if (lineage && lineage.state !== "tracked")
       return yield* new Store.MemoryStoreConflict({ code: "thread_lineage_incomplete" });
+    return lineage;
   });
   // Called inside the response's writer transaction. Only returned bodies count;
   // one append per call, even for history/search pages with multiple revisions.
@@ -618,7 +620,6 @@ const make = Effect.fnUntraced(function* (
     return yield* store.transact(
       Effect.gen(function* () {
         yield* permit;
-        yield* requireScope(value.scope);
         yield* requireCaller(sourceThread);
         const requestDigest = hash(
           yield* decode(
@@ -643,8 +644,8 @@ const make = Effect.fnUntraced(function* (
           // Never reconstruct the first operation with today's context or revive its body.
           return prior;
         }
-        yield* requireCompleteLineage(value.memorySpaceId, sourceThread);
-        const old = yield* store.readOperation(value.memorySpaceId, value.operationId);
+        yield* requireScope(value.scope);
+        const lineage = yield* requireCompleteLineage(value.memorySpaceId, sourceThread);
         const revisionId = M.MemoryRevisionId.make(
           memoryStableUuid(`${value.memorySpaceId}:${value.operationId}:revision`),
         );
@@ -652,27 +653,21 @@ const make = Effect.fnUntraced(function* (
           value.memorySpaceId,
           value.payload,
         ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
-        if (sourceThread) {
-          if (sourceThread.environmentId !== environmentId)
-            return yield* new MemoryAccessError({ code: "identity_mismatch" });
-          const lineage = yield* store.readThreadLineage(sourceThread, value.memorySpaceId);
-          // The writer fence above guarantees a complete caller context.
-          if (lineage.state === "tracked") {
-            payload = yield* decode(
-              decodeSummaryPayload(
-                {
-                  ...payload,
-                  derivedFromMemoryRevisions: [
-                    ...new Set([...payload.derivedFromMemoryRevisions, ...lineage.revisions]),
-                  ],
-                },
-                strict,
-              ),
-            );
-            yield* validateSummaryDependencies(value.memorySpaceId, payload).pipe(
-              Effect.provideService(SqlClient.SqlClient, sql),
-            );
-          }
+        if (lineage) {
+          payload = yield* decode(
+            decodeSummaryPayload(
+              {
+                ...payload,
+                derivedFromMemoryRevisions: [
+                  ...new Set([...payload.derivedFromMemoryRevisions, ...lineage.revisions]),
+                ],
+              },
+              strict,
+            ),
+          );
+          yield* validateSummaryDependencies(value.memorySpaceId, payload).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
         }
         const op: M.MemoryOperation = {
           protocolVersion: 1,
@@ -693,12 +688,9 @@ const make = Effect.fnUntraced(function* (
             scope: value.scope,
             assertionKind: value.assertionKind,
             provenance: { environmentId, upsertRequestDigest: requestDigest },
-            createdAtUtc:
-              old && old.kind !== "forget"
-                ? old.revision.createdAtUtc
-                : M.MemoryUtcTimestamp.make(
-                    DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis)),
-                  ),
+            createdAtUtc: M.MemoryUtcTimestamp.make(
+              DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis)),
+            ),
           },
           payload,
         };
