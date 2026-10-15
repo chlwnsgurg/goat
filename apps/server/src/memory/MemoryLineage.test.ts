@@ -14,6 +14,10 @@ import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Service from "./MemoryService.ts";
+import * as Maintenance from "./MemoryFtsMaintenance.ts";
+import * as Snapshot from "./MemorySnapshot.ts";
+import * as Sync from "./MemorySyncService.ts";
+import * as Projection from "../orchestration-v2/ProjectionStore.ts";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const space = M.MemorySpaceId.make(id(1));
@@ -35,7 +39,7 @@ const makeEnvironment = Effect.fnUntraced(function* (environmentId: M.Environmen
   const database = Layer.effectDiscard(
     migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
-  const live = Service.layer.pipe(
+  const core = Layer.merge(Service.layer, Maintenance.layer).pipe(
     Layer.provideMerge(
       Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(database)))),
     ),
@@ -44,9 +48,29 @@ const makeEnvironment = Effect.fnUntraced(function* (environmentId: M.Environmen
         resolve: () => Effect.succeed(null),
       }),
     ),
-    Layer.provide(
+    Layer.provideMerge(
       Layer.succeed(Environment.ServerEnvironmentIdentity, {
         getEnvironmentId: Effect.succeed(environmentId),
+      }),
+    ),
+  );
+  const live = Snapshot.layer.pipe(
+    Layer.provideMerge(core),
+    Layer.provide(
+      Layer.mock(Sync.MemorySyncService)({
+        readLocalReadiness: () =>
+          Effect.succeed({ memorySpaceId: space, bootstrap: "ready" as const }),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(Projection.ProjectionStoreV2)({
+        getThreadShell: (requested) =>
+          Effect.succeed({
+            id: requested,
+            projectId: M.ProjectId.make("synthetic-project"),
+            activeRunId: M.RunId.make("synthetic-run"),
+            activityRunStatus: "running",
+          } as M.OrchestrationV2ThreadShell),
       }),
     ),
   );
@@ -55,7 +79,15 @@ const makeEnvironment = Effect.fnUntraced(function* (environmentId: M.Environmen
   const service = Context.get(context, Service.MemoryService);
   const sql = Context.get(context, SqlClient.SqlClient);
   yield* sql`CREATE TABLE orchestration_events(application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
-  return { store, service, sql };
+  yield* sql`CREATE TABLE projection_projects(project_id TEXT,workspace_root TEXT,deleted_at TEXT)`;
+  yield* sql`INSERT INTO projection_projects VALUES ('synthetic-project','/synthetic',NULL)`;
+  return {
+    store,
+    service,
+    sql,
+    maintenance: Context.get(context, Maintenance.MemoryFtsMaintenance),
+    snapshot: Context.get(context, Snapshot.MemorySnapshot),
+  };
 });
 const authority = (environmentId = memberId, now = at): Store.HubAuthority => ({
   principal: { memorySpaceId: space, environmentId, credentialVersion: 1, scopes: ["memory:sync"] },
@@ -136,10 +168,22 @@ describe("r4 authoritative lineage", () => {
               receipt,
               reauthorize: Effect.void,
             });
+            const current = yield* e.store.loadAggregate(space, op.memoryId);
+            assert.isTrue(
+              yield* e.maintenance.repair({
+                memorySpaceId: space,
+                memoryId: op.memoryId,
+                revisionId: op.revision.revisionId,
+                generation: current.generation,
+              }),
+            );
             return op;
           });
           const a = yield* push(input(20));
-          yield* e.store.appendThreadLineage(thread, space, [a.revision.revisionId]);
+          const policy = { grant: "read" as const, policyEpoch: 1 };
+          assert.isDefined(
+            yield* e.snapshot.forThread(thread.threadId, policy, Effect.succeed(policy)),
+          );
           yield* push({
             ...input(20),
             operationId: M.MemoryOperationId.make(id(2021)),
@@ -184,7 +228,7 @@ describe("r4 authoritative lineage", () => {
             1,
           );
           // A tracked thread write uses the same transaction and union as the MCP entry point.
-          const s = input(22);
+          const s: M.MemoryUpsertInput = { ...input(22), scope: { kind: "thread", thread } };
           yield* e.service.upsert(s, Effect.void, thread);
           const summary = yield* operation(e.store, s);
           assert.deepStrictEqual(summary.payload.derivedFromMemoryRevisions, [
