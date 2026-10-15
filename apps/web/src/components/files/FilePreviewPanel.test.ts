@@ -1,7 +1,66 @@
+// @vitest-environment jsdom
+
 import type { ScopedThreadRef } from "@goat/contracts";
-import { ProjectReadFileError } from "@goat/contracts";
+import { EnvironmentId, ProjectReadFileError } from "@goat/contracts";
+import type { useFileTree } from "@pierre/trees/react";
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { COMPOSER_MENTION_DRAG_TYPE } from "../chat/composerMentionDrag";
+import FileBrowserPanel from "./FileBrowserPanel";
+
+const browser = vi.hoisted(() => ({
+  options: null as Parameters<typeof useFileTree>[0] | null,
+  insert: vi.fn(() => true),
+  copy: vi.fn(),
+  menu: vi.fn(),
+  entries: [{ path: "report.md", kind: "file" as const }],
+  load: vi.fn(),
+  model: {
+    resetPaths: vi.fn(),
+    setGitStatus: vi.fn(),
+    subscribe: () => () => {},
+    isSearchOpen: () => false,
+    getItem: vi.fn(),
+  },
+}));
+
+vi.mock("@pierre/trees/react", () => ({
+  useFileTree: (options: Parameters<typeof useFileTree>[0]) => {
+    browser.options = options;
+    return { model: browser.model };
+  },
+  useFileTreeSearch: () => ({ value: "" }),
+  useFileTreeSelector: () => false,
+  FileTree: () => createElement("div", { "data-item-path": "report.md" }),
+}));
+vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
+vi.mock("~/composerHandleContext", () => ({
+  useComposerHandleContext: () => ({ current: { insertTextAtEnd: browser.insert } }),
+}));
+vi.mock("~/hooks/useCopyToClipboard", () => ({ writeTextToClipboard: browser.copy }));
+vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
+vi.mock("~/hooks/useWorkspaceMutationRefresh", () => ({ useWorkspaceMutationRefresh: () => {} }));
+vi.mock("~/fileContextMenu", () => ({
+  useFileContextMenu: () => ({ buildItems: () => [], activate: vi.fn() }),
+}));
+vi.mock("~/localApi", () => ({ readLocalApi: () => ({ contextMenu: { show: browser.menu } }) }));
+vi.mock("~/state/queries", () => ({
+  useProjectPathSearch: () => ({ entries: [], isPending: false, error: null }),
+}));
+vi.mock("./useDirectoryEntries", () => ({
+  useDirectoryEntries: () => ({
+    entries: browser.entries,
+    load: browser.load,
+    refresh: vi.fn(),
+    ready: true,
+    error: null,
+    isPending: false,
+    loadingDirectories: new Set<string>(),
+  }),
+}));
 
 import {
   formatFileCommentRange,
@@ -19,6 +78,72 @@ import {
 } from "./filePreviewMode";
 
 const decodeReadError = Schema.decodeSync(ProjectReadFileError);
+
+describe.each([
+  ["/srv/notes", "[report.md](/srv/notes/report.md)", "/srv/notes/report.md"],
+  ["D:\\notes", "[report.md](D:%5Cnotes%5Creport.md)", "D:\\notes\\report.md"],
+  ["/work/repo", "[report.md](report.md)", "report.md"],
+])("file tree destination paths rooted at %s", (cwd, mention, path) => {
+  it.each(["open", "add-to-chat", "copy-mention", "drag"])(
+    "uses the destination path for %s",
+    async (action) => {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.clearAllMocks();
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      const openFile = vi.fn();
+      try {
+        await act(() =>
+          root.render(
+            createElement(FileBrowserPanel, {
+              environmentId: EnvironmentId.make("remote"),
+              cwd,
+              workspaceRoot: "/work/repo",
+              projectName: "Project",
+              selectedPath: null,
+              selectedPathRevealId: 0,
+              onOpenFile: openFile,
+              workspaceMutationId: null,
+            }),
+          ),
+        );
+        if (action === "open") {
+          await act(() => browser.options!.onSelectionChange!(["report.md"]));
+          expect(openFile).toHaveBeenCalledWith(path);
+        } else if (action === "drag") {
+          const setData = vi.fn();
+          const event = new Event("dragstart", { bubbles: true });
+          Object.defineProperty(event, "dataTransfer", { value: { setData } });
+          await act(() => container.querySelector("[data-item-path]")!.dispatchEvent(event));
+          expect(setData).toHaveBeenCalledWith(COMPOSER_MENTION_DRAG_TYPE, mention);
+        } else {
+          const contextMenu = browser.options!.composition!.contextMenu!;
+          const item = { path: "report.md" } as Parameters<
+            NonNullable<typeof contextMenu.onOpen>
+          >[0];
+          const context = {
+            close: vi.fn(),
+            anchorElement: container,
+          } as unknown as Parameters<NonNullable<typeof contextMenu.onOpen>>[1];
+          browser.menu.mockResolvedValue(action);
+          await act(async () => contextMenu.onOpen!(item, context));
+          if (action === "add-to-chat") {
+            expect(browser.insert).toHaveBeenCalledWith(`${mention} `, {
+              ensureLeadingBoundary: true,
+            });
+          } else {
+            expect(browser.copy).toHaveBeenCalledWith(mention);
+          }
+        }
+      } finally {
+        await act(() => root.unmount());
+        container.remove();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+});
 
 describe("directory explorer targets", () => {
   it("reveals workspace directories without changing the tree root", () => {

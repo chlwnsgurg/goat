@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { fileBasename, isWindowsAbsolutePath, workspaceRelativeFilePath } from "@goat/shared/path";
+import { fileBasename, isWindowsAbsolutePath } from "@goat/shared/path";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
@@ -18,6 +18,7 @@ import {
   getProjectFilePickerMatches,
   isProjectFilePickerPathQuery,
   PROJECT_FILE_PICKER_RESULT_LIMIT,
+  projectFilePickerWorkspacePath,
   resolveProjectFilePickerPath,
   type ProjectFilePickerMatch,
 } from "./ProjectFilePicker.logic";
@@ -76,6 +77,7 @@ function EmptyProjectFilePicker() {
 }
 
 interface PickerResultsProps extends ProjectFilePickerProps {
+  readonly platform: string;
   readonly target: ActiveProjectTarget;
   readonly query: string;
   readonly highlightedItemValue: string | null;
@@ -119,7 +121,7 @@ function FilePickerResults(
         ),
         icon: <PierreEntryIcon pathValue={match.path} kind={match.kind} theme={resolvedTheme} />,
         run: async () => {
-          const path = workspaceRelativeFilePath(match.path, target.cwd) ?? match.path;
+          const path = projectFilePickerWorkspacePath(match.path, target.cwd, props.platform);
           useRightPanelStore
             .getState()
             .openFile(target.threadRef, path, match.kind === "file" ? props.line : undefined);
@@ -130,6 +132,7 @@ function FilePickerResults(
       props.direct,
       props.line,
       props.matches,
+      props.platform,
       resolvedTheme,
       target.cwd,
       target.threadRef,
@@ -195,20 +198,43 @@ function DirectFilePickerResults(props: PickerResultsProps & { readonly platform
       ? projectEnvironment.fileMetadata({ environmentId, input: { path: path.path } })
       : null,
   );
-  const isPending = fileAccess.isPending || home.isPending || metadata.isPending;
   const entry = metadata.error === null ? metadata.data : null;
   const kind = entry?.kind;
+  const read = useEnvironmentQuery(
+    fileAccess.canReadFiles &&
+      path !== null &&
+      !path.directoryOnly &&
+      !metadata.isPending &&
+      metadata.error === null &&
+      kind === "file"
+      ? projectEnvironment.readFile({
+          environmentId,
+          input: { cwd: props.target.cwd, relativePath: path.path },
+        })
+      : null,
+  );
+  // A binary result also proves the host opened and read the file; media uses
+  // its own preview rather than the text returned by this query.
+  const binary =
+    read.failure !== null &&
+    "_tag" in read.failure &&
+    read.failure._tag === "ProjectReadFileError" &&
+    read.failure.failure === "binary_file";
+  const isPending = fileAccess.isPending || home.isPending || metadata.isPending || read.isPending;
   const error =
     fileAccess.error ??
     (!fileAccess.canReadFiles && !fileAccess.isPending
       ? "This connection cannot read host files."
       : null) ??
     home.error ??
-    metadata.error;
+    metadata.error ??
+    (binary ? null : read.error);
   const canOpen =
     error === null &&
+    !isPending &&
     path !== null &&
     (kind === "file" || kind === "directory") &&
+    (kind === "directory" || read.data !== null || binary) &&
     (!path.directoryOnly || kind === "directory");
   return (
     <FilePickerResults
@@ -250,7 +276,7 @@ function OpenProjectFilePicker(props: ProjectFilePickerProps & { target: ActiveP
   const platform =
     config?.environment.platform.os ??
     (isWindowsAbsolutePath(props.target.cwd) ? "windows" : "unknown");
-  const resultsProps = { ...props, query, highlightedItemValue };
+  const resultsProps = { ...props, query, highlightedItemValue, platform };
 
   return (
     <CommandPaletteContent

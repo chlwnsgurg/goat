@@ -61,7 +61,7 @@ import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { cn } from "~/lib/utils";
 import type { ChatFileAttachment } from "~/types";
-import { isAbsolutePath, resolveWorkspaceFilePath } from "@goat/shared/path";
+import { isAbsolutePath } from "@goat/shared/path";
 import { resolvePathLinkTarget } from "@goat/shared/fileLinks";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -1507,16 +1507,11 @@ export default function FilePreviewPanel({
               key={`${environmentId}:${explorerTarget.cwd}`}
               environmentId={environmentId}
               cwd={explorerTarget.cwd}
+              workspaceRoot={cwd}
               projectName={projectName}
               selectedPath={explorerTarget.selectedPath}
               selectedPathRevealId={revealRequestId}
-              onOpenFile={(path) =>
-                onOpenFile(
-                  explorerTarget.cwd === cwd
-                    ? path
-                    : resolveWorkspaceFilePath(path, explorerTarget.cwd),
-                )
-              }
+              onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
               {...(previewPath && !isMedia && !isPdf
                 ? { onRefreshSelectedFile: file.refresh }

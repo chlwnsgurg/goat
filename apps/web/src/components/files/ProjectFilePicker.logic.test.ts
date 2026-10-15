@@ -3,6 +3,7 @@ import { assert, describe, it } from "vite-plus/test";
 import {
   getProjectFilePickerMatches,
   isProjectFilePickerPathQuery,
+  projectFilePickerWorkspacePath,
   resolveProjectFilePickerPath,
 } from "./ProjectFilePicker.logic";
 
@@ -96,6 +97,24 @@ describe("getProjectFilePickerMatches", () => {
 });
 
 describe("explicit picker paths", () => {
+  it("preserves literal POSIX backslashes when converting workspace paths", () => {
+    for (const platform of ["linux", "darwin"]) {
+      assert.equal(
+        projectFilePickerWorkspacePath("/work/repo/a\\b.ts", "/work/repo", platform),
+        "a\\b.ts",
+      );
+      assert.equal(projectFilePickerWorkspacePath("a\\b.ts", "/work/repo", platform), "a\\b.ts");
+      assert.equal(
+        projectFilePickerWorkspacePath("/work/repo\\other/a.ts", "/work/repo", platform),
+        "/work/repo\\other/a.ts",
+      );
+    }
+    assert.equal(
+      projectFilePickerWorkspacePath("C:\\repo\\a\\b.ts", "c:/repo", "windows"),
+      "a/b.ts",
+    );
+  });
+
   it("detects paths using the destination platform", () => {
     for (const platform of ["darwin", "linux"]) {
       for (const query of ["/", " /srv/app/file.ts:42:3 ", "~/notes/", "/tmp/a\\b"]) {

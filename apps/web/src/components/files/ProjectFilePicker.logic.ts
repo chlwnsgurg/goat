@@ -25,6 +25,7 @@
 
 import type { ProjectEntry } from "@goat/contracts";
 import { splitFilePathPosition } from "@goat/shared/fileLinks";
+import { workspaceRelativeFilePath } from "@goat/shared/path";
 import { normalizeSearchQuery } from "@goat/shared/searchRanking";
 
 export const PROJECT_FILE_PICKER_RESULT_LIMIT = 200;
@@ -35,6 +36,14 @@ export interface ProjectFilePickerMatch {
   readonly nameMatchIndices: ReadonlyArray<number>;
   readonly path: string;
   readonly pathMatchIndices: ReadonlyArray<number>;
+}
+
+/** Only Windows destinations interpret a backslash as a path separator. */
+export function projectFilePickerWorkspacePath(path: string, cwd: string, platform: string) {
+  if (platform === "windows") return workspaceRelativeFilePath(path, cwd) ?? path;
+  const root = cwd.replace(/\/+$/, "");
+  if (path === cwd || path === root) return ".";
+  return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
 }
 
 /** Exact-path intent is interpreted for the destination environment, never the browser OS. */
