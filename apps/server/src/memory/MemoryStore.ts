@@ -1298,6 +1298,12 @@ export class MemoryStore extends Context.Service<
       space: M.MemorySpaceId,
       id: M.MemoryOperationId,
     ) => Effect.Effect<StoredReceipt | undefined, MemoryStorageError>;
+    readonly readResolutionInputsPage: (
+      input: M.MemoryHistoryInput & { resolutionInputsFor: M.MemoryResolutionId },
+    ) => Effect.Effect<
+      { scope: M.MemoryScope | null; page: M.MemoryHistoryPage },
+      MemoryStorageError | MemoryStoreConflict
+    >;
     readonly readResolutionSnapshot: (
       space: M.MemorySpaceId,
       memoryId: M.MemoryId,
@@ -2191,6 +2197,135 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+  const historyPageCodec = codec(M.MemoryHistoryPage);
+  const decodeHistoryPage = Schema.decodeUnknownEffect(M.MemoryHistoryPage);
+  const historyRevisionCodec = codec(
+    Schema.Struct({ revision: M.MemoryRevision, payload: Schema.NullOr(M.MemoryPayload) }),
+  );
+  const readResolutionInputsPage: MemoryStore["Service"]["readResolutionInputsPage"] = Effect.fn(
+    "MemoryStore.readResolutionInputsPage",
+  )(
+    function* (input) {
+      const offset = input.cursor ? Number(input.cursor) : 0;
+      if (!Number.isSafeInteger(offset) || offset < 0)
+        return yield* new MemoryStoreConflict({ code: "invalid_cursor" });
+      const current = yield* readItem(input.memorySpaceId, input.memoryId);
+      if (!current) return yield* new MemoryStoreConflict({ code: "not_found" });
+      const selected = yield* stored(
+        "resolution-input-selection",
+        sql<{ resolution_json: string; identity_json: string | null }>`
+          SELECT r.resolution_json,l.identity_json FROM memory_resolutions r
+          LEFT JOIN memory_identity_ledger l ON l.space=r.space AND l.memory_id=r.memory_id
+          WHERE r.space=${input.memorySpaceId} AND r.resolution_id=${input.resolutionInputsFor} AND r.memory_id=${input.memoryId}`,
+      );
+      if (!selected[0]) return yield* new MemoryStoreConflict({ code: "not_found" });
+      const resolution = yield* resolutionCodec.decode(selected[0].resolution_json, strict);
+      const identity = selected[0].identity_json
+        ? yield* identityCodec.decode(selected[0].identity_json, strict)
+        : null;
+      const ids = resolution.inputRevisionIds.slice(offset, offset + input.limit);
+      const page: M.MemoryHistoryPage = {
+        memoryId: input.memoryId,
+        revisions: [],
+        restorableRevisionIds: [],
+        resolutions: [],
+        tombstone: null,
+        reports: [],
+        revertResults: [],
+        localAvailability: current.item.localAvailability,
+        nextCursor: null,
+      };
+      const revisions: Array<M.MemoryHistoryPage["revisions"][number]> = [];
+      const restorableRevisionIds: M.MemoryRevisionId[] = [];
+      let bytes = new TextEncoder().encode(yield* historyPageCodec.encode(page)).length;
+      let examined = offset;
+      for (const id of ids) {
+        // One PK lookup per selected input, never materialize the full revision history.
+        const rows = yield* stored(
+          "resolution-input-metadata",
+          sql<{
+            operation_id: string;
+            parents_json: string;
+            scope_json: string;
+            assertion_kind: string;
+            provenance_json: string;
+            created_at: number;
+            payload_bytes: number;
+          }>`SELECT r.operation_id,r.parents_json,r.scope_json,r.assertion_kind,r.provenance_json,r.created_at,
+            coalesce(length(CAST(p.body_json AS BLOB)),0) AS payload_bytes
+            FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref
+            WHERE r.space=${input.memorySpaceId} AND r.memory_id=${input.memoryId} AND r.revision_id=${id}`,
+        );
+        const row = rows[0];
+        if (!row) {
+          examined++;
+          continue;
+        }
+        const revision = yield* decodeRevision(
+          {
+            memorySpaceId: input.memorySpaceId,
+            memoryId: input.memoryId,
+            revisionId: id,
+            operationId: row.operation_id,
+            parents: yield* headsCodec.decode(row.parents_json),
+            scope: yield* scopeCodec.decode(row.scope_json),
+            assertionKind: row.assertion_kind,
+            provenance: yield* provenanceCodec.decode(row.provenance_json),
+            payloadRef: id,
+            createdAtUtc: yield* importTime(row.created_at),
+          },
+          strict,
+        );
+        // Include the UUID in retention metadata and array separators in the byte budget.
+        const metadataBytes =
+          new TextEncoder().encode(yield* historyRevisionCodec.encode({ revision, payload: null }))
+            .length + 42;
+        const visible =
+          current.item.localAvailability.exposure === "visible" && current.item.status === "active";
+        const bodyBytes = visible ? row.payload_bytes : 0;
+        // Reserve cursor bytes before reading bodies. An oversized original remains restorable.
+        if (
+          bytes + metadataBytes + bodyBytes + 64 > M.MEMORY_PAGE_MAX_UTF8_BYTES &&
+          revisions.length
+        )
+          break;
+        let payload: M.MemoryPayload | null = null;
+        if (
+          visible &&
+          bodyBytes &&
+          bytes + metadataBytes + bodyBytes + 64 <= M.MEMORY_PAGE_MAX_UTF8_BYTES
+        ) {
+          const bodies = yield* stored(
+            "resolution-input-body",
+            sql<{ body_json: string }>`
+              SELECT body_json FROM memory_payloads WHERE space=${input.memorySpaceId} AND memory_id=${input.memoryId} AND payload_ref=${id}`,
+          );
+          if (bodies[0]) payload = yield* payloadCodec.decode(bodies[0].body_json, strict);
+        }
+        revisions.push({ revision, payload });
+        if (visible && row.payload_bytes > 0) restorableRevisionIds.push(id);
+        bytes += metadataBytes + (payload ? bodyBytes : 0);
+        examined++;
+      }
+      return {
+        scope: identity?.scope ?? ("scope" in current.item ? current.item.scope : null),
+        page: yield* decodeHistoryPage(
+          {
+            ...page,
+            revisions,
+            restorableRevisionIds,
+            nextCursor: examined < resolution.inputRevisionIds.length ? String(examined) : null,
+          },
+          strict,
+        ),
+      };
+    },
+    Effect.mapError((cause) =>
+      isStorageError(cause) || cause._tag === "MemoryStoreConflict"
+        ? cause
+        : new MemoryStorageError({ stage: "resolution-input-codec", cause }),
+    ),
+  );
   const loadAggregate = Effect.fn("MemoryStore.loadAggregate")(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
@@ -9542,6 +9677,7 @@ const make = Effect.gen(function* () {
     assignIntentIdentityTx,
     transact,
     receipt,
+    readResolutionInputsPage,
     readResolutionSnapshot,
     readResolutionHeads,
     loadAggregate: (space, id) => transact(loadAggregate(space, id)),

@@ -5,6 +5,7 @@ import {
   MEMORY_FORGET_NOTICE,
   MEMORY_REVOCATION_NOTICE,
   memoryReportTarget,
+  memoryLocalSpace,
   presentMemoryAvailability,
   presentMemoryForget,
   presentMemoryItem,
@@ -97,6 +98,21 @@ const report = Schema.decodeUnknownSync(M.MemoryReportDelivery)({
 });
 
 describe("memory presentation boundaries", () => {
+  it("recovers a retained local space after a disabled status is fetched on a fresh visit", () => {
+    const status = {
+      state: "disabled",
+      memorySpaceId: null,
+      retainedLocalSpaceId: item.memorySpaceId,
+    } satisfies Pick<M.MemorySyncStatus, "state" | "memorySpaceId" | "retainedLocalSpaceId">;
+    expect(memoryLocalSpace(status)).toBe(item.memorySpaceId);
+    expect(memoryLocalSpace({ ...status, retainedLocalSpaceId: null })).toBeNull();
+    expect(
+      memoryLocalSpace({ ...status, state: "bootstrapping", memorySpaceId: item.memorySpaceId }),
+    ).toBeNull();
+    expect(
+      memoryLocalSpace({ ...status, state: "online", memorySpaceId: resolution.memorySpaceId }),
+    ).toBe(resolution.memorySpaceId);
+  });
   it("explains removal and forgetting in the app language", () => {
     expect(MEMORY_REVOCATION_NOTICE).toBe(
       "Removing a device applies to later requests and to results still on the hub.",
@@ -177,7 +193,7 @@ describe("memory presentation boundaries", () => {
       localDeadlineState,
     });
   });
-  it("requires complete history and the current result", () => {
+  it("requires a retained original and the current result independently of the history cursor", () => {
     const input = { item, entry, history, now: Date.parse(applied) };
     const incomplete = presentMemoryRevert({
       ...input,
@@ -186,7 +202,10 @@ describe("memory presentation boundaries", () => {
     const absent = presentMemoryRevert({ ...input, history: { ...history, revisions: [] } });
     expect(incomplete.canRevert).toBe(false);
     expect(absent.canRevert).toBe(false);
-    expect(incomplete.reason).not.toBe(absent.reason);
+    expect(incomplete.reason).toBe(absent.reason);
+    expect(
+      presentMemoryRevert({ ...input, history: { ...history, nextCursor: "more" } }),
+    ).toMatchObject({ canRevert: true, reason: null });
     expect(
       presentMemoryRevert({ ...input, item: { ...item, revision: revision(8) } }).canRevert,
     ).toBe(false);
@@ -199,6 +218,21 @@ describe("memory presentation boundaries", () => {
         },
       }).canRevert,
     ).toBe(false);
+  });
+  it("uses bounded server retention metadata when an original is too large to preview", () => {
+    expect(
+      presentMemoryRevert({
+        item,
+        entry,
+        history: {
+          ...history,
+          revisions: history.revisions.map((pair) => ({ ...pair, payload: null })),
+          restorableRevisionIds: [revision(3).revisionId],
+          nextCursor: "1",
+        },
+        now: Date.parse(applied),
+      }),
+    ).toMatchObject({ canRevert: true, restorableRevisionIds: [revision(3).revisionId] });
   });
   it("can restore a retained input without the resolution judgment", () => {
     const missingJudgment = { ...entry, payload: null };

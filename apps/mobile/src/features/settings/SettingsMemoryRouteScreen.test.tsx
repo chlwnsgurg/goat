@@ -370,7 +370,11 @@ describe("native Memory with shared factory", () => {
   });
   it("selects a retained original despite a local deadline warning and settles with the hub result", async () => {
     await mount();
-    h.responses.set(WS_METHODS.memoryHistory, revertHistory);
+    h.responses.set(WS_METHODS.memoryHistory, (input) => ({
+      ...revertHistory(),
+      revisions: "resolutionInputsFor" in (input as object) ? revertHistory().revisions : [],
+      nextCursor: "more",
+    }));
     h.responses.set(WS_METHODS.memoryRevertResolution, () => {
       throw new Error("Synthetic revert response lost");
     });
@@ -946,4 +950,34 @@ describe("native sharing workflow", () => {
     ]);
     expect(h.calls).toHaveLength(0);
   });
+});
+
+it("reopens native saved memories after sharing off and remount without an explicit space", async () => {
+  h = createNativeMemoryHarness();
+  h.grant(["memory:read", "memory:write", "settings:write"]);
+  await h.waitForAtom(h.memory.hubSettingsUpdate.permissionAtom(nativeEnv), Boolean);
+  const screen = <SettingsMemoryRouteScreen route={{ params: { environmentId: nativeEnv } }} />;
+  view = renderNative(h, screen);
+  await view.render();
+  h.responses.set(WS_METHODS.memoryHubSettingsUpdate, () => ({
+    view: { settings: { mode: "disabled" }, members: [], version: 2 },
+    credential: null,
+  }));
+  h.responses.set(WS_METHODS.memorySyncStatus, () => ({
+    ...nativeSyncStatus,
+    state: "disabled",
+    memorySpaceId: null,
+    retainedLocalSpaceId: nativeSpace,
+  }));
+  await view.click("Turn sharing off");
+  await view.click("Stop sharing");
+  await view.unmount();
+  view = renderNative(h, screen);
+  await view.render();
+  expect(view.container.textContent).toContain("Synthetic memory body");
+  expect(view.container.textContent).toContain(
+    "Saved memories stay. Turn on memory to save new memories.",
+  );
+  await view.click("Open memory: Synthetic memory body");
+  expect(view.container.textContent).toContain("Synthetic memory body");
 });

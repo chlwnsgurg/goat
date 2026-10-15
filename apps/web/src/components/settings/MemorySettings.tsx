@@ -24,6 +24,7 @@ import {
   presentMemoryItem,
   presentMemoryResolution,
   presentMemoryRevert,
+  memoryLocalSpace,
   presentMemoryRevertResult,
   presentMemoryReport,
   presentMemorySync,
@@ -222,8 +223,7 @@ function MemoryDestinationContent({
     };
   }, [canSync, environmentId, getSync, syncReload]);
   const refreshBootstrap = useCallback(() => setSyncReload((value) => value + 1), []);
-  const readySpace =
-    sync && sync.state !== "disabled" && sync.state !== "bootstrapping" ? sync.memorySpaceId : null;
+  const readySpace = memoryLocalSpace(sync);
   const [savedSpace, setSavedSpace] = useState<MemorySpaceId | null>(null);
   if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
   const memorySpaceId = target.memorySpaceId ?? readySpace ?? savedSpace;
@@ -720,7 +720,10 @@ function MemoryDetails({
                     <p>Resolved on {deviceName(display.resolvingEnvironmentId)}</p>
                     <p>Revert deadline: {formatTimestamp(display.revertDeadlineUtc, "locale")}</p>
                     <p>{entry.payload?.judgment ?? "Retained judgment unavailable."}</p>
-                    {item && memoryEnabled ? (
+                    {item?.status === "active" &&
+                    memoryEnabled &&
+                    item.revision.revisionId === entry.resolution.resultRevisionId &&
+                    entry.resolution.revertsResolutionId === undefined ? (
                       <MemoryRevertControl
                         environmentId={environmentId}
                         item={item}
@@ -840,7 +843,10 @@ export function MemoryRevertControl({
   environmentId: EnvironmentId;
   item: MemoryItem;
   entry: MemoryHistoryPage["resolutions"][number];
-  history: Pick<MemoryHistoryPage, "revertResults" | "revisions" | "nextCursor">;
+  history: Pick<
+    MemoryHistoryPage,
+    "revertResults" | "revisions" | "nextCursor" | "restorableRevisionIds"
+  >;
   onSettled: () => void;
 }) {
   const { environments } = useEnvironments();
@@ -848,6 +854,31 @@ export function MemoryRevertControl({
   const canWrite = useAtomValue(memoryEnvironment.revertResolution.permissionAtom(environmentId));
   const connection = Option.getOrNull(usePreparedConnection(environmentId));
   const revert = useAtomCommand(memoryEnvironment.revertResolution, { reportFailure: false });
+  const [originalCursor, setOriginalCursor] = useState<string | undefined>();
+  const originals = useEnvironmentQuery(
+    memoryEnvironment.history({
+      environmentId,
+      input: {
+        memorySpaceId: item.memorySpaceId,
+        memoryId: item.memoryId,
+        resolutionInputsFor: entry.resolution.resolutionId,
+        limit: 20,
+        ...(originalCursor ? { cursor: originalCursor } : {}),
+      },
+    }),
+  );
+  const originalPage = originals.data ? Option.getOrNull(originals.data) : null;
+  const revertHistory = {
+    ...history,
+    revisions: originalPage?.revisions ?? [],
+    restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
+  };
+  const refreshOriginals = originals.refresh;
+  const previousHistory = useRef(history);
+  useEffect(() => {
+    if (previousHistory.current !== history) refreshOriginals();
+    previousHistory.current = history;
+  }, [history, refreshOriginals]);
   const [selected, setSelected] = useState<MemoryRevisionId | null>(null);
   const [intent, setIntent] = useState<MemoryRevertResolutionInput | null>(null);
   const [busy, setBusy] = useState(false);
@@ -864,7 +895,7 @@ export function MemoryRevertControl({
   const display = presentMemoryRevert({
     item,
     entry,
-    history,
+    history: revertHistory,
     now: openedAt,
     ...(selected ? { restoredRevisionId: selected } : {}),
   });
@@ -892,7 +923,7 @@ export function MemoryRevertControl({
     const eligibility = presentMemoryRevert({
       item,
       entry,
-      history,
+      history: revertHistory,
       restoredRevisionId: selected,
       now: Date.now(),
     });
@@ -919,6 +950,7 @@ export function MemoryRevertControl({
     setResult(response.value);
     setSelected(null);
     setIntent(null);
+    originals.refresh();
     onSettled();
   }
   return (
@@ -926,6 +958,35 @@ export function MemoryRevertControl({
       <p>{display.windowLabel}</p>
       {display.timeNotice ? <p>{display.timeNotice}</p> : null}
       {display.reason ? <p>{display.reason}</p> : null}
+      {originals.error ? <p role="alert">Could not load retained originals.</p> : null}
+      {originalCursor ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          onClick={() => {
+            setOriginalCursor(undefined);
+            setSelected(null);
+            setIntent(null);
+          }}
+        >
+          First originals page
+        </Button>
+      ) : null}
+      {originalPage?.nextCursor ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          onClick={() => {
+            setOriginalCursor(originalPage.nextCursor!);
+            setSelected(null);
+            setIntent(null);
+          }}
+        >
+          Next originals page
+        </Button>
+      ) : null}
       {!canWrite ? <p>Memory write permission is required to revert.</p> : null}
       {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
@@ -933,10 +994,10 @@ export function MemoryRevertControl({
         <div role="group" aria-label="Revert confirmation">
           <p>Choose the retained original to restore.</p>
           {display.restorableRevisionIds.map((revisionId) => {
-            const index = history.revisions.findIndex(
+            const index = revertHistory.revisions.findIndex(
               (entry) => entry.revision.revisionId === revisionId,
             );
-            const original = history.revisions[index]!;
+            const original = revertHistory.revisions[index]!;
             return (
               <label key={revisionId} className="block space-x-2">
                 <input
@@ -954,7 +1015,9 @@ export function MemoryRevertControl({
                     (device) => device.environmentId === original.revision.provenance.environmentId,
                   )?.label ?? "Unknown device"}
                 </span>
-                <p className="whitespace-pre-wrap break-words">{original.payload?.text}</p>
+                <p className="whitespace-pre-wrap break-words">
+                  {original.payload?.text ?? "Retained original is too large to preview."}
+                </p>
               </label>
             );
           })}

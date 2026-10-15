@@ -89,7 +89,12 @@ vi.mock("../../state/memory", async () => {
       ...Object.fromEntries(
         ["list", "search", "read", "history", "readSource"].map((label) => [
           label,
-          () => ({ label }),
+          (request: { input?: { resolutionInputsFor?: string } }) => ({
+            label:
+              label === "history" && request.input?.resolutionInputsFor
+                ? "resolutionInputs"
+                : label,
+          }),
         ]),
       ),
       draftAtom: ({ draftId }: { draftId: string }) => drafts(draftId),
@@ -99,7 +104,14 @@ vi.mock("../../state/memory", async () => {
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: ({ label }: { label: string }) => {
     useFixtureVersion();
-    return { data: state.queries.get(label) ?? Option.none(), error: null, refresh: state.refresh };
+    return {
+      data:
+        state.queries.get(label) ??
+        (label === "resolutionInputs" ? state.queries.get("history") : undefined) ??
+        Option.none(),
+      error: null,
+      refresh: state.refresh,
+    };
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
@@ -325,7 +337,10 @@ async function renderRevert(
   history:
     | typeof retained
     | Pick<MemoryHistoryPage, "revisions" | "revertResults" | "nextCursor"> = retained,
+  originals = history,
 ) {
+  state.queries.set("history", Option.some(history));
+  state.queries.set("resolutionInputs", Option.some(originals));
   const { AtomRegistry } = await import("effect/reactivity");
   const registry = AtomRegistry.make();
   vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
@@ -426,7 +441,7 @@ it.each(["pending", "accepted", "revision_changed", "forgotten"] as const)(
     expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
   },
 );
-it("cancels without sending, revalidates missing originals, and closes on revoke or incomplete history", async () => {
+it("cancels without sending, revalidates missing originals, and closes on revoke, with paged history allowed", async () => {
   await renderRevert();
   await chooseOriginal();
   await click("Cancel");
@@ -436,7 +451,7 @@ it("cancels without sending, revalidates missing originals, and closes on revoke
   await renderRevert({ ...retained, revisions: [] });
   expect(container.querySelector('[aria-label="Revert confirmation"]')).toBeNull();
   await renderRevert({ ...retained, nextCursor: "more" });
-  expect(container.textContent).toContain("Load the remaining history before reverting");
+  expect(container.querySelector('[aria-label="Revert confirmation"]')).not.toBeNull();
   await renderRevert();
   await chooseOriginal();
   state.allowed = false;
@@ -1485,5 +1500,39 @@ it("removes an open editor and history when shared admission removes the derived
   );
   expect(state.navigate).toHaveBeenCalledWith(
     expect.objectContaining({ to: "/settings/memory", hash: "" }),
+  );
+});
+
+it("reopens saved memory after sharing is disabled and the settings screen remounts", async () => {
+  state.queries.set("list", Option.some({ items: [activeItem], nextCursor: null }));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Synthetic original");
+  state.responses.set(
+    "syncStatus",
+    success({ state: "disabled", memorySpaceId: null, retainedLocalSpaceId: id(1) }),
+  );
+  state.responses.set(
+    "hubSettingsUpdate",
+    success({ view: { version: 3, settings: { mode: "disabled" } }, credential: null }),
+  );
+  await click("Turn sharing off");
+  await click("Stop sharing");
+  await act(async () => root.render(null));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Synthetic original");
+  expect(container.textContent).toContain("Turn on memory to save new memories.");
+  expect(
+    [...container.querySelectorAll("button")].find((b) => b.textContent === "Remember something")!
+      .disabled,
+  ).toBe(true);
+});
+
+it("chooses an original from its bounded query while the ordinary history page has no input bodies", async () => {
+  await renderRevert({ ...retained, revisions: [], nextCursor: "80" }, retained);
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(1);
+  await chooseOriginal();
+  await click("Revert resolution");
+  expect(state.calls).toHaveBeenCalledWith(
+    expect.objectContaining({ input: expect.objectContaining({ restoredRevisionId: id(3) }) }),
   );
 });

@@ -2031,6 +2031,7 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
           const status = () =>
             sync.syncStatus({}, Effect.void).pipe(Effect.tap((s) => decodeStatus(s)));
           assert.strictEqual((yield* status()).state, "disabled");
+          assert.isNull((yield* status()).retainedLocalSpaceId);
           yield* changeHub(1, { ...member, memorySpaceId: null });
           const unbound = yield* status();
           assert.strictEqual(unbound.state, "bootstrapping");
@@ -2044,6 +2045,22 @@ it.effect("status selects disabled and bootstrapping without requiring a bound r
           yield* changeHub(3, { mode: "disabled" });
           const disabled = yield* status();
           assert.strictEqual(disabled.state, "disabled");
+          assert.isNull(disabled.memorySpaceId);
+          assert.strictEqual(disabled.retainedLocalSpaceId, space);
+          const restarted = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const fresh = yield* Sync.MemorySyncService;
+              return yield* fresh.syncStatus({}, Effect.void);
+            }).pipe(
+              Effect.provide(
+                Layer.fresh(Sync.layer).pipe(
+                  Layer.provide(Layer.succeed(Sync.MemorySyncRuntime, adapter)),
+                ),
+              ),
+            ),
+          );
+          assert.strictEqual(restarted.state, "disabled");
+          assert.strictEqual(restarted.retainedLocalSpaceId, space);
           assert.strictEqual(disabled.lastSuccessfulSyncAtUtc, null);
           assert.strictEqual(disabled.failureCode, undefined);
         }).pipe(

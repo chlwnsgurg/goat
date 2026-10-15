@@ -24,6 +24,7 @@ import {
   presentMemoryResolution,
   presentMemoryRevertResult,
   presentMemoryRevert,
+  memoryLocalSpace,
   presentMemoryReport,
   memoryReportTarget,
   MEMORY_FORGET_NOTICE,
@@ -374,10 +375,7 @@ function MemoryConnected({
       };
     }, [load, readAllowed]),
   );
-  const readySpace =
-    status && status.state !== "disabled" && status.state !== "bootstrapping"
-      ? status.memorySpaceId
-      : null;
+  const readySpace = memoryLocalSpace(status);
   if (readySpace && readySpace !== savedSpace) setSavedSpace(readySpace);
   const space = params.memorySpaceId ?? readySpace ?? savedSpace;
   const enabled =
@@ -917,7 +915,11 @@ function MemoryDetails({
                     {formatMemoryTime(view.revertDeadlineUtc)}
                   </Copy>
                   <Copy>{entry.payload?.judgment ?? "Judgment unavailable"}</Copy>
-                  {item && history && memoryEnabled ? (
+                  {item?.status === "active" &&
+                  history &&
+                  memoryEnabled &&
+                  item.revision.revisionId === entry.resolution.resultRevisionId &&
+                  entry.resolution.revertsResolutionId === undefined ? (
                     <MemoryRevertControl
                       environmentId={params.environmentId}
                       item={item}
@@ -985,6 +987,31 @@ function MemoryRevertControl({
   const allowed = useAtomValue(memory.revertResolution.permissionAtom(environmentId));
   const revert = useAtomCommand(memory.revertResolution);
   const { savedConnectionsById } = useSavedRemoteConnections();
+  const [originalCursor, setOriginalCursor] = useState<string | undefined>();
+  const originalsAtom = memory.history({
+    environmentId,
+    input: {
+      memorySpaceId: item.memorySpaceId,
+      memoryId: item.memoryId,
+      resolutionInputsFor: entry.resolution.resolutionId,
+      limit: 20,
+      ...(originalCursor ? { cursor: originalCursor } : {}),
+    },
+  });
+  const originalsResult = useAtomValue(originalsAtom);
+  const originalPage = AsyncResult.isSuccess(originalsResult)
+    ? Option.getOrNull(originalsResult.value)
+    : null;
+  const revertHistory = {
+    ...history,
+    revisions: originalPage?.revisions ?? [],
+    restorableRevisionIds: originalPage?.restorableRevisionIds ?? [],
+  };
+  const previousHistory = useRef(history);
+  useEffect(() => {
+    if (previousHistory.current !== history) registry.refresh(originalsAtom);
+    previousHistory.current = history;
+  }, [history, registry, originalsAtom]);
   const [selected, setSelected] = useState<MemoryRevisionId | null>(null);
   const [intent, setIntent] = useState<MemoryRevertResolutionInput | null>(null);
   const [result, setResult] = useState<MemoryRevertResult | null>(null);
@@ -995,7 +1022,7 @@ function MemoryRevertControl({
   const display = presentMemoryRevert({
     item,
     entry,
-    history,
+    history: revertHistory,
     now: openedAt,
     ...(selected ? { restoredRevisionId: selected } : {}),
   });
@@ -1017,12 +1044,17 @@ function MemoryRevertControl({
     if (!selected || busy.current || result || !active()) return;
     const current = readCurrent();
     const page = readHistory();
+    const originals = registry.get(originalsAtom);
+    const liveOriginals = AsyncResult.isSuccess(originals)
+      ? Option.getOrNull(originals.value)
+      : null;
     const resolution = page?.resolutions.find(
       (value) => value.resolution.resolutionId === entry.resolution.resolutionId,
     );
     if (
       !current ||
       !page ||
+      !liveOriginals ||
       !resolution ||
       current.memoryId !== item.memoryId ||
       current.memorySpaceId !== item.memorySpaceId ||
@@ -1033,7 +1065,11 @@ function MemoryRevertControl({
       !presentMemoryRevert({
         item: current,
         entry: resolution,
-        history: page,
+        history: {
+          ...page,
+          revisions: liveOriginals.revisions,
+          restorableRevisionIds: liveOriginals.restorableRevisionIds ?? [],
+        },
         now: Date.now(),
         restoredRevisionId: selected,
       }).canRevert
@@ -1061,6 +1097,7 @@ function MemoryRevertControl({
         setResult(response.value);
         setIntent(null);
         setSelected(null);
+        registry.refresh(originalsAtom);
         onSettled();
       }
     } finally {
@@ -1073,6 +1110,31 @@ function MemoryRevertControl({
       <Copy>{display.windowLabel}</Copy>
       {display.timeNotice ? <Copy>{display.timeNotice}</Copy> : null}
       {display.reason ? <Copy>{display.reason}</Copy> : null}
+      {AsyncResult.isFailure(originalsResult) ? (
+        <Copy>Could not load retained originals.</Copy>
+      ) : null}
+      {originalCursor ? (
+        <Action
+          label="First originals page"
+          disabled={pending}
+          onPress={() => {
+            setOriginalCursor(undefined);
+            setSelected(null);
+            setIntent(null);
+          }}
+        />
+      ) : null}
+      {originalPage?.nextCursor ? (
+        <Action
+          label="Next originals page"
+          disabled={pending}
+          onPress={() => {
+            setOriginalCursor(originalPage.nextCursor!);
+            setSelected(null);
+            setIntent(null);
+          }}
+        />
+      ) : null}
       {!allowed ? <Copy>Memory write permission is required to revert.</Copy> : null}
       {error ? <Copy>{error}</Copy> : null}
       {result ? <Copy>{presentMemoryRevertResult(result).label}</Copy> : null}
@@ -1080,7 +1142,7 @@ function MemoryRevertControl({
         <>
           <Copy>Choose the retained original to restore.</Copy>
           {display.restorableRevisionIds.map((id) => {
-            const { number, pair } = originalDisplay(history, id);
+            const { number, pair } = originalDisplay(revertHistory, id);
             return (
               <View key={id}>
                 <Action
@@ -1088,7 +1150,7 @@ function MemoryRevertControl({
                   disabled={pending || intent !== null}
                   onPress={() => setSelected(id)}
                 />
-                <Copy>{pair?.payload?.text ?? "Original unavailable"}</Copy>
+                <Copy>{pair?.payload?.text ?? "Retained original is too large to preview."}</Copy>
                 {pair ? (
                   <Copy>
                     {formatMemoryTime(pair.revision.createdAtUtc)} ·{" "}
