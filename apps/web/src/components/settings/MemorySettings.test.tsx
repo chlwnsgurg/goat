@@ -10,18 +10,32 @@ const state = vi.hoisted(() => ({
   environment: null as unknown,
   result: null as unknown,
   navigate: vi.fn(),
+  responses: new Map<string, unknown>(),
+  executors: new Map<string, (input: unknown) => Promise<unknown>>(),
 }));
 vi.mock("@effect/atom-react", async (original) => ({
   ...(await original<typeof import("@effect/atom-react")>()),
   useAtomValue: () => state.allowed,
 }));
 vi.mock("../../state/memory", () => ({
-  memoryEnvironment: { forget: { permissionAtom: () => ({}) } },
+  memoryEnvironment: Object.fromEntries(
+    [
+      "forget",
+      "hubSettingsGet",
+      "hubSettingsUpdate",
+      "ownerSourceReadPolicyGet",
+      "ownerSourceReadPolicyUpdate",
+    ].map((label) => [label, { label, permissionAtom: () => ({}) }]),
+  ),
 }));
 vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: () => async (input: unknown) => {
-    state.calls(input);
-    return state.result;
+  useAtomCommand: (command: { label: string }) => {
+    if (!state.executors.has(command.label))
+      state.executors.set(command.label, async (input: unknown) => {
+        state.calls(input);
+        return state.responses.get(command.label) ?? state.result;
+      });
+    return state.executors.get(command.label);
   },
 }));
 vi.mock("../../state/environments", () => ({
@@ -34,7 +48,7 @@ vi.mock("./settingsLayout", () => ({
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 import { RegistryContext } from "@effect/atom-react";
-import { MemorySettings, MemoryForgetControl } from "./MemorySettings";
+import { MemorySettings, MemoryForgetControl, MemoryAdministration } from "./MemorySettings";
 import { validateMemorySettingsSearch } from "./MemorySettings.logic";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const item = Schema.decodeUnknownSync(MemoryItem)({
@@ -62,6 +76,7 @@ beforeEach(() => {
   state.calls.mockClear();
   state.environment = null;
   state.result = { _tag: "Failure" };
+  state.responses.clear();
 });
 afterEach(async () => {
   await act(async () => root.unmount());
@@ -141,4 +156,79 @@ it("does not mount memory consumers for an unsupported explicit foreign deep lin
   expect(container.textContent).toContain("Update or reconnect");
   expect(container.textContent).toContain("foreign-owner");
   expect(state.calls).not.toHaveBeenCalled();
+});
+
+it("keeps pending reenrollment when removing another owner permission and renders the committed policy", async () => {
+  const pair = {
+    memorySpaceId: id(1),
+    ownerEnvironmentId: "remote-owner",
+    requesterEnvironmentId: "pending-device",
+  };
+  const view = {
+    version: 3,
+    revocationPropagation: "pending",
+    policy: {
+      ownerPolicyEpoch: 3,
+      allowedRequesterEnvironmentIds: ["active-device"],
+      enrollments: [
+        { ...pair, ownerPolicyEpoch: 3, removalEpoch: 2, state: "pending" },
+        { ...pair, requesterEnvironmentId: "active-device", ownerPolicyEpoch: 3, state: "active" },
+      ],
+      removals: [{ ...pair, removalEpoch: 2, state: "pending" }],
+    },
+  };
+  state.responses.set("hubSettingsGet", {
+    _tag: "Success",
+    value: { version: 2, settings: { mode: "hub", memorySpaceId: id(1) } },
+  });
+  state.responses.set("ownerSourceReadPolicyGet", { _tag: "Success", value: view });
+  state.responses.set("ownerSourceReadPolicyUpdate", {
+    _tag: "Success",
+    value: {
+      ...view,
+      version: 4,
+      policy: {
+        ...view.policy,
+        allowedRequesterEnvironmentIds: [],
+        enrollments: [view.policy.enrollments[0]],
+      },
+    },
+  });
+  const { AtomRegistry } = await import("effect/reactivity");
+  const registry = AtomRegistry.make();
+  vi.spyOn(registry, "get").mockImplementation(() => state.allowed as never);
+  await act(async () =>
+    root.render(
+      <RegistryContext value={registry}>
+        <MemoryAdministration environmentId={EnvironmentId.make("remote-owner")} />
+      </RegistryContext>,
+    ),
+  );
+  expect(container.textContent).toContain("pending-device");
+  expect(container.textContent).toContain("active-device");
+  const remove = [...container.querySelectorAll("li")]
+    .find((entry) => entry.textContent?.includes("active-device"))!
+    .querySelector("button")!;
+  await act(async () => remove.click());
+  const request = state.calls.mock.calls.at(-1)![0] as {
+    environmentId: string;
+    input: { allowedRequesterEnvironmentIds: string[]; expectedVersion: number };
+  };
+  expect(request.input.allowedRequesterEnvironmentIds).toEqual(["pending-device"]);
+  expect(request.input.expectedVersion).toBe(3);
+  expect(request.environmentId).toBe("remote-owner");
+  expect(container.textContent).not.toContain("active-device");
+  expect(container.textContent).toContain("pending-device");
+  const calls = state.calls.mock.calls.length;
+  await click("Turn sharing off");
+  await click("Cancel");
+  expect(state.calls.mock.calls.length).toBe(calls);
+  state.responses.set("hubSettingsUpdate", {
+    _tag: "Success",
+    value: { view: { version: 3, settings: { mode: "disabled" } }, credential: null },
+  });
+  await click("Turn sharing off");
+  await click("Confirm sharing off");
+  expect(container.textContent).toContain("Sharing: disabled");
+  expect(container.textContent).toContain("Turn sharing on");
 });

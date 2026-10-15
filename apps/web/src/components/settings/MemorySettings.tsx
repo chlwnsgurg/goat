@@ -271,7 +271,7 @@ function MemoryDestinationContent({
   );
 }
 
-function MemoryAdministration({ environmentId }: { environmentId: EnvironmentId }) {
+export function MemoryAdministration({ environmentId }: { environmentId: EnvironmentId }) {
   const registry = useContext(RegistryContext);
   const getHub = useAtomCommand(memoryEnvironment.hubSettingsGet, { reportFailure: false });
   const getOwner = useAtomCommand(memoryEnvironment.ownerSourceReadPolicyGet, {
