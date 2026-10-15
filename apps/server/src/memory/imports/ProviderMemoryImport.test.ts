@@ -190,10 +190,14 @@ const harness = (initial: ImportSnapshot) => {
       Effect.gen(function* () {
         yield* permit;
         addresses.push(a.environmentId);
-        if (batch && batch.selectionDigest !== a.selectionDigest)
+        if (
+          batch &&
+          batch.operationId === a.operationId &&
+          batch.selectionDigest !== a.selectionDigest
+        )
           return yield* new M.MemoryImportRpcError({ issue: "operation_id_reused" });
         if (retired) return { kind: "retired" as const };
-        if (!batch) return { kind: "new" as const };
+        if (!batch || batch.operationId !== a.operationId) return { kind: "new" as const };
         return batch.receipt.state === "completed"
           ? { kind: "completed" as const, receipt: batch.receipt }
           : { kind: "partial" as const, batch, receipt: batch.receipt };
@@ -202,7 +206,8 @@ const harness = (initial: ImportSnapshot) => {
       Effect.gen(function* () {
         yield* permit;
         addresses.push(a.environmentId);
-        if (!batch || retired) return yield* new M.MemoryRpcError({ code: "not_found" });
+        if (!batch || batch.operationId !== a.operationId || retired)
+          return yield* new M.MemoryRpcError({ code: "not_found" });
         return batch.receipt;
       }),
     readItem: (a, permit) =>
@@ -631,14 +636,22 @@ describe("ProviderMemoryImport closed coordinator", () => {
     fixtureTest((h, s) =>
       Effect.gen(function* () {
         const { sourceId, preview } = yield* prepare(h);
-        h.source({ ...s, parserVersion: "codex-ad-hoc-v2", snapshotDigest: "b".repeat(64) });
+        const handbook =
+          "# Task Group: New profile\nscope: synthetic task\n\n## Task 1: Stable guidance\n\n### learnings\nUse focused checks.";
+        h.source({
+          ...snapshotMemoryImportFiles(s, [
+            { selector: "MEMORY.md", text: handbook, byteCount: handbook.length },
+          ]),
+          profile: "codex-handbook-v1",
+          parserVersion: "codex-handbook-v1",
+        });
         const p = yield* h
           .make()
           .run({ action: "preview", memorySpaceId: space, sourceId }, Effect.void);
         assert.equal(p.action, "preview");
         if (p.action === "preview") assert.notEqual(p.sessionId, preview.sessionId);
         assert.equal(h.registration()!.sourceId, sourceId);
-        assert.equal(h.registration()!.source.parserVersion, "codex-ad-hoc-v2");
+        assert.equal(h.registration()!.source.parserVersion, "codex-handbook-v1");
       }),
     ),
   );

@@ -1,7 +1,6 @@
 import * as M from "@goat/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- deterministic hashing only; identity and time are injected.
 import * as NodeCrypto from "node:crypto";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- pure structural comparison of typed fences.
 import * as NodeUtil from "node:util";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
