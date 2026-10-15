@@ -20,6 +20,7 @@ import lineageMigration from "../persistence/Migrations/074_MemoryImportLineage.
 import hubMigration from "../persistence/Migrations/071_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/072_MemorySearchCounters.ts";
 import * as Store from "./MemoryStore.ts";
+import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -7866,5 +7867,116 @@ it.effect.each(["fts", "substring"] as const)(
         [...first.items, ...next.items].map((i) => i.memoryId),
         Array.from({ length: 105 }, (_, n) => id(n + 2)),
       );
+    }).pipe(Effect.provide(live)),
+);
+
+const missingCheckpointCases = ["hub_snapshot_bytes", "hub_snapshot_rows", "both"].flatMap(
+  (missing) => ["usage", "other-space-admission", "new-record"].map((path) => ({ missing, path })),
+);
+it.effect.each(missingCheckpointCases)(
+  "rejects missing checkpoint totals $missing before $path and rolls back all writes",
+  ({ missing, path }) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      yield* store.apply(approved());
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_quota_counters WHERE space='_checkpoint_dirty'`,
+        [],
+      );
+      assert.strictEqual(
+        (yield* sql<{
+          value: number;
+        }>`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='checkpoint_initialized' AND scope_key=''`)[0]
+          ?.value,
+        1,
+      );
+      yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND
+        (dimension=${missing} OR (${missing}='both' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')))`;
+      // Snapshot every memory table, including row caches, counters, FTS and outbox.
+      const inventory = Effect.gen(function* () {
+        const tables = yield* sql<{
+          name: string;
+        }>`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'memory_%' ORDER BY name`;
+        const rows = [];
+        for (const table of tables)
+          rows.push({
+            table: table.name,
+            rows: yield* sql.unsafe(`SELECT * FROM "${table.name}" ORDER BY rowid`),
+          });
+        return rows;
+      });
+      const before = yield* inventory;
+      const other = M.MemorySpaceId.make(id(900));
+      const failed = yield* store
+        .transact(
+          Effect.gen(function* () {
+            yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES ('_rollback_probe','probe','',1)`;
+            if (path === "usage") return yield* store.readHubUsageTx(space);
+            if (path === "other-space-admission")
+              return yield* store.reserveHubCheckpointTx({
+                memorySpaceId: other,
+                checkpointDeltaBytes: 1,
+                publishedPinnedDeltaBytes: 0,
+              });
+            const identity: M.MemoryIdentityRecord = {
+              memorySpaceId: space,
+              memoryId: M.MemoryId.make(id(901)),
+              scope: { kind: "user" },
+              creatingEnvironmentId: env,
+              createOperationId: M.MemoryOperationId.make(id(902)),
+              createdAtUtc: M.MemoryUtcTimestamp.make(now),
+            };
+            const fence: M.MemoryFenceRecord = {
+              memorySpaceId: space,
+              memoryId: identity.memoryId,
+              highestFencingToken: 0,
+              activeLease: null,
+            };
+            yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${identity.memoryId},${JSON.stringify(identity)},${JSON.stringify(fence)},66560,0)`;
+            const cache = yield* sql<{
+              checkpoint_bytes: number;
+              checkpoint_rows: number;
+            }>`SELECT checkpoint_bytes,checkpoint_rows FROM memory_identity_ledger WHERE memory_id=${identity.memoryId}`;
+            assert.deepStrictEqual(cache, [{ checkpoint_bytes: 0, checkpoint_rows: 0 }]);
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.instanceOf(failed, Store.MemoryStorageError);
+      assert.strictEqual(failed.stage, "checkpoint-accounting");
+      assert.instanceOf(failed.cause, CheckpointAccountingError);
+      assert.strictEqual((failed.cause as CheckpointAccountingError).stage, "missing-total");
+      assert.deepStrictEqual(yield* inventory, before);
+    }).pipe(Effect.provide(live)),
+);
+
+it.effect(
+  "initializes a genuinely new checkpoint space and keeps its lifecycle after the last record",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const store = yield* Store.MemoryStore;
+      assert.strictEqual(
+        (yield* store.transact(store.readHubUsageTx(space))).requiredCheckpointBoundBytes,
+        4096,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_quota_counters WHERE space=${space} AND dimension='checkpoint_initialized'`,
+        [],
+      );
+      yield* store.apply(approved());
+      yield* store.transact(sql`DELETE FROM memory_identity_ledger WHERE space=${space}`);
+      assert.deepStrictEqual(
+        yield* sql`SELECT dimension,value FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows','checkpoint_initialized') ORDER BY dimension`,
+        [
+          { dimension: "checkpoint_initialized", value: 1 },
+          { dimension: "hub_snapshot_bytes", value: 0 },
+          { dimension: "hub_snapshot_rows", value: 0 },
+        ],
+      );
+      yield* sql`DELETE FROM memory_quota_counters WHERE space=${space} AND dimension='hub_snapshot_bytes' AND scope_key=''`;
+      const failed = yield* store.transact(store.readHubUsageTx(space)).pipe(Effect.flip);
+      assert.instanceOf(failed, Store.MemoryStorageError);
+      assert.instanceOf(failed.cause, CheckpointAccountingError);
     }).pipe(Effect.provide(live)),
 );

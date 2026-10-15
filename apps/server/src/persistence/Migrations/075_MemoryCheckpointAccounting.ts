@@ -183,7 +183,7 @@ export default Effect.gen(function* () {
     END`);
   }
   // These indexes contain bounded aggregate/owner addresses, never corpus text.
-  yield* sql`CREATE INDEX memory_checkpoint_spaces ON memory_quota_counters(space) WHERE dimension='hub_snapshot_rows' AND scope_key=''`;
+  yield* sql`CREATE INDEX memory_checkpoint_spaces ON memory_quota_counters(space) WHERE (dimension='hub_snapshot_rows' OR dimension='checkpoint_initialized') AND scope_key=''`;
   yield* sql`CREATE INDEX memory_suppression_owner ON memory_import_keys(space,memory_id) WHERE key_kind IN ('sourceKey','content','sourceExclusion')`;
   // Invalidation keys use only the existing quota counter PK, and are drained
   // synchronously inside the writer transaction before admission/publication/commit.
@@ -237,7 +237,16 @@ export default Effect.gen(function* () {
       );
     }
   // One-time full recalc uses the very same selector/encoder as later per-key deltas.
+  // Remember legacy spaces even when their canonical inventory is empty. The
+  // marker and both recalculated totals commit atomically with this unreleased upgrade.
+  yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+    SELECT space,'checkpoint_initialized','',1 FROM
+      (SELECT space FROM memory_quota_counters WHERE dimension IN ('hub_snapshot_bytes','hub_snapshot_rows') AND scope_key=''
+       UNION SELECT space FROM memory_hub_retention)`;
   yield* sql`DELETE FROM memory_quota_counters WHERE dimension IN ('hub_snapshot_bytes','hub_snapshot_rows')`;
+  for (const dimension of ["hub_snapshot_bytes", "hub_snapshot_rows"])
+    yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value)
+      SELECT space,${dimension},'',0 FROM memory_quota_counters WHERE dimension='checkpoint_initialized' AND scope_key=''`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'m:'||memory_id,1 FROM memory_identity_ledger`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'c:'||operation_id,1 FROM memory_compact_receipts`;
   yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT '_checkpoint_dirty',space,'l:'||rowid,1 FROM memory_import_lineage`;

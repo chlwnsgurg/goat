@@ -26,6 +26,14 @@ export class CheckpointAccountingError extends Schema.TaggedError<CheckpointAcco
  */
 export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
   const sql = yield* SqlClient.SqlClient;
+  // A space marker outlives its last record. Validate every initialized pair before
+  // any delta, including untouched spaces used by global admission. This reads only
+  // the bounded space index and counter PK, never the corpus/cache rows.
+  const missing = yield* sql`SELECT i.space FROM memory_quota_counters i
+    WHERE i.dimension='checkpoint_initialized' AND i.scope_key='' AND
+      (i.value!=1 OR NOT EXISTS(SELECT 1 FROM memory_quota_counters b WHERE b.space=i.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key='')
+       OR NOT EXISTS(SELECT 1 FROM memory_quota_counters n WHERE n.space=i.space AND n.dimension='hub_snapshot_rows' AND n.scope_key='')) LIMIT 1`;
+  if (missing.length) return yield* new CheckpointAccountingError({ stage: "missing-total" });
   const now = yield* Clock.currentTimeMillis;
   const dirty = yield* sql<{
     dimension: string;
@@ -44,6 +52,17 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
       }
     }
     const space = yield* decodeSpace(key.dimension);
+    const initialized =
+      yield* sql`SELECT 1 FROM memory_quota_counters WHERE space=${space} AND dimension='checkpoint_initialized' AND scope_key=''`;
+    if (!initialized.length) {
+      // Only the first canonical write may create zero totals. Never upsert a lost
+      // total with a new record's delta after a space has been initialized.
+      const orphan =
+        yield* sql`SELECT 1 FROM memory_quota_counters WHERE space=${space} AND scope_key='' AND dimension IN ('hub_snapshot_bytes','hub_snapshot_rows') LIMIT 1`;
+      if (orphan.length) return yield* new CheckpointAccountingError({ stage: "missing-total" });
+      yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES
+        (${space},'hub_snapshot_bytes','',0),(${space},'hub_snapshot_rows','',0),(${space},'checkpoint_initialized','',1)`;
+    }
     const independent = key.scope_key.startsWith("l:") || key.scope_key.startsWith("s:");
     const inventory = memory
       ? yield* selectCheckpointMemory(space, yield* decodeMemory(id), now, false)
@@ -87,13 +106,9 @@ export const refreshCheckpointAccounting = Effect.fnUntraced(function* () {
           ? cached[0]?.checkpoint_bytes
           : cached[0]?.checkpoint_rows) ?? 0;
       const delta = value - previous;
-      if (delta < 0 || previous > 0) {
-        const updated =
-          yield* sql`UPDATE memory_quota_counters SET value=value+${delta} WHERE space=${space} AND dimension=${dimension} AND scope_key='' RETURNING value`;
-        if (!updated.length)
-          return yield* new CheckpointAccountingError({ stage: "missing-total" });
-      } else
-        yield* sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${space},${dimension},'',${delta}) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`;
+      const updated =
+        yield* sql`UPDATE memory_quota_counters SET value=value+${delta} WHERE space=${space} AND dimension=${dimension} AND scope_key='' RETURNING value`;
+      if (!updated.length) return yield* new CheckpointAccountingError({ stage: "missing-total" });
     }
     if (cached.length)
       yield* sql.unsafe(

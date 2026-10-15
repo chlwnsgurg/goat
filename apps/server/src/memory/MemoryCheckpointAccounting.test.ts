@@ -80,6 +80,8 @@ it.effect(
         yield* sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,completed_items_json,observed_at_utc) VALUES (${id(10 + i)},${space},'origin','batch',${id(30)},${id(10 + i)},${JSON.stringify({ kind, data: "\\\u0000한".repeat(100) })},'1970-01-01T00:00:00.000Z')`;
       yield* sql`INSERT INTO memory_hub_retention(space,checkpoint_id,handles_json,published_pinned_bytes) VALUES (${space},'published','[{"checkpointId":"published"},{"checkpointId":"published"}]',37)`;
       yield* sql`INSERT INTO memory_inbox_pending(space,pending_key,record_kind,missing_parents_json,reason,checkpoint_id,page_ordinal,metadata_json) VALUES (${space},'page','checkpoint','[]','hub_snapshot','hub:published',0,'{"preserve":"exact"}')`;
+      // A legacy empty space must also acquire a persistent zero pair on upgrade.
+      yield* sql`INSERT INTO memory_hub_retention(space) VALUES (${id(900)})`;
       const pages = yield* sql`SELECT * FROM memory_inbox_pending`;
       const retention = yield* sql`SELECT * FROM memory_hub_retention`;
       const before = yield* counters;
@@ -100,6 +102,14 @@ it.effect(
       yield* sql.withTransaction(checkpoint);
       assert.deepStrictEqual(yield* sql`SELECT * FROM memory_inbox_pending`, pages);
       assert.deepStrictEqual(yield* sql`SELECT * FROM memory_hub_retention`, retention);
+      assert.deepStrictEqual(
+        yield* sql`SELECT dimension,value FROM memory_quota_counters WHERE space=${id(900)} AND dimension IN ('checkpoint_initialized','hub_snapshot_bytes','hub_snapshot_rows') ORDER BY dimension`,
+        [
+          { dimension: "checkpoint_initialized", value: 1 },
+          { dimension: "hub_snapshot_bytes", value: 0 },
+          { dimension: "hub_snapshot_rows", value: 0 },
+        ],
+      );
       const actual = checkpointInventorySize(yield* selectCheckpointMemory(space, memoryId, 0));
       const reserve = futureForgetReserve(66560, 0);
       assert.deepStrictEqual(yield* readSize, {
@@ -585,6 +595,16 @@ it.effect("keeps aggregate counter cardinality and lookup plans independent of 1
       detail: string;
     }>`EXPLAIN QUERY PLAN SELECT space FROM memory_quota_counters WHERE dimension='hub_snapshot_rows' AND scope_key=''`;
     assert.isTrue(spaces.every((r) => r.detail.includes("memory_checkpoint_spaces")));
+    const lifecycle = yield* sql<{
+      detail: string;
+    }>`EXPLAIN QUERY PLAN SELECT i.space FROM memory_quota_counters i
+      WHERE i.dimension='checkpoint_initialized' AND i.scope_key='' AND
+      (NOT EXISTS(SELECT 1 FROM memory_quota_counters b WHERE b.space=i.space AND b.dimension='hub_snapshot_bytes' AND b.scope_key='')
+       OR NOT EXISTS(SELECT 1 FROM memory_quota_counters n WHERE n.space=i.space AND n.dimension='hub_snapshot_rows' AND n.scope_key='')) LIMIT 1`;
+    assert.isTrue(lifecycle.some((r) => r.detail.includes("memory_checkpoint_spaces")));
+    assert.isTrue(
+      lifecycle.filter((r) => r.detail.includes("SEARCH")).every((r) => r.detail.includes("INDEX")),
+    );
     const owners = yield* sql<{
       detail: string;
     }>`EXPLAIN QUERY PLAN SELECT rowid FROM memory_import_keys WHERE space=${space} AND memory_id=${memoryId} AND key_kind IN ('sourceKey','content','sourceExclusion')`;
