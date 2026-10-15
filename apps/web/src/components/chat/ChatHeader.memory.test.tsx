@@ -1,19 +1,33 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { EnvironmentId, ThreadId } from "@goat/contracts";
 import { afterEach, expect, it, vi } from "vite-plus/test";
-const state = vi.hoisted(() => ({ supported: true, allowed: true, destination: "" }));
+const state = vi.hoisted(() => ({
+  supported: true,
+  allowed: true,
+  destination: "",
+  listeners: new Set<() => void>(),
+}));
+function subscribe(listener: () => void) {
+  state.listeners.add(listener);
+  return () => {
+    state.listeners.delete(listener);
+  };
+}
 vi.mock("../../state/environments", () => ({
-  useEnvironment: () => ({
-    serverConfig: {
-      environment: { capabilities: state.supported ? { memory: { protocolVersion: 1 } } : {} },
-    },
-  }),
+  useEnvironment: () => {
+    const supported = useSyncExternalStore(subscribe, () => state.supported);
+    return {
+      serverConfig: {
+        environment: { capabilities: supported ? { memory: { protocolVersion: 1 } } : {} },
+      },
+    };
+  },
 }));
 vi.mock("../../state/session", async (original) => ({
   ...(await original<typeof import("../../state/session")>()),
-  useEnvironmentScope: () => state.allowed,
+  useEnvironmentScope: () => useSyncExternalStore(subscribe, () => state.allowed),
   readEnvironmentScope: () => state.allowed,
 }));
 vi.mock("@tanstack/react-router", () => ({
@@ -78,8 +92,24 @@ it("opens Memory for the active remote thread, and removes the action when its e
   expect(target.pathname).toBe("/settings/memory");
   expect(target.searchParams.get("environmentId")).toBe("remote-owner");
   expect(target.searchParams.has("project")).toBe(false);
-  state.supported = false;
-  await act(async () => render());
+  await act(async () => {
+    state.allowed = false;
+    state.listeners.forEach((listener) => listener());
+  });
+  expect(
+    [...container.querySelectorAll("button")].some((item) => item.textContent === "Memory"),
+  ).toBe(false);
+  await act(async () => {
+    state.allowed = true;
+    state.listeners.forEach((listener) => listener());
+  });
+  expect(
+    [...container.querySelectorAll("button")].some((item) => item.textContent === "Memory"),
+  ).toBe(true);
+  await act(async () => {
+    state.supported = false;
+    state.listeners.forEach((listener) => listener());
+  });
   expect(
     [...container.querySelectorAll("button")].some((item) => item.textContent === "Memory"),
   ).toBe(false);
