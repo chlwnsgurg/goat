@@ -8,6 +8,7 @@ import {
 } from "@goat/client-runtime/memory-import-recovery";
 import {
   createMemoryImportAdmission,
+  memoryImportGenerationKey,
   removeMemoryImportDestination,
   memoryImportRecoveryStorage,
 } from "./memoryImportRecoveryStorage";
@@ -386,4 +387,79 @@ it("another tab binding generation fences old preview even before notification, 
   await a.ready();
   await a.workflow.apply();
   expect(a.calls.filter((call) => call.action === "apply")).toHaveLength(1);
+});
+
+it("deleted generation after another tab binding change rejects first preview without notification, then re-previews", async () => {
+  let a!: ReturnType<typeof fixture>;
+  const invalidated = vi.fn(() => a.workflow.invalidate());
+  const admission = createMemoryImportAdmission(destination, invalidated, independentAdapter());
+  a = fixture(1, admission.recovery, admission.capturePreview);
+  const key = memoryImportGenerationKey(destination);
+  expect(localStorage.getItem(key)).toBeNull();
+  await a.ready();
+  const firstGeneration = localStorage.getItem(key);
+  await removeMemoryImportDestination(destination, independentAdapter());
+  expect(localStorage.getItem(key)).not.toBe(firstGeneration);
+  localStorage.removeItem(key);
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  await a.workflow.apply();
+  expect(write).not.toHaveBeenCalled();
+  expect(a.calls.filter((call) => call.action === "apply")).toEqual([]);
+  expect(await a.store.load(destination)).toBeNull();
+  expect(invalidated).toHaveBeenCalledOnce();
+  expect(a.workflow.getSnapshot().phase).toBe("idle");
+  await a.ready();
+  expect(localStorage.getItem(key)).not.toBeNull();
+  expect(localStorage.getItem(key)).not.toBe(firstGeneration);
+  await a.workflow.apply();
+  expect(a.calls.filter((call) => call.action === "apply")).toHaveLength(1);
+});
+it.each(["malformed", "00000000-0000-0000-0000-000000000000", ""])(
+  "initializes malformed preview generation %j and permits apply",
+  async (value) => {
+    const key = memoryImportGenerationKey(destination);
+    localStorage.setItem(key, value);
+    const admission = createMemoryImportAdmission(destination, undefined, independentAdapter());
+    const a = fixture(1, admission.recovery, admission.capturePreview);
+    await a.ready();
+    expect(localStorage.getItem(key)).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    await a.workflow.apply();
+    expect(a.calls.filter((call) => call.action === "apply")).toHaveLength(1);
+  },
+);
+it("rejects malformed admission generation without saving or applying and preserves sent X", async () => {
+  let a!: ReturnType<typeof fixture>;
+  const invalidated = vi.fn(() => a.workflow.invalidate());
+  const admission = createMemoryImportAdmission(destination, invalidated, independentAdapter());
+  a = fixture(1, admission.recovery, admission.capturePreview);
+  await a.ready();
+  const x = M.MemoryOperationId.make(uuid(99));
+  await memoryImportRecoveryStorage(independentAdapter()).save(destination, x);
+  localStorage.setItem(memoryImportGenerationKey(destination), "malformed");
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  await a.workflow.apply();
+  expect(write).not.toHaveBeenCalled();
+  expect(a.calls.filter((call) => call.action === "apply")).toEqual([]);
+  expect(invalidated).toHaveBeenCalledOnce();
+  expect(a.workflow.getSnapshot().phase).toBe("idle");
+  expect((await a.store.load(destination))?.operationId).toBe(x);
+});
+it("rejects repeated malformed generation at admission even when preview read the same raw value", async () => {
+  const key = memoryImportGenerationKey(destination);
+  localStorage.setItem(key, "malformed");
+  let a!: ReturnType<typeof fixture>;
+  const invalidated = vi.fn(() => a.workflow.invalidate());
+  const admission = createMemoryImportAdmission(destination, invalidated, independentAdapter());
+  a = fixture(1, admission.recovery, admission.capturePreview);
+  await a.ready();
+  localStorage.setItem(key, "malformed");
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  await a.workflow.apply();
+  expect(write).not.toHaveBeenCalled();
+  expect(a.calls.filter((call) => call.action === "apply")).toEqual([]);
+  expect(await a.store.load(destination)).toBeNull();
+  expect(invalidated).toHaveBeenCalledOnce();
+  expect(a.workflow.getSnapshot().phase).toBe("idle");
 });

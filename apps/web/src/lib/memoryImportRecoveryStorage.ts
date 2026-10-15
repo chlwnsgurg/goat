@@ -21,6 +21,10 @@ function withDestinationLock<T>(destination: MemoryImportDestination, run: () =>
 export const memoryImportGenerationKey = (destination: MemoryImportDestination) =>
   `${memoryImportRecoveryKey(destination)}:generation`;
 
+const validGeneration = (value: string | null | undefined): value is string =>
+  typeof value === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+
 const stores = new WeakMap<
   MemoryImportRecoveryStorage,
   ReturnType<typeof createMemoryImportRecoveryStore>
@@ -54,7 +58,7 @@ export function createMemoryImportAdmission(
 ) {
   const base = createMemoryImportRecoveryStore(storage, () => Date.now());
   const invalidations = new Set([invalidate]);
-  let previewGeneration: string | null | undefined;
+  let previewGeneration: string | undefined;
   return {
     subscribeInvalidation: (listener: () => void) => {
       invalidations.add(listener);
@@ -63,17 +67,24 @@ export function createMemoryImportAdmission(
       };
     },
     capturePreview: async () => {
-      previewGeneration = await storage.getItem(memoryImportGenerationKey(destination));
+      previewGeneration = undefined;
+      await withDestinationLock(destination, async () => {
+        const key = memoryImportGenerationKey(destination);
+        let generation = await storage.getItem(key);
+        if (!validGeneration(generation)) {
+          generation = randomUUID();
+          await storage.setItem(key, generation);
+        }
+        previewGeneration = generation;
+      });
     },
     recovery: {
       ...memoryImportRecoveryStorage(storage),
       save: (target: MemoryImportDestination, operationId: Parameters<typeof base.save>[1]) => {
         if (!canSafelyImport()) return Promise.reject(new Error(unsafeImportBrowserMessage));
         return withDestinationLock(target, async () => {
-          if (
-            previewGeneration === undefined ||
-            previewGeneration !== (await storage.getItem(memoryImportGenerationKey(target)))
-          ) {
+          const generation = await storage.getItem(memoryImportGenerationKey(target));
+          if (!validGeneration(generation) || previewGeneration !== generation) {
             for (const listener of invalidations) listener();
             throw new Error(changedImportDestinationMessage);
           }

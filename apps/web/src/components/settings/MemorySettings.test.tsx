@@ -2245,6 +2245,14 @@ it("explains unavailable safe import admission while keeping Check import result
 });
 it("storage generation notification stops selection without deleting recovery", async () => {
   const { memoryImportGenerationKey } = await import("../../lib/memoryImportRecoveryStorage");
+  const destination = { environmentId: envId, memorySpaceId: spaceId };
+  const operationId = (await import("@goat/contracts")).MemoryOperationId.make(id(80));
+  const store = memoryImportRecoveryStorage();
+  await store.save(destination, operationId);
+  state.executors.set("importProvider", async (request) => {
+    state.calls(request);
+    throw new Error("offline");
+  });
   await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
   await chooseControl("user", 1);
   expect(container.querySelectorAll("select")[1]!.value).toBe("user");
@@ -2258,4 +2266,5 @@ it("storage generation notification stops selection without deleting recovery", 
     ),
   );
   expect(container.textContent).toContain("Destination changed. Choose a scope and preview again.");
+  expect((await store.load(destination))?.operationId).toBe(operationId);
 });
