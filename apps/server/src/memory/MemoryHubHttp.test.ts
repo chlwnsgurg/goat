@@ -1,3 +1,5 @@
+import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import { expect, it } from "vite-plus/test";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -23,6 +25,8 @@ const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     yield* migration;
     yield* hubMigration;
+    yield* lineageMigration;
+    yield* checkpointMigration;
     const sql = yield* SqlClient.SqlClient;
     const crypto = yield* Crypto.Crypto;
     const digest = Hex.encode(

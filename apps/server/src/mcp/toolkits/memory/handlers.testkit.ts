@@ -3,13 +3,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Schema from "effect/Schema";
 // eslint-disable-next-line goat/no-raw-mcp-registration -- Test harness calls only toolkits registered through McpHttpServer.toolkitRegistration.
 import { McpSchema, McpServer } from "effect/ai";
 import migration from "../../../persistence/Migrations/071_Memory.ts";
 import searchMigration from "../../../persistence/Migrations/073_MemorySearchCounters.ts";
 import hubMigration from "../../../persistence/Migrations/072_MemoryHubSync.ts";
+import lineageMigration from "../../../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../../../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import * as RepositoryResolver from "../../../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Store from "../../../memory/MemoryStore.ts";
@@ -30,7 +32,12 @@ const identity = Layer.succeed(Environment.ServerEnvironmentIdentity, {
   getEnvironmentId: Effect.succeed(M.EnvironmentId.make("fixture-memory-mcp")),
 });
 const database = Layer.effectDiscard(
-  migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(searchMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+  ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
 const makeCore = <E, R>(

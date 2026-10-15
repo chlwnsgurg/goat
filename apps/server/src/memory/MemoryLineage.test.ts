@@ -8,6 +8,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
+import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
@@ -38,7 +40,12 @@ const input = (n: number, deps: readonly M.MemoryRevisionId[] = []): M.MemoryUps
 });
 const makeEnvironment = Effect.fnUntraced(function* (environmentId: M.EnvironmentId) {
   const database = Layer.effectDiscard(
-    migration.pipe(Effect.andThen(hubMigration), Effect.andThen(searchMigration)),
+    migration.pipe(
+      Effect.andThen(hubMigration),
+      Effect.andThen(searchMigration),
+      Effect.andThen(lineageMigration),
+      Effect.andThen(checkpointMigration),
+    ),
   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
   const core = Layer.merge(Service.layer, Maintenance.layer).pipe(
     Layer.provideMerge(

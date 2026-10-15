@@ -1,3 +1,4 @@
+import { checkpointLedgerFixture } from "./MemoryCheckpoint.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
@@ -8,6 +9,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
+import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
+import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import * as Store from "./MemoryStore.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { memoryOperationDigest } from "./MemoryDecider.ts";
@@ -76,9 +79,13 @@ const decision = (op = operation()): Store.MemoryDecision => ({
     : {}),
 });
 const database = NodeSqliteClient.layer({ filename: ":memory:" });
-const setup = Layer.effectDiscard(migration.pipe(Effect.andThen(hubMigration))).pipe(
-  Layer.provideMerge(database),
-);
+const setup = Layer.effectDiscard(
+  migration.pipe(
+    Effect.andThen(hubMigration),
+    Effect.andThen(lineageMigration),
+    Effect.andThen(checkpointMigration),
+  ),
+).pipe(Layer.provideMerge(database));
 const live = Store.layer.pipe(Layer.provideMerge(setup));
 
 const services = Quota.layer.pipe(Layer.provideMerge(live));
@@ -362,7 +369,7 @@ describe("MemoryQuotaService", () => {
         const count = M.MEMORY_IMPORT_MAX_SOURCE_ITEMS - records.length + extra;
         yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${count}) INSERT INTO memory_import_keys (space,key_kind,key,memory_id,record_json) SELECT ${space},'fixture',CAST(v AS TEXT),${id(900)},'{}' FROM n`;
       } else {
-        yield* sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) VALUES (${space},${id(900)},'{}','{}',0)`;
+        yield* sql`INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) VALUES (${space},${id(900)},${checkpointLedgerFixture(space, id(900), env).identity},${checkpointLedgerFixture(space, id(900), env).fence},0)`;
         const used = yield* store.usage(space, { kind: "user" });
         const held = yield* store.readForgetReservation(space, memory);
         const filler =
@@ -379,7 +386,7 @@ describe("MemoryQuotaService", () => {
       const expansion = result.receipt.forgetExpansion;
       if (!expansion) throw new Error("Missing expansion disposition");
       assert.strictEqual(expansion.requestDigest, request.operationDigest);
-      assert.strictEqual(expansion.status, extra ? "rejected" : "accepted");
+      assert.strictEqual(expansion.status, extra ? "rejected" : "pending");
       assert.notStrictEqual(expansion.operationId, op.operationId);
       const additional = (yield* store.readOperation(space, expansion.operationId))!;
       const additionalReceipt = (yield* store.receipt(space, expansion.operationId))!;
@@ -658,7 +665,7 @@ describe("MemoryQuotaService", () => {
       const sql = yield* SqlClient.SqlClient;
       const quota = yield* Quota.MemoryQuotaService;
       const store = yield* Store.MemoryStore;
-      yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${M.MEMORY_MAX_LIFETIME_IDS - 1}) INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) SELECT ${space},'00000000-0000-4000-8001-'||printf('%012d',v),'{}','{}',0 FROM n`;
+      yield* sql`WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<${M.MEMORY_MAX_LIFETIME_IDS - 1}) INSERT INTO memory_identity_ledger (space,memory_id,identity_json,fence_json,reserve_bytes) SELECT ${space},'00000000-0000-4000-8001-'||printf('%012d',v),json_set(${checkpointLedgerFixture(space, memory, env).identity},'$.memoryId','00000000-0000-4000-8001-'||printf('%012d',v)),json_set(${checkpointLedgerFixture(space, memory, env).fence},'$.memoryId','00000000-0000-4000-8001-'||printf('%012d',v)),0 FROM n`;
       const accepted = yield* quota.commit(decision(forget()), env, Effect.void);
       assert.strictEqual(accepted.receipt.outcome, "deleted");
       const other = decodeOperation({
@@ -854,7 +861,7 @@ it.effect(
     Effect.gen(function* () {
       const quota = yield* Quota.MemoryQuotaService;
       const sql = yield* SqlClient.SqlClient;
-      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${memory},'{}','{}',${M.MEMORY_IDENTITY_CORE_MAX_BYTES + 100},2)`;
+      yield* sql`INSERT INTO memory_identity_ledger(space,memory_id,identity_json,fence_json,reserve_bytes,reserve_keys) VALUES (${space},${memory},${checkpointLedgerFixture(space, memory, env).identity},${checkpointLedgerFixture(space, memory, env).fence},${M.MEMORY_IDENTITY_CORE_MAX_BYTES + 100},2)`;
       yield* sql`INSERT INTO memory_payloads(space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${space},'relay:fixture',${memory},'한글','[]')`;
       yield* sql`INSERT INTO memory_hub_source_reads(space,request_id,memory_id,requester,owner,credential_version,request_digest,locator_json,state,deadline,payload_ref) VALUES (${space},'fixture',${memory},${env},${env},1,'digest','{}','completed',0,'relay:fixture')`;
       const status = yield* quota.readStorageStatus({ memorySpaceId: space, environmentId: env });

@@ -169,9 +169,16 @@ const make = Effect.gen(function* () {
             ? 0
             : utf8(yield* payloadJson(op.payload).pipe(Effect.mapError(storageError)));
         const oldPayloadBytes = yield* Effect.reduce(
-          current.revisions.filter(
-            (pair) => current.heads.includes(pair.revision.revisionId) && pair.payload !== null,
-          ),
+          [
+            ...new Map(
+              current.revisions
+                .filter(
+                  (pair) =>
+                    current.heads.includes(pair.revision.revisionId) && pair.payload !== null,
+                )
+                .map((pair) => [pair.revision.payloadRef, pair]),
+            ).values(),
+          ],
           () => 0,
           (sum, pair) => Effect.map(payloadJson(pair.payload!), (json) => sum + utf8(json)),
         ).pipe(Effect.mapError(storageError));
@@ -298,7 +305,9 @@ const make = Effect.gen(function* () {
           charge(
             "history",
             usage.historyBytes,
-            oldPayloadBytes +
+            (op.kind === "upsert" && op.revision.payloadRef !== op.revision.revisionId
+              ? 0
+              : oldPayloadBytes) +
               (op.kind === "resolve"
                 ? utf8(
                     yield* resolutionPayloadJson(op.resolutionPayload).pipe(
@@ -534,7 +543,12 @@ const make = Effect.gen(function* () {
                   ...result.receipt,
                   forgetExpansion: {
                     ...expansion,
-                    status: extraResult.receipt.outcome === "rejected" ? "rejected" : "accepted",
+                    status:
+                      extraResult.receipt.outcome === "rejected"
+                        ? "rejected"
+                        : "pendingSync" in extraResult.receipt && extraResult.receipt.pendingSync
+                          ? "pending"
+                          : "accepted",
                   },
                 },
               });
@@ -657,6 +671,7 @@ const make = Effect.gen(function* () {
           const retention = yield* store.readHubRetentionTx(input.memorySpaceId);
           const counters = yield* store.counters(input.memorySpaceId);
           const hub = yield* store.readHubUsageTx(input.memorySpaceId);
+          const lineageCounters = yield* store.counters("_hub_global");
           const inventory = yield* store.readHubInventoryTx(input.memorySpaceId);
           const limits: Partial<Record<M.MemoryCapacityDimension, number>> = {
             space_live_items: M.MEMORY_SPACE_MAX_LIVE_ITEMS,
@@ -666,6 +681,7 @@ const make = Effect.gen(function* () {
             lifetime_ids: M.MEMORY_MAX_LIFETIME_IDS,
             receipts: M.MEMORY_DEDUP_MAX_RECEIPTS,
             import_source_items: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+            import_lineage_bytes: M.MEMORY_IMPORT_LINEAGE_MAX_BYTES,
             log_tail_rows: M.MEMORY_LOG_MAX_TAIL_ROWS,
             log_tail_bytes: M.MEMORY_LOG_MAX_TAIL_BYTES,
             work_items: M.MEMORY_WORK_MAX_PENDING_ITEMS,
@@ -683,22 +699,25 @@ const make = Effect.gen(function* () {
               .filter((c) => c.dimension === dimension)
               .reduce((sum, c) => sum + c.value, 0);
             const current =
-              dimension === "checkpoint_staging"
-                ? hub.stagingBytes
-                : dimension === "checkpoint_handles"
-                  ? hub.liveHandles
-                  : dimension === "relay_hub"
-                    ? hub.liveSourceReads
-                    : dimension === "members"
-                      ? (hub.tables.find((table) => table.table === "memory_hub_members")
-                          ?.rowCount ?? 0)
-                      : dimension === "log_tail_rows"
-                        ? counter + hub.tailRows
-                        : dimension === "log_tail_bytes"
-                          ? counter + hub.tailBytes
-                          : dimension === "permanent_metadata"
-                            ? counter + hub.permanentMetadataBytes
-                            : counter;
+              dimension === "import_lineage_bytes"
+                ? (lineageCounters.find((counter) => counter.dimension === "import_lineage_bytes")
+                    ?.value ?? 0)
+                : dimension === "checkpoint_staging"
+                  ? hub.stagingBytes
+                  : dimension === "checkpoint_handles"
+                    ? hub.liveHandles
+                    : dimension === "relay_hub"
+                      ? hub.liveSourceReads
+                      : dimension === "members"
+                        ? (hub.tables.find((table) => table.table === "memory_hub_members")
+                            ?.rowCount ?? 0)
+                        : dimension === "log_tail_rows"
+                          ? counter + hub.tailRows
+                          : dimension === "log_tail_bytes"
+                            ? counter + hub.tailBytes
+                            : dimension === "permanent_metadata"
+                              ? counter + hub.permanentMetadataBytes
+                              : counter;
             quotas.push({
               dimension,
               current,
@@ -775,15 +794,15 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const growth = yield* readStorageGrowth(input.environmentId);
           const fts = yield* store.ftsState(input.environmentId);
-          // WP2 local drafts have no canonical hub inventory. Existing snapshot counters
-          // already track their serialized payload and outbox bytes transactionally.
+          // WP2 local drafts have no canonical hub inventory. The private input meter
+          // tracks their serialized payload and outbox bytes transactionally.
           const counters = yield* store.counters(`_local:${input.environmentId}`);
           const value = (dimension: string) =>
             counters.find((counter) => counter.dimension === dimension && counter.scope_key === "")
               ?.value ?? 0;
           const localLimits = [
             ["work_items", value("processing_pending_sync"), M.MEMORY_WORK_MAX_PENDING_ITEMS],
-            ["work_bytes", value("hub_snapshot_bytes"), M.MEMORY_WORK_MAX_PAYLOAD_BYTES],
+            ["work_bytes", value("memory_input_bytes"), M.MEMORY_WORK_MAX_PAYLOAD_BYTES],
           ] as const;
           const quotas: M.MemoryStorageQuota[] = localLimits.map(([dimension, current, limit]) => ({
             dimension,
