@@ -3018,8 +3018,9 @@ const stageReportRevert = Effect.gen(function* () {
   if (op?.kind !== "revert") throw new Error("revert fixture");
   return { request, op, workId };
 });
-for (const route of ["ack", "pull", "hub-local"] as const) {
-  it.effect(`r2 H1 approves operation report through ${route}`, () =>
+it.effect.each(["ack", "pull", "hub-local"] as const)(
+  "r2 H1 approves operation report through %s",
+  (route) =>
     Effect.gen(function* () {
       const service = yield* Service.MemoryService;
       const sql = yield* SqlClient.SqlClient;
@@ -3092,37 +3093,34 @@ for (const route of ["ack", "pull", "hub-local"] as const) {
       assert.strictEqual(reports[0]!.outcome, "reverted");
       assert.strictEqual(reports[0]!.resolvingEnvironmentId, environmentId);
     }).pipe(Effect.provide(live)),
-  );
-}
-for (const hubSequence of [null, 1]) {
-  it.effect(`r2 H1 refuses report approval for rejected ACK ${hubSequence}`, () =>
-    Effect.gen(function* () {
-      const service = yield* Service.MemoryService;
-      const { op, workId } = yield* stageReportRevert;
-      yield* service.settleHubAcknowledgement({
-        memorySpaceId: space,
-        hubEnvironmentId: environmentId,
-        localEnvironmentId: environmentId,
-        workId,
-        operation: { operationId: op.operationId, operationDigest: memoryOperationDigest(op) },
-        reauthorize: Effect.void,
-        receipt: {
-          operationId: op.operationId,
-          memoryId,
-          operationDigest: memoryOperationDigest(op),
-          outcome: "rejected",
-          hubSequence,
-          failureCode: "revert_expired",
-        },
-      });
-      assert.isNull(yield* service.nextReportWakeAt(0));
-      assert.deepStrictEqual(
-        yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
-        [],
-      );
-    }).pipe(Effect.provide(live)),
-  );
-}
+);
+it.effect.each([null, 1])("r2 H1 refuses report approval for rejected ACK %s", (hubSequence) =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const { op, workId } = yield* stageReportRevert;
+    yield* service.settleHubAcknowledgement({
+      memorySpaceId: space,
+      hubEnvironmentId: environmentId,
+      localEnvironmentId: environmentId,
+      workId,
+      operation: { operationId: op.operationId, operationDigest: memoryOperationDigest(op) },
+      reauthorize: Effect.void,
+      receipt: {
+        operationId: op.operationId,
+        memoryId,
+        operationDigest: memoryOperationDigest(op),
+        outcome: "rejected",
+        hubSequence,
+        failureCode: "revert_expired",
+      },
+    });
+    assert.isNull(yield* service.nextReportWakeAt(0));
+    assert.deepStrictEqual(
+      yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
+      [],
+    );
+  }).pipe(Effect.provide(live)),
+);
 it.effect(
   "r2 M1 foreign operation backlog leaves local report capacity available",
   () =>
@@ -3182,8 +3180,9 @@ it.effect(
   { timeout: 120000 },
 );
 
-for (const mode of ["disabled", "other-space", "writer-wait"] as const) {
-  it.effect(`r2 H2 rechecks revert sharing on ${mode} including staged replay`, () =>
+it.effect.each(["disabled", "other-space", "writer-wait"] as const)(
+  "r2 H2 rechecks revert sharing on %s including staged replay",
+  (mode) =>
     Effect.scoped(
       Effect.gen(function* () {
         let blocked = false;
@@ -3250,5 +3249,4 @@ for (const mode of ["disabled", "other-space", "writer-wait"] as const) {
         }).pipe(Effect.provide(serviceLive(Service.layer, readSettings)));
       }),
     ),
-  );
-}
+);
