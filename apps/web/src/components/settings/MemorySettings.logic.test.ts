@@ -111,3 +111,52 @@ describe("Memory settings intent boundaries", () => {
     });
   });
 });
+
+import {
+  MemorySpaceId,
+  MemoryResetReportAttemptsInput,
+  type MemoryReportDelivery,
+} from "@goat/contracts";
+import { memoryReportRetryIntent } from "./MemorySettings.logic";
+const decodeRetry = Schema.decodeUnknownSync(MemoryResetReportAttemptsInput);
+it("builds a valid bounded retry command from current exhausted exact-owner rows", () => {
+  const owner = EnvironmentId.make("owner");
+  const space = MemorySpaceId.make(id(1));
+  const reports = Array.from({ length: 40 }, (_, index) => ({
+    reportId: String(index).padStart(64, "0"),
+    state: "failed",
+    automaticAttempts: 10,
+    resolvingEnvironmentId: owner,
+  })) as MemoryReportDelivery[];
+  const intent = memoryReportRetryIntent(
+    owner,
+    space,
+    [...reports, reports[0]!],
+    reports.map((r) => r.reportId),
+  );
+  expect(decodeRetry(intent).reportIds).toHaveLength(32);
+  expect(
+    memoryReportRetryIntent(
+      EnvironmentId.make("foreign"),
+      space,
+      reports,
+      reports.map((r) => r.reportId),
+    ),
+  ).toBeNull();
+  expect(
+    memoryReportRetryIntent(
+      owner,
+      space,
+      reports.map((r) => ({ ...r, automaticAttempts: undefined })),
+      reports.map((r) => r.reportId),
+    ),
+  ).toBeNull();
+  expect(
+    memoryReportRetryIntent(
+      owner,
+      space,
+      [],
+      reports.map((r) => r.reportId),
+    ),
+  ).toBeNull();
+});

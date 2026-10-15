@@ -1,3 +1,7 @@
+import { MemoryImportSettings } from "./MemoryImportSettings";
+import { MemoryAgentAccessSettings } from "./MemoryAgentAccessSettings";
+import { MemoryReportRetrySettings } from "./MemoryReportRetrySettings";
+import { MemoryScopeSettings, type MemoryScopeSelection } from "./MemoryScopeSettings";
 import { XIcon } from "../solar";
 import { MemoryAdministration } from "./MemorySharingSettings";
 import { randomUUID } from "../../lib/utils";
@@ -27,6 +31,9 @@ import {
   presentMemoryRevertResult,
   presentMemoryReport,
   presentMemorySync,
+  presentMemoryCoverage,
+  presentMemoryStorage,
+  presentMemoryProcessing,
 } from "@goat/client-runtime/memory-presentation";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
@@ -230,6 +237,8 @@ function MemoryDestinationContent({
 
   return (
     <>
+      <MemoryAgentAccessSettings environmentId={environmentId} />
+      {sync ? <MemoryStatusRows sync={sync} /> : null}
       {canRead && sync?.state === "bootstrapping" && sync.memorySpaceId ? (
         <MemoryBootstrapRefresh
           environmentId={environmentId}
@@ -263,6 +272,13 @@ function MemoryDestinationContent({
             }
           />
         </SettingsSection>
+      ) : null}
+      {memorySpaceId && canRead ? (
+        <MemoryImportSettings
+          key={memorySpaceId}
+          environmentId={environmentId}
+          memorySpaceId={memorySpaceId}
+        />
       ) : null}
       {!memorySpaceId ? (
         <SettingsSection title="Memories" id="memory-records">
@@ -463,6 +479,9 @@ function MemoryRecords({
             }
           />
         ) : null}
+        {value ? (
+          <SettingsRow title={presentMemoryCoverage(value.indexCoverage, items.length).label} />
+        ) : null}
         {notice ? <SettingsRow title={<span role="status">{notice}</span>} /> : null}
         {!value && !page.error ? (
           <SettingsRow
@@ -471,8 +490,8 @@ function MemoryRecords({
           />
         ) : !value ? null : items.length === 0 ? (
           <SettingsRow
-            title="No memories yet"
-            description="Memories saved on this device will appear here."
+            title={presentMemoryCoverage(value.indexCoverage, 0).emptyLabel ?? "No memories found"}
+            description={presentMemoryCoverage(value.indexCoverage, 0).label}
           />
         ) : (
           <LegendList
@@ -766,6 +785,12 @@ function MemoryDetails({
               {value.revertResults.map((result) => (
                 <p key={result.operationId}>{presentMemoryRevertResult(result).label}</p>
               ))}
+              <MemoryReportRetrySettings
+                environmentId={environmentId}
+                memorySpaceId={memorySpaceId}
+                reports={value.reports}
+                onSettled={history.refresh}
+              />
               {value.reports.map((report) => (
                 <MemoryReportControl key={report.reportId} report={report} />
               ))}
@@ -1123,7 +1148,7 @@ function MemoryReportControl({ report }: { report: MemoryReportDelivery }) {
   return (
     <div>
       <p>{display.label}</p>
-      {display.failureCode ? <p>{display.failureCode}</p> : null}
+      <p>Automatic attempts: {display.automaticAttempts ?? "Unknown"}</p>
       {destination ? (
         <Button
           size="sm"
@@ -1140,9 +1165,6 @@ function MemoryReportControl({ report }: { report: MemoryReportDelivery }) {
         >
           Open report
         </Button>
-      ) : null}
-      {report.state === "failed" ? (
-        <p>Manual report retry is not available in this environment version.</p>
       ) : null}
     </div>
   );
@@ -1162,6 +1184,7 @@ function MemoryEditor({
   const [id] = useState(() => item?.memoryId ?? MemoryId.make(randomUUID()));
   const [operationId, setOperationId] = useState<MemoryOperationId | null>(null);
   const [busy, setBusy] = useState(false);
+  const [selection, setSelection] = useState<MemoryScopeSelection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const draft = memoryEnvironment.draftAtom({
     environmentId,
@@ -1202,6 +1225,7 @@ function MemoryEditor({
         if (
           busy ||
           !text?.trim() ||
+          (!item && !selection) ||
           !registry.get(memoryEnvironment.upsert.permissionAtom(environmentId))
         )
           return;
@@ -1215,7 +1239,8 @@ function MemoryEditor({
             memoryId: id,
             operationId: intentId,
             expectedHeads: item ? [item.revision.revisionId] : [],
-            scope: item?.scope ?? { kind: "user" },
+            scope: item?.scope ?? selection!.scope,
+            ...(!item && selection?.project ? { project: selection.project } : {}),
             assertionKind: item?.revision.assertionKind ?? "fact",
             payload: {
               text,
@@ -1236,6 +1261,14 @@ function MemoryEditor({
           setError("Memory update failed. Retry the same request or close the editor and reload.");
       }}
     >
+      {!item ? (
+        <MemoryScopeSettings
+          environmentId={environmentId}
+          memorySpaceId={memorySpaceId}
+          disabled={busy || operationId !== null}
+          onChange={setSelection}
+        />
+      ) : null}
       <Textarea
         aria-label="Memory text"
         value={text ?? ""}
@@ -1248,7 +1281,7 @@ function MemoryEditor({
         }
       />
       {error ? <p role="alert">{error}</p> : null}
-      <Button type="submit" size="sm" disabled={busy || !text?.trim()}>
+      <Button type="submit" size="sm" disabled={busy || !text?.trim() || (!item && !selection)}>
         {operationId ? "Retry memory request" : "Save memory"}
       </Button>
       <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onClose}>
@@ -1345,5 +1378,34 @@ function MemorySourcePage({
         Next original page
       </Button>
     </div>
+  );
+}
+
+/** Producer helpers keep raw storage fields and timestamps out of Settings. */
+function MemoryStatusRows({ sync }: { sync: MemorySyncStatus }) {
+  const storage = presentMemoryStorage(sync.storage);
+  const processing = presentMemoryProcessing(sync.processing);
+  const labels = [
+    processing.checkingLabel,
+    processing.heldLabel,
+    processing.waitingLabel,
+    processing.cleanupLabel,
+    processing.receiveLabel,
+    processing.reportLabel,
+    processing.admissionLabel,
+  ].filter(Boolean);
+  return (
+    <SettingsSection title="Memory status">
+      <SettingsRow title="Hub" description={presentMemorySync(sync).label} />
+      <SettingsRow
+        title="Storage"
+        description={[storage.label, storage.searchLabel, ...storage.reasons].join(". ")}
+      />
+      <SettingsRow title="Coverage" description={processing.coverage.label} />
+      <SettingsRow
+        title="Processing"
+        description={labels.join(". ") || "No pending processing reported"}
+      />
+    </SettingsSection>
   );
 }
