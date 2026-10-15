@@ -13,7 +13,7 @@ export const PIERRE_TREE_UNSAFE_CSS = `
   button[data-type='item'], button[data-type='item']::before { border-radius: var(--radius-md); }
   svg[data-icon-name='goat-tree-icon-loading'] { opacity: 0.6; }
   @media (prefers-reduced-motion: no-preference) {
-    svg[data-icon-name='goat-tree-icon-loading'] { animation: goat-tree-spin 1s linear infinite; }
+    svg[data-icon-name='goat-tree-icon-loading'] { animation: goat-tree-spin 0.9s steps(8) infinite; }
   }
   @keyframes goat-tree-spin { to { transform: rotate(360deg); } }
 `;
