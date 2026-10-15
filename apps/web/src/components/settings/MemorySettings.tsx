@@ -269,7 +269,7 @@ function MemoryDestinationContent({
           <SettingsRow
             title={
               sync?.state === "disabled"
-                ? "Turn on memory to start saving memories."
+                ? "Turn on memory to see and save memories."
                 : "Memory is getting ready."
             }
             description={

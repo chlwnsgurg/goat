@@ -99,6 +99,8 @@ function sessionScopes(scopes: ReadonlyArray<AuthEnvironmentScope>): AuthSession
   };
 }
 const decodeMemoryPage = Schema.decodeUnknownEffect(MemoryPage);
+const decodeMemoryItem = Schema.decodeUnknownEffect(MemoryItem);
+const decodeMemoryHistory = Schema.decodeUnknownEffect(MemoryHistoryPage);
 const decodeSignal = Schema.decodeUnknownSync(MemoryChangeSignal);
 const decodeImport = Schema.decodeUnknownSync(MemoryImportProviderResult);
 const signal = (kind: MemoryChangeSignal["kind"], memoryId = id) =>
@@ -180,6 +182,7 @@ const harness = Effect.fn(function* (
   ledger = createMemoryTombstoneLedger(),
   pageValue = page,
   repeatPages = false,
+  historyValue = history,
 ) {
   const registry = AtomRegistry.make();
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
@@ -224,7 +227,7 @@ const harness = Effect.fn(function* (
       }),
     [WS_METHODS.memoryList]: () => respondOnce("list", pageValue),
     [WS_METHODS.memorySearch]: () => respondOnce("search", pageValue),
-    [WS_METHODS.memoryHistory]: () => respondOnce("history", history),
+    [WS_METHODS.memoryHistory]: () => respondOnce("history", historyValue),
     [WS_METHODS.memoryReadSource]: () => respondOnce("source", sourcePage),
     [WS_METHODS.memoryImportProvider]: () =>
       Effect.succeed(decodeImport({ action: "discover", sources: [] })),
@@ -1335,4 +1338,66 @@ it.effect("keeps schema-decoded forgotten rows visible after observing the same 
       expect(result.value.value.items[0]).not.toHaveProperty("payload");
     }),
   ),
+);
+
+it.effect.each(["read", "history", "draft"] as const)(
+  "removes already open derived %s when only its source is forgotten",
+  (consumer) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (item.status !== "active" || unrelatedItem.status !== "active")
+          throw new Error("Active fixture required");
+        const derived = yield* decodeMemoryItem(
+          {
+            ...unrelatedItem,
+            payload: {
+              ...unrelatedItem.payload,
+              text: "Already open derivative",
+              derivedFromMemoryRevisions: [item.revision.revisionId],
+            },
+          },
+          { onExcessProperty: "error" },
+        );
+        if (derived.status !== "active") throw new Error("Active fixture required");
+        const derivedHistory = yield* decodeMemoryHistory(
+          {
+            ...history,
+            memoryId: derived.memoryId,
+            revisions: [{ revision: derived.revision, payload: derived.payload }],
+          },
+          { onExcessProperty: "error" },
+        );
+        const h = yield* harness(createMemoryTombstoneLedger(), page, false, derivedHistory);
+        const exposure = h.memory.exposureAtom(target);
+        h.registry.mount(exposure);
+        yield* Queue.offer(h.queue, signal("reset"));
+        yield* waitFor(h.registry, exposure, (state) => state.ready);
+        const derivedTarget = { ...target, input: { ...target.input, memoryId: derived.memoryId } };
+        const read = h.memory.read(derivedTarget);
+        const past = h.memory.history({
+          ...derivedTarget,
+          input: { ...derivedTarget.input, limit: 10 },
+        });
+        h.registry.mount(read);
+        h.registry.mount(past);
+        yield* Deferred.succeed(h.reply, derived);
+        yield* waitFor(h.registry, hasBody(read), Boolean);
+        yield* waitFor(h.registry, hasBody(past), Boolean);
+        expect(JSON.stringify(h.registry.get(read))).toContain("Already open derivative");
+        expect(JSON.stringify(h.registry.get(past))).toContain("Already open derivative");
+        const edit = h.memory.draftAtom({ ...target, draftId: "open-derivative" });
+        h.registry.mount(edit);
+        h.registry.set(edit, { text: derived.payload.text, memoryIds: [derived.memoryId] });
+        expect(h.registry.get(edit)).toBe("Already open derivative");
+        yield* Queue.offer(h.queue, signal("forget", id));
+        yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+        // No D signal, refetch, TTL advance, or new mount is needed to purge the body.
+        if (consumer === "read")
+          expect(h.registry.get(read)).toEqual(AsyncResult.success(Option.none()));
+        if (consumer === "history")
+          expect(h.registry.get(past)).toEqual(AsyncResult.success(Option.none()));
+        if (consumer === "draft") expect(h.registry.get(edit)).toBeNull();
+        expect(h.readCount()).toBe(1);
+      }),
+    ),
 );

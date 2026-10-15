@@ -1459,3 +1459,23 @@ it("explains the device limit and starts a fresh add after removing a device", a
   expect(fresh.input.expectedVersion).toBe(6);
   expect(fresh.input.requestId).not.toBe(first.input.requestId);
 });
+
+it("describes both seeing and saving memories on a fresh visit while sharing is off", async () => {
+  state.responses.set("syncStatus", success({ state: "disabled", memorySpaceId: null }));
+  await supportedScreen(false);
+  expect(container.textContent).toContain("Turn on memory to see and save memories.");
+  expect(container.textContent).not.toContain("Turn on memory to start saving memories.");
+});
+
+it("removes an open editor and history when shared admission removes the derived memory", async () => {
+  const { render, registry } = await supportedScreen();
+  const writes = vi.spyOn(registry, "set");
+  await click("Edit");
+  expect(container.querySelector('[aria-label="Memory text"]')).not.toBeNull();
+  state.queries.set("read", Option.none());
+  state.queries.set("history", Option.none());
+  await render();
+  expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
+  expect(container.textContent).not.toContain("Synthetic original");
+  expect(writes.mock.calls.at(-1)?.[1]).toBeNull();
+});

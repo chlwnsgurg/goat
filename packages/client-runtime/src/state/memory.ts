@@ -37,6 +37,7 @@ export interface MemoryExposure {
   readonly epoch: object;
   readonly versions: HashMap.HashMap<MemoryId, object>;
   readonly forgotten: ReadonlySet<MemoryId>;
+  readonly forgetGeneration: object;
 }
 
 /** Body-free state. Epoch identity also fences replies from a prior subscription. */
@@ -47,6 +48,7 @@ export function emptyMemoryExposure(): MemoryExposure {
     epoch: {},
     versions: HashMap.empty(),
     forgotten: new Set(),
+    forgetGeneration: {},
   };
 }
 
@@ -64,7 +66,14 @@ export function applyMemoryChange(
     signal.kind === "forget" && !state.forgotten.has(signal.memoryId)
       ? new Set([...state.forgotten, signal.memoryId])
       : state.forgotten;
-  return { ...state, versions, forgotten };
+  return {
+    ...state,
+    versions,
+    forgotten,
+    // The factory mutates its ledger before this reducer runs. Set identity cannot
+    // signal admission changes for already displayed derived bodies or drafts.
+    forgetGeneration: signal.kind === "forget" ? {} : state.forgetGeneration,
+  };
 }
 
 /** A later upsert/watermark cannot undo a tombstone observed by this consumer. */
@@ -329,6 +338,9 @@ export function createMemoryEnvironmentAtoms<R, E>(
       return Atom.readable(
         (get) => {
           const current = get(relevantState);
+          // Admission observes all space changes independently of the stable direct-ID
+          // request projection. A source forget must hide an already displayed derivative.
+          const admission = get(state);
           const allowed = get(read.permissionAtom(environmentId, input));
           const result = get(raw);
           if (allowed && current.ready && result._tag === "Failure")
@@ -342,7 +354,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
             return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
           if (
             Option.isSome(result.value.value) &&
-            containsForgottenMemory(result.value.value.value, current.forgotten)
+            containsForgottenMemory(result.value.value.value, admission.forgotten)
           ) {
             const value = result.value.value.value;
             // A tombstone in a page must not hide unrelated memories. Drop affected
@@ -357,7 +369,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
                 Option.some({
                   ...value,
                   items: value.items.filter(
-                    (item) => !containsForgottenMemory(item, current.forgotten),
+                    (item) => !containsForgottenMemory(item, admission.forgotten),
                   ),
                 } as EnvironmentRpcSuccess<T>),
               );
@@ -391,7 +403,13 @@ export function createMemoryEnvironmentAtoms<R, E>(
       (get) => {
         const draft = get(stored);
         if (draft === null || draft.memoryIds.length === 0) return draft?.text ?? null;
-        if (!memoryExposureMatches(draft.exposure, get(state), draft.memoryIds)) {
+        const current = get(state);
+        // Drafts carry no complete revision lineage. Purge existing-memory edits on
+        // any same-space forget; ordinary unrelated upserts retain the draft.
+        if (
+          draft.exposure.forgetGeneration !== current.forgetGeneration ||
+          !memoryExposureMatches(draft.exposure, current, draft.memoryIds)
+        ) {
           // Purge the retained text, rather than only hiding it from the view.
           get.set(stored, null);
           return null;
