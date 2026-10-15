@@ -209,7 +209,9 @@ function Sidebar({
   ...props
 }: React.ComponentProps<"div"> & {
   side?: "left" | "right";
-  variant?: "sidebar" | "floating" | "inset";
+  /** `framed` sits beside the destination rail: offset by --destination-rail-width, drawn as a
+   * rounded panel below the titlebar strip so the strip reads as window frame. */
+  variant?: "sidebar" | "floating" | "inset" | "framed";
   collapsible?: "offcanvas" | "icon" | "none";
   resizable?: boolean | SidebarResizableOptions;
 }) {
@@ -319,7 +321,10 @@ function Sidebar({
             "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) md:flex",
             "[[data-panel-animations=true]_&]:transition-[left,right,width] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
             side === "left"
-              ? "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
+              ? variant === "framed"
+                ? // Slides exactly its own width, ending under the rail.
+                  "left-(--destination-rail-width) group-data-[collapsible=offcanvas]:left-[calc(var(--destination-rail-width)-var(--sidebar-width))]"
+                : "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
               : "right-0 group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
             // Adjust the padding for floating and inset variants.
             variant === "floating" || variant === "inset"
@@ -331,7 +336,14 @@ function Sidebar({
           {...props}
         >
           <div
-            className="flex h-full w-full flex-col bg-sidebar surface-grain group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm/5"
+            className={cn(
+              "flex h-full w-full flex-col",
+              variant === "framed"
+                ? // The panel surface starts under the titlebar strip; the strip shows the frame.
+                  // Its top edge lands on the titlebar hairline, so the corner curves out of it.
+                  "relative isolate bg-transparent before:absolute before:inset-x-0 before:top-[calc(var(--workspace-topbar-height)-1px)] before:bottom-0 before:-z-10 before:rounded-tl-xl before:border-t before:border-l before:border-sidebar-border before:bg-sidebar"
+                : "bg-sidebar surface-grain group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow-sm/5",
+            )}
             data-sidebar="sidebar"
             data-slot="sidebar-inner"
           >

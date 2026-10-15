@@ -83,6 +83,10 @@ vi.mock("./sidebar/SidebarChrome", () => ({
 }));
 vi.mock("../hooks/useThreadVisitedMigration", () => ({ useThreadVisitedMigration: () => {} }));
 vi.mock("./sidebar/mainAppLocation", () => ({ MainAppLocationTracker: () => null }));
+vi.mock("./sidebar/DestinationRail", async () => {
+  const { createContext } = await import("react");
+  return { DestinationRail: () => null, DestinationRailVisibleContext: createContext(false) };
+});
 vi.mock("./SidebarStageBackdrop", () => ({ useSidebarStageBackdropVariant: () => null }));
 vi.mock("../panelAnimations", () => ({
   PanelAnimationSuppressionProvider: () => null,
