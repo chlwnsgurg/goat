@@ -244,6 +244,77 @@ describe("DesktopConnectionCatalogStore", () => {
     ),
   );
 
+  it.effect("reclaims an abandoned expired reclaim guard before saving", () =>
+    withStore(
+      Effect.gen(function* () {
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const lockPath = `${environment.stateDir}/connection-catalog.lock`;
+        const guardPath = `${lockPath}.reclaim`;
+        yield* fs.makeDirectory(environment.stateDir, { recursive: true });
+        yield* fs.writeFileString(lockPath, "2147483647:abandoned");
+        yield* fs.writeFileString(guardPath, "2147483647:abandoned-reclaimer");
+        yield* fs.utimes(lockPath, EXPIRED_LOCK_TIME, EXPIRED_LOCK_TIME);
+        yield* fs.utimes(guardPath, EXPIRED_LOCK_TIME, EXPIRED_LOCK_TIME);
+
+        assert.isTrue(yield* store.set(VALID_CATALOG, null));
+        assert.isFalse(yield* fs.exists(lockPath));
+        assert.isFalse(yield* fs.exists(guardPath));
+        assert.deepStrictEqual(yield* store.get, Option.some(VALID_CATALOG));
+      }),
+    ),
+  );
+
+  it.effect("respects a fresh reclaim guard over an expired dead-owner lock", () =>
+    withStore(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fs = yield* FileSystem.FileSystem;
+        const lockPath = `${environment.stateDir}/connection-catalog.lock`;
+        const guardPath = `${lockPath}.reclaim`;
+        const owner = "2147483647:abandoned";
+        const reclaimer = "2147483647:reclaiming";
+        yield* fs.makeDirectory(environment.stateDir, { recursive: true });
+        yield* fs.writeFileString(lockPath, owner);
+        yield* fs.writeFileString(guardPath, reclaimer);
+        yield* fs.utimes(lockPath, EXPIRED_LOCK_TIME, EXPIRED_LOCK_TIME);
+        const lockInfo = yield* fs.stat(lockPath);
+        const guardInfo = yield* fs.stat(guardPath);
+        const started = yield* Deferred.make<void>();
+        const blocked = yield* DesktopConnectionCatalogStore.make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            makeDirectory: () => Effect.void,
+            stat: (file) => Effect.succeed(file === guardPath ? guardInfo : lockInfo),
+            readFileString: (file) => Effect.succeed(file === guardPath ? reclaimer : owner),
+            writeFileString: (file) =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "AlreadyExists",
+                  module: "FileSystem",
+                  method: "writeFileString",
+                  pathOrDescriptor: file,
+                }),
+              ).pipe(Effect.tapError(() => Deferred.succeed(started, undefined))),
+          }),
+        );
+        const writer = yield* blocked
+          .set(VALID_CATALOG, null)
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("5 seconds");
+        const result = yield* Fiber.join(writer);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result))
+          assert.equal(result.failure._tag, "DesktopConnectionCatalogStoreWriteError");
+        assert.equal(yield* fs.readFileString(lockPath), owner);
+        assert.equal(yield* fs.readFileString(guardPath), reclaimer);
+        assert.isFalse(yield* fs.exists(`${environment.stateDir}/connection-catalog.json`));
+      }),
+    ),
+  );
+
   it.effect.each(["set", "clear"] as const)(
     "holds the cross-store lock between recovery comparison and rename against %s",
     (operation) =>

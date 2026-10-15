@@ -467,6 +467,8 @@ export const make = Effect.gen(function* () {
   // One operation at a time: concurrent reads would each run recovery and prompt for keys.
   const lock = yield* Semaphore.make(1);
   const lockPath = path.join(environment.stateDir, "connection-catalog.lock");
+  const reclaimPath = `${lockPath}.reclaim`;
+  const staleLockThresholdMs = 60_000;
   // A keychain prompt can outlive the timeout. Never evict an owner that is still alive.
   const ownerAlive = (pid: number) => {
     try {
@@ -504,16 +506,16 @@ export const make = Effect.gen(function* () {
       const modified = Option.flatMap(info, (value) => value.mtime);
       if (
         Option.isSome(modified) &&
-        (yield* Clock.currentTimeMillis) - modified.value.getTime() > 60_000
+        (yield* Clock.currentTimeMillis) - modified.value.getTime() > staleLockThresholdMs
       ) {
         const pid = Option.isSome(owner) ? Number(owner.value.split(":")[0]) : NaN;
         if (!Number.isSafeInteger(pid) || pid <= 0 || !ownerAlive(pid)) {
           // Serialize stale removers too: two removers must not unlink a new owner's lock.
-          // An abandoned reclaim guard fails closed rather than risking another writer's data.
+          // A crash can leave the short-lived guard behind; only expired guards are abandoned.
           const reclaimed = yield* Effect.scoped(
             Effect.acquireRelease(
-              fileSystem.writeFileString(`${lockPath}.reclaim`, token, { flag: "wx", mode: 0o600 }),
-              () => fileSystem.remove(`${lockPath}.reclaim`, { force: true }).pipe(Effect.ignore),
+              fileSystem.writeFileString(reclaimPath, token, { flag: "wx", mode: 0o600 }),
+              () => fileSystem.remove(reclaimPath, { force: true }).pipe(Effect.ignore),
             ).pipe(
               Effect.andThen(
                 Effect.gen(function* () {
@@ -531,7 +533,20 @@ export const make = Effect.gen(function* () {
               ),
               Effect.catchIf(
                 (error) => error.reason._tag === "AlreadyExists",
-                () => Effect.succeed(false),
+                () =>
+                  Effect.gen(function* () {
+                    const guard = yield* fileSystem.stat(reclaimPath).pipe(Effect.option);
+                    const guardModified = Option.flatMap(guard, (value) => value.mtime);
+                    if (
+                      Option.isSome(guardModified) &&
+                      (yield* Clock.currentTimeMillis) - guardModified.value.getTime() >
+                        staleLockThresholdMs
+                    ) {
+                      yield* fileSystem.remove(reclaimPath, { force: true });
+                      return true;
+                    }
+                    return false;
+                  }),
               ),
             ),
           );
