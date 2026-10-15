@@ -1492,6 +1492,27 @@ const make = Effect.fnUntraced(function* (
           op.resolution.resolvingEnvironmentId !== member.environmentId
         )
           return yield* new M.MemoryHubError({ code: "identity_mismatch" });
+        const inputs = current.revisions.filter((pair) =>
+          op.expectedHeads.includes(pair.revision.revisionId),
+        );
+        if (inputs.length !== op.expectedHeads.length || inputs.some((pair) => !pair.payload))
+          return yield* new Store.MemoryStoreConflict({ code: "missing_parent" });
+        const inherited = inputs.flatMap((pair) => pair.payload!.derivedFromMemoryRevisions);
+        const dependencies = [...new Set([...op.expectedHeads, ...inherited])];
+        // Recompute from authoritative payloads inside the admission transaction. A
+        // member may neither omit inherited lineage nor race an external forget.
+        const payload = yield* decode(
+          decodeSummaryPayload({ ...op.payload, derivedFromMemoryRevisions: dependencies }, strict),
+        );
+        if (
+          encodeHeads([...op.payload.derivedFromMemoryRevisions].sort()) !==
+          encodeHeads([...dependencies].sort())
+        )
+          return yield* invalid();
+        yield* validateSummaryDependencies(op.memorySpaceId, {
+          ...payload,
+          derivedFromMemoryRevisions: inherited.filter((id) => !op.expectedHeads.includes(id)),
+        }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
         const iso = (value: number) =>
           M.MemoryUtcTimestamp.make(DateTime.formatIso(DateTime.makeUnsafe(value)));
         approval = {
