@@ -493,7 +493,9 @@ ACK/pull and drain existing memory/index/maintenance workers before baseline T0.
 
 1. Run 64 identical import rounds (all 64 aliases; two serial 32-item apply chunks per round) and drain after each; sample at 0/16/32/48/64.
    Noop must add **0** canonical identities, body/revision rows/bytes, lineage or FTS indexed
-   rows/bytes; transient/session receipt metadata stays within admitted limits.
+   rows/bytes; transient/session receipt metadata stays within admitted limits. A completed,
+   fully settled noop stores its result once and later identical results share it by
+   content-addressed reference; only the per-operation replay guard below may grow.
 2. Run 16 changed rounds for the same identities/aliases, replacing each body with another
    deterministic 4-KiB body once per round, in two serial 32-item chunks; settle/drain each round and sample every four.
    Exactly 16 live identities remain, history never exceeds configured admitted ceiling;
@@ -521,6 +523,12 @@ DB allocated/WAL high-water growth may be bounded by the measured warmup high-wa
 recorded separately), not a fresh allowance per cycle. Freeze this allowance before execution;
 do not derive a larger bound from a leaking run. Reject a sustained per-cycle rise. Permanent forget metadata
 must equal the bounded logical suppression/reserve inventory, no duplicate growth on rebuild.
+The one exception to the noop rise rule is the per-operation replay guard that 30-day exact
+replay requires for each new operationId (operation ID, request digest, original expiry, result
+reference). It is charged to the existing dedup count and metadata caps, expires with the
+original 30-day retention and is reported separately as guard count and encoded bytes. Result
+bodies, FTS and canonical history still add 0, and the guards stay inside the same fixed 1-MiB
+allowance (user decision, 2026-10-15). No pre-allocated receipt arena.
 Changed-history used bytes are bounded by admitted canonical/history/metadata bytes plus
 recorded index/schema allocation and the same fixed 1-MiB allocator allowance;
 retention drains cannot leave an ever-growing uncharged history. No VACUUM/file-shrink criterion.
