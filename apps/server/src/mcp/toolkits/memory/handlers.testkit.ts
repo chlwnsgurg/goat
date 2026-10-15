@@ -40,38 +40,23 @@ const database = Layer.effectDiscard(
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
-const makeCore = (serviceLayer: typeof Service.layer, environmentId?: M.EnvironmentId) => {
-  // Session-manager tests own a separate orchestration DB. Their memory fixture
-  // represents a fresh local thread in the same environment, without foreign history.
-  const localStorage = environmentId
-    ? Store.layer.pipe(
-        Layer.provideMerge(
-          Layer.effectDiscard(
-            Effect.gen(function* () {
-              const sql = yield* SqlClient.SqlClient;
-              yield* sql`CREATE TABLE orchestration_events(application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
-            }),
-          ).pipe(Layer.provideMerge(database)),
-        ),
-      )
-    : storage;
-  return serviceLayer.pipe(
-    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(localStorage))),
-    Layer.provide(
-      environmentId
-        ? Layer.succeed(Environment.ServerEnvironmentIdentity, {
-            getEnvironmentId: Effect.succeed(environmentId),
-          })
-        : identity,
+const makeCore = <E, R>(
+  serviceLayer: typeof Service.layer,
+  databaseLayer: Layer.Layer<SqlClient.SqlClient, E, R>,
+  environmentLayer = identity,
+) =>
+  serviceLayer.pipe(
+    Layer.provideMerge(
+      Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(databaseLayer)))),
     ),
+    Layer.provide(environmentLayer),
     Layer.provide(
       Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
         resolve: () => Effect.succeed(null),
       }),
     ),
   );
-};
-export const core = makeCore(Service.layer);
+export const core = makeCore(Service.layer, database);
 const settings = Settings.layerTest({}, "memoryHub");
 const admin = Layer.effect(Hub.MemoryHubAdministrator, Hub.makeAdministrator).pipe(
   Layer.provideMerge(storage),
@@ -99,7 +84,7 @@ const sync = Layer.unwrap(
   }),
 ).pipe(Layer.provide(admin));
 
-const makeLayer = (serviceCore: typeof core) =>
+const makeLayer = <E, R>(serviceCore: Layer.Layer<Layer.Success<typeof core>, E, R>) =>
   Layer.mergeAll(
     McpHttpServer.layerMemoryToolkit,
     McpHttpServer.layerMemoryAdministrationToolkit,
@@ -111,11 +96,34 @@ const makeLayer = (serviceCore: typeof core) =>
     Layer.provide(NodeServices.layer),
   );
 export const layer = makeLayer(core);
-export const layerForEnvironment = (environmentId: M.EnvironmentId) =>
-  makeLayer(makeCore(Service.layer, environmentId));
+/** Session admission and memory calls must share the environment identity and event database. */
+export const layerForThreadEnvironment = <E, R>(
+  environmentId: M.EnvironmentId,
+  databaseLayer: Layer.Layer<SqlClient.SqlClient, E, R>,
+) =>
+  McpHttpServer.layerMemoryToolkit.pipe(
+    Layer.provideMerge(
+      makeCore(
+        Service.layer,
+        databaseLayer,
+        Layer.succeed(Environment.ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(environmentId),
+        }),
+      ),
+    ),
+    Layer.provide(
+      Layer.mock(Sync.MemorySyncService)({
+        syncStatus: (_input, permit) =>
+          permit.pipe(Effect.andThen(Effect.fail(new M.MemoryHubError({ code: "hub_disabled" })))),
+      }),
+    ),
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+    Layer.provide(NodeServices.layer),
+  );
 export const layerWithSourceReadAuthority = (
   authority: Service.MemorySourceReadAuthority["readSource"],
-) => makeLayer(makeCore(Service.layerWithSourceReadAuthority(authority)));
+) => makeLayer(makeCore(Service.layerWithSourceReadAuthority(authority), database));
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
   clientCapabilities: {},
