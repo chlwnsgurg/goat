@@ -300,6 +300,11 @@ const PROBE_TIMEOUT_MS = 8_000;
 const DEFAULT_BROWSE_LIMIT = 200;
 const MAX_BROWSE_LIMIT = 1000;
 const MAX_PROJECT_PAGES = 20;
+/**
+ * Agents connect on every tool call. A host whose runtime refresh was deferred
+ * keeps serving on its current runtime until the manager's background retry.
+ */
+const AGENT_CONNECTION = { reuseWhileRefreshPending: true } as const;
 
 /** An alias the SSH config or known_hosts names, with nothing ssh could read as an option. */
 const SAFE_HOST_ALIAS = /^[A-Za-z0-9_][A-Za-z0-9_.@:%+\-[\]]*$/u;
@@ -1000,9 +1005,9 @@ const make = Effect.gen(function* () {
     readonly runtimeMode: RuntimeMode;
     readonly modelSelection: ModelSelection;
   }) {
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(input.target)).pipe(
-      sshFailed(input.target.alias),
-    );
+    const bootstrap = yield* withRuntime(
+      manager.ensureEnvironment(input.target, AGENT_CONNECTION),
+    ).pipe(sshFailed(input.target.alias));
     if ("type" in bootstrap)
       return yield* failure(
         "host_unavailable",
@@ -1111,7 +1116,7 @@ const make = Effect.gen(function* () {
         break;
     }
 
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
+    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
       sshFailed(target.alias),
     );
     if ("type" in bootstrap)
@@ -1348,7 +1353,7 @@ const make = Effect.gen(function* () {
   ) {
     const target = yield* resolveHost(call.host);
     const ceiling = yield* authorize;
-    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target)).pipe(
+    const bootstrap = yield* withRuntime(manager.ensureEnvironment(target, AGENT_CONNECTION)).pipe(
       unavailable(target.alias),
     );
     if ("type" in bootstrap)

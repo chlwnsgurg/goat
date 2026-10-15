@@ -402,6 +402,29 @@ describe("SSH pending replacement reconciliation", () => {
     }),
   );
 
+  it.effect(
+    "an agent connection reuses a healthy forward while a refresh waits for its retry",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        f.setMode("ready-pending");
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const agent = { reuseWhileRefreshPending: true } as const;
+          const first = yield* manager.ensureEnvironment(uploadTarget, agent);
+          assert.isFalse("type" in first);
+          const again = yield* manager.ensureEnvironment(uploadTarget, agent);
+          assert.isFalse("type" in again);
+          assert.equal(f.count.launches, 1);
+          assert.equal(f.count.forwards, 1);
+          // A plain connect still retries the deferred refresh at once.
+          f.setMode("ready");
+          yield* manager.ensureEnvironment(uploadTarget);
+          assert.equal(f.count.launches, 2);
+        }).pipe(Effect.provide(f.layer), Effect.scoped);
+      }),
+  );
+
   it.effect("one scoped ten-minute retry uses noninteractive auth and caches its forward", () =>
     Effect.gen(function* () {
       const f = yield* fixture;

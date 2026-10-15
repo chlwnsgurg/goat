@@ -320,7 +320,17 @@ interface SshAuthAttemptInput<T> extends SshAuthOperationInput<T> {
 export interface SshEnvironmentManagerShape {
   readonly ensureEnvironment: (
     target: DesktopSshEnvironmentTarget,
-    options?: { readonly issuePairingToken?: boolean; readonly keyOnly?: boolean },
+    options?: {
+      readonly issuePairingToken?: boolean;
+      readonly keyOnly?: boolean;
+      /**
+       * Hand out a forward that still answers while a deferred runtime refresh
+       * waits for its ten-minute retry, instead of retrying the refresh now.
+       * Agent tool calls connect on every call; a busy host would otherwise
+       * repeat the whole remote launch each time.
+       */
+      readonly reuseWhileRefreshPending?: boolean;
+    },
   ) => Effect.Effect<
     DesktopSshEnvironmentReadyOrPending,
     SshEnvironmentEffectError,
@@ -3796,6 +3806,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     runner?: RemoteGoatRunnerOptions,
     background: boolean = false,
     keyOnly: boolean = false,
+    reuseWhileRefreshPending: boolean = false,
   ): Effect.fn.Return<
     SshTunnelEntry | DesktopSshRuntimePendingResult,
     SshEnvironmentEffectError,
@@ -3803,6 +3814,19 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
   > {
     const entry = tunnels.get(key);
     if (entry !== undefined) {
+      // The background retry owns a deferred refresh; this caller only needs a forward.
+      if (reuseWhileRefreshPending && pendingReplacements.has(key)) {
+        if (yield* keepAnsweringTunnel(key, entry)) return entry;
+        // The stale forward is closed; connect anew, refreshing if the host is idle now.
+        return yield* createTunnelEntry({
+          key,
+          resolvedTarget,
+          keyOnly,
+          ...(runner === undefined ? {} : { runner }),
+          previousLocalPort: entry.localPort,
+          background,
+        });
+      }
       const replace =
         pendingReplacements.has(key) || runner?.refreshOwnedRuntimeOnFirstConnection === true;
       if (!replace && (yield* keepAnsweringTunnel(key, entry))) return entry;
@@ -3880,7 +3904,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
 
   const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
-    requestOptions?: { readonly issuePairingToken?: boolean; readonly keyOnly?: boolean },
+    requestOptions?: Parameters<SshEnvironmentManagerShape["ensureEnvironment"]>[1],
   ): Effect.fn.Return<
     DesktopSshEnvironmentReadyOrPending,
     SshEnvironmentEffectError,
@@ -3941,6 +3965,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           connectionRunner,
           false,
           requestOptions?.keyOnly === true,
+          requestOptions?.reuseWhileRefreshPending === true,
         );
         if ("type" in entry) return entry;
 
