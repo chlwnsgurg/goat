@@ -2155,3 +2155,27 @@ describe("WP5 lineage checkpoint contracts", () => {
     });
   });
 });
+
+it("report retry reset accepts at most 32 distinct exact-owner IDs and rejects excess fields", () => {
+  const valid = {
+    memorySpaceId: id(),
+    environmentId: "fixture",
+    reportIds: Array.from({ length: 32 }, (_, n) => n.toString(16).padStart(64, "0")),
+  };
+  const decode = Schema.decodeUnknownSync(M.MemoryResetReportAttemptsInput);
+  expect(decode(valid).reportIds).toHaveLength(32);
+  for (const invalid of [
+    { ...valid, reportIds: [...valid.reportIds, "f".repeat(64)] },
+    { ...valid, reportIds: [valid.reportIds[0], valid.reportIds[0]] },
+    { ...valid, reportIds: [] },
+    { ...valid, agent: true },
+    { ...valid, environmentId: undefined },
+  ])
+    expect(() => decode(invalid)).toThrow();
+  expect(() =>
+    Schema.decodeUnknownSync(M.MemoryResetReportAttemptsResult)({
+      resetCount: 33,
+      unchangedCount: 0,
+    }),
+  ).toThrow();
+});

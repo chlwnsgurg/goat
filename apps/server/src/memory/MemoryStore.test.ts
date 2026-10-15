@@ -19,6 +19,7 @@ import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import * as Store from "./MemoryStore.ts";
 import { CheckpointAccountingError } from "./MemoryCheckpointAccounting.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
@@ -117,6 +118,7 @@ const setup = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(database));
@@ -2985,6 +2987,7 @@ describe("MemoryStore transient source relay", () => {
                 Effect.andThen(hubMigration),
                 Effect.andThen(lineageMigration),
                 Effect.andThen(checkpointMigration),
+                Effect.andThen(reportMigration),
                 Effect.andThen(searchMigration),
               ),
             ).pipe(Layer.provideMerge(db)),

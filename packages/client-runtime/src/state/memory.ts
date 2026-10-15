@@ -456,6 +456,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
     search: bodyQuery(WS_METHODS.memorySearch),
     read: bodyQuery(WS_METHODS.memoryRead),
     history: bodyQuery(WS_METHODS.memoryHistory),
+    resetReportAttempts: command(WS_METHODS.memoryResetReportAttempts),
     readSource: bodyQuery(WS_METHODS.memoryReadSource),
     upsert: command(WS_METHODS.memoryUpsert),
     forget: command(WS_METHODS.memoryForget),

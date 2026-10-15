@@ -1449,6 +1449,8 @@ const layerWsRpc = (
           memorySync.updateHubSettings(input, memorySettings).pipe(Effect.mapError(memoryError)),
       });
       const ownerHandlers = WsMemoryAdministrationRpcGroup.middleware(RpcInstrumentation).of({
+        [WS_METHODS.memoryResetReportAttempts]: (input) =>
+          memory.resetReportAttempts(input, memorySettings).pipe(Effect.mapError(memoryError)),
         [WS_METHODS.memoryOwnerSourceReadPolicyGet]: () => ownerPolicy.get(ownerSettings),
         [WS_METHODS.memoryOwnerSourceReadPolicyUpdate]: (input) =>
           ownerPolicy.update(input, ownerSettings).pipe(Effect.mapError(memoryError)),

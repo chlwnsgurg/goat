@@ -256,6 +256,7 @@ export const MEMORY_RPC_REQUIRED_SCOPES = {
   [WS_METHODS.memoryList]: "memory:read",
   [WS_METHODS.memoryRead]: "memory:read",
   [WS_METHODS.memoryHistory]: "memory:read",
+  [WS_METHODS.memoryResetReportAttempts]: "settings:write",
   [WS_METHODS.memorySyncStatus]: "memory:read",
   [WS_METHODS.memoryUpsert]: "memory:write",
   [WS_METHODS.memoryForget]: "memory:write",

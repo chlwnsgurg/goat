@@ -29,6 +29,7 @@ import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
@@ -51,6 +52,7 @@ const database = Layer.effectDiscard(
     Effect.andThen(searchMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const live = Store.layer.pipe(Layer.provideMerge(database));
@@ -153,7 +155,18 @@ const identity = Layer.succeed(Environment.ServerEnvironmentIdentity, {
 const resolver = Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
   resolve: () => Effect.succeed(null),
 });
-const serviceLayer = Service.layer.pipe(Layer.provide(identity), Layer.provide(resolver));
+const serviceLayer = Service.layer.pipe(
+  Layer.provide(
+    Layer.succeed(Settings.MemoryHubCommittedSettings, {
+      read: Effect.succeed({
+        settings: { mode: "hub" as const, memorySpaceId: space },
+        version: 1,
+      }),
+    }),
+  ),
+  Layer.provide(identity),
+  Layer.provide(resolver),
+);
 const importLive = serviceLayer.pipe(
   Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(live))),
 );
@@ -1822,6 +1835,14 @@ const repository = {
   },
 };
 const repositoryImportLive = Service.layer.pipe(
+  Layer.provide(
+    Layer.succeed(Settings.MemoryHubCommittedSettings, {
+      read: Effect.succeed({
+        settings: { mode: "hub" as const, memorySpaceId: space },
+        version: 1,
+      }),
+    }),
+  ),
   Layer.provide(identity),
   Layer.provide(
     Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
@@ -2594,6 +2615,7 @@ const growthLayer = (filename: string) => {
       yield* searchMigration;
       yield* lineageMigration;
       yield* checkpointMigration;
+      yield* reportMigration;
       const sql = yield* SqlClient.SqlClient;
       yield* sql.unsafe("PRAGMA journal_mode=WAL");
       yield* sql`CREATE TABLE orchestration_events(sequence INTEGER PRIMARY KEY,event_id TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT,occurred_at TEXT,application_event_version INTEGER,aggregate_kind TEXT)`;
@@ -2602,6 +2624,14 @@ const growthLayer = (filename: string) => {
   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename })));
   const quota = Quota.layer.pipe(Layer.provideMerge(Store.layer.pipe(Layer.provideMerge(db))));
   const service = Service.layer.pipe(
+    Layer.provide(
+      Layer.succeed(Settings.MemoryHubCommittedSettings, {
+        read: Effect.succeed({
+          settings: { mode: "hub" as const, memorySpaceId: space },
+          version: 1,
+        }),
+      }),
+    ),
     Layer.provideMerge(quota),
     Layer.provide(identity),
     Layer.provide(resolver),
@@ -2617,7 +2647,9 @@ const growthLayer = (filename: string) => {
     ),
     Layer.provide(identity),
     Layer.provide(NodeServices.layer),
-    Layer.provide(Settings.layerTest({ memoryHub: { mode: "hub", memorySpaceId: space } })),
+    Layer.provide(
+      Settings.layerTest({ memoryHub: { mode: "hub", memorySpaceId: space } }, "memoryHub"),
+    ),
     Layer.provide(
       Layer.succeed(RuntimeIdentity.RuntimeIdentity, { instanceId: "synthetic-growth" }),
     ),

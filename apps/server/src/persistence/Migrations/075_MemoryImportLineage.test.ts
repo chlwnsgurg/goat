@@ -1,3 +1,4 @@
+import * as Settings from "../../serverSettings.ts";
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Service from "../../memory/MemoryService.ts";
@@ -201,6 +202,14 @@ it.effect.each(["event", "compact", "hubReceipt"] as const)(
       }).pipe(
         Effect.provide(
           Service.layer.pipe(
+            Layer.provide(
+              Layer.succeed(Settings.MemoryHubCommittedSettings, {
+                read: Effect.succeed({
+                  settings: { mode: "hub" as const, memorySpaceId: space },
+                  version: 1,
+                }),
+              }),
+            ),
             Layer.provide(Quota.layer),
             Layer.provide(Layer.succeed(Store.MemoryStore, store)),
             Layer.provide(

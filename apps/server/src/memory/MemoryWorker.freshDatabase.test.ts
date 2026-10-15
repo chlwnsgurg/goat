@@ -48,24 +48,27 @@ const live = (hub = false, configured = false) =>
     Layer.provide(identity),
     Layer.provide(NodeServices.layer),
     Layer.provide(
-      Settings.layerTest({
-        ...(hub
-          ? {
-              memoryHub: {
-                mode: "hub",
-                memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
-              },
-            }
-          : {}),
-        ...(configured
-          ? {
-              defaultModelSelection: {
-                instanceId: M.ProviderInstanceId.make("fixture"),
-                model: "fixture",
-              },
-            }
-          : {}),
-      }),
+      Settings.layerTest(
+        {
+          ...(hub
+            ? {
+                memoryHub: {
+                  mode: "hub",
+                  memorySpaceId: M.MemorySpaceId.make("00000000-0000-4000-8000-000000000001"),
+                },
+              }
+            : {}),
+          ...(configured
+            ? {
+                defaultModelSelection: {
+                  instanceId: M.ProviderInstanceId.make("fixture"),
+                  model: "fixture",
+                },
+              }
+            : {}),
+        },
+        "memoryHub",
+      ),
     ),
     Layer.provide(Layer.succeed(RuntimeIdentity.RuntimeIdentity, { instanceId: "fresh-worker" })),
     Layer.provide(Layer.mock(Events.EventSinkV2)({ stream: () => Stream.empty })),

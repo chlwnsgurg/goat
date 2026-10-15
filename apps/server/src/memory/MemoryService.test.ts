@@ -1,3 +1,4 @@
+import * as Settings from "../serverSettings.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -13,6 +14,7 @@ import migration from "../persistence/Migrations/071_Memory.ts";
 import hubMigration from "../persistence/Migrations/072_MemoryHubSync.ts";
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
+import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.ts";
@@ -29,12 +31,21 @@ const database = Layer.effectDiscard(
     Effect.andThen(hubMigration),
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
+    Effect.andThen(reportMigration),
     Effect.andThen(searchMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const store = Store.layer.pipe(Layer.provideMerge(database));
 const serviceLive = (serviceLayer = Service.layer) =>
   serviceLayer.pipe(
+    Layer.provide(
+      Layer.succeed(Settings.MemoryHubCommittedSettings, {
+        read: Effect.succeed({
+          settings: { mode: "hub" as const, memorySpaceId: space },
+          version: 1,
+        }),
+      }),
+    ),
     Layer.provide(
       Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
         resolve: () => Effect.succeed(null),
@@ -2801,3 +2812,98 @@ for (const mutation of ["forget", "hold", "replace"] as const) {
     },
   );
 }
+
+it.effect("W2 rejects Settings writes while disabled and keeps saved records readable", () =>
+  Effect.gen(function* () {
+    let disabled = false;
+    const binding: Settings.MemoryHubCommittedSettings["Service"] = {
+      read: Effect.sync(() => ({
+        settings: disabled
+          ? { mode: "disabled" as const }
+          : { mode: "hub" as const, memorySpaceId: space },
+        version: 1,
+      })),
+    };
+    const configured = Service.layer.pipe(
+      Layer.provide(Layer.succeed(Settings.MemoryHubCommittedSettings, binding)),
+      Layer.provide(
+        Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+          resolve: () => Effect.succeed(null),
+        }),
+      ),
+      Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(store))),
+      Layer.provide(
+        Layer.succeed(Environment.ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(environmentId),
+        }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* Service.MemoryService;
+      yield* service.upsert(input(), Effect.void);
+      disabled = true;
+      const error = yield* service.upsert(input(4), Effect.void).pipe(Effect.flip);
+      assert.strictEqual("code" in error ? error.code : null, "bootstrap_required");
+      const saved = yield* service.read({ memorySpaceId: space, memoryId }, Effect.void);
+      assert.strictEqual(saved.status, "active");
+      if (saved.status === "active") assert.strictEqual(saved.payload.text, "synthetic memory");
+      assert.strictEqual(
+        yield* service
+          .forget(
+            {
+              memorySpaceId: space,
+              memoryId,
+              operationId: M.MemoryOperationId.make(id(5)),
+              expectedHeads: [],
+            },
+            Effect.void,
+          )
+          .pipe(Effect.flip)
+          .pipe(Effect.map((e) => ("code" in e ? e.code : null))),
+        "bootstrap_required",
+      );
+      assert.strictEqual(
+        yield* service
+          .resetReportAttempts(
+            { memorySpaceId: space, environmentId, reportIds: ["a".repeat(64)] },
+            Effect.void,
+          )
+          .pipe(Effect.flip)
+          .pipe(Effect.map((e) => ("code" in e ? e.code : null))),
+        "bootstrap_required",
+      );
+    }).pipe(Effect.provide(configured));
+  }),
+);
+it.effect("report reset denies live permission loss and wrong selected environment", () =>
+  Effect.gen(function* () {
+    const service = yield* Service.MemoryService;
+    const sql = yield* SqlClient.SqlClient;
+    const rid = "a".repeat(64);
+    yield* sql`INSERT INTO memory_report_outbox(report_id,space,memory_id,operation_id,resolving_environment_id,outcome,state,failure_code,created_at,report_kind,report_approved,automatic_attempts) VALUES (${rid},${space},${memoryId},${id(3)},${environmentId},'resolved','failed','unavailable',0,'resolve',1,10)`;
+    const request = { memorySpaceId: space, environmentId, reportIds: [rid] };
+    let calls = 0;
+    const permit = Effect.suspend(() => (++calls === 1 ? Effect.void : denied));
+    assert.strictEqual(
+      (yield* service.resetReportAttempts(request, permit).pipe(Effect.exit))._tag,
+      "Failure",
+    );
+    assert.deepStrictEqual(yield* sql`SELECT automatic_attempts FROM memory_report_outbox`, [
+      { automatic_attempts: 10 },
+    ]);
+    assert.strictEqual(
+      yield* service
+        .resetReportAttempts(
+          { ...request, environmentId: M.EnvironmentId.make("foreign") },
+          Effect.void,
+        )
+        .pipe(Effect.flip)
+        .pipe(Effect.map((e) => ("code" in e ? e.code : null))),
+      "identity_mismatch",
+    );
+    assert.deepStrictEqual(yield* service.resetReportAttempts(request, Effect.void), {
+      resetCount: 1,
+      unchangedCount: 0,
+    });
+  }).pipe(Effect.provide(live)),
+);
