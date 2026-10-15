@@ -1,6 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Ref from "effect/Ref";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
@@ -342,7 +345,13 @@ describe("MemoryImport durable ports", () => {
             p.selection.result,
           );
           return yield* restarted.importPorts.readReceipt(p.batch, Effect.void);
-        }).pipe(Effect.provide(serviceLayer));
+        }).pipe(
+          Effect.provide(
+            serviceLayer.pipe(
+              Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(Store.layer))),
+            ),
+          ),
+        );
         assert.strictEqual(replay.state, "completed");
         assert.strictEqual(replay.sessionNewItems, 1);
         assert.strictEqual(replay.sessionBodyBytes, 16);
@@ -492,5 +501,144 @@ describe("MemoryImport durable ports", () => {
       if (revised?.kind === "upsert")
         assert.deepStrictEqual(revised.revision.parents, [first.selection.revisionId]);
     }).pipe(Effect.provide(importLive)),
+  );
+  it.effect(
+    "materializes unfinished selections and noop does not allocate another body, revision or intent",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const service = yield* Service.MemoryService;
+        const first = prepared();
+        const unfinished = { ...first.selection, result: null };
+        yield* service.importPorts.commit(
+          {
+            ...first,
+            selection: unfinished,
+            batch: {
+              ...first.batch,
+              selections: [unfinished],
+              receipt: { ...first.batch.receipt, state: "partial", remaining: 1, items: [] },
+            },
+          },
+          Effect.void,
+        );
+        const reg = yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        );
+        const noop = prepared(reg!, 30, first.next);
+        const selection = { ...noop.selection, selector: first.selection.selector, result: null };
+        const p: PreparedImportCommit = {
+          ...noop,
+          selection,
+          candidate: first.candidate,
+          next: { ...first.next, outcome: "noop" },
+          expectedHeads: [first.selection.revisionId],
+          batch: {
+            ...noop.batch,
+            selections: [selection],
+            receipt: { ...noop.batch.receipt, items: [], state: "partial", remaining: 1 },
+          },
+        };
+        const before = yield* durableInventory;
+        const result = yield* service.importPorts.commit(p, Effect.void);
+        assert.strictEqual(result.outcome, "noop");
+        assert.strictEqual(result.revisionId, first.selection.revisionId);
+        const after = yield* durableInventory;
+        assert.deepStrictEqual(after.revisions, before.revisions);
+        assert.deepStrictEqual(after.payloads, before.payloads);
+        assert.deepStrictEqual(after.outbox, before.outbox);
+        const receipt = yield* service.importPorts.readReceipt(p.batch, Effect.void);
+        assert.strictEqual(receipt.sessionBodyBytes, 16);
+        assert.strictEqual(receipt.sessionNewItems, 1);
+      }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("denies bootstrap and stale project binding without an intent or partial receipt", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const sql = yield* SqlClient.SqlClient;
+      const p = prepared();
+      yield* sql`UPDATE memory_compaction_state SET published=0 WHERE space=${space}`;
+      const before = yield* durableInventory;
+      const failure = yield* service.importPorts.commit(p, Effect.void).pipe(Effect.flip);
+      if (failure._tag === "MemoryStoreConflict")
+        assert.strictEqual(failure.code, "bootstrap_required");
+      else assert.fail("expected bootstrap conflict");
+      assert.deepStrictEqual(yield* durableInventory, before);
+      yield* sql`UPDATE memory_compaction_state SET published=1 WHERE space=${space}`;
+      yield* sql`CREATE TABLE projection_projects(project_id TEXT PRIMARY KEY,workspace_root TEXT,deleted_at TEXT)`;
+      yield* sql`INSERT INTO projection_projects VALUES ('synthetic-project','/synthetic',NULL)`;
+      const project: M.ScopedProjectRef = {
+        environmentId,
+        projectId: M.ProjectId.make("synthetic-project"),
+      };
+      const projectKey: M.MemoryProjectKey = {
+        kind: "explicit",
+        sharedProjectId: uuid(80),
+      };
+      const binding: M.MemoryProjectBinding = {
+        memorySpaceId: space,
+        project,
+        projectKey,
+        repositoryKey: null,
+        version: 1,
+      };
+      yield* store.putProjectBinding(binding, null, 0);
+      const scope: M.MemoryScope = { kind: "project", projectKey };
+      const selection = { ...p.selection, selector: { ...p.selection.selector, scope, project } };
+      const mapped = {
+        ...p,
+        selection,
+        next: { ...p.next, scope },
+        batch: { ...p.batch, selections: [selection] },
+        projectBinding: binding,
+      };
+      yield* store.putProjectBinding({ ...binding, version: 2 }, 1, 0);
+      const snapshot = yield* durableInventory;
+      const stale = yield* service.importPorts.commit(mapped, Effect.void).pipe(Effect.flip);
+      if (stale._tag === "MemoryStoreConflict") assert.strictEqual(stale.code, "revision_changed");
+      else assert.fail("expected project binding conflict");
+      assert.deepStrictEqual(yield* durableInventory, snapshot);
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect(
+    "authorizes only after acquiring the writer lock when a queued import loses its grant",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const service = yield* Service.MemoryService;
+        const store = yield* Store.MemoryStore;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const started = yield* Deferred.make<void>();
+        const grant = yield* Ref.make(true);
+        const before = yield* durableInventory;
+        const holder = yield* Effect.forkChild(
+          store.transact(
+            Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          ),
+        );
+        yield* Deferred.await(entered);
+        const permit = Ref.get(grant).pipe(
+          Effect.flatMap((allowed) =>
+            allowed ? Effect.void : Effect.fail(new Service.MemoryAccessError({ code: "fenced" })),
+          ),
+        );
+        const queued = yield* Effect.forkChild(
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(service.importPorts.commit(prepared(), permit)),
+            Effect.exit,
+          ),
+        );
+        yield* Deferred.await(started);
+        yield* Ref.set(grant, false);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(holder);
+        const result = yield* Fiber.join(queued);
+        assert.strictEqual(result._tag, "Failure");
+        assert.deepStrictEqual(yield* durableInventory, before);
+      }).pipe(Effect.provide(importLive)),
   );
 });

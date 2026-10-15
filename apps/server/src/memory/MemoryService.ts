@@ -1,5 +1,3 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- deterministic server-owned revision identifiers.
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- structural captured-binding and selector comparison.
 import * as NodeUtil from "node:util";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes.
 import * as NodeCrypto from "node:crypto";
@@ -544,7 +542,36 @@ const make = Effect.fnUntraced(function* (
       input.batch,
       permit,
       Effect.gen(function* () {
-        const { batch, selection, candidate, next, previous, registration } = input;
+        const { candidate, next, previous, registration } = input;
+        // L4 may pass an unfinished frozen selection. Results are materialized here, IDs never regenerated.
+        const itemResult: M.MemoryImportItemResult = input.selection.result ?? {
+          sourceItemKey: next.sourceItemKey,
+          outcome: next.outcome,
+          memoryId:
+            next.outcome === "suppressed" || next.outcome === "rejected" ? null : next.memoryId,
+          revisionId:
+            next.outcome === "suppressed" || next.outcome === "rejected"
+              ? null
+              : next.outcome === "noop"
+                ? ((next.pending ?? next.accepted)?.revisionId ?? null)
+                : input.selection.revisionId,
+          ...(next.outcome === "rejected" && next.rejected ? { issue: next.rejected.issue } : {}),
+        };
+        const selection = { ...input.selection, result: itemResult };
+        const selections = input.batch.selections.map((s) =>
+          s.selector.sourceItemKey === next.sourceItemKey ? selection : s,
+        );
+        const remaining = selections.filter((s) => s.result === null).length;
+        const batch = {
+          ...input.batch,
+          selections,
+          receipt: {
+            ...input.batch.receipt,
+            state: remaining === 0 ? ("completed" as const) : ("partial" as const),
+            remaining,
+            items: selections.flatMap((s) => (s.result ? [s.result] : [])),
+          },
+        };
         if (
           registration.environmentId !== environmentId ||
           next.environmentId !== environmentId ||
@@ -557,8 +584,8 @@ const make = Effect.fnUntraced(function* (
           candidate.sourceItemKey !== next.sourceItemKey ||
           candidate.sourceFingerprint !== selection.selector.sourceFingerprint ||
           !NodeUtil.isDeepStrictEqual(
-            selection,
-            batch.selections.find((s) => s.selector.sourceItemKey === next.sourceItemKey),
+            input.selection,
+            input.batch.selections.find((s) => s.selector.sourceItemKey === next.sourceItemKey),
           ) ||
           !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope)
         )
@@ -583,6 +610,37 @@ const make = Effect.fnUntraced(function* (
             next.outcome !== selection.result?.outcome
           )
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          const match = yield* store.findImportMatchTx({
+            ...batch,
+            source: {
+              environmentId,
+              sourceId: batch.sourceId,
+              sourceItemKey: candidate.sourceItemKey,
+            },
+            content: {
+              scope: next.scope,
+              assertionKind: "inference",
+              contentFingerprint: candidate.contentFingerprint,
+            },
+          });
+          if (next.outcome === "suppressed") {
+            if (
+              match.kind !== "source_suppressed" &&
+              match.kind !== "content_suppressed" &&
+              match.kind !== "pending_forget"
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            return;
+          }
+          if (next.outcome === "rejected") {
+            if (
+              !next.rejected ||
+              next.rejected.sourceFingerprint !== candidate.sourceFingerprint ||
+              itemResult.issue !== next.rejected.issue
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+            return;
+          }
           const current = yield* store.loadAggregate(batch.memorySpaceId, next.memoryId);
           if (current.tombstone) return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
           if (current.pendingForget)
@@ -590,14 +648,6 @@ const make = Effect.fnUntraced(function* (
           if (
             current.heads.length !== input.expectedHeads.length ||
             !current.heads.every((h) => input.expectedHeads.includes(h))
-          )
-            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
-          // Updated imports branch only from their last accepted observation, never a pending proposal.
-          const parents = previous?.accepted ? [previous.accepted.revisionId] : [];
-          if (
-            parents.length !== input.parents.length ||
-            !parents.every((h) => input.parents.includes(h)) ||
-            (current.identity && (!previous || previous.memoryId !== next.memoryId))
           )
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           if (selection.selector.project) {
@@ -620,6 +670,49 @@ const make = Effect.fnUntraced(function* (
           } else if (next.scope.kind === "project" || input.projectBinding !== null) {
             return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
           }
+          if (next.outcome === "noop") {
+            const observation = previous?.pending ?? previous?.accepted;
+            const payload = current.revisions.find(
+              (r) => r.revision.revisionId === observation?.revisionId,
+            )?.payload;
+            if (
+              !observation ||
+              observation.sourceFingerprint !== candidate.sourceFingerprint ||
+              observation.contentFingerprint !== candidate.contentFingerprint ||
+              payload?.text !== candidate.payload.text ||
+              !NodeUtil.isDeepStrictEqual(next.pending, previous?.pending ?? null)
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            return;
+          }
+          // Updated imports branch only from their last accepted observation, never a pending proposal.
+          let parents = previous?.accepted ? [previous.accepted.revisionId] : [];
+          if (next.outcome === "aliased" && !previous && input.parents.length === 1) {
+            const parent = current.revisions.find(
+              (r) => r.revision.revisionId === input.parents[0],
+            );
+            const accepted = parent
+              ? yield* store.receipt(batch.memorySpaceId, parent.revision.operationId)
+              : undefined;
+            if (
+              !parent ||
+              parent.payload?.text !== candidate.payload.text ||
+              !accepted ||
+              !("hubSequence" in accepted.receipt) ||
+              accepted.receipt.hubSequence === null ||
+              accepted.receipt.outcome === "rejected"
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            parents = [parent.revision.revisionId];
+          }
+          if (
+            parents.length !== input.parents.length ||
+            !parents.every((h) => input.parents.includes(h)) ||
+            (current.identity &&
+              next.outcome !== "aliased" &&
+              (!previous || previous.memoryId !== next.memoryId))
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           const observation = next.pending;
           if (
             !observation ||
@@ -672,6 +765,8 @@ const make = Effect.fnUntraced(function* (
           if (operation.kind !== "upsert")
             return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
           const receipt = yield* apply(operation, Store.localIntent, permit);
+          if ((receipt.receipt.outcome === "conflicted") !== (next.outcome === "conflicted"))
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           if (receipt.receipt.outcome === "rejected")
             return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
           // Parent-aware intent records the frozen operation, unlike the initial-only local draft materializer.

@@ -4,8 +4,6 @@ import {
   CHECKPOINT_RECORD_OVERHEAD,
   CHECKPOINT_PAGE_OVERHEAD,
 } from "./MemoryCheckpointBound.ts";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes do not depend on runtime identity.
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- body-free structural CAS comparison.
 import * as NodeUtil from "node:util";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes.
 import * as NodeCrypto from "node:crypto";
@@ -1675,7 +1673,10 @@ const checkpointCodec = codec(M.MemoryHubCheckpointPage);
 const importId = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const importKey = Schema.String.check(
   Schema.makeFilter(
-    (s) => s.length > 0 && new TextEncoder().encode(s).length <= 512 && !/[\u0000-\u001f]/.test(s),
+    (s) =>
+      s.length > 0 &&
+      new TextEncoder().encode(s).length <= 512 &&
+      !Array.from(s).some((c) => c.charCodeAt(0) < 32),
   ),
 );
 const importLabel = Schema.String.check(
@@ -1761,7 +1762,9 @@ const ImportBatchCodec = Schema.Struct({
           s.result === null ||
           (s.result.sourceItemKey === s.selector.sourceItemKey &&
             (s.result.memoryId === null || s.result.memoryId === s.memoryId) &&
-            (s.result.revisionId === null || s.result.revisionId === s.revisionId)),
+            (s.result.revisionId === null ||
+              s.result.outcome === "noop" ||
+              s.result.revisionId === s.revisionId)),
       ),
   ),
 );
