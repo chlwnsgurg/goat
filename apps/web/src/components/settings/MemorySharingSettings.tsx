@@ -27,6 +27,7 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { isMemoryEnvironmentAvailable, memoryOwnerDesiredIds } from "./MemorySettings.logic";
 import { memoryDeviceFlow } from "./memoryDeviceFlow";
 
+const decodeHubAddress = Schema.decodeUnknownSync(MemoryHubEndpoint);
 const operationId = () => MemoryOperationId.make(randomUUID());
 
 export function MemoryAdministration({
@@ -175,7 +176,7 @@ export function MemoryAdministration({
       return;
     }
     try {
-      Schema.decodeUnknownSync(MemoryHubEndpoint)(endpoint);
+      decodeHubAddress(endpoint);
     } catch {
       setError("Enter a valid Hub address using HTTPS, or HTTP for localhost.");
       return;
@@ -258,11 +259,15 @@ export function MemoryAdministration({
       <SettingsSection title="Sharing" id="memory-sharing">
         <SettingsRow
           title={
-            hub?.settings.mode === "hub"
-              ? "This device is the hub"
-              : hub?.settings.mode === "member"
-                ? "Memory sharing"
-                : "Memory off"
+            !hub
+              ? error
+                ? "Sharing unavailable"
+                : "Loading sharing"
+              : hub.settings.mode === "hub"
+                ? "This device is the hub"
+                : hub?.settings.mode === "member"
+                  ? "Memory sharing"
+                  : "Memory off"
           }
           description={
             hub?.settings.mode === "hub"
@@ -561,7 +566,7 @@ export function MemoryAdministration({
               )}
               <Button
                 size="sm"
-                disabled={busy || !canOwner || !requester || pending !== null}
+                disabled={busy || !canOwner || !owner || !requester || pending !== null}
                 onClick={() => requester && void saveOwner(requester, true)}
               >
                 Allow
