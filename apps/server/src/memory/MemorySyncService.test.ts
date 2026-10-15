@@ -6226,8 +6226,8 @@ it.effect.each(["tail", "bootstrap"] as const)(
         const hStore = Context.get(h, Store.MemoryStore);
         const hSql = Context.get(h, SqlClient.SqlClient);
         const bEnvironment = M.EnvironmentId.make("fixture-member-b");
-        for (const environment of [local, remote, bEnvironment])
-          yield* hSql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environment},${"a".repeat(64)},1,'active',0)`;
+        for (const [index, environment] of [local, remote, bEnvironment].entries())
+          yield* hSql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${environment},${String(index + 1).repeat(64)},1,'active',0)`;
         const authority = (environmentId: M.EnvironmentId): Store.HubAuthority => ({
           principal: {
             memorySpaceId: space,
