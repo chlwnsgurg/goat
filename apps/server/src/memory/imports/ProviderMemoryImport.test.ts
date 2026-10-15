@@ -1333,41 +1333,51 @@ describe("ProviderMemoryImport read-only binding preparation", () => {
         const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1");
         const h = harness(batchSnapshot(fixture.snapshot));
         const service = yield* Service.MemoryService;
-        const store = yield* Store.MemoryStore;
         const sql = yield* SqlClient.SqlClient;
         let rollback = true;
+        let witnessedAtomicWrite = false;
+        const denial = new Service.MemoryAccessError({ code: "unavailable" });
         let commits = 0;
         const runtime = makeProviderMemoryImport(
           {
             ...h.ports,
             ...service.importPorts,
             commit: (a, permit) =>
-              store.transact(
-                Effect.gen(function* () {
-                  commits++;
-                  assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 0);
-                  assert.deepEqual(
-                    a.projectBinding,
-                    yield* service.importPorts.binding(
-                      { memorySpaceId: space, project: projectA },
-                      permit,
-                    ),
-                  );
-                  const result = yield* service.importPorts.commit(a, permit);
-                  assert.equal((yield* sql`SELECT * FROM memory_project_bindings`).length, 1);
-                  assert.equal((yield* sql`SELECT * FROM memory_revisions`).length, 1);
-                  if (rollback)
-                    return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
-                  return result;
-                }).pipe(
-                  Effect.catchTags({
-                    SqlError: (cause) =>
-                      Effect.fail(
-                        new Store.MemoryStorageError({ stage: "test-transaction", cause }),
-                      ),
-                  }),
-                ),
-              ),
+              Effect.gen(function* () {
+                commits++;
+                assert.equal(
+                  (yield* sql`SELECT * FROM memory_project_bindings`.pipe(Effect.orDie)).length,
+                  0,
+                );
+                assert.deepEqual(
+                  a.projectBinding,
+                  yield* service.importPorts.binding(
+                    { memorySpaceId: space, project: projectA },
+                    permit,
+                  ),
+                );
+                const recheck = Effect.gen(function* () {
+                  yield* permit;
+                  const bindings = yield* sql`SELECT * FROM memory_project_bindings`
+                    .pipe(Effect.orDie)
+                    .pipe(Effect.orDie);
+                  const revisions = yield* sql`SELECT * FROM memory_revisions`.pipe(Effect.orDie);
+                  if (bindings.length && revisions.length) {
+                    witnessedAtomicWrite = true;
+                    if (rollback) return yield* denial;
+                  }
+                });
+                const result = yield* service.importPorts.commit(a, recheck);
+                assert.equal(
+                  (yield* sql`SELECT * FROM memory_project_bindings`.pipe(Effect.orDie)).length,
+                  1,
+                );
+                assert.equal(
+                  (yield* sql`SELECT * FROM memory_revisions`.pipe(Effect.orDie)).length,
+                  1,
+                );
+                return result;
+              }),
           },
           h.reader,
           parsers,
@@ -1406,7 +1416,8 @@ describe("ProviderMemoryImport read-only binding preparation", () => {
         };
         const before = yield* inventory;
         const error = yield* runtime.run(input, Effect.void).pipe(Effect.flip);
-        assert.equal(error._tag, "MemoryStoreConflict");
+        assert.strictEqual(error, denial);
+        assert.isTrue(witnessedAtomicWrite);
         assert.deepEqual(yield* inventory, before);
         rollback = false;
         const result = yield* runtime.run(input, Effect.void);
