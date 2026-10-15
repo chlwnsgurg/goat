@@ -10,7 +10,7 @@ export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const bytes = (column: string) => `length(CAST(${column} AS BLOB))`;
   const live = (p: string) =>
-    `(SELECT coalesce(sum(${bytes("body_json")}),0) FROM memory_payloads WHERE space=${p}.space AND payload_ref IN (SELECT r.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value))`;
+    `(SELECT coalesce(sum(${bytes("body_json")}),0) FROM memory_payloads WHERE space=${p}.space AND memory_id=${p}.memory_id AND payload_ref IN (SELECT r.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value))`;
   const summary = (p: string) =>
     `(${p}.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value WHERE json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL))`;
   const payloadLive = (p: string) =>
@@ -159,11 +159,15 @@ export default Effect.gen(function* () {
       ["AFTER", 1],
     ] as const) {
       const adjust = (d: string, scope: string, value: string, global = false) => {
-        const where = `${affected}${global ? "" : ` AND i.space=memory_quota_counters.space${scope === "scope_key" ? " AND i.scope_key=memory_quota_counters.scope_key" : ""}`}`;
-        return `UPDATE memory_quota_counters SET value=value${sign < 0 ? "-" : "+"}(SELECT coalesce(sum(${value}),0) FROM memory_items i WHERE (${affected})${global ? "" : ` AND i.space=memory_quota_counters.space${scope === "scope_key" ? " AND i.scope_key=memory_quota_counters.scope_key" : ""}`}) WHERE memory_quota_counters.dimension='usage_${d}' AND memory_quota_counters.scope_key=${scope === "scope_key" ? "memory_quota_counters.scope_key" : "''"} AND ${global ? "memory_quota_counters.space='_usage_environment'" : `memory_quota_counters.space IN (SELECT i.space FROM memory_items i WHERE ${where})`};`;
+        const target = global
+          ? "memory_quota_counters.space='_usage_environment' AND scope_key=''"
+          : scope === "scope_key"
+            ? `(space,scope_key) IN (SELECT i.space,i.scope_key FROM memory_items i WHERE ${affected})`
+            : `space IN (SELECT i.space FROM memory_items i WHERE ${affected}) AND scope_key=''`;
+        return `UPDATE memory_quota_counters SET value=value${sign < 0 ? "-" : "+"}(SELECT coalesce(sum(${value}),0) FROM memory_items i WHERE (${affected})${global ? "" : ` AND i.space=memory_quota_counters.space${scope === "scope_key" ? " AND i.scope_key=memory_quota_counters.scope_key" : ""}`}) WHERE dimension='usage_${d}' AND ${target};`;
       };
       yield* sql.unsafe(
-        `CREATE TRIGGER usage_revision_${action.toLowerCase()}_${timing.toLowerCase()} ${timing} ${action} ON memory_revisions BEGIN ${adjust("live_bytes", "", live("i"))}${adjust("live_bytes", "", live("i"), true)}${adjust("summaries", "scope_key", summary("i"))} END`,
+        `CREATE TRIGGER usage_revision_${action.toLowerCase()}_${timing.toLowerCase()} ${timing} ${action}${action === "UPDATE" ? " OF space,memory_id,revision_id,provenance_json,payload_ref" : ""} ON memory_revisions BEGIN ${adjust("live_bytes", "", live("i"))}${adjust("live_bytes", "", live("i"), true)}${adjust("summaries", "scope_key", summary("i"))} END`,
       );
     }
   }

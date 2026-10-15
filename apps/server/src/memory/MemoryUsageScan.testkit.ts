@@ -1,3 +1,6 @@
+import { assert } from "@effect/vitest";
+import * as Schema from "effect/Schema";
+import * as Store from "./MemoryStore.ts";
 import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -170,4 +173,26 @@ export const scanUsage = Effect.fn("scanUsage")(function* (
     logRows: log[0]!.count,
     logBytes: log[0]!.bytes,
   };
+});
+
+/** Full scan oracle is intentionally test-only; check every persisted space and scope. */
+export const assertUsageCounters = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const store = yield* Store.MemoryStore;
+  const spaces = yield* sql<{
+    space: string;
+  }>`SELECT space FROM memory_items UNION SELECT space FROM memory_identity_ledger UNION SELECT space FROM memory_payloads UNION SELECT memory_space_id AS space FROM memory_events`;
+  for (const { space } of spaces) {
+    const id = M.MemorySpaceId.make(space);
+    const scopes = yield* sql<{
+      scope_json: string;
+    }>`SELECT DISTINCT scope_json FROM memory_items WHERE space=${space}`;
+    const candidates: M.MemoryScope[] = [{ kind: "user" }];
+    for (const row of scopes)
+      candidates.push(
+        yield* Schema.decodeEffect(Schema.fromJsonString(M.MemoryScope))(row.scope_json),
+      );
+    for (const scope of candidates)
+      assert.deepStrictEqual(yield* store.usage(id, scope), yield* scanUsage(id, scope));
+  }
 });

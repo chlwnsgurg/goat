@@ -1,3 +1,4 @@
+import { assertUsageCounters } from "./MemoryUsageScan.testkit.ts";
 import { checkpointLedgerFixture } from "./MemoryCheckpoint.testkit.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
@@ -194,7 +195,10 @@ describe("MemoryQuotaService", () => {
           limit + 1,
         );
       }
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("rolls back quota reservations with failed canonical commit", () =>
     Effect.gen(function* () {
@@ -208,7 +212,10 @@ describe("MemoryQuotaService", () => {
         .pipe(Effect.exit);
       assert.deepStrictEqual(yield* store.counters(space), []);
       assert.isUndefined((yield* store.loadAggregate(space, memory)).identity);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("existing-identity first forget uses its reserve at full budgets and FTS brake", () =>
     Effect.gen(function* () {
@@ -230,7 +237,10 @@ describe("MemoryQuotaService", () => {
       const outcome = yield* quota.commit(decision(forget()), env, Effect.void);
       assert.strictEqual(outcome.receipt.outcome, "deleted");
       assert.strictEqual((yield* store.loadAggregate(space, memory)).item?.status, "forgotten");
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect(
     "reserves actual first-delete source keys before ordinary writers fill the budget",
@@ -278,7 +288,10 @@ describe("MemoryQuotaService", () => {
           M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
         );
         assert.strictEqual((yield* store.readSuppressions(space, memory)).length, 100);
-      }).pipe(Effect.provide(services)),
+      }).pipe(
+        Effect.tap(() => assertUsageCounters),
+        Effect.provide(services),
+      ),
   );
   it.effect("reserves first-delete slots in a fresh memory ledger", () =>
     Effect.gen(function* () {
@@ -303,7 +316,10 @@ describe("MemoryQuotaService", () => {
       });
       yield* quota.commit(decision(op), env, Effect.void);
       assert.strictEqual((yield* store.readForgetReservation(space, memory)).keys, 2);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect.each([
     { dimension: "keys", extra: 0 },
@@ -501,7 +517,10 @@ describe("MemoryQuotaService", () => {
         counters.find((counter) => counter.dimension === "import_source_items")?.value,
         (yield* store.usage(space, { kind: "user" })).keys,
       );
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect.each([0, 1])(
     "includes encoded judgment at the actual resolve history boundary (+%s)",
@@ -558,7 +577,10 @@ describe("MemoryQuotaService", () => {
             ? M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES - oldBytes - judgmentBytes + 1
             : M.MEMORY_HISTORY_MAX_PAYLOAD_BYTES,
         );
-      }).pipe(Effect.provide(services)),
+      }).pipe(
+        Effect.tap(() => assertUsageCounters),
+        Effect.provide(services),
+      ),
   );
   it.effect("prunes an expired judgment only after approval and a covering checkpoint", () =>
     Effect.gen(function* () {
@@ -662,7 +684,10 @@ describe("MemoryQuotaService", () => {
           .length,
         1,
       );
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("unknown-ID forget reserves at lifetime equality but refuses plus one", () =>
     Effect.gen(function* () {
@@ -689,7 +714,10 @@ describe("MemoryQuotaService", () => {
         M.MEMORY_MAX_LIFETIME_IDS,
       );
       assert.isUndefined(yield* store.receipt(space, other.operationId));
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("approved forget bypasses local identity key and receipt limits", () =>
     Effect.gen(function* () {
@@ -713,7 +741,10 @@ describe("MemoryQuotaService", () => {
       );
       assert.deepStrictEqual(receipt.receipt, approved.receipt);
       assert.strictEqual(yield* store.readCursor(space, env), 1);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("pending forget preservation equality and plus one", () =>
     Effect.gen(function* () {
@@ -739,7 +770,10 @@ describe("MemoryQuotaService", () => {
       assert.strictEqual((yield* store.pendingForgetIntents(2001)).length, 2000);
       const restored = yield* Store.MemoryStore.pipe(Effect.provide(Store.layer));
       assert.strictEqual((yield* restored.pendingForgetIntents(2001)).length, 2000);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("31 UTC days retain 30 completed rows plus current and exact signed deltas", () =>
     Effect.gen(function* () {
@@ -767,7 +801,10 @@ describe("MemoryQuotaService", () => {
       );
       const restored = yield* Quota.MemoryQuotaService.pipe(Effect.provide(Quota.layer));
       assert.deepStrictEqual(yield* restored.readStorageGrowth(env), growth);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("same-day replacement missed days and clock rollback preserve actual endpoints", () =>
     Effect.gen(function* () {
@@ -792,7 +829,10 @@ describe("MemoryQuotaService", () => {
           ?.deltaBytes,
         -3,
       );
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("non-memory DB growth changes shared metrics without memory allocation growth", () =>
     Effect.gen(function* () {
@@ -804,7 +844,10 @@ describe("MemoryQuotaService", () => {
       const after = yield* store.measureAllocation();
       assert.strictEqual(after.memoryBytes, before.memoryBytes);
       assert.isAbove(after.dbFileBytes, before.dbFileBytes);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
   it.effect("startup sampling records unavailable allocation as null and clock discontinuity", () =>
     Effect.gen(function* () {
@@ -821,7 +864,10 @@ describe("MemoryQuotaService", () => {
           (delta) => delta.reason === "clock_discontinuity",
         ),
       );
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
 });
 
@@ -855,7 +901,10 @@ describe("MemoryQuotaService hub storage status", () => {
       assert.strictEqual(staging.current, status.requiredCheckpointBoundBytes! + 20);
       assert.strictEqual(staging.reserved, status.requiredCheckpointBoundBytes);
       assert.strictEqual(status.lastSnapshotBytes, 0);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
   );
 });
 
@@ -877,7 +926,10 @@ it.effect(
       assert.strictEqual(status.quotas.find((q) => q.dimension === "work_bytes")?.reclaimable, 6);
       assert.strictEqual(status.quotas.find((q) => q.dimension === "history")?.reclaimable, 0);
       assert.isAbove(status.requiredCheckpointBoundBytes!, 0);
-    }).pipe(Effect.provide(services)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(services),
+    ),
 );
 
 it.effect("r16 unbound storage preserves environment samples and FTS using indexed reads", () =>
@@ -929,5 +981,8 @@ it.effect("r16 unbound storage preserves environment samples and FTS using index
     yield* Effect.log("R16_STORAGE_EXPLAIN", JSON.stringify(plans)).pipe(
       Effect.provide(Logger.layer([Logger.consolePretty({ colors: false })])),
     );
-  }).pipe(Effect.provide(services)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(services),
+  ),
 );

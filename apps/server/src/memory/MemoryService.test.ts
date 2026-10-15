@@ -1,3 +1,4 @@
+import { assertUsageCounters } from "./MemoryUsageScan.testkit.ts";
 import * as Settings from "../serverSettings.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
@@ -128,7 +129,10 @@ describe("MemoryService hub admission", () => {
           .pipe(Effect.flip))._tag,
         "MemoryHubUnauthorizedError",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect(
     "a fresh remote operation reaches the canonical projection despite its compact hub receipt",
@@ -181,7 +185,10 @@ describe("MemoryService hub admission", () => {
         assert.strictEqual(coverage.eligible, 1);
         assert.strictEqual(coverage.textBytes, new TextEncoder().encode(op.payload.text).length);
         assert.strictEqual((yield* store.transact(store.readHubUsageTx(space))).tailRows, 1);
-      }).pipe(Effect.provide(live)),
+      }).pipe(
+        Effect.tap(() => assertUsageCounters),
+        Effect.provide(live),
+      ),
   );
 });
 describe("MemoryService", () => {
@@ -190,7 +197,10 @@ describe("MemoryService", () => {
       const service = yield* Service.MemoryService;
       const first = yield* service.upsert(input(), Effect.void);
       assert.deepStrictEqual(yield* service.upsert(input(), Effect.void), first);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("rejects changed content under the same operation", () =>
     Effect.gen(function* () {
@@ -202,7 +212,10 @@ describe("MemoryService", () => {
       assert.strictEqual(error._tag, "MemoryStoreConflict");
       if (error._tag === "MemoryStoreConflict")
         assert.strictEqual(error.code, "operation_id_reused");
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("denies writes before persisting receipt or payload", () =>
     Effect.gen(function* () {
@@ -211,7 +224,10 @@ describe("MemoryService", () => {
       yield* service.upsert(input(), denied).pipe(Effect.flip);
       assert.isUndefined(yield* store.receipt(space, input().operationId));
       assert.isUndefined((yield* store.loadAggregate(space, memoryId)).item);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("rechecks live permission even on replay", () =>
     Effect.gen(function* () {
@@ -221,7 +237,10 @@ describe("MemoryService", () => {
         (yield* service.upsert(input(), denied).pipe(Effect.flip))._tag,
         "MemoryAccessError",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("rejects secret prose without retaining it", () =>
     Effect.gen(function* () {
@@ -234,7 +253,10 @@ describe("MemoryService", () => {
         )
         .pipe(Effect.flip);
       assert.deepStrictEqual((yield* store.loadAggregate(space, memoryId)).revisions, []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("rejects extra fields at the input boundary", () =>
     Effect.gen(function* () {
@@ -244,7 +266,10 @@ describe("MemoryService", () => {
         (yield* service.upsert(value, Effect.void).pipe(Effect.flip))._tag,
         "MemoryStoreConflict",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("isolates thread scopes to the owning environment", () =>
     Effect.gen(function* () {
@@ -271,7 +296,10 @@ describe("MemoryService", () => {
         )).items,
         [],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("keeps user and thread reads separate before paging", () =>
     Effect.gen(function* () {
@@ -287,7 +315,10 @@ describe("MemoryService", () => {
         Effect.void,
       );
       assert.deepStrictEqual(page.items, []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("consumes read-only write denial before any domain mutation", () =>
     Effect.gen(function* () {
@@ -311,7 +342,10 @@ describe("MemoryService", () => {
         )).items,
         [],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("binds search continuation to normalized query, mode, space and scope", () =>
     Effect.gen(function* () {
@@ -358,7 +392,10 @@ describe("MemoryService", () => {
         (yield* service.search(request, revoked).pipe(Effect.flip))._tag,
         "MemoryAccessError",
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("returns index coverage on empty search", () =>
     Effect.gen(function* () {
@@ -369,7 +406,10 @@ describe("MemoryService", () => {
       );
       assert.strictEqual(page.indexCoverage?.projectionWatermark, page.projectionWatermark);
       assert.deepStrictEqual(page.items, []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("forget removes bodies and blocks late local writes", () =>
     Effect.gen(function* () {
@@ -394,7 +434,10 @@ describe("MemoryService", () => {
       );
       assert.isTrue(page.revisions.every((r) => r.payload === null));
       yield* service.upsert(input(5), Effect.void).pipe(Effect.flip);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("local re-forget creates no new receipt", () =>
     Effect.gen(function* () {
@@ -421,7 +464,10 @@ describe("MemoryService", () => {
       );
       assert.strictEqual(result.receipt.outcome, "noop");
       assert.isUndefined(yield* store.receipt(space, M.MemoryOperationId.make(id(5))));
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("rolls back mutation and sync intent together", () =>
     Effect.gen(function* () {
@@ -440,7 +486,10 @@ describe("MemoryService", () => {
         .pipe(Effect.flip);
       assert.isUndefined(yield* store.receipt(space, input().operationId));
       assert.deepStrictEqual(yield* store.readEligibleOutbox(space, 0, 100), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
 });
 
@@ -470,14 +519,20 @@ describe("memory project bindings", () => {
         kind: "explicit",
         sharedProjectId: "shared",
       });
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("unbound projects resolve to no project key", () =>
     Effect.gen(function* () {
       yield* seedProject;
       const service = yield* Service.MemoryService;
       assert.isNull(yield* service.resolveProjectKey(space, project));
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
   it.effect("stale version and revoked permit commit no binding", () =>
     Effect.gen(function* () {
@@ -496,7 +551,10 @@ describe("memory project bindings", () => {
         .updateProjectBinding({ ...request, expectedVersion: 0 }, denied)
         .pipe(Effect.flip);
       assert.isNull(yield* service.resolveProjectKey(space, project));
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
 });
 
@@ -566,7 +624,10 @@ it.effect(
       assert.strictEqual((yield* service.receiveHubPage(pullArgs)).length, 1);
       assert.strictEqual(yield* store.readCursor(space, environmentId), 7);
       assert.deepStrictEqual(yield* service.receiveHubPage(pullArgs), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -641,7 +702,10 @@ it.effect(
         (yield* sql`SELECT 1 FROM memory_events WHERE operation_id=${operationId}`).length,
         1,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -712,7 +776,10 @@ it.effect(
           .length,
         0,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 describe("MemoryService source outcome fencing", () => {
@@ -809,7 +876,10 @@ describe("MemoryService source outcome fencing", () => {
         .pipe(Effect.flip);
       assert.strictEqual(forgotten._tag, "MemoryStoreConflict");
       if (forgotten._tag === "MemoryStoreConflict") assert.strictEqual(forgotten.code, "forgotten");
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   );
 });
 
@@ -834,7 +904,10 @@ it.effect("rejects an empty pull that skips canonical sequences and leaves the c
       yield* service.receiveHubPage({ ...args, page: { ...args.page, throughSequence: 0 } }),
       [],
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 
 it.effect(
@@ -936,7 +1009,10 @@ it.effect(
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_payloads`).length, 0);
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_identity_ledger`).length, 0);
       assert.deepStrictEqual(yield* sql`SELECT * FROM memory_quota_counters`, before);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect.each(["accepted", "rejected"] as const)(
@@ -1029,7 +1105,10 @@ it.effect.each(["accepted", "rejected"] as const)(
             .length,
           0,
         );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 describe("body-free hub metadata report ownership", () => {
@@ -1146,7 +1225,10 @@ describe("body-free hub metadata report ownership", () => {
           );
           assert.strictEqual((yield* again.pendingReports(100)).length, 0);
         }
-      }).pipe(Effect.provide(live)),
+      }).pipe(
+        Effect.tap(() => assertUsageCounters),
+        Effect.provide(live),
+      ),
   );
 });
 
@@ -1282,7 +1364,10 @@ it.effect.each(["ack", "pull", "metadata"] as const)(
         links.forgetExpansion,
       );
       assert.deepStrictEqual(yield* fresh.pendingForgetIntents(100), []);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -1391,7 +1476,10 @@ it.effect(
         yield* service.admitHubOperation({ authority, operation: op }),
         accepted,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect("index-only updates preserve materialized checkpoint credit and staging usage", () =>
@@ -1436,7 +1524,10 @@ it.effect("index-only updates preserve materialized checkpoint credit and stagin
         .length,
       0,
     );
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 
 it.effect.each(["status", "kind", "memory_id"] as const)(
@@ -1534,7 +1625,10 @@ it.effect.each(["status", "kind", "memory_id"] as const)(
         }),
       );
       assert.deepStrictEqual(yield* snapshotPending("hub:outbox-restaged"), [{ pending: 0 }]);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -1714,7 +1808,10 @@ it.effect(
         page.items.some((item) => item.memoryId !== memoryId && item.status === "active"),
       );
       assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -1774,7 +1871,10 @@ it.effect(
         M.MEMORY_CHECKPOINT_STAGING_MAX_BYTES,
       );
       assert.strictEqual((yield* store.loadAggregate(space, memoryId)).item?.status, "forgotten");
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -1813,7 +1913,10 @@ it.effect(
       assert.isNull(receipt.hubSequence);
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_hub_operations`).length, 0);
       assert.isTrue((yield* store.loadAggregate(space, memoryId)).item?.pendingSync);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect("commits 100 frozen local intents atomically and advances the next intent", () =>
@@ -1922,7 +2025,10 @@ it.effect("commits 100 frozen local intents atomically and advances the next int
     assert.isUndefined(yield* store.receipt(space, target.operationId));
     yield* service.commitLocalIntent({ assignment: target, expectedEpoch: 7, readBinding });
     assert.deepStrictEqual(yield* store.listMaterializableIntents(environmentId, 100), []);
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 
 it.effect.each(["lost-response", "known-approval"] as const)(
@@ -2160,7 +2266,10 @@ it.effect.each(["lost-response", "known-approval"] as const)(
         0,
       );
       assert.isNull(yield* service.reconcileResolutionSubmission(args));
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -2259,7 +2368,10 @@ it.effect(
         )!.current,
         bytes,
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 
 it.effect(
@@ -2304,7 +2416,10 @@ it.effect(
           .pipe(Effect.flip);
         assert.isTrue("code" in failure && failure.code === "invalid_output");
       }
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 it.effect("reauthorizes immediately before returning unready FTS coverage", () =>
   Effect.gen(function* () {
@@ -2323,7 +2438,10 @@ it.effect("reauthorizes immediately before returning unready FTS coverage", () =
     assert.deepStrictEqual(yield* sql`SELECT after_rowid,ready FROM memory_search_backfill`, [
       { after_rowid: 1000, ready: 0 },
     ]);
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 it.effect("list byte cap retains the quarantined row cursor before a visible short tail", () =>
   Effect.gen(function* () {
@@ -2367,7 +2485,10 @@ it.effect("list byte cap retains the quarantined row cursor before a visible sho
       [id(14)],
     );
     assert.isNull(tail.nextCursor);
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 it.effect("list refuses a valid first item exceeding the reserved page envelope", () =>
   Effect.gen(function* () {
@@ -2398,7 +2519,10 @@ it.effect("list refuses a valid first item exceeding the reserved page envelope"
       .list({ memorySpaceId: space, limit: 100, includeQuarantined: true }, Effect.void)
       .pipe(Effect.flip);
     assert.isTrue("code" in failure && failure.code === "payload_too_large");
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 
 const sourceFixture = Effect.gen(function* () {
@@ -2921,7 +3045,10 @@ it.effect("report reset denies live permission loss and wrong selected environme
       resetCount: 1,
       unchangedCount: 0,
     });
-  }).pipe(Effect.provide(live)),
+  }).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 
 it.effect("Settings retry reset reauthorizes after waiting for the SQL writer", () =>
@@ -2966,7 +3093,10 @@ it.effect("Settings retry reset reauthorizes after waiting for the SQL writer", 
         [{ automatic_attempts: 10 }],
       );
     }),
-  ).pipe(Effect.provide(live)),
+  ).pipe(
+    Effect.tap(() => assertUsageCounters),
+    Effect.provide(live),
+  ),
 );
 
 // Real retained resolution and staged operation; report approval is never seeded by SQL.
@@ -3094,7 +3224,10 @@ it.effect.each(["ack", "pull", "hub-local"] as const)(
       assert.strictEqual(reports.length, 1);
       assert.strictEqual(reports[0]!.outcome, "reverted");
       assert.strictEqual(reports[0]!.resolvingEnvironmentId, environmentId);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 it.effect.each([{ hubSequence: null }, { hubSequence: 1 }])(
   "r2 H1 refuses report approval for rejected ACK %j",
@@ -3123,7 +3256,10 @@ it.effect.each([{ hubSequence: null }, { hubSequence: 1 }])(
         yield* service.acquireReports({ owner: environmentId, now: 0, until: 1000, limit: 32 }),
         [],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );
 it.effect(
   "r2 M1 foreign operation backlog leaves local report capacity available",
@@ -3214,7 +3350,10 @@ it.effect(
         yield* sql`SELECT value FROM memory_quota_counters WHERE space=${space} AND dimension='report_items'`,
         [{ value: 1 }],
       );
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
   { timeout: 600000 },
 );
 
@@ -3332,5 +3471,8 @@ it.effect(
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(writer);
       assert.strictEqual((yield* sql`SELECT 1 FROM memory_report_outbox`).length, 1);
-    }).pipe(Effect.provide(live)),
+    }).pipe(
+      Effect.tap(() => assertUsageCounters),
+      Effect.provide(live),
+    ),
 );

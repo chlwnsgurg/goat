@@ -125,7 +125,7 @@ it.effect(
       yield* sql`DELETE FROM memory_outbox WHERE id='test'`;
       yield* check;
       const service = yield* Service.MemoryService;
-      const op = Schema.decodeUnknownSync(M.MemoryOperation)({
+      const op = yield* Schema.decodeUnknownEffect(M.MemoryOperation)({
         protocolVersion: 1,
         memorySpaceId: space,
         memoryId: id(10),
