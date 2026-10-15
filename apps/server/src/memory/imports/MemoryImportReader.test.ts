@@ -1141,4 +1141,20 @@ exec(compile(code,'<descriptor-broker>','exec'),{'__name__':'__main__'})
       }),
     ),
   );
+  it.effect("UTF-8 decoding preserves BOM bytes and the original byte count", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* buildMemoryImportFixture("codex-ad-hoc-v1", {
+          files: { "extensions/ad_hoc/notes/bom.md": "\uFEFFSynthetic fixture text\n" },
+        });
+        const reader = yield* Reader.acquireMemoryImportReader(readerConfig(fixture));
+        const before = captureMemoryImportInventory(fixture.sourceRoot);
+        const value = yield* reader.read({ slot: fixture.snapshot.slot });
+        assert.deepEqual(value.files, fixture.snapshot.files);
+        assert.equal(Buffer.byteLength(value.files[0]!.text), value.files[0]!.byteCount);
+        assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
+        assert.deepEqual(residue(fixture), []);
+      }),
+    ),
+  );
 });

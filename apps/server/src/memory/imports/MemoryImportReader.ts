@@ -665,7 +665,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                     throw error("source_unreadable");
                   return {
                     selector: file.selector,
-                    text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+                    text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
                     byteCount: file.byteCount,
                   };
                 }),
@@ -713,7 +713,7 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
               files = [];
               let bytes = 0;
               const treeText = yield* Effect.try({
-                try: () => new TextDecoder("utf-8", { fatal: true }).decode(tree),
+                try: () => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(tree),
                 catch: () => error("invalid_utf8"),
               });
               const entries = treeText.split("\0").filter(Boolean);
@@ -743,7 +743,8 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                 const content = yield* run(["cat-file", "blob", oid!], 262144);
                 if (content.length !== size) return yield* Effect.fail(error("source_changed"));
                 const text = yield* Effect.try({
-                  try: () => new TextDecoder("utf-8", { fatal: true }).decode(content),
+                  try: () =>
+                    new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content),
                   catch: () => error("invalid_utf8"),
                 });
                 files.push({ selector: selector!, text, byteCount: content.length });
