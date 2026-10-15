@@ -1,3 +1,6 @@
+// Suggestion matching adapted from Emanuele-web04/synara @ 566efb1b1
+// (apps/web/src/components/BrowserPanel.logic.ts).
+// Copyright (c) 2026 T3 Tools Inc. Copyright (c) 2026 Emanuele Di Pietro. MIT license.
 import { addressBarSearchUrl, resolveAddressBarInput } from "@goat/shared/preview";
 
 export type BrowserAddressTab = { tabId: string; url: string; title: string };
