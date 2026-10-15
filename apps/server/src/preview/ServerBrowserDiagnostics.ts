@@ -37,17 +37,32 @@ const ENTRY_BUDGET_BYTES = 24_000;
 const TEXT_LIMIT = 2_000;
 const STACK_LIMIT = 4_000;
 const URL_LIMIT = 2_048;
+const INPUT_LIMIT = 8_192;
+const QUERY_PARAMETER_LIMIT = 32;
 
 const redactUrl = (raw: string) => {
+  // Reject oversized URLs before parsing; a truncated authority can expose credentials.
+  if (raw.length > INPUT_LIMIT) return "url:[redacted]";
   try {
-    const url = new URL(raw);
+    // Bound the query before URLSearchParams parses it, including duplicate keys.
+    const bounded = raw.replace(/\?[^#]*/, (query) =>
+      query.split("&", QUERY_PARAMETER_LIMIT).join("&"),
+    );
+    const url = new URL(bounded);
     if (!["http:", "https:", "ws:", "wss:", "about:"].includes(url.protocol)) {
       return `${url.protocol}[redacted]`;
     }
     url.username = "";
     url.password = "";
     url.hash = "";
-    for (const key of new Set(url.searchParams.keys())) url.searchParams.set(key, "[REDACTED]");
+    const redacted = new URLSearchParams();
+    const keys = new Set<string>();
+    for (const key of url.searchParams.keys()) {
+      if (keys.has(key)) continue;
+      keys.add(key);
+      redacted.append(key, "[REDACTED]");
+    }
+    url.search = redacted.toString();
     return url.href.slice(0, URL_LIMIT);
   } catch {
     return "invalid:[redacted]";
@@ -56,10 +71,18 @@ const redactUrl = (raw: string) => {
 
 // Error stacks and console messages can embed source URLs as well as prose.
 // This only redacts URLs, not arbitrary secrets printed by the page.
-const redactText = (text: string, limit: number) =>
-  text
-    .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|(?:data|blob|about):)[^\s<>"']+/gi, redactUrl)
+const redactText = (text: string, limit: number) => {
+  const bounded = text.slice(0, INPUT_LIMIT);
+  return bounded
+    .replace(
+      /\b(?:[a-z][a-z0-9+.-]*:\/\/|(?:data|blob|about):)(?:(?<==)"(?:\\.|[^"\\<>])*(?:"|$)|(?<==)'(?:\\.|[^'\\<>])*(?:'|$)|[^\s<>])+/gi,
+      (raw, offset: number) =>
+        text.length > INPUT_LIMIT && offset + raw.length === bounded.length
+          ? "url:[redacted]"
+          : redactUrl(raw),
+    )
     .slice(0, limit);
+};
 
 const contains = (value: string, filter: string | undefined) =>
   filter === undefined || value.toLowerCase().includes(filter.toLowerCase());

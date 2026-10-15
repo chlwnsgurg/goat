@@ -123,6 +123,82 @@ describe("ServerBrowserDiagnostics", () => {
     );
   });
 
+  it.each([
+    '"TOP_SECRET"',
+    "'TOP_SECRET'",
+    `' {"token":"TOP_SECRET"} '`,
+    '"TOP SECRET"',
+    '"TOP_SECRET\\"suffix"',
+    'prefix"TOP_SECRET"',
+  ])("redacts quoted query values %s across diagnostics", (value) => {
+    const { page, diagnostics, consoleMessage } = fixture();
+    const url = `https://USER_SECRET:PASS_SECRET@example.test/api?token=${value}&other=OTHER_SECRET#FRAGMENT_SECRET`;
+    consoleMessage(`See ${url}`);
+    const error = new Error(`Failed ${url}`);
+    error.stack = `Error: Failed\n at ${url}`;
+    page.emit("pageerror", error);
+    page.emit("requestfailed", {
+      url: () => url,
+      method: () => "GET",
+      failure: () => ({ errorText: `Failed ${url}` }),
+    });
+    const result = diagnostics.read({});
+    const texts = [
+      result.console.entries[0]?.text,
+      result.errors.entries[0]?.message,
+      result.errors.entries[0]?.stack,
+      result.network.entries[0]?.url,
+      result.network.entries[0]?.errorText,
+    ];
+    for (const text of texts) {
+      expect(text).toContain("https://example.test/api?token=%5BREDACTED%5D&other=%5BREDACTED%5D");
+      expect(text).not.toMatch(/SECRET|TOP SECRET/);
+    }
+  });
+
+  it("redacts quoted credentials and URLs embedded in JSON strings", () => {
+    const { diagnostics, consoleMessage } = fixture();
+    consoleMessage(
+      `{"url":"https://USER_SECRET:'PASS_SECRET'@example.test/api?token='TOP_SECRET'"}`,
+    );
+    expect(diagnostics.read({}).console.entries[0]?.text).toContain(
+      "https://example.test/api?token=%5BREDACTED%5D",
+    );
+    expect(diagnostics.read({}).console.entries[0]?.text).not.toContain("SECRET");
+  });
+
+  it.each([200, 10_000])("bounds query processing for %i parameters", (count) => {
+    const { page, diagnostics, consoleMessage } = fixture();
+    const query = Array.from({ length: count }, (_, i) => `k${i}=SECRET`).join("&");
+    const url = `https://example.test/api?${query}`;
+    consoleMessage(url);
+    page.emit("requestfinished", { url: () => url, method: () => "GET" });
+    const result = diagnostics.read({});
+    for (const text of [result.console.entries[0]?.text, result.network.entries[0]?.url]) {
+      expect(text).toBeDefined();
+      expect(text).not.toContain("SECRET");
+      expect(text?.length).toBeLessThanOrEqual(2_048);
+      expect(text?.match(/k\d+=/g)?.length ?? 0).toBeLessThanOrEqual(32);
+      if (count === 200) expect(text).toContain("k31=%5BREDACTED%5D");
+      else expect(text).toBe("url:[redacted]");
+    }
+  });
+
+  it("does not expose credentials or quoted values cut by the input limit", () => {
+    const { page, diagnostics, consoleMessage } = fixture();
+    const urls = [
+      `https://USER_SECRET:${"PASSWORD_SECRET".repeat(1_000)}@example.test/`,
+      `https://example.test/api?token="${"TOP SECRET ".repeat(1_000)}"`,
+    ];
+    for (const url of urls) {
+      consoleMessage(url);
+      page.emit("requestfinished", { url: () => url, method: () => "GET" });
+      const result = diagnostics.read({ limit: 1 });
+      expect(result.console.entries[0]?.text).toBe("url:[redacted]");
+      expect(result.network.entries[0]?.url).toBe("url:[redacted]");
+    }
+  });
+
   it("bounds UTF-8 output and reports entries omitted by the shared byte budget", () => {
     const { page, diagnostics, consoleMessage } = fixture();
     for (let i = 0; i < 205; i++) {
