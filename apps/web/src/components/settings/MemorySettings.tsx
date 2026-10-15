@@ -734,7 +734,9 @@ function MemoryDetails({
               {value.resolutions.length > 0 ? (
                 <div>
                   <h3 className="text-sm font-medium">Resolution history</h3>
-                  <p>History updates live. Start at the first page to see new changes.</p>
+                  <p className="text-xs leading-normal text-muted-foreground/80">
+                    History updates live. Start at the first page to see new changes.
+                  </p>
                 </div>
               ) : null}
               {value.resolutions.map((entry) => {
@@ -968,7 +970,11 @@ export function MemoryRevertControl({
     <div>
       <p>{display.windowLabel}</p>
       {display.timeNotice ? <p>{display.timeNotice}</p> : null}
-      {display.notice ? <p role="status">{display.notice}</p> : null}
+      {display.notice ? (
+        <p className="text-xs leading-normal text-muted-foreground/80" role="status">
+          {display.notice}
+        </p>
+      ) : null}
       {display.reason ? <p>{display.reason}</p> : null}
       {!canWrite ? <p>Memory write permission is required to revert.</p> : null}
       {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}
@@ -1167,7 +1173,9 @@ function MemoryReportControl({ report }: { report: MemoryReportDelivery }) {
   return (
     <div>
       <p>{display.label}</p>
-      <p>Automatic attempts: {display.automaticAttempts ?? "Unknown"}</p>
+      <p className="text-xs leading-normal text-muted-foreground/80">
+        Automatic attempts: {display.automaticAttempts ?? "Unknown"}
+      </p>
       {destination ? (
         <Button
           size="sm"

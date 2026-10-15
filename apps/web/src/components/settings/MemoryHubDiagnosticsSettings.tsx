@@ -11,6 +11,7 @@ import { useEnvironment } from "../../state/environments";
 import { memoryEnvironment } from "../../state/memory";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
+import { ChevronRightIcon } from "../solar";
 import { Button } from "../ui/button";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
@@ -50,6 +51,7 @@ function Diagnostics({
 }) {
   const canRead = useAtomValue(memoryEnvironment.hubDiagnostics.permissionAtom(environmentId));
   const getDiagnostics = useAtomCommand(memoryEnvironment.hubDiagnostics, { reportFailure: false });
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<MemoryHubDiagnostics | null>(null);
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
@@ -135,20 +137,30 @@ function Diagnostics({
         />
       ) : null}
       {canRead && diagnostics ? (
-        <Collapsible>
-          <CollapsibleTrigger>Settings details</CollapsibleTrigger>
-          <CollapsiblePanel>
-            <p>Settings version {diagnostics.version}</p>
+        <Collapsible open={detailsOpen} onOpenChange={setDetailsOpen}>
+          <CollapsibleTrigger className="flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:px-4">
+            <ChevronRightIcon
+              aria-hidden
+              className={detailsOpen ? "size-4 shrink-0 rotate-90" : "size-4 shrink-0"}
+            />
+            Settings details
+          </CollapsibleTrigger>
+          <CollapsiblePanel animate={false}>
+            <div className="px-3 py-3 text-xs leading-normal text-muted-foreground/80 sm:px-4">
+              Settings version {diagnostics.version}
+            </div>
           </CollapsiblePanel>
         </Collapsible>
       ) : null}
-      {error ? <p role="alert">Could not load hub diagnostics.</p> : null}
-      {message ? <p role="status">{message}</p> : null}
+      {error ? (
+        <SettingsRow title={<span role="alert">Could not load hub diagnostics.</span>} />
+      ) : null}
+      {message ? <SettingsRow title={<span role="status">{message}</span>} /> : null}
       <SettingsRow
         title="Reconcile sync"
         description="Rearm eligible held work on this device."
         control={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               variant="outline"

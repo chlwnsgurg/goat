@@ -54,9 +54,8 @@ export function MemoryAgentAccessSettings({ environmentId }: { environmentId: En
             }}
           />
         }
-      >
-        {message ? <p role="status">{message}</p> : null}
-      </SettingsRow>
+        status={message ? <span role="status">{message}</span> : undefined}
+      />
     </SettingsSection>
   );
 }

@@ -172,7 +172,7 @@ export function MemoryScopeSettings({
             label="Memory project"
           />
           {binding ? (
-            <p>
+            <p className="text-xs leading-normal text-muted-foreground/80">
               {binding.projectKey?.kind === "explicit"
                 ? "Dedicated shared project"
                 : binding.projectKey
@@ -180,38 +180,44 @@ export function MemoryScopeSettings({
                   : "No repository identity available"}
             </p>
           ) : null}
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={disabled || busy || !canUpdate || !binding}
-            onClick={() =>
-              setConfirm(binding?.projectKey?.kind === "explicit" ? "useRepository" : "setExplicit")
-            }
-          >
-            {binding?.projectKey?.kind === "explicit"
-              ? "Use repository identity"
-              : "Create dedicated shared project"}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={disabled || busy}
-            onClick={() => setReload((v) => v + 1)}
-          >
-            Reload binding
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={disabled || busy || !canUpdate || !binding}
+              onClick={() =>
+                setConfirm(
+                  binding?.projectKey?.kind === "explicit" ? "useRepository" : "setExplicit",
+                )
+              }
+            >
+              {binding?.projectKey?.kind === "explicit"
+                ? "Use repository identity"
+                : "Create dedicated shared project"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={disabled || busy}
+              onClick={() => setReload((v) => v + 1)}
+            >
+              Reload binding
+            </Button>
+          </div>
           {confirm ? (
-            <div role="group" aria-label="Confirm project binding">
-              <p>
+            <div className="space-y-3" role="group" aria-label="Confirm project binding">
+              <p className="text-xs leading-normal text-muted-foreground/80">
                 Change the project identity used for future memories? Existing memories keep their
                 scope.
               </p>
-              <Button size="sm" disabled={disabled || busy} onClick={() => void save()}>
-                Confirm binding change
-              </Button>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirm(null)}>
-                Cancel
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" disabled={disabled || busy} onClick={() => void save()}>
+                  Confirm binding change
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirm(null)}>
+                  Cancel
+                </Button>
+              </div>
             </div>
           ) : null}
         </>
@@ -225,7 +231,11 @@ export function MemoryScopeSettings({
           label="Memory thread"
         />
       ) : null}
-      {message ? <p role="status">{message}</p> : null}
+      {message ? (
+        <p className="text-xs leading-normal text-muted-foreground/80" role="status">
+          {message}
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -44,7 +44,7 @@ function MemoryReportRetryRequest({
     .slice(0, 32);
   return (
     <div className="space-y-3" role="group" aria-label="Report delivery retry">
-      <p>
+      <p className="text-xs leading-normal text-muted-foreground/80">
         Choose up to 32 exhausted failed reports. Retry resets automatic delivery attempts; it does
         not release storage or start an agent.
       </p>
@@ -77,7 +77,11 @@ function MemoryReportRetryRequest({
           </span>
         </label>
       ))}
-      {!allowed ? <p>Settings write permission is required to retry reports.</p> : null}
+      {!allowed ? (
+        <p className="text-xs leading-normal text-muted-foreground/80">
+          Settings write permission is required to retry reports.
+        </p>
+      ) : null}
       <Button
         size="sm"
         variant="outline"
@@ -114,7 +118,11 @@ function MemoryReportRetryRequest({
       >
         Retry selected reports
       </Button>
-      {message ? <p role="status">{message}</p> : null}
+      {message ? (
+        <p className="text-xs leading-normal text-muted-foreground/80" role="status">
+          {message}
+        </p>
+      ) : null}
     </div>
   );
 }
