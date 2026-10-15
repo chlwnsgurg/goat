@@ -598,7 +598,9 @@ export const acquireMemoryImportReader = (config: MemoryImportReaderConfig) =>
                   Effect.catch(() =>
                     Effect.sync(() => {
                       budget.unavailable = true;
-                    }),
+                    }).pipe(
+                      Effect.andThen(Effect.logError("Memory import snapshot cleanup failed.")),
+                    ),
                   ),
                 ),
             );

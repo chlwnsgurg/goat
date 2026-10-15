@@ -452,15 +452,22 @@ describe("MemoryImportReader", () => {
         const fixture = yield* buildMemoryImportFixture("codex-handbook-v1");
         const spy = makeDescriptorSpy(fixture);
         const started = yield* Deferred.make<void>();
+        const proceed = yield* Deferred.make<void>();
+        let paused = false;
         const reader = yield* Reader.acquireMemoryImportReader({
           ...spy.config,
-          onProcessSpawn: (event) => {
-            if (event.operation === "copy") Deferred.doneUnsafe(started, Effect.void);
-          },
+          onSnapshotSealed: () =>
+            Effect.gen(function* () {
+              if (paused) return;
+              paused = true;
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(proceed);
+            }),
         });
         const before = captureMemoryImportInventory(fixture.sourceRoot);
         const fiber = yield* Effect.forkChild(reader.read({ slot: fixture.snapshot.slot }));
         yield* Deferred.await(started);
+        assert.equal(residue(fixture).length, 1);
         yield* Fiber.interrupt(fiber);
         assert.deepEqual(captureMemoryImportInventory(fixture.sourceRoot), before);
         assert.deepEqual(residue(fixture), []);
