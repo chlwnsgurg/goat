@@ -2361,6 +2361,42 @@ describe("MemoryImport shared settled noop", () => {
         assert.deepStrictEqual(yield* durableInventory, before);
       }).pipe(Effect.provide(importLive)),
   );
+  it.effect(
+    "converts legacy settled detail only when the exact private allocation cannot grow",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* Store.MemoryStore;
+        const sql = yield* SqlClient.SqlClient;
+        const p = prepared();
+        const result = { ...p.selection.result!, outcome: "noop" as const };
+        const selection = { ...p.selection, result, observation: p.next.pending!, settled: true };
+        for (const env of [M.EnvironmentId.make("origin".repeat(400)), environmentId]) {
+          const batch = {
+            ...p.batch,
+            environmentId: env,
+            selections: [selection],
+            receipt: { ...p.batch.receipt, items: [result] },
+          };
+          yield* sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,request_digest,completed_items_json,observed_at_utc)
+          VALUES (${env},${space},${env},'batch',${sourceId},${batch.operationId},${batch.selectionDigest},${encodeUnknown(batch)},${stamp})`;
+          const before = yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata'`;
+          const replay = yield* store.transact(store.readImportBatchTx(batch));
+          assert.strictEqual(
+            replay?.kind,
+            env === environmentId ? "completed-noop-ref" : "detailed",
+          );
+          if (replay && replay.kind !== "retired")
+            assert.deepStrictEqual(replay.receipt, batch.receipt);
+          const after = yield* sql<{
+            value: number;
+          }>`SELECT value FROM memory_quota_counters WHERE space='_hub_global' AND dimension='import_metadata'`;
+          assert.isAtMost(after[0]!.value, before[0]!.value);
+        }
+        assert.strictEqual((yield* sql`SELECT * FROM memory_import_noop_results`).length, 1);
+      }).pipe(Effect.provide(importLive)),
+  );
   it.effect("retires at original 30-day boundary and collects only the final reference", () =>
     Effect.gen(function* () {
       yield* approvedImport;

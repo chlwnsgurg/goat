@@ -5925,6 +5925,7 @@ const make = Effect.gen(function* () {
     );
   // No pointer chains: the immutable object is addressed within its trusted origin.
   const shareImportNoopTx = Effect.fnUntraced(function* (batch: typeof ImportBatchCodec.Type) {
+    const detailedJson = yield* importBatchCodec.encode(batch);
     if (
       batch.receipt.state !== "completed" ||
       batch.receipt.remaining !== 0 ||
@@ -5933,7 +5934,7 @@ const make = Effect.gen(function* () {
         (s) => s.result?.outcome === "noop" && s.observation !== undefined && s.settled === true,
       )
     )
-      return { json: yield* importBatchCodec.encode(batch), resultRef: null };
+      return { json: detailedJson, resultRef: null };
     const json = yield* importNoopResultCodec.encode({
       codecVersion: 1,
       items: batch.receipt.items,
@@ -5947,6 +5948,34 @@ const make = Effect.gen(function* () {
     );
     if (rows[0] && (rows[0].result_json !== json || rows[0].codec_version !== 1))
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const compactJson = yield* importBatchCodec.encode({
+      kind: "completed-noop-ref",
+      codecVersion: 1,
+      memorySpaceId: batch.memorySpaceId,
+      environmentId: batch.environmentId,
+      sourceId: batch.sourceId,
+      operationId: batch.operationId,
+      selectionDigest: batch.selectionDigest,
+      sessionId: batch.sessionId,
+      resultRef,
+      sessionNewItems: batch.receipt.sessionNewItems,
+      sessionBodyBytes: batch.receipt.sessionBodyBytes,
+      createdAtUtc: batch.createdAtUtc,
+    });
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const objectBytes = rows[0]
+      ? 0
+      : bytes(json) +
+        bytes(resultRef) +
+        bytes(batch.memorySpaceId) +
+        bytes(batch.environmentId) +
+        bytes(batch.sourceId) +
+        8;
+    // A legacy/late-settlement conversion must not need new admission. Very long
+    // trusted origin labels can make the first object cost more than the detail.
+    // Keep that detail intact; new-request admission still checks every dimension.
+    if (bytes(compactJson) + bytes(resultRef) + objectBytes > bytes(detailedJson))
+      return { json: detailedJson, resultRef: null };
     if (!rows[0])
       yield* stored(
         "import-noop-insert",
@@ -5954,23 +5983,7 @@ const make = Effect.gen(function* () {
       INSERT INTO memory_import_noop_results(space,environment_id,source_id,result_ref,codec_version,result_json)
       VALUES (${batch.memorySpaceId},${batch.environmentId},${batch.sourceId},${resultRef},1,${json})`,
       );
-    return {
-      resultRef,
-      json: yield* importBatchCodec.encode({
-        kind: "completed-noop-ref",
-        codecVersion: 1,
-        memorySpaceId: batch.memorySpaceId,
-        environmentId: batch.environmentId,
-        sourceId: batch.sourceId,
-        operationId: batch.operationId,
-        selectionDigest: batch.selectionDigest,
-        sessionId: batch.sessionId,
-        resultRef,
-        sessionNewItems: batch.receipt.sessionNewItems,
-        sessionBodyBytes: batch.receipt.sessionBodyBytes,
-        createdAtUtc: batch.createdAtUtc,
-      }),
-    };
+    return { resultRef, json: compactJson };
   });
   const readImportNoopResultTx = Effect.fnUntraced(function* (
     b: typeof ImportCompletedNoopCodec.Type,
