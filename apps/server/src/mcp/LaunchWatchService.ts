@@ -1131,11 +1131,13 @@ export const make = Effect.gen(function* () {
   const incarnationFor = (id: string) => {
     const previous = watches.get(id)?.incarnation;
     return previous === undefined
-      ? crypto.randomUUIDv4.pipe(
-          Effect.mapError(
-            (cause) => new LaunchWatchStoreError({ message: "Could not start a watch.", cause }),
-          ),
-        )
+      ? crypto
+          .randomUUIDv4()
+          .pipe(
+            Effect.mapError(
+              (cause) => new LaunchWatchStoreError({ message: "Could not start a watch.", cause }),
+            ),
+          )
       : Effect.succeed(previous);
   };
 

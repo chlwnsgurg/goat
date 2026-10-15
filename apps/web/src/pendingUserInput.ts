@@ -3,7 +3,12 @@ import {
   resolvePendingUserInputAnswer,
   type PendingUserInputDraftAnswer,
 } from "@goat/client-runtime/state/user-input-draft";
-import type { UserInputQuestion } from "@goat/contracts";
+import type { ThreadContextRecord, UserInputQuestion } from "@goat/contracts";
+import {
+  projectComposerContextForProvider,
+  replaceComposerContextReferences,
+} from "@goat/shared/composerContextReferences";
+import { formatThreadLink } from "@goat/shared/threadLinks";
 
 export {
   buildPendingUserInputAnswers,
@@ -12,6 +17,23 @@ export {
   togglePendingUserInputOptionSelection,
 } from "@goat/client-runtime/state/user-input-draft";
 export type { PendingUserInputDraftAnswer } from "@goat/client-runtime/state/user-input-draft";
+
+/** Question responses carry text, so send thread chips as links with the actual thread IDs. */
+export function projectPendingUserInputAnswer(
+  answer: unknown,
+  threadContexts: ReadonlyArray<ThreadContextRecord>,
+) {
+  if (typeof answer !== "string" || threadContexts.length === 0) return answer;
+  const recordsById = new Map(threadContexts.map((record) => [record.contextId, record]));
+  return replaceComposerContextReferences(answer, (reference) => {
+    const record = reference.kind === "thread" ? recordsById.get(reference.contextId) : undefined;
+    if (!record) return reference.source;
+    // Remote thread tools need the SSH alias as well as the ID; a local-only link loses it.
+    return record.host === undefined
+      ? formatThreadLink(record.threadId, reference.label)
+      : projectComposerContextForProvider({ text: reference.source, records: [record] });
+  });
+}
 
 export interface PendingUserInputProgress {
   questionIndex: number;

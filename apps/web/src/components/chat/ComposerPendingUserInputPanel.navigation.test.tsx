@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { RuntimeRequestId } from "@goat/contracts";
+import { EnvironmentId, RuntimeRequestId, ThreadId } from "@goat/contracts";
 import { act, useState, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -18,8 +18,12 @@ vi.mock("../ui/collapsible", () => {
   };
 });
 
+vi.mock("../ChatMarkdown", () => ({ default: ({ text }: { text: string }) => <p>{text}</p> }));
+
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import type { PendingUserInput } from "../../session-logic";
+
+const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
 
 const prompt: PendingUserInput = {
   requestId: RuntimeRequestId.make("question-navigation"),
@@ -55,6 +59,8 @@ function Questions({
       <button onClick={() => setQuestionIndex(questionIndex - 1)}>Previous</button>
       <ComposerPendingUserInputPanel
         pendingUserInputs={[{ ...prompt, responseCapability }]}
+        cwd="/repo"
+        threadRef={threadRef}
         disabled={disabled}
         respondingRequestIds={[]}
         answers={answers}

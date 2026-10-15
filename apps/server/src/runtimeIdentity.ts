@@ -13,6 +13,6 @@ export const layer = Layer.effect(
   RuntimeIdentity,
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    return { instanceId: yield* crypto.randomUUIDv4 };
+    return { instanceId: yield* crypto.randomUUIDv4() };
   }),
 );

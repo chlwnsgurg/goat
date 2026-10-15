@@ -41,6 +41,7 @@ import * as Secrets from "../secrets/SecretRequests.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { captureRpcMemoryGrantCeiling } from "../auth/RpcAuthorization.ts";
+import * as Git from "../vcs/GitVcsDriver.ts";
 import * as Tasks from "./ScheduledTaskService.ts";
 
 const decodePublicInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
@@ -216,6 +217,9 @@ it.effect(
         ).pipe(Layer.provideMerge(runtime));
         const dependencies = Layer.mergeAll(
           databaseLayer,
+          Layer.mock(Git.GitVcsDriver)({
+            listWorktreePaths: () => Effect.succeed([project.workspaceRoot]),
+          }),
           NodeServices.layer,
           delivery,
           Layer.mock(Scheduler.Scheduler)({

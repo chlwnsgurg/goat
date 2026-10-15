@@ -62,6 +62,8 @@ import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -87,6 +89,11 @@ import * as LaunchWatchService from "./LaunchWatchService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.ts";
 import * as ProviderAdapter from "@goat/provider-core/server/ProviderAdapter";
+
+const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+);
 
 // Effect returns a declared tool failure as `isError` with its encoded payload
 // as JSON text, never as `structuredContent`.
@@ -707,9 +714,11 @@ describe("orchestrator MCP toolkit", () => {
             }),
           );
           const layerTest = Layer.merge(
-            McpHttpServer.layerOrchestratorToolkit,
+            layerOrchestratorToolkit,
             McpHttpServer.layerThreadToolkit,
           ).pipe(
+            Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+            Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
             Layer.provide(
               ThreadResultService.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
             ),
@@ -3924,7 +3933,7 @@ describe("orchestrator MCP toolkit", () => {
             model: codexModel,
           }),
         ]);
-        const layerTest = McpHttpServer.layerOrchestratorToolkit.pipe(
+        const layerTest = layerOrchestratorToolkit.pipe(
           Layer.provide(
             ThreadResultService.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
           ),
@@ -4417,10 +4426,9 @@ it.live("delegate_task wait returns before a child question is answered", () =>
           ),
         ),
       );
-      const layer = Layer.merge(
-        McpHttpServer.layerOrchestratorToolkit,
-        McpHttpServer.layerThreadToolkit,
-      ).pipe(
+      const layer = Layer.merge(layerOrchestratorToolkit, McpHttpServer.layerThreadToolkit).pipe(
+        Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+        Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
         Layer.provide(ThreadResultService.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(orchestration),
@@ -4619,7 +4627,7 @@ it.live("delegate_task wait returns before a child question is answered", () =>
 it.effect("goat_thread_wait host result retains pendingRequestIds through MCP registration", () =>
   Effect.gen(function* () {
     const calls: Array<SshRemoteDispatch.SshHostToolCall> = [];
-    const layer = McpHttpServer.layerOrchestratorToolkit.pipe(
+    const layer = layerOrchestratorToolkit.pipe(
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(Layer.mock(ThreadResultService.ThreadResultService)({})),
       Layer.provideMerge(McpServer.McpServer.layer),

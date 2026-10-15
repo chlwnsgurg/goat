@@ -26,6 +26,7 @@ import {
 } from "../logicalProject";
 import { resolveNewThreadEnvMode, resolveProjectSettings } from "@goat/shared/projectSettings";
 import {
+  readProject,
   readProjects,
   readThreadShell,
   readThreadShells,
@@ -162,6 +163,10 @@ export function useNewThreadHandler() {
           candidate.id === projectRef.projectId &&
           candidate.environmentId === projectRef.environmentId,
       );
+      // Removal can land while the project file is read; a draft opened
+      // after that belongs to a project that no longer exists.
+      const abandonedSinceRequest = () =>
+        routeChangedSinceRequest() || (project !== undefined && readProject(projectRef) === null);
       // The resolver applies project overrides and, until the server has
       // folded them, the aggregate's own legacy fields.
       const projectSettings = resolveProjectSettings(
@@ -273,7 +278,7 @@ export function useNewThreadHandler() {
           // already-open one. State written while defaults load wins instead.
           const initialWorkspaceContext = pickExplicitWorkspaceOptions(emptyStoredDraftThread);
           const workspaceContext = await resolveRequestedWorkspaceContext();
-          if (routeChangedSinceRequest()) return null;
+          if (abandonedSinceRequest()) return null;
           const routeTargetNow = getCurrentRouteTarget();
           const openedMeanwhile =
             !isDraftAlreadyOpen &&
@@ -384,7 +389,7 @@ export function useNewThreadHandler() {
         return (async () => {
           const initialWorkspaceContext = pickExplicitWorkspaceOptions(latestActiveDraftThread);
           const workspaceContext = await resolveRequestedWorkspaceContext();
-          if (routeChangedSinceRequest()) return null;
+          if (abandonedSinceRequest()) return null;
           const activeNow = getDraftSession(currentRouteTarget.draftId);
           if (
             activeNow == null ||
@@ -428,7 +433,7 @@ export function useNewThreadHandler() {
       const createdAt = new Date().toISOString();
       return (async () => {
         const initialEnvMode = options?.envMode ?? (await resolveDefaultEnvMode());
-        if (routeChangedSinceRequest()) {
+        if (abandonedSinceRequest()) {
           return null;
         }
         // The await yields, so a concurrent invocation may have registered a

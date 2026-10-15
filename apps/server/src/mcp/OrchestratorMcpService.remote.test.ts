@@ -1,4 +1,6 @@
 import * as Stream from "effect/Stream";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -40,11 +42,11 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SshRemoteDispatch from "../sshRemote/SshRemoteDispatch.ts";
 import * as RemoteDispatchCoordinator from "../remoteReports/RemoteDispatchCoordinator.ts";
-import Migration0062 from "../persistence/Migrations/063_RemoteReports.ts";
-import Migration0063 from "../persistence/Migrations/064_RemoteDispatches.ts";
-import Migration0065 from "../persistence/Migrations/066_RemoteDispatchQuestions.ts";
-import Migration0068 from "../persistence/Migrations/068_RemoteReportRelay.ts";
-import Migration0073 from "../persistence/Migrations/073_MemoryTaskGrantCeiling.ts";
+import Migration0062 from "../persistence/Migrations/064_RemoteReports.ts";
+import Migration0063 from "../persistence/Migrations/065_RemoteDispatches.ts";
+import Migration0065 from "../persistence/Migrations/067_RemoteDispatchQuestions.ts";
+import Migration0068 from "../persistence/Migrations/069_RemoteReportRelay.ts";
+import Migration0073 from "../persistence/Migrations/074_MemoryTaskGrantCeiling.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as LaunchWatchService from "./LaunchWatchService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -340,6 +342,8 @@ const fixture = Effect.gen(function* () {
     Layer.mock(LaunchWatchService.LaunchWatchService)({}),
   );
   const layer = OrchestratorMcpService.layer.pipe(
+    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provideMerge(RemoteDispatchCoordinator.layer),
     Layer.provide(dependencies),
   );

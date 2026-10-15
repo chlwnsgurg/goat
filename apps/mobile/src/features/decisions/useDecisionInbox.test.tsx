@@ -249,6 +249,15 @@ vi.mock("../../components/ControlPill", () => ({
   ControlPill: PressHost,
   ControlPillMenu: () => null,
 }));
+vi.mock("../../native/SelectableMarkdownText", () => ({
+  SelectableMarkdownText: (props: { readonly markdown: string }) => (
+    <TextHost>{props.markdown}</TextHost>
+  ),
+}));
+vi.mock("../../native/useOpenPullRequest", () => ({ useOpenPullRequest: () => () => {} }));
+vi.mock("../files/FileMarkdownPreview", () => ({
+  useMarkdownPreviewStyles: () => ({ nativeTextStyle: {} }),
+}));
 vi.mock("../threads/QuestionAttachments", () => ({
   QuestionAttachments: (props: HostProps & { question: ThreadUserInputQuestion }) => (
     <InputHost {...props} accessibilityLabel={props.question.question} />

@@ -35,8 +35,8 @@ G13 `goat-copy`, G14 `launch-watch`.
 ### `channels` 채널 원장, GOAT 봇, Slack
 
 - 커밋: #32 #56 #55 #54
-- 경로: `apps/server/src/channels`, `apps/server/src/mcp/toolkits/channel`, `apps/server/src/persistence/Migrations/064_*`, `apps/server/src/orchestration-v2/{Orchestrator,ThreadMessageIntake,runtimeLayer}.ts`, `apps/server/src/textGeneration`, `apps/server/src/{server,ws}.ts`, `packages/contracts/src/{channelGateway,channelLedger,channelReception,orchestrationV2,rpc,clientRpcPermissions}.ts`, `packages/provider-core/src/server/channelReceptionPrompt.ts`, `packages/client-runtime/src/state/channels.ts`, `apps/web/src/state/channels.ts`, `apps/web/src/components/goatBot`, `apps/web/src/routes/_chat.bot.tsx`, `apps/web/src/AppRoot.tsx`, `apps/web/src/components/{ThreadRouteView,Sidebar,LegacySidebar}.tsx`, `apps/web/src/components/sidebar/{SidebarChrome,SidebarViewToggles}.tsx`, `apps/web/src/components/sidebar/SidebarViewToggles.logic.ts`, `apps/web/src/state/entities.ts`, `apps/web/src/components/settings/{SlackChannelSettings*,IntegrationsSettings.tsx,settingsSearch.ts}`, `apps/server/package.json`
-- 정책: GOAT 전용. 마이그레이션 064는 다시 실행해도 안전하게 써서(`IF NOT EXISTS`) upstream이 그 id를 가져가면 옮길 수 있다. upstream의 orchestrator, intake, text generation, RPC 변경은 받고 봇 스레드의 provider run 거부, 봇 입력의 채널 접수, 채널 RPC·MCP 도구, reception 생성을 다시 얹는다. 다른 기기 작업자(`ChannelRemoteWorkers`)는 `remote-reports` 영역의 SSH launch와 출발지 보고 도구 위에 서므로, 그 영역의 upstream 충돌을 풀 때 함께 확인한다. 웹에서는 봇 스레드가 `ThreadRouteView`에서 메신저 화면(`components/goatBot`)으로 갈라지고 작업자 `ChatView`는 그대로다. 두 사이드바의 봇 행과 봇 스레드 제외, 로고의 봇 경로, `AppRoot`의 채널 포트 공급은 upstream 사이드바 변경을 받은 뒤 다시 얹는다. 채널·Slack RPC는 `WsChannelRpcGroup`에 따로 두고 서버는 그 handler를 별도 layer로 등록한다. 모든 RPC를 한 handler layer에 두면 타입 검사기의 instantiation 한도를 넘는다 (사이클 261013에서 209개). Slack 어댑터(`apps/server/src/channels/slack`)는 GOAT 전용이고 `@slack/socket-mode`, `@slack/web-api`, `undici`를 apps/server 직접 의존성으로 유지한다. Integrations 설정의 Slack 섹션 한 줄과 설정 검색 항목은 upstream 변경 위에 다시 얹는다.
+- 경로: `apps/server/src/channels`, `apps/server/src/mcp/toolkits/channel`, `apps/server/src/persistence/Migrations/066_*`, `apps/server/src/orchestration-v2/{Orchestrator,ThreadMessageIntake,runtimeLayer}.ts`, `apps/server/src/textGeneration`, `apps/server/src/{server,ws}.ts`, `packages/contracts/src/{channelGateway,channelLedger,channelReception,orchestrationV2,rpc,clientRpcPermissions}.ts`, `packages/provider-core/src/server/channelReceptionPrompt.ts`, `packages/client-runtime/src/state/channels.ts`, `apps/web/src/state/channels.ts`, `apps/web/src/components/goatBot`, `apps/web/src/routes/_chat.bot.tsx`, `apps/web/src/AppRoot.tsx`, `apps/web/src/components/{ThreadRouteView,Sidebar,LegacySidebar}.tsx`, `apps/web/src/components/sidebar/{SidebarChrome,SidebarViewToggles}.tsx`, `apps/web/src/components/sidebar/SidebarViewToggles.logic.ts`, `apps/web/src/state/entities.ts`, `apps/web/src/components/settings/{SlackChannelSettings*,IntegrationsSettings.tsx,settingsSearch.ts}`, `apps/server/package.json`
+- 정책: GOAT 전용. 마이그레이션 066은 다시 실행해도 안전하게 써서(`IF NOT EXISTS`) upstream이 그 id를 가져가면 옮길 수 있다. upstream의 orchestrator, intake, text generation, RPC 변경은 받고 봇 스레드의 provider run 거부, 봇 입력의 채널 접수, 채널 RPC·MCP 도구, reception 생성을 다시 얹는다. 다른 기기 작업자(`ChannelRemoteWorkers`)는 `remote-reports` 영역의 SSH launch와 출발지 보고 도구 위에 서므로, 그 영역의 upstream 충돌을 풀 때 함께 확인한다. 웹에서는 봇 스레드가 `ThreadRouteView`에서 메신저 화면(`components/goatBot`)으로 갈라지고 작업자 `ChatView`는 그대로다. 두 사이드바의 봇 행과 봇 스레드 제외, 로고의 봇 경로, `AppRoot`의 채널 포트 공급은 upstream 사이드바 변경을 받은 뒤 다시 얹는다. 채널·Slack RPC는 `WsChannelRpcGroup`에 따로 두고 서버는 그 handler를 별도 layer로 등록한다. 모든 RPC를 한 handler layer에 두면 타입 검사기의 instantiation 한도를 넘는다 (사이클 261013에서 209개). Slack 어댑터(`apps/server/src/channels/slack`)는 GOAT 전용이고 `@slack/socket-mode`, `@slack/web-api`, `undici`를 apps/server 직접 의존성으로 유지한다. Integrations 설정의 Slack 섹션 한 줄과 설정 검색 항목은 upstream 변경 위에 다시 얹는다.
 
 ### `ci` CI
 
@@ -113,8 +113,8 @@ G13 `goat-copy`, G14 `launch-watch`.
 ### `remote-reports` 원격 보고와 원격 위임
 
 - 커밋: #5 #10 #6
-- 경로: `apps/server/src/remoteReports`, `apps/server/src/mcp/toolkits/{remoteReport,ssh}`, `apps/server/src/persistence/Migrations/06{2,3}_*`, `packages/contracts/src/remoteReports.ts`
-- 정책: GOAT 전용. 마이그레이션 062·063은 다시 실행해도 안전하게 써서(`IF NOT EXISTS`) upstream이 그 id를 가져가면 옮길 수 있다. upstream의 SSH·MCP 변경은 받고 출발지 보고, 원격 위임, 첨부 전달을 다시 얹는다.
+- 경로: `apps/server/src/remoteReports`, `apps/server/src/mcp/toolkits/{remoteReport,ssh}`, `apps/server/src/persistence/Migrations/06{4,5}_*`, `packages/contracts/src/remoteReports.ts`
+- 정책: GOAT 전용. 마이그레이션 064·065는 다시 실행해도 안전하게 써서(`IF NOT EXISTS`) upstream이 그 id를 가져가면 옮길 수 있다. upstream의 SSH·MCP 변경은 받고 출발지 보고, 원격 위임, 첨부 전달을 다시 얹는다.
 
 ### `server-activity` 서버 activity와 마이그레이션 61
 
@@ -146,7 +146,9 @@ upstream이 다른 이름으로 쓰면, 이미 GOAT 마이그레이션을 기록
 - GOAT 마이그레이션은 upstream 마이그레이션 뒤에 둔다. upstream이 그 id를 가져가면 GOAT 항목을
   뒤로 밀고 파일 번호도 바꾼다. 이미 옛 id를 기록한 DB는 `reconcileGoatMigrationIds`가 migrator
   앞에서 고친다: 건너뛰게 된 upstream 마이그레이션을 실행하고 GOAT 기록을 새 id로 옮긴다. 새 GOAT
-  마이그레이션은 이름을 `GOAT_MIGRATION_NAMES`에 더한다 (사이클 261013, 10.002).
+  마이그레이션은 이름을 `GOAT_MIGRATION_NAMES`에 더한다 (사이클 261013, 10.002). upstream의
+  `assertV2MigrationsCanRun`은 옛 GOAT id를 건너뛴 upstream 마이그레이션으로 읽으므로 reconcile이 그보다
+  먼저 돈다 (사이클 261014).
 - 사이클 스캔에서 id가 겹치면 위 방식으로 옮긴다. 옮길 수 없는 경우만 `⛔` 카드로 결정한다.
 
 **`t3_*` 이름 누수.** upstream이 새 MCP 도구나 프롬프트 문자열을 `t3_*`로 추가하면 깨끗하게 머지된

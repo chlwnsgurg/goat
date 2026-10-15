@@ -29,7 +29,10 @@ import {
   type ThreadId,
 } from "@goat/contracts";
 import * as Context from "effect/Context";
-import { cloudTaskResultText } from "@goat/provider-core/server/cloudTask";
+import {
+  CLOUD_DELIVERY_REJECTED_CODE,
+  cloudTaskResultText,
+} from "@goat/provider-core/server/cloudTask";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -644,6 +647,8 @@ export const layer: Layer.Layer<
       readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
+      /** A reported terminal preserves the adapter's acknowledged task state. */
+      readonly providerReportedTerminal?: true;
       readonly refreshAfterTurn: Effect.Effect<void>;
       readonly writeIfRunCurrent?: {
         readonly activeAttemptId: RunAttemptId;
@@ -736,6 +741,12 @@ export const layer: Layer.Layer<
         const task = input.providerThread.cloudTask;
         const uncertainTask =
           input.terminal.status === "failed" &&
+          !(
+            input.providerReportedTerminal === true &&
+            input.terminal.failure.code === CLOUD_DELIVERY_REJECTED_CODE &&
+            task?.status === "running" &&
+            input.providerThread.nativeThreadRef !== null
+          ) &&
           task !== undefined &&
           (task.status === "running" || task.status === "submitting")
             ? {
@@ -1136,6 +1147,7 @@ export const layer: Layer.Layer<
                     }),
                 openRunOwnedSubagents: openSubagents,
                 terminal,
+                providerReportedTerminal: true,
                 failureItemPersisted: terminal.status === "failed",
                 refreshAfterTurn,
               }).pipe(
