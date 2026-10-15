@@ -764,11 +764,10 @@ export function ThreadRelationshipsPanel(props: {
                         {relationshipLink}
                         {agent.memoryGrantCeiling && agent.memoryGrantCeiling !== "none" ? (
                           <span className="text-xs text-muted-foreground">
-                            Memory:{" "}
                             {
                               presentMemoryRunAccess({
                                 memoryGrantCeiling: agent.memoryGrantCeiling,
-                              }).savedCeiling
+                              }).savedCeilingLabel
                             }
                           </span>
                         ) : null}
@@ -843,10 +842,9 @@ export function ThreadRelationshipsPanel(props: {
                   )}
                   {agent?.memoryGrantCeiling && agent.memoryGrantCeiling !== "none" ? (
                     <span className="text-xs text-muted-foreground">
-                      Memory:{" "}
                       {
                         presentMemoryRunAccess({ memoryGrantCeiling: agent.memoryGrantCeiling })
-                          .savedCeiling
+                          .savedCeilingLabel
                       }
                     </span>
                   ) : null}

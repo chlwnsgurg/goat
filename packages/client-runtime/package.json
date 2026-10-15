@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./memory-browsing": {
+      "types": "./src/memoryBrowsing.ts",
+      "default": "./src/memoryBrowsing.ts"
+    },
     "./memory-presentation": {
       "types": "./src/memoryPresentation.ts",
       "default": "./src/memoryPresentation.ts"
