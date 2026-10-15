@@ -56,6 +56,7 @@ export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   "hover",
   "select",
   "drag",
+  "logs",
 ] as const;
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_SERVER_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
@@ -710,8 +711,90 @@ export const PreviewAutomationNetworkEntry = Schema.Struct({
   failed: Schema.Boolean,
   errorText: Schema.optional(Schema.String),
   timestamp: Schema.String,
+  requestId: Schema.optional(Schema.String),
+  phase: Schema.optional(Schema.Literals(["request", "response", "finished", "failed"])),
+  durationMs: Schema.optional(Schema.Number),
 });
 export type PreviewAutomationNetworkEntry = typeof PreviewAutomationNetworkEntry.Type;
+
+export const PreviewAutomationPageError = Schema.Struct({
+  message: Schema.String,
+  stack: Schema.optional(Schema.String),
+  timestamp: Schema.String,
+});
+export type PreviewAutomationPageError = typeof PreviewAutomationPageError.Type;
+
+const DiagnosticFilter = Schema.String.check(Schema.isMaxLength(256));
+export const PreviewAutomationLogsInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))).annotate(
+    {
+      description:
+        "Maximum entries per stream, newest first. Defaults to 50; maximum 100. A shared byte budget may return fewer.",
+    },
+  ),
+  includeConsole: Schema.optional(Schema.Boolean).annotate({
+    description: "Include console entries. Defaults to true.",
+  }),
+  includeErrors: Schema.optional(Schema.Boolean).annotate({
+    description: "Include uncaught page errors and stacks. Defaults to true.",
+  }),
+  includeNetwork: Schema.optional(Schema.Boolean).annotate({
+    description: "Include network metadata. Defaults to true.",
+  }),
+  consoleLevels: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(32))).check(Schema.isMaxLength(20)),
+  ).annotate({
+    description:
+      "Exact Playwright console levels to include, such as log, info, warning, error or debug. Omit for all levels.",
+  }),
+  text: Schema.optional(DiagnosticFilter).annotate({
+    description:
+      "Case-insensitive substring of console text or page error message/stack, after URL redaction.",
+  }),
+  url: Schema.optional(DiagnosticFilter).annotate({
+    description:
+      "Case-insensitive substring of the redacted network URL; query values cannot be searched.",
+  }),
+  method: Schema.optional(Schema.String.check(Schema.isMaxLength(32))).annotate({
+    description: "Exact HTTP method, case-insensitive, such as GET or POST.",
+  }),
+  status: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+  ).annotate({
+    description:
+      "Exact HTTP response status (100 through 599). Request/failure entries without a response do not match.",
+  }),
+  failed: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Filter transport failures; HTTP 4xx/5xx responses are not failed requests. Omit for both.",
+  }),
+}).annotate({
+  description:
+    "Read retained diagnostics, newest first. All streams default to included; limit defaults to 50 per stream (maximum 100), subject to a shared 24 KB entry budget. Filters are case-insensitive substrings except exact console levels, HTTP status, method and failed. URL filtering uses redacted URLs. text filters console text and error message/stack. Reads do not clear buffers.",
+});
+export type PreviewAutomationLogsInput = typeof PreviewAutomationLogsInput.Type;
+
+const DiagnosticCounts = {
+  droppedCount: Schema.Int.annotate({
+    description: "Entries evicted from this tab's bounded buffer, before filtering.",
+  }),
+  omittedCount: Schema.Int.annotate({
+    description: "Retained matching entries omitted by the limit or shared byte budget.",
+  }),
+};
+export const PreviewAutomationLogs = Schema.Struct({
+  console: Schema.Struct({
+    entries: Schema.Array(PreviewAutomationConsoleEntry),
+    ...DiagnosticCounts,
+  }),
+  errors: Schema.Struct({ entries: Schema.Array(PreviewAutomationPageError), ...DiagnosticCounts }),
+  network: Schema.Struct({
+    entries: Schema.Array(PreviewAutomationNetworkEntry),
+    ...DiagnosticCounts,
+  }),
+});
+export type PreviewAutomationLogs = typeof PreviewAutomationLogs.Type;
 
 export const PreviewAutomationActionEvent = Schema.Struct({
   id: Schema.String,
