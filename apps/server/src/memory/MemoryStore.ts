@@ -731,7 +731,7 @@ const AdminRecordSchema = Schema.Struct({
   secretName: Schema.NullOr(
     Schema.String.check(Schema.makeFilter((v) => /^[a-z0-9-]{1,128}$/.test(v))),
   ),
-  result: Schema.NullOr(Schema.Struct({ view: M.MemoryHubSettingsView })),
+  result: Schema.NullOr(Schema.Struct({ view: M.MemoryHubSettingsSnapshot })),
   memberVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
 }).check(
   Schema.makeFilter(
@@ -1000,6 +1000,9 @@ export class MemoryStore extends Context.Service<
       operationId: M.MemoryOperationId;
       revisionId: M.MemoryRevisionId;
     }) => InTx<AssignedIntent>;
+    readonly readHubMembers: (
+      space: M.MemorySpaceId,
+    ) => Effect.Effect<readonly M.MemoryHubMemberView[], MemoryStorageError>;
     readonly readHubMember: (
       space: M.MemorySpaceId,
       environment: M.EnvironmentId,
@@ -6685,6 +6688,38 @@ const make = Effect.gen(function* () {
     status: row.status,
     joinedAt: row.joined_at,
   });
+  // One space-indexed roster query. The bounded pending admin partition supplies
+  // confirmation state; the authority table remains active/revoked throughout install.
+  const readHubMembers: MemoryStore["Service"]["readHubMembers"] = Effect.fn(
+    "MemoryStore.readHubMembers",
+  )(function* (space) {
+    const rows = yield* stored(
+      "hub-members",
+      sql<{
+        environment: string;
+        credential_version: number;
+        status: M.MemoryHubMemberView["status"];
+        joined_at: number | null;
+      }>`SELECT m.environment,m.credential_version,m.joined_at,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM memory_outbox AS a
+        WHERE a.space='_admin' AND a.kind='admin' AND a.status='pending'
+        AND json_extract(a.admin_json,'$.stage') IN ('activated','ready')
+        AND json_extract(a.admin_json,'$.action.action') IN ('provisionMember','rotateMemberCredential')
+        AND json_extract(a.admin_json,'$.action.environmentId')=m.environment
+        AND json_extract(a.admin_json,'$.memberVersion')=m.credential_version
+        AND json_extract(a.admin_json,'$.result.view.settings.memorySpaceId')=m.space
+      ) THEN 'pending_ack' ELSE 'active' END AS status
+      FROM memory_hub_members AS m WHERE m.space=${space} AND m.status='active'
+      ORDER BY m.environment LIMIT ${M.MEMORY_HUB_MAX_MEMBERS}`,
+    );
+    return rows.map((row) => ({
+      environmentId: M.EnvironmentId.make(row.environment),
+      credentialVersion: row.credential_version,
+      status: row.status,
+      joinedAt: row.joined_at,
+    }));
+  });
   const readHubMember: MemoryStore["Service"]["readHubMember"] = Effect.fn(
     "MemoryStore.readHubMember",
   )(function* (space, environment) {
@@ -6853,14 +6888,20 @@ const make = Effect.gen(function* () {
           record.action.environmentId !== input.environmentId)
     )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+    const old = yield* readHubMember(input.memorySpaceId, input.environmentId);
     const expectedAction =
       input.next === "revoked"
         ? "revokeMember"
-        : input.expectedCredentialVersion === null
+        : input.expectedCredentialVersion === null || old?.status === "revoked"
           ? "provisionMember"
           : "rotateMemberCredential";
     if (
       record.action.action !== expectedAction &&
+      !(
+        record.action.action === "rotateMemberCredential" &&
+        old?.status === "revoked" &&
+        input.next !== "revoked"
+      ) &&
       !(
         record.action.action === "configure" &&
         input.next !== "revoked" &&
@@ -6868,7 +6909,6 @@ const make = Effect.gen(function* () {
       )
     )
       return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-    const old = yield* readHubMember(input.memorySpaceId, input.environmentId);
     if (record.memberVersion !== null) {
       if (
         !old ||
@@ -9178,6 +9218,7 @@ const make = Effect.gen(function* () {
     discardBootstrapTx,
     retireFrozenClaimTx,
     advanceBootstrapTx,
+    readHubMembers,
     readHubMember,
     findHubMemberByCredential,
     requireHubMemberTx,

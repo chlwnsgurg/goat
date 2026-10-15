@@ -67,8 +67,8 @@ export function MemoryAdministration({
   const [requester, setRequester] = useState<EnvironmentId | null>(null);
   const [endpoint, setEndpoint] = useState(connection?.httpBaseUrl ?? "");
   const [confirm, setConfirm] = useState<"disable" | "add" | "rotate" | EnvironmentId | null>(null);
-  // The contract has no membership read API. Only successful additions in this mounted view are known.
-  const [knownMembers, setKnownMembers] = useState<EnvironmentId[]>([]);
+  const members = hub?.members ?? [];
+  const knownMembers = members.map((member) => member.environmentId);
   const intent = useRef<MemoryHubSettingsUpdateInput | null>(null);
   const ownerIntent = useRef<Parameters<typeof updateOwner>[0]["input"] | null>(null);
   const flow = useRef<ReturnType<typeof memoryDeviceFlow> | null>(null);
@@ -139,8 +139,6 @@ export function MemoryAdministration({
     setHub(result.value.view);
     setConfirm(null);
     onSharingRefresh?.();
-    if (input.action === "revokeMember")
-      setKnownMembers((ids) => ids.filter((id) => id !== input.environmentId));
   }
   async function saveOwner(id: EnvironmentId, allowed: boolean) {
     if (
@@ -215,7 +213,6 @@ export function MemoryAdministration({
       const view = await flow.current.run();
       if (!live()) return;
       setHub(view);
-      setKnownMembers((ids) => [...new Set([...ids, device])]);
       flow.current.dispose();
       flow.current = null;
       setPending(null);
@@ -225,7 +222,7 @@ export function MemoryAdministration({
     } catch {
       if (live())
         setError(
-          "Device setup did not finish. Retry to continue. If you reload, select the device and use Replace key to recover, or Remove to clean up.",
+          "Device setup did not finish. Retry to continue. If you reload, use Replace key on the device row to recover, or Remove to clean up.",
         );
     } finally {
       if (live()) setBusy(false);
@@ -374,39 +371,53 @@ export function MemoryAdministration({
       </SettingsSection>
       {hub?.settings.mode === "hub" ? (
         <SettingsSection title="Devices">
-          <SettingsRow
-            title="Device list unavailable"
-            description="This server cannot list existing member devices. Select a connected device below to replace its key or remove it. Connect the device in Settings → Connections first."
-          />
-          {knownMembers.map((id) => (
-            <SettingsRow
-              key={id}
-              title={name(id)}
-              control={
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={blocked}
-                    onClick={() => {
-                      setDevice(id);
-                      setConfirm("rotate");
-                    }}
-                  >
-                    Replace key
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={blocked}
-                    onClick={() => setConfirm(id)}
-                  >
-                    Remove
-                  </Button>
-                </div>
-              }
-            />
-          ))}
+          {members
+            .filter((member) => member.environmentId !== environmentId)
+            .map((member) => {
+              const id = member.environmentId;
+              const connected = candidates.some((candidate) => candidate.environmentId === id);
+              const replaceReason = !connected
+                ? "Connect this device in Settings → Connections to replace its key."
+                : !writable(id)
+                  ? "Settings write permission is required to replace this key."
+                  : undefined;
+              return (
+                <SettingsRow
+                  key={id}
+                  title={name(id)}
+                  status={
+                    member.status === "pending_ack"
+                      ? "Waiting for the device to confirm"
+                      : undefined
+                  }
+                  description={replaceReason}
+                  control={
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={blocked || Boolean(replaceReason)}
+                        title={replaceReason}
+                        onClick={() => {
+                          setDevice(id);
+                          setConfirm("rotate");
+                        }}
+                      >
+                        Replace key
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={blocked}
+                        onClick={() => setConfirm(id)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  }
+                />
+              );
+            })}
           <SettingsRow
             title="Add device"
             description="Choose a connected device that supports memory."
@@ -418,24 +429,12 @@ export function MemoryAdministration({
                   candidates.filter((e) => !knownMembers.includes(e.environmentId)),
                   "Device",
                 )}
-                <Button size="sm" disabled={blocked || !device} onClick={() => setConfirm("add")}>
+                <Button
+                  size="sm"
+                  disabled={blocked || !device || knownMembers.includes(device)}
+                  onClick={() => setConfirm("add")}
+                >
                   Add
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={blocked || !device}
-                  onClick={() => setConfirm("rotate")}
-                >
-                  Replace key
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={blocked || !device}
-                  onClick={() => device && setConfirm(device)}
-                >
-                  Remove
                 </Button>
               </div>
             }

@@ -44,7 +44,11 @@ it.effect(
               updateHubSettings: (input, permit) =>
                 permit.pipe(
                   Effect.as({
-                    view: { settings: { mode: "disabled" }, version: input.expectedVersion + 1 },
+                    view: {
+                      members: [],
+                      settings: { mode: "disabled" },
+                      version: input.expectedVersion + 1,
+                    },
                     credential: null,
                   }),
                 ),
@@ -72,7 +76,10 @@ it.effect("disable forwards CAS and the live permit to Sync and returns a noncre
             settings: { mode: "disabled" },
           });
           calls++;
-          return { view: { settings: { mode: "disabled" }, version: 8 }, credential: null };
+          return {
+            view: { members: [], settings: { mode: "disabled" }, version: 8 },
+            credential: null,
+          };
         }),
     });
     yield* Effect.gen(function* () {

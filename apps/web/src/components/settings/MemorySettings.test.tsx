@@ -578,7 +578,7 @@ it("keeps pending reenrollment when removing another owner permission and render
   };
   state.responses.set("hubSettingsGet", {
     _tag: "Success",
-    value: { version: 2, settings: { mode: "hub", memorySpaceId: id(1) } },
+    value: { version: 2, members: [], settings: { mode: "hub", memorySpaceId: id(1) } },
   });
   state.responses.set("ownerSourceReadPolicyGet", { _tag: "Success", value: view });
   state.responses.set("ownerSourceReadPolicyUpdate", {
@@ -648,6 +648,12 @@ async function deferredResult() {
 const success = (value: unknown) => ({ _tag: "Success", value });
 const hubView = (version: number, space = id(1)) => ({
   version,
+  members: [] as {
+    environmentId: string;
+    credentialVersion: number;
+    status: string;
+    joinedAt: number | null;
+  }[],
   settings: { mode: "hub", memorySpaceId: space },
 });
 const ownerView = (version: number, requester: string) => ({
@@ -1016,7 +1022,20 @@ it("adds a named device, retries install without exposing its key, and confirms 
       return { _tag: "Failure" };
     }
     return success({
-      view: hubView(request.input.action === "provisionMember" ? 3 : 4),
+      view: {
+        ...hubView(request.input.action === "provisionMember" ? 3 : 4),
+        members:
+          request.input.action === "revokeMember"
+            ? []
+            : [
+                {
+                  environmentId: "active-device",
+                  credentialVersion: 1,
+                  status: "active",
+                  joinedAt: 0,
+                },
+              ],
+      },
       credential:
         request.input.action === "provisionMember"
           ? { requestId: request.input.requestId, memorySpaceId: id(1), credential }
@@ -1064,4 +1083,50 @@ it("opens memories when bootstrap publishes a reset without a reload or timer", 
   });
   expect(container.textContent).toContain("Synthetic original");
   expect(container.textContent).not.toContain("Memory is getting ready.");
+});
+
+it("reloads persisted members, excludes them from Add, and removes an offline unknown device", async () => {
+  const { render } = await supportedScreen(false);
+  const members = [
+    { environmentId: "active-device", credentialVersion: 2, status: "active", joinedAt: 0 },
+    {
+      environmentId: "unregistered-private-id",
+      credentialVersion: 1,
+      status: "pending_ack",
+      joinedAt: 0,
+    },
+  ];
+  state.responses.set("hubSettingsGet", success({ ...hubView(4), members }));
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await render();
+  expect(container.textContent).not.toContain("Device list unavailable");
+  expect(container.textContent).not.toContain("unregistered-private-id");
+  expect(container.textContent).toContain("Waiting for the device to confirm");
+  const picker =
+    container.querySelector<HTMLSelectElement>('select[aria-label="Device"]') ??
+    container.querySelector<HTMLSelectElement>("select")!;
+  expect([...picker.options].map((o) => o.value)).not.toContain("active-device");
+  const row = [...container.querySelectorAll("[data-test-row]")].find((e) =>
+    e.textContent?.startsWith("Unknown device"),
+  )!;
+  expect(row.textContent).toContain(
+    "Connect this device in Settings → Connections to replace its key.",
+  );
+  const buttons = [...row.querySelectorAll("button")];
+  expect(buttons.find((b) => b.textContent === "Replace key")!.disabled).toBe(true);
+  expect(buttons.find((b) => b.textContent === "Remove")!.disabled).toBe(false);
+  await act(async () => buttons.find((b) => b.textContent === "Remove")!.click());
+  state.responses.set(
+    "hubSettingsUpdate",
+    success({
+      view: { ...hubView(5), members: [members[0]] },
+      credential: null,
+    }),
+  );
+  await click("Remove device");
+  expect(state.calls.mock.calls.at(-1)![0]).toMatchObject({
+    environmentId: "remote-owner",
+    input: { action: "revokeMember", environmentId: "unregistered-private-id", expectedVersion: 4 },
+  });
+  expect(container.textContent).not.toContain("Unknown device");
 });

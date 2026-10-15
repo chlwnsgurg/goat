@@ -17,7 +17,11 @@ export const layer = McpToolAccess.toLayer(MemoryAdministrationToolkit, {
           { ...value, action: "configure", settings: { mode: "disabled" } },
           yield* invocationPermit("settings"),
         )
-        .pipe(Effect.flatMap((result) => disabled(result.view)));
+        .pipe(
+          Effect.flatMap((result) =>
+            disabled({ settings: result.view.settings, version: result.view.version }),
+          ),
+        );
     }).pipe(Effect.mapError(memoryError)),
   ),
 });

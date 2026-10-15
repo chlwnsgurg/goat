@@ -14,6 +14,7 @@ const requestIds = [1, 2, 3].map((n) =>
 ) as [MemoryOperationId, MemoryOperationId, MemoryOperationId];
 const result: MemoryHubSettingsUpdateResult = {
   view: {
+    members: [],
     version: 5,
     settings: {
       mode: "hub",

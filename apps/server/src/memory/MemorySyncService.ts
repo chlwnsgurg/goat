@@ -1961,7 +1961,9 @@ const make = Effect.gen(function* () {
     getHubSettings: (_input, permit) =>
       permit.pipe(
         Effect.andThen(readSettings),
-        Effect.map((s) => ({ settings: s.memoryHub, version: s.memoryHubVersion })),
+        Effect.flatMap((s) =>
+          Hub.readSettingsView(store, { settings: s.memoryHub, version: s.memoryHubVersion }),
+        ),
       ),
     updateHubSettings: (input, permit) =>
       Effect.gen(function* () {

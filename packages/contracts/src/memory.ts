@@ -1667,13 +1667,33 @@ export const MEMORY_ADMINISTRATION_MCP_TOOLS = ["memory_hub_disable"] as const;
 export const MemoryHubSettingsGetInput = struct({});
 export type MemoryHubSettingsGetInput = typeof MemoryHubSettingsGetInput.Type;
 
-export const MemoryHubSettingsView = struct({
+/** Persisted settings receipts exclude the live roster. */
+export const MemoryHubSettingsSnapshot = struct({
   settings: MemoryHubSettings,
   version: NonNegativeInt,
 });
+export type MemoryHubSettingsSnapshot = typeof MemoryHubSettingsSnapshot.Type;
+export const MemoryHubMemberView = struct({
+  environmentId: EnvironmentId,
+  credentialVersion: PositiveInt,
+  status: Schema.Literals(["pending_ack", "active"]),
+  joinedAt: Schema.NullOr(NonNegativeInt),
+});
+export type MemoryHubMemberView = typeof MemoryHubMemberView.Type;
+export const MemoryHubSettingsView = struct({
+  settings: MemoryHubSettings,
+  version: NonNegativeInt,
+  members: array(MemoryHubMemberView, MEMORY_HUB_MAX_MEMBERS),
+}).check(
+  Schema.makeFilter(
+    (view) =>
+      (view.settings.mode === "hub" || view.members.length === 0) &&
+      unique(view.members.map((member) => member.environmentId)),
+  ),
+);
 export type MemoryHubSettingsView = typeof MemoryHubSettingsView.Type;
-/** The narrow disable tool cannot return provisioning credentials or an enabled mode. */
-export const MemoryHubDisableResult = MemoryHubSettingsView.check(
+/** The narrow disable tool cannot return a roster, credentials or an enabled mode. */
+export const MemoryHubDisableResult = MemoryHubSettingsSnapshot.check(
   Schema.makeFilter((view) => view.settings.mode === "disabled"),
 );
 export type MemoryHubDisableResult = typeof MemoryHubDisableResult.Type;

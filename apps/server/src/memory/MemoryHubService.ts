@@ -358,17 +358,30 @@ export const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(MemoryHubService, make);
 
+/** Live roster is never persisted in settings receipts or returned by the disable tool. */
+export const readSettingsView = (
+  store: Store.MemoryStore["Service"],
+  snapshot: M.MemoryHubSettingsSnapshot,
+): Effect.Effect<M.MemoryHubSettingsView, Store.MemoryStorageError> =>
+  Effect.gen(function* () {
+    const members =
+      snapshot.settings.mode === "hub" && snapshot.settings.memorySpaceId !== null
+        ? yield* store.readHubMembers(snapshot.settings.memorySpaceId)
+        : [];
+    return { ...snapshot, members };
+  });
+
 export type MemoryHubAdministrationError = MemoryHubServiceError | Secrets.SecretStoreError;
 type AdminPermit = Effect.Effect<void, M.MemoryHubForbiddenError>;
 const decodeMemorySpaceId = Schema.decodeUnknownEffect(M.MemorySpaceId);
-type SafeAdminResult = Omit<M.MemoryHubSettingsUpdateResult, "credential">;
+type SafeAdminResult = { readonly view: M.MemoryHubSettingsSnapshot };
 
 /** L3 binds the existing settings admin lock and dedicated idempotent settings CAS. */
 export class MemoryHubAdminSettings extends Context.Service<
   MemoryHubAdminSettings,
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-    readonly read: Effect.Effect<M.MemoryHubSettingsView, M.MemoryHubError>;
+    readonly read: Effect.Effect<M.MemoryHubSettingsSnapshot, M.MemoryHubError>;
     readonly readPreviousHubRequestId: Effect.Effect<M.MemoryOperationId | null, M.MemoryHubError>;
     readonly readPreviousHubSpace: Effect.Effect<M.MemorySpaceId | null, M.MemoryHubError>;
     readonly apply: (
@@ -746,7 +759,7 @@ export const makeAdministrator = Effect.gen(function* () {
               permit,
               Effect.gen(function* () {
                 const member = yield* store.readHubMember(memorySpaceId, environmentId);
-                if (request.action === "provisionMember" && member)
+                if (request.action === "provisionMember" && member && member.status !== "revoked")
                   return yield* new Store.MemoryStoreConflict({ code: "operation_id_reused" });
                 if (request.action !== "provisionMember" && !member)
                   return yield* new Store.MemoryStoreConflict({ code: "not_found" });
@@ -853,7 +866,7 @@ export const makeAdministrator = Effect.gen(function* () {
             credential: Buffer.from(saved.value).toString("base64url"),
           };
         }
-        return { ...record.result, credential };
+        return { view: yield* readSettingsView(store, record.result.view), credential };
       }),
     );
   });

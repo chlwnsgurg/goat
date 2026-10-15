@@ -543,13 +543,16 @@ const adminDependencies = Secrets.layer.pipe(
 );
 const adminFixture = Effect.gen(function* () {
   yield* seed;
-  const view = yield* Ref.make<M.MemoryHubSettingsView>({
+  const view = yield* Ref.make<M.MemoryHubSettingsSnapshot>({
     settings: { mode: "hub", memorySpaceId: space },
     version: 0,
   });
   const failApply = yield* Ref.make(false);
   const applied = yield* Ref.make(
-    new Map<M.MemoryOperationId, { digest: string; result: { view: M.MemoryHubSettingsView } }>(),
+    new Map<
+      M.MemoryOperationId,
+      { digest: string; result: { view: M.MemoryHubSettingsSnapshot } }
+    >(),
   );
   const lock = yield* Semaphore.make(1);
   const backend: Hub.MemoryHubAdminSettings["Service"] = {
@@ -607,6 +610,92 @@ const missingAcknowledgementCases = (
 );
 
 describe("MemoryHubAdministrator", () => {
+  it.effect("returns a fresh safe roster through provision, acknowledge, rotation and revoke", () =>
+    Effect.gen(function* () {
+      const { admin, backend } = yield* adminFixture;
+      const store = yield* Store.MemoryStore;
+      const read = () =>
+        Effect.flatMap(backend.read, (snapshot) => Hub.readSettingsView(store, snapshot));
+      const issued = yield* admin.update(provision, Effect.void);
+      const target = (view: M.MemoryHubSettingsView) =>
+        view.members.find((m) => m.environmentId === provision.environmentId)!;
+      assert.strictEqual(target(issued.view).status, "pending_ack");
+      assert.deepStrictEqual((yield* read()).members, issued.view.members);
+      assert.deepStrictEqual(Object.keys(target(issued.view)).sort(), [
+        "credentialVersion",
+        "environmentId",
+        "joinedAt",
+        "status",
+      ]);
+      const ack = yield* admin.update(
+        {
+          action: "acknowledgeCredential",
+          requestId: M.MemoryOperationId.make(id(491)),
+          expectedVersion: 1,
+          credentialRequestId: provision.requestId,
+        },
+        Effect.void,
+      );
+      assert.strictEqual(target(ack.view).status, "active");
+      assert.deepStrictEqual((yield* read()).members, ack.view.members);
+      const rotated = yield* admin.update(
+        {
+          action: "rotateMemberCredential",
+          requestId: M.MemoryOperationId.make(id(492)),
+          expectedVersion: 2,
+          environmentId: provision.environmentId,
+        },
+        Effect.void,
+      );
+      assert.strictEqual(target(rotated.view).status, "pending_ack");
+      assert.strictEqual(target(rotated.view).credentialVersion, 2);
+      const revoked = yield* admin.update(
+        {
+          action: "revokeMember",
+          requestId: M.MemoryOperationId.make(id(493)),
+          expectedVersion: 3,
+          environmentId: provision.environmentId,
+        },
+        Effect.void,
+      );
+      assert.isUndefined(target(revoked.view));
+      assert.deepStrictEqual((yield* read()).members, revoked.view.members);
+      const readded = yield* admin.update(
+        { ...provision, requestId: M.MemoryOperationId.make(id(494)), expectedVersion: 4 },
+        Effect.void,
+      );
+      assert.strictEqual(target(readded.view).status, "pending_ack");
+      assert.strictEqual(target(readded.view).credentialVersion, 4);
+      assert.deepStrictEqual(
+        (yield* Hub.readSettingsView(store, { settings: { mode: "disabled" }, version: 4 }))
+          .members,
+        [],
+      );
+    }).pipe(Effect.provide(adminDependencies)),
+  );
+  it.effect(
+    "rejects provisioning above the existing retained-member capacity, including revoked slots",
+    () =>
+      Effect.gen(function* () {
+        const { admin } = yield* adminFixture;
+        const sql = yield* SqlClient.SqlClient;
+        for (let n = 2; n < M.MEMORY_HUB_MAX_MEMBERS; n++)
+          yield* sql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${`retained-${n}`},${n.toString(16).padStart(64, "0")},1,'revoked',0)`;
+        const error = yield* admin.update(provision, Effect.void).pipe(Effect.flip);
+        assert.strictEqual(error._tag, "MemoryCapacityError");
+        if (error._tag === "MemoryCapacityError") {
+          assert.strictEqual(error.dimension, "members");
+          assert.strictEqual(error.limit, M.MEMORY_HUB_MAX_MEMBERS);
+        }
+        assert.strictEqual(
+          (yield* sql<{
+            count: number;
+          }>`SELECT count(*) AS count FROM memory_hub_members WHERE space=${space}`)[0]!.count,
+          M.MEMORY_HUB_MAX_MEMBERS,
+        );
+      }).pipe(Effect.provide(adminDependencies)),
+  );
+
   it.effect.each(missingAcknowledgementCases)(
     "missing acknowledgement before $action (historical=$historical, retryFirst=$retryFirst)",
     ({ action, historical, retryFirst }) =>

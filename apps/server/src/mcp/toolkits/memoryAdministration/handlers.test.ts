@@ -16,6 +16,8 @@ it.effect("disable uses explicit settings grant and CAS, returns only the disabl
     const view = yield* decodeDisabled(result.body);
     expect(view.settings.mode).toBe("disabled");
     expect(result.body).not.toHaveProperty("credential");
+    expect(result.body).not.toHaveProperty("members");
+    expect(Object.keys(result.body as object).sort()).toEqual(["settings", "version"]);
     expect(
       (yield* Fixture.call(
         "memory_hub_disable",
