@@ -619,6 +619,38 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("pipelines reader requests before replies without leaking values mode", () =>
+  withReaderClient((sql) =>
+    Effect.gen(function* () {
+      // Finish startup before holding requests at the worker transport boundary.
+      yield* countEntries(sql).pipe(SqliteClient.readOnly);
+      const worker = startedWorkers[startedWorkers.length - 1]!;
+      const send = worker.postMessage.bind(worker);
+      const requests: Array<() => void> = [];
+      const postMessage = vi.spyOn(worker, "postMessage").mockImplementation((...args) => {
+        requests.push(() => send(...args));
+      });
+      yield* Effect.gen(function* () {
+        const select = sql`SELECT name FROM entries`;
+        const values = yield* Effect.forkChild(select.values.pipe(SqliteClient.readOnly), {
+          startImmediately: true,
+        });
+        const objects = yield* Effect.forkChild(select.pipe(SqliteClient.readOnly), {
+          startImmediately: true,
+        });
+        // Neither request has reached the real worker, so no reply can release
+        // a statement lease. Both must already have crossed the permit boundary.
+        assert.lengthOf(requests, 2);
+        postMessage.mockRestore();
+        for (const request of requests) request();
+        assert.deepEqual(yield* Fiber.join(values), [["first"]]);
+        assert.deepEqual(yield* Fiber.join(objects), [{ name: "first" }]);
+        assert.deepEqual(yield* select.pipe(SqliteClient.readOnly), [{ name: "first" }]);
+      }).pipe(Effect.ensuring(Effect.sync(() => postMessage.mockRestore())));
+    }),
+  ),
+);
+
 it.effect("lets the writer commit while a read-only transaction is open", () =>
   withReaderClient((sql) =>
     Effect.gen(function* () {
