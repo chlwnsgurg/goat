@@ -781,6 +781,57 @@ it.effect("ignores worktree metadata for directories that no longer exist", () =
   ).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
+it.effect("reads worktrees from git that rejects worktree list -z", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+      // Git before 2.36 has no `worktree list -z` and exits with a usage error.
+      const oldGitSpawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (!ChildProcess.isStandardCommand(command)) {
+            return yield* Effect.die("expected a standard Git command");
+          }
+          if (command.args.includes("worktree") && command.args.includes("-z")) {
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(1),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(129)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.empty,
+              stderr: Stream.encodeText(Stream.make("error: unknown switch `z'")),
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
+          }
+          return yield* delegate.spawn(command);
+        }),
+      );
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, oldGitSpawner),
+      );
+      const cwd = yield* makeTmpDir();
+      yield* initRepoWithCommit(cwd).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, driver));
+      const worktreePath = NodeFS.realpathSync.native(yield* makeTmpDir());
+      yield* git(cwd, ["worktree", "add", "-b", "feature/old-git", worktreePath]).pipe(
+        Effect.provideService(GitVcsDriver.GitVcsDriver, driver),
+      );
+
+      const refs = yield* driver.listRefs({ cwd, refresh: true });
+      const listedPath = refs.refs.find((ref) => ref.name === "feature/old-git")?.worktreePath;
+      assert.equal(listedPath && NodeFS.realpathSync.native(listedPath), worktreePath);
+
+      const paths = yield* driver.listWorktreePaths(cwd);
+      assert.include(
+        paths.map((listed) => NodeFS.realpathSync.native(listed)),
+        worktreePath,
+      );
+    }),
+  ).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
 it.effect("refreshes the current branch after an external checkout", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -949,11 +1000,25 @@ it.effect.each([
     name: "reference lock",
     stderr: "error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def",
     expected: "could not update a local reference",
+    attempts: 2,
   },
   {
     name: "lock file",
     stderr: "fatal: Unable to create '/repo/.git/FETCH_HEAD.lock': File exists.",
     expected: "could not update a local reference",
+    attempts: 2,
+  },
+  {
+    name: "reference race on Git 2.53",
+    stderr: "error: fetching ref refs/remotes/origin/main failed: incorrect old value provided",
+    expected: "could not update a local reference",
+    attempts: 2,
+  },
+  {
+    name: "held reference lock on Git 2.53",
+    stderr: "error: fetching ref refs/remotes/origin/main failed: reference already exists",
+    expected: "could not update a local reference",
+    attempts: 2,
   },
   {
     name: "unrelated remote chatter",
@@ -1014,7 +1079,37 @@ it.effect.each([
     assert.notInclude(yield* encodeGitCommandError(error), secret);
     assert.notProperty(error, "stderr");
     assert.notProperty(error, "args");
-    assert.equal(yield* Ref.get(attempts), 1);
+    assert.equal(yield* Ref.get(attempts), "attempts" in scenario ? scenario.attempts : 1);
+  }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("retries a fetch that lost a ref update to another Git process", () =>
+  Effect.gen(function* () {
+    const attempts = yield* Ref.make(0);
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        if (!ChildProcess.isStandardCommand(command))
+          return yield* Effect.die("expected Git command");
+        if (command.args[0] !== "fetch") return makeNonRepositoryHandle();
+        const attempt = yield* Ref.updateAndGet(attempts, (count) => count + 1);
+        if (attempt > 1) return makeSuccessfulHandle("");
+        return ChildProcessSpawner.makeHandle({
+          ...makeNonRepositoryHandle(),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+          stderr: Stream.encodeText(
+            Stream.make(
+              "error: fetching ref refs/remotes/origin/main failed: incorrect old value provided",
+            ),
+          ),
+        });
+      }),
+    );
+    const driver = yield* makeGitVcsDriverCore().pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+    const cwd = yield* makeTmpDir();
+    yield* driver.fetchRemote({ cwd, remoteName: "origin", refName: "main" });
+    assert.equal(yield* Ref.get(attempts), 2);
   }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
@@ -2990,6 +3085,94 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         }
       }),
     );
+    it.effect.each(["commit", "short-commit", "tag", "revision"] as const)(
+      "creates a worktree from a %s without recording it as a PR base",
+      (kind) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          const commit = yield* git(cwd, ["rev-parse", "HEAD"]);
+          yield* git(cwd, ["tag", "v1"]);
+          const baseRef =
+            kind === "commit"
+              ? commit
+              : kind === "short-commit"
+                ? commit.slice(0, 12)
+                : kind === "tag"
+                  ? "v1"
+                  : "HEAD~0";
+          const path = yield* Path.Path;
+          const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "revision");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({
+            cwd,
+            path: worktreePath,
+            refName: baseRef,
+            newRefName: "feature/revision",
+            baseRefName: baseRef,
+          });
+
+          assert.equal(yield* git(worktreePath, ["rev-parse", "HEAD"]), commit);
+          assert.equal(
+            yield* driver.readConfigValue(cwd, "branch.feature/revision.gh-merge-base"),
+            null,
+          );
+        }),
+    );
+
+    it.effect.each(["release/v2", "refs/heads/release/v2", "deadbeef"])(
+      "records the branch name when creating a worktree from %s",
+      (baseRef) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          const baseBranch = baseRef.replace(/^refs\/heads\//, "");
+          yield* git(cwd, ["branch", baseBranch]);
+          const path = yield* Path.Path;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir("git-worktrees-"), "branch"),
+            refName: baseRef,
+            newRefName: "feature/branch",
+            baseRefName: baseRef,
+          });
+
+          assert.equal(
+            yield* driver.readConfigValue(cwd, "branch.feature/branch.gh-merge-base"),
+            baseBranch,
+          );
+        }),
+    );
+
+    it.effect.each(["release/v2", "origin/release/v2", "refs/remotes/origin/release/v2"])(
+      "records a remote-only PR base when creating a worktree from %s",
+      (baseRef) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          const remote = yield* makeTmpDir("git-remote-");
+          yield* git(remote, ["init", "--bare"]);
+          yield* git(cwd, ["remote", "add", "origin", remote]);
+          yield* git(cwd, ["push", "origin", "HEAD:refs/heads/release/v2"]);
+          const commit = yield* git(cwd, ["rev-parse", "origin/release/v2"]);
+          const path = yield* Path.Path;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* driver.createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir("git-worktrees-"), "remote"),
+            refName: commit,
+            newRefName: "feature/remote",
+            baseRefName: baseRef,
+          });
+
+          assert.equal(
+            yield* driver.readConfigValue(cwd, "branch.feature/remote.gh-merge-base"),
+            "release/v2",
+          );
+        }),
+    );
+
     it("parses checkout progress lines from git's stderr", () => {
       assert.deepStrictEqual(parseGitCheckoutProgressLine("Updating files:  78% (2104/2700)"), {
         percent: 78,
@@ -3139,23 +3322,53 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         );
         assert.equal(created.worktree.path, expected);
         assert.equal(yield* fileSystem.exists(expected), true);
-
-        const error = yield* driver
-          .createWorktree(
-            { cwd, path: null, refName: initialBranch, newRefName: "feature/relative-dir" },
-            { worktreesDirectory: "relative/worktrees" },
-          )
-          .pipe(Effect.flip);
-        assert.match(error.detail, /must be an absolute folder on this machine/);
-
-        const rootError = yield* driver
-          .createWorktree(
-            { cwd, path: null, refName: initialBranch, newRefName: "feature/root-dir" },
-            { worktreesDirectory: "/" },
-          )
-          .pipe(Effect.flip);
-        assert.match(rootError.detail, /not a drive root/);
       }),
+    );
+
+    it.effect(
+      "falls back to the default worktrees directory when the configured one is unavailable",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const pathService = yield* Path.Path;
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const defaultWorktree = yield* driver.createWorktree({
+            cwd,
+            path: null,
+            refName: initialBranch,
+            newRefName: "feature/default-dir",
+          });
+          const repoWorktreesDir = pathService.dirname(defaultWorktree.worktree.path);
+          const missingParent = pathService.join(yield* makeTmpDir("gone-"), "gone", "worktrees");
+
+          const cases = [
+            { setting: missingParent, reason: "missing", branch: "feature/missing-dir" },
+            { setting: "relative/worktrees", reason: "invalid", branch: "feature/relative-dir" },
+            { setting: "/", reason: "invalid", branch: "feature/root-dir" },
+          ] as const;
+          for (const { setting, reason, branch } of cases) {
+            const fallbacks: Array<string> = [];
+            const created = yield* driver.createWorktree(
+              { cwd, path: null, refName: initialBranch, newRefName: branch },
+              {
+                worktreesDirectory: setting,
+                progress: {
+                  onWorktreesDirectoryFallback: (status) =>
+                    Effect.sync(() => {
+                      fallbacks.push(status.unavailable.reason);
+                    }),
+                },
+              },
+            );
+            const expected = pathService.join(repoWorktreesDir, branch.replace("/", "-"));
+            assert.equal(created.worktree.path, expected);
+            assert.equal(yield* fileSystem.exists(expected), true);
+            assert.deepStrictEqual(fallbacks, [reason]);
+          }
+          assert.equal(yield* fileSystem.exists(pathService.dirname(missingParent)), false);
+        }),
     );
 
     it.effect("resolves the submodule mode from the option, then t3.json", () =>

@@ -468,7 +468,7 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const temporarySuffix = crypto.randomUUIDv4.pipe(
+  const temporarySuffix = crypto.randomUUIDv4().pipe(
     Effect.map((uuid) => uuid.replace(/-/g, "")),
     Effect.mapError(
       (cause) =>

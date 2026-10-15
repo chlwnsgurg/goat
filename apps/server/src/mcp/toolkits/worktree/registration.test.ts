@@ -1,8 +1,8 @@
 import * as SshRemoteDispatch from "../../../sshRemote/SshRemoteDispatch.ts";
 import * as ConnectionCatalogBroker from "../../../connections/ConnectionCatalogBroker.ts";
-import Migration0062 from "../../../persistence/Migrations/063_RemoteReports.ts";
-import Migration0063 from "../../../persistence/Migrations/064_RemoteDispatches.ts";
-import Migration0065 from "../../../persistence/Migrations/066_RemoteDispatchQuestions.ts";
+import Migration0062 from "../../../persistence/Migrations/064_RemoteReports.ts";
+import Migration0063 from "../../../persistence/Migrations/065_RemoteDispatches.ts";
+import Migration0065 from "../../../persistence/Migrations/067_RemoteDispatchQuestions.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as RemoteDispatchCoordinator from "../../../remoteReports/RemoteDispatchCoordinator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
