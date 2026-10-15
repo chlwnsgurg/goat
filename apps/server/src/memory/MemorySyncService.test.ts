@@ -5710,7 +5710,15 @@ it.effect.each(["claim", "paired"] as const)(
     }),
 );
 
-it.effect.each(["valid", "limit", "generation-race", "omitted", "admission-race"] as const)(
+const resolutionLineageModes = [
+  "valid",
+  "limit",
+  "generation-race",
+  "omitted",
+  "omitted-heads",
+  "admission-race",
+] as const;
+it.effect.each(resolutionLineageModes)(
   "r2 resolution preserves transitive lineage and fences %s",
   (mode) =>
     Effect.gen(function* () {
@@ -5828,14 +5836,22 @@ it.effect.each(["valid", "limit", "generation-race", "omitted", "admission-race"
           const candidate =
             mode === "omitted"
               ? { ...op, payload: { ...op.payload, derivedFromMemoryRevisions: original.heads } }
-              : op;
+              : mode === "omitted-heads"
+                ? { ...op, payload: { ...op.payload, derivedFromMemoryRevisions: deps } }
+                : op;
           const receipt = yield* service.admitHubOperation({
             authority,
             operation: candidate,
             resolutionRequest: { ...submission, operation: candidate },
           });
           assert.strictEqual(receipt.outcome, mode === "valid" ? "accepted" : "rejected");
-          if (mode !== "valid") return;
+          if (mode !== "valid") {
+            assert.strictEqual(
+              receipt.failureCode,
+              mode === "admission-race" ? "source_invalidated" : "invalid_output",
+            );
+            return;
+          }
           // Expire the actual original input payloads, not their lineage identity rows.
           yield* sql`UPDATE memory_payloads SET purge_eligible_after=0,revert_deadline=0 WHERE payload_ref IN (${original.heads[0]!},${original.heads[1]!})`;
           yield* sql`UPDATE memory_resolutions SET revert_deadline=0 WHERE memory_id=${target}`;
