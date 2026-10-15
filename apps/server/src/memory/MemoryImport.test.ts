@@ -1036,6 +1036,12 @@ describe("MemoryImport M3c final fences", () => {
       assert.deepStrictEqual(op.revision.parents, [targetRev]);
       assert.strictEqual(op.revision.payloadRef, operation.revision.payloadRef);
       assert.strictEqual(
+        (yield* store.loadAggregate(space, memoryId)).revisions.find(
+          (r) => r.revision.revisionId === op.revision.revisionId,
+        )?.revision.payloadRef,
+        operation.revision.payloadRef,
+      );
+      assert.strictEqual(
         (yield* service.importPorts.readReceipt(p.batch, Effect.void)).sessionBodyBytes,
         0,
       );

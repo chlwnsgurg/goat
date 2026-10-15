@@ -1,11 +1,13 @@
 import { assert, it } from "@effect/vitest";
 import * as M from "@goat/contracts";
 import * as Store from "../../memory/MemoryStore.ts";
+import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
+const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 it.effect(
   "installs one body-free table, one lookup index and three delta triggers without changing search counters",
@@ -74,9 +76,9 @@ it.effect(
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
-it.effect(
-  "refuses publication and history deletion after upgrading incomplete approved 073 import history",
-  () =>
+it.effect.each(["event", "compact", "hubReceipt"] as const)(
+  "refuses publication and history deletion after upgrading incomplete approved 073 import history: %s",
+  (evidence) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 73 });
@@ -103,8 +105,22 @@ it.effect(
           },
         };
         yield* sql`INSERT INTO memory_revisions VALUES (${space},${op},${memoryId},${op},'[]','{"kind":"user"}','inference',${JSON.stringify(provenance)},NULL,0)`;
-        yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at)
-        VALUES (1,${space},${memoryId},${op},'upsert',${environmentId},${"a".repeat(64)},'{}',${JSON.stringify({ outcome: "accepted", hubSequence: n + 1 })},0)`;
+        const receipt: M.MemoryHubReceipt = {
+          operationId: M.MemoryOperationId.make(op),
+          memoryId,
+          operationDigest: "a".repeat(64),
+          outcome: "accepted",
+          hubSequence: n + 1,
+        };
+        if (evidence === "event")
+          yield* sql`INSERT INTO memory_events(protocol_version,memory_space_id,memory_id,operation_id,kind,origin_environment_id,operation_digest,metadata_json,receipt_json,created_at)
+          VALUES (1,${space},${memoryId},${op},'upsert',${environmentId},${receipt.operationDigest},'{}',${json(receipt)},0)`;
+        else if (evidence === "compact")
+          yield* sql`INSERT INTO memory_compact_receipts(space,operation_id,operation_digest,hub_sequence,receipt_json,compact_json)
+          VALUES (${space},${op},${receipt.operationDigest},${receipt.hubSequence},${json(receipt)},'{}')`;
+        else
+          yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json)
+          VALUES (${space},'hubReceipt',${op},${memoryId},${json({ memoryId, receipt })})`;
         records.push(
           {
             memorySpaceId: space,

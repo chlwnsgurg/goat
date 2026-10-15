@@ -2405,7 +2405,7 @@ const make = Effect.gen(function* () {
               scope: yield* scopeCodec.decode(row.scope_json),
               assertionKind: row.assertion_kind,
               provenance: yield* provenanceCodec.decode(row.provenance_json),
-              payloadRef: row.revision_id,
+              payloadRef: row.payload_ref ?? row.revision_id,
               createdAtUtc: yield* importTime(row.created_at),
             },
             strict,
