@@ -451,7 +451,10 @@ describe("import workflow admission and fences", () => {
     const f = workflowFixture(1);
     await f.store.save(destination, operationId);
     await f.ready();
-    await expect(f.workflow.apply()).rejects.toThrow("previous import");
+    await f.workflow.apply();
+    expect(f.workflow.getSnapshot().phase).toBe("recovery");
+    expect((await f.store.load(destination))?.operationId).toBe(operationId);
+    await expect(f.workflow.retry()).rejects.toThrow("Preview");
     expect(f.calls.some((input) => input.action === "apply")).toBe(false);
   });
   it("bounds selection and disallows duplicate keys", () => {
