@@ -86,13 +86,13 @@ export default Effect.gen(function* () {
     delta(`${p}.space`, "items", `${p}.scope_key`, `(${p}.status!='forgotten')`, sign) +
     delta(`${p}.space`, "summaries", `${p}.scope_key`, summary(p), sign);
   for (const [table, spaceColumn, metrics] of tables) {
-    for (const [dimension, value] of Object.entries(metrics("r"))) {
+    for (const [dimension, value] of Object.entries(metrics("accounted"))) {
       if (table === "memory_compact_receipts" && dimension === "receipt_bytes") continue;
       yield* sql.unsafe(
-        `INSERT INTO memory_quota_counters SELECT ${spaceColumn},'usage_${dimension}','',sum(${value}) FROM ${table} r GROUP BY ${spaceColumn} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+        `INSERT INTO memory_quota_counters SELECT ${spaceColumn},'usage_${dimension}','',sum(${value}) FROM ${table} accounted GROUP BY ${spaceColumn} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
       );
       yield* sql.unsafe(
-        `INSERT INTO memory_quota_counters SELECT '_usage_environment','usage_${dimension}','',coalesce(sum(${value}),0) FROM ${table} r WHERE true ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
+        `INSERT INTO memory_quota_counters SELECT '_usage_environment','usage_${dimension}','',coalesce(sum(${value}),0) FROM ${table} accounted WHERE true ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
       );
     }
     for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
@@ -129,11 +129,11 @@ export default Effect.gen(function* () {
     `INSERT INTO memory_quota_counters SELECT '_usage_environment','usage_receipt_bytes','',coalesce(sum(coalesce(length(compact_blob),length(CAST(compact_json AS BLOB)))),0) FROM memory_compact_receipts WHERE true ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value`,
   );
   for (const [d, v] of [
-    ["items", "(r.status!='forgotten')"],
-    ["summaries", summary("r")],
+    ["items", "(accounted.status!='forgotten')"],
+    ["summaries", summary("accounted")],
   ])
     yield* sql.unsafe(
-      `INSERT INTO memory_quota_counters SELECT space,'usage_${d}',scope_key,sum(${v}) FROM memory_items r GROUP BY space,scope_key`,
+      `INSERT INTO memory_quota_counters SELECT space,'usage_${d}',scope_key,sum(${v}) FROM memory_items accounted GROUP BY space,scope_key`,
     );
   // Payload mutation changes only this payload's live bytes. Item mutation accounts heads.
   for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {

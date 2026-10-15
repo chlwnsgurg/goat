@@ -115,7 +115,7 @@ it.effect(
         .pipe(Effect.exit);
       assert.deepStrictEqual(yield* storage.usage(space, { kind: "user" }), before);
       yield* check;
-      yield* sql`UPDATE memory_revisions SET provenance_json=json_set(provenance_json,'$.sourceThread','synthetic') WHERE revision_id=${id(30004)}`;
+      yield* sql`UPDATE memory_revisions SET provenance_json=json_set(provenance_json,'$.sourceThread',json('{"environmentId":"fixture","threadId":"synthetic"}')) WHERE revision_id=${id(30004)}`;
       yield* check;
       yield* sql`UPDATE memory_payloads SET body_json=json_set(body_json,'$.text','한글 synthetic replacement') WHERE payload_ref=${id(30004)}`;
       yield* check;
