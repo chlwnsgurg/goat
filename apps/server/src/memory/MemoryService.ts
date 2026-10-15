@@ -1,4 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- deterministic server-owned revision identifiers.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- structural captured-binding and selector comparison.
+import * as NodeUtil from "node:util";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes.
 import * as NodeCrypto from "node:crypto";
 import * as M from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
@@ -14,7 +17,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as Store from "./MemoryStore.ts";
 import { ProviderMemoryImportRuntime } from "./imports/MemoryImportTypes.ts";
-import type { ImportProviderFacade } from "./imports/MemoryImportTypes.ts";
+import type {
+  ImportProviderFacade,
+  ImportPorts,
+  ImportAddress,
+  PreparedImportCommit,
+} from "./imports/MemoryImportTypes.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import { decideMemoryOperation, memoryOperationDigest } from "./MemoryDecider.ts";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
@@ -74,6 +82,8 @@ export class MemoryService extends Context.Service<
   MemoryService,
   {
     readonly importProvider: ImportProviderFacade;
+    /** L5 adds readiness/requireBootstrap/syncStatus from its existing Sync instance. */
+    readonly importPorts: Omit<ImportPorts, "readiness" | "requireBootstrap" | "syncStatus">;
     readonly commitLocalIntent: (
       input: IntentCommitInput,
     ) => Effect.Effect<
@@ -509,6 +519,237 @@ const make = Effect.fnUntraced(function* (
       }),
     );
   });
+  const requireImportAddress = (address: ImportAddress) =>
+    address.environmentId === environmentId
+      ? Effect.void
+      : Effect.fail(new Store.MemoryStoreConflict({ code: "not_found" }));
+  const importTransaction = <A, E, R>(
+    address: ImportAddress,
+    permit: Permit,
+    effect: Effect.Effect<A, E, R>,
+  ) =>
+    store.transact(
+      Effect.gen(function* () {
+        yield* permit;
+        yield* requireImportAddress(address);
+        return yield* effect;
+      }),
+      { requireOuter: true },
+    );
+  const commitImport = Effect.fn("MemoryService.commitImport")(function* (
+    input: PreparedImportCommit,
+    permit: Permit,
+  ) {
+    return yield* importTransaction(
+      input.batch,
+      permit,
+      Effect.gen(function* () {
+        const { batch, selection, candidate, next, previous, registration } = input;
+        if (
+          registration.environmentId !== environmentId ||
+          next.environmentId !== environmentId ||
+          registration.memorySpaceId !== batch.memorySpaceId ||
+          registration.sourceId !== batch.sourceId ||
+          next.sourceId !== batch.sourceId ||
+          next.memorySpaceId !== batch.memorySpaceId ||
+          selection.memoryId !== next.memoryId ||
+          selection.selector.sourceItemKey !== next.sourceItemKey ||
+          candidate.sourceItemKey !== next.sourceItemKey ||
+          candidate.sourceFingerprint !== selection.selector.sourceFingerprint ||
+          !NodeUtil.isDeepStrictEqual(
+            selection,
+            batch.selections.find((s) => s.selector.sourceItemKey === next.sourceItemKey),
+          ) ||
+          !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope)
+        )
+          return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+        yield* requireScope(next.scope);
+        // Sync readiness is observed outside SQL; published local state is authoritative after lock.
+        const ready = yield* query(
+          sql`SELECT 1 FROM memory_compaction_state WHERE space=${batch.memorySpaceId} AND published=1`,
+        );
+        if (!ready.length)
+          return yield* new Store.MemoryStoreConflict({ code: "bootstrap_required" });
+        const commitIntent = Effect.gen(function* () {
+          yield* permit;
+          const savedRegistration = yield* store.readImportRegistrationTx({
+            ...batch,
+            by: "source",
+          });
+          if (
+            !NodeUtil.isDeepStrictEqual(savedRegistration, registration) ||
+            registration.version !== input.registrationVersion ||
+            !NodeUtil.isDeepStrictEqual(next.accepted, previous?.accepted ?? null) ||
+            next.outcome !== selection.result?.outcome
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          const current = yield* store.loadAggregate(batch.memorySpaceId, next.memoryId);
+          if (current.tombstone) return yield* new Store.MemoryStoreConflict({ code: "forgotten" });
+          if (current.pendingForget)
+            return yield* new Store.MemoryStoreConflict({ code: "forget_pending" });
+          if (
+            current.heads.length !== input.expectedHeads.length ||
+            !current.heads.every((h) => input.expectedHeads.includes(h))
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          // Updated imports branch only from their last accepted observation, never a pending proposal.
+          const parents = previous?.accepted ? [previous.accepted.revisionId] : [];
+          if (
+            parents.length !== input.parents.length ||
+            !parents.every((h) => input.parents.includes(h)) ||
+            (current.identity && (!previous || previous.memoryId !== next.memoryId))
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          if (selection.selector.project) {
+            const project = selection.selector.project;
+            yield* projectRoot(project);
+            const binding = (yield* store.getProjectBinding(batch.memorySpaceId, project)) ?? {
+              memorySpaceId: batch.memorySpaceId,
+              project,
+              projectKey: null,
+              repositoryKey: null,
+              version: 0,
+            };
+            if (
+              !input.projectBinding ||
+              !NodeUtil.isDeepStrictEqual(binding, input.projectBinding) ||
+              next.scope.kind !== "project" ||
+              !NodeUtil.isDeepStrictEqual(binding.projectKey, next.scope.projectKey)
+            )
+              return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+          } else if (next.scope.kind === "project" || input.projectBinding !== null) {
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          }
+          const observation = next.pending;
+          if (
+            !observation ||
+            observation.operationId !== selection.operationId ||
+            observation.revisionId !== selection.revisionId ||
+            observation.sourceFingerprint !== candidate.sourceFingerprint ||
+            observation.contentFingerprint !== candidate.contentFingerprint
+          )
+            return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
+          const operation = yield* decode(
+            decodeOperation(
+              {
+                protocolVersion: 1,
+                kind: "upsert",
+                memorySpaceId: batch.memorySpaceId,
+                memoryId: next.memoryId,
+                operationId: selection.operationId,
+                originEnvironmentId: environmentId,
+                expectedHeads: input.expectedHeads,
+                revision: {
+                  memorySpaceId: batch.memorySpaceId,
+                  memoryId: next.memoryId,
+                  operationId: selection.operationId,
+                  revisionId: selection.revisionId,
+                  payloadRef: selection.revisionId,
+                  parents: input.parents,
+                  scope: next.scope,
+                  assertionKind: "inference",
+                  createdAtUtc: batch.createdAtUtc,
+                  provenance: {
+                    environmentId,
+                    importSource: {
+                      sourceId: registration.sourceId,
+                      format: registration.source.format,
+                      parserVersion: registration.source.parserVersion,
+                      sourceLocator: registration.sourceLocator,
+                      sourceItemKey: candidate.sourceItemKey,
+                      sourceFingerprint: candidate.sourceFingerprint,
+                      contentFingerprint: candidate.contentFingerprint,
+                      sourceAliases: [],
+                      acceptedContentFingerprints: [],
+                    },
+                  },
+                },
+                payload: candidate.payload,
+              },
+              strict,
+            ),
+          );
+          if (operation.kind !== "upsert")
+            return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+          const receipt = yield* apply(operation, Store.localIntent, permit);
+          if (receipt.receipt.outcome === "rejected")
+            return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
+          // Parent-aware intent records the frozen operation, unlike the initial-only local draft materializer.
+          yield* store.enqueueWork({
+            id: `import:${environmentId}:${batch.operationId}:${selection.operationId}`,
+            space: batch.memorySpaceId,
+            memoryId: next.memoryId,
+            kind: "admin",
+            status: "completed",
+            metadata: {
+              protocolVersion: 1,
+              kind: "upsert",
+              operationId: selection.operationId,
+              memorySpaceId: batch.memorySpaceId,
+              memoryId: next.memoryId,
+              originEnvironmentId: environmentId,
+              expectedHeads: input.expectedHeads,
+              revision: operation.revision,
+            },
+            payloadRef: selection.revisionId,
+            attempt: 0,
+            nextAttemptAt: 0,
+            claimedBy: null,
+            claimedUntil: null,
+          });
+          yield* permit;
+        });
+        const result = yield* store.commitImportItemTx({
+          registrationVersion: input.registrationVersion,
+          batch,
+          previous,
+          next,
+          commitIntent,
+        });
+        yield* permit;
+        return result;
+      }),
+    );
+  });
+  const importPorts: MemoryService["Service"]["importPorts"] = {
+    readRegistration: (input, permit) =>
+      importTransaction(input, permit, store.readImportRegistrationTx(input)),
+    saveRegistration: (input, permit) =>
+      importTransaction(input, permit, store.writeImportRegistrationTx(input)),
+    preflightBatch: (input, permit) =>
+      importTransaction(
+        input,
+        permit,
+        Effect.gen(function* () {
+          const batch = yield* store.readImportBatchTx(input);
+          if (!batch) return { kind: "new" as const };
+          if (batch.selectionDigest !== input.selectionDigest)
+            return yield* new M.MemoryImportRpcError({
+              issue: "operation_id_reused",
+              operationId: input.operationId,
+            });
+          if (batch.kind === "retired") return { kind: "retired" as const };
+          return batch.receipt.state === "completed"
+            ? { kind: "completed" as const, receipt: batch.receipt }
+            : { kind: "partial" as const, batch, receipt: batch.receipt };
+        }),
+      ),
+    readReceipt: (input, permit) =>
+      importTransaction(
+        input,
+        permit,
+        Effect.gen(function* () {
+          const receipt = yield* store.readImportReceiptTx(input);
+          if (!receipt) return yield* new M.MemoryRpcError({ code: "not_found" });
+          return receipt;
+        }),
+      ),
+    readItem: (input, permit) => importTransaction(input, permit, store.readImportItemTx(input)),
+    findMatch: (input, permit) => importTransaction(input, permit, store.findImportMatchTx(input)),
+    binding: getProjectBinding,
+    resolveProjectKey,
+    commit: commitImport,
+  };
   const commitLocalIntent: MemoryService["Service"]["commitLocalIntent"] = Effect.fn(
     "MemoryService.commitLocalIntent",
   )(function* (input) {
@@ -1873,6 +2114,7 @@ const make = Effect.fnUntraced(function* (
     );
   });
   return MemoryService.of({
+    importPorts,
     importProvider: (input, permit) =>
       Effect.gen(function* () {
         yield* permit;

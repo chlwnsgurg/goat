@@ -67,6 +67,7 @@ export type ImportCandidate = {
   readonly sourceFingerprint: string;
   readonly contentFingerprint: string;
   readonly title?: string;
+  /** Parser emits evidence=[]; L4 attaches import evidence before preparing commit. */
   readonly payload: M.MemoryPayload;
   readonly byteCount: number;
 };
@@ -129,6 +130,7 @@ export type ImportBatch = ImportBatchAddress & {
 };
 export type ImportRetiredBatchGuard = {
   readonly kind: "retired";
+  readonly codecVersion: 1;
   readonly selectionDigest: string;
 };
 export type ImportItem = ImportSourceAddress & {

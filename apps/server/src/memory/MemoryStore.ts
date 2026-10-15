@@ -5,6 +5,9 @@ import {
   CHECKPOINT_PAGE_OVERHEAD,
 } from "./MemoryCheckpointBound.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes do not depend on runtime identity.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- body-free structural CAS comparison.
+import * as NodeUtil from "node:util";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- stable server-owned hashes.
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import * as M from "@goat/contracts";
@@ -1500,6 +1503,12 @@ export class MemoryStore extends Context.Service<
       space: M.MemorySpaceId,
       scope: M.MemoryScope,
     ) => Effect.Effect<MemoryUsage, MemoryStorageError>;
+    readonly readImportRegistrationTx: ImportStorePorts["readImportRegistrationTx"];
+    readonly writeImportRegistrationTx: ImportStorePorts["writeImportRegistrationTx"];
+    readonly readImportBatchTx: ImportStorePorts["readImportBatchTx"];
+    readonly readImportReceiptTx: ImportStorePorts["readImportReceiptTx"];
+    readonly readImportItemTx: ImportStorePorts["readImportItemTx"];
+    readonly commitImportItemTx: ImportStorePorts["commitImportItemTx"];
     readonly findImportMatchTx: ImportStorePorts["findImportMatchTx"];
     readonly readImportLineage: (
       space: M.MemorySpaceId,
@@ -1663,6 +1672,134 @@ const decodeReport = Schema.decodeUnknownEffect(M.MemoryReportDelivery);
 const threadCodec = codec(M.ScopedThreadRef);
 const decodeCheckpoint = Schema.decodeUnknownEffect(M.MemoryHubCheckpointPage);
 const checkpointCodec = codec(M.MemoryHubCheckpointPage);
+const importId = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+const importKey = Schema.String.check(
+  Schema.makeFilter(
+    (s) => s.length > 0 && new TextEncoder().encode(s).length <= 512 && !/[\u0000-\u001f]/.test(s),
+  ),
+);
+const importLabel = Schema.String.check(
+  Schema.makeFilter((s) => s.length > 0 && new TextEncoder().encode(s).length <= 512),
+);
+const importCount = Schema.Int.check(Schema.makeFilter((n) => n >= 0));
+const importAddress = { memorySpaceId: M.MemorySpaceId, environmentId: M.EnvironmentId };
+const importSourceAddress = { ...importAddress, sourceId: M.MemoryImportSourceId };
+const ImportSlotCodec = Schema.Struct({
+  format: M.MemoryImportFormat,
+  rootSlot: importKey,
+  selection: Schema.NullOr(importKey),
+});
+const ImportSessionCodec = Schema.Struct({
+  sessionId: importLabel,
+  parserVersion: importLabel,
+  profile: importLabel,
+  snapshotDigest: digest,
+  createdAtUtc: M.MemoryUtcTimestamp,
+  expiresAtUtc: M.MemoryUtcTimestamp,
+  newItems: importCount,
+  bodyBytes: importCount,
+  applied: Schema.Array(
+    Schema.Struct({ sourceItemKey: importKey, sourceFingerprint: digest, bodyBytes: importCount }),
+  ),
+});
+const ImportRegistrationCodec = Schema.Struct({
+  ...importSourceAddress,
+  codecVersion: Schema.Literal(1),
+  version: importCount,
+  slot: ImportSlotCodec,
+  source: M.MemoryImportSource,
+  sourceLocator: importLabel.check(
+    Schema.makeFilter((s) => !s.startsWith("/") && !/^[a-zA-Z]:[\\/]/.test(s)),
+  ),
+  session: Schema.NullOr(ImportSessionCodec),
+}).check(
+  Schema.makeFilter((r) => r.sourceId === r.source.sourceId && r.slot.format === r.source.format),
+);
+const ImportSelectorCodec = Schema.Struct({
+  sourceItemKey: importKey,
+  sourceFingerprint: digest,
+  scope: M.MemoryScope,
+  project: Schema.optionalKey(M.ScopedProjectRef),
+});
+const ImportBatchCodec = Schema.Struct({
+  ...importAddress,
+  operationId: M.MemoryOperationId,
+  kind: Schema.Literal("detailed"),
+  codecVersion: Schema.Literal(1),
+  selectionDigest: digest,
+  sourceId: M.MemoryImportSourceId,
+  sessionId: importLabel,
+  selections: Schema.Array(
+    Schema.Struct({
+      selector: ImportSelectorCodec,
+      memoryId: M.MemoryId,
+      operationId: M.MemoryOperationId,
+      revisionId: M.MemoryRevisionId,
+      result: Schema.NullOr(M.MemoryImportItemResult),
+    }),
+  ),
+  receipt: M.MemoryImportReceipt,
+  createdAtUtc: M.MemoryUtcTimestamp,
+}).check(
+  Schema.makeFilter(
+    (b) =>
+      b.selections.length > 0 &&
+      b.selections.length <= M.MEMORY_IMPORT_APPLY_MAX_ITEMS &&
+      new Set(b.selections.map((s) => s.selector.sourceItemKey)).size === b.selections.length &&
+      new Set(b.selections.map((s) => s.operationId)).size === b.selections.length &&
+      new Set(b.selections.map((s) => s.revisionId)).size === b.selections.length &&
+      b.receipt.operationId === b.operationId &&
+      b.receipt.sourceId === b.sourceId &&
+      b.receipt.sessionId === b.sessionId &&
+      b.receipt.remaining === b.selections.filter((s) => s.result === null).length &&
+      NodeUtil.isDeepStrictEqual(
+        b.receipt.items,
+        b.selections.flatMap((s) => (s.result ? [s.result] : [])),
+      ) &&
+      b.selections.every(
+        (s) =>
+          s.result === null ||
+          (s.result.sourceItemKey === s.selector.sourceItemKey &&
+            (s.result.memoryId === null || s.result.memoryId === s.memoryId) &&
+            (s.result.revisionId === null || s.result.revisionId === s.revisionId)),
+      ),
+  ),
+);
+const ImportRetiredCodec = Schema.Struct({
+  kind: Schema.Literal("retired"),
+  codecVersion: Schema.Literal(1),
+  selectionDigest: digest,
+});
+const ImportObservationCodec = Schema.Struct({
+  sourceFingerprint: digest,
+  contentFingerprint: digest,
+  revisionId: M.MemoryRevisionId,
+  operationId: M.MemoryOperationId,
+});
+const ImportItemCodec = Schema.Struct({
+  ...importSourceAddress,
+  codecVersion: Schema.Literal(1),
+  sourceItemKey: importKey,
+  scope: M.MemoryScope,
+  memoryId: M.MemoryId,
+  accepted: Schema.NullOr(ImportObservationCodec),
+  pending: Schema.NullOr(ImportObservationCodec),
+  rejected: Schema.NullOr(Schema.Struct({ sourceFingerprint: digest, issue: M.MemoryImportIssue })),
+  outcome: M.MemoryImportOutcome,
+});
+const privateImportCodec = <S extends Schema.Constraint>(schema: S) => {
+  const c = codec(schema);
+  return {
+    ...c,
+    encode: (value: S["Type"]) =>
+      stored("import-codec", Schema.decodeUnknownEffect(schema)(value, strict)).pipe(
+        Effect.flatMap(c.encode),
+      ),
+  };
+};
+const importRegistrationCodec = privateImportCodec(ImportRegistrationCodec);
+const importBatchCodec = privateImportCodec(Schema.Union([ImportBatchCodec, ImportRetiredCodec]));
+const importItemCodec = privateImportCodec(ImportItemCodec);
 const lineageCodec = codec(M.MemoryImportLineageRecord);
 const stagedCheckpointCodec = codec(
   Schema.Struct({
@@ -5531,6 +5668,248 @@ const make = Effect.gen(function* () {
       logBytes: log[0]!.bytes,
     };
   });
+  const readImportRegistrationTx: ImportStorePorts["readImportRegistrationTx"] = Effect.fnUntraced(
+    function* (input) {
+      yield* Transaction;
+      const rows = yield* stored(
+        "import-registration-read",
+        input.by === "source"
+          ? sql<{
+              registration_json: string;
+            }>`SELECT registration_json FROM memory_import_receipts WHERE space=${input.memorySpaceId} AND environment_id=${input.environmentId} AND record_kind='source' AND source_id=${input.sourceId}`
+          : sql<{
+              registration_json: string;
+            }>`SELECT registration_json FROM memory_import_receipts WHERE space=${input.memorySpaceId} AND environment_id=${input.environmentId} AND record_kind='source'
+        AND json_extract(registration_json,'$.slot.format')=${input.slot.format} AND json_extract(registration_json,'$.slot.rootSlot')=${input.slot.rootSlot}
+        AND json_extract(registration_json,'$.slot.selection') IS ${input.slot.selection}`,
+      );
+      if (rows.length > 1) return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (!rows[0]) return undefined;
+      const r = yield* importRegistrationCodec.decode(rows[0].registration_json, strict);
+      if (
+        r.memorySpaceId !== input.memorySpaceId ||
+        r.environmentId !== input.environmentId ||
+        (input.by === "source" && r.sourceId !== input.sourceId)
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      return r;
+    },
+  );
+  const writeImportRegistrationTx: ImportStorePorts["writeImportRegistrationTx"] =
+    Effect.fnUntraced(function* (input) {
+      yield* Transaction;
+      const json = yield* importRegistrationCodec.encode(input.next);
+      const next = yield* importRegistrationCodec.decode(json, strict);
+      if (next.memorySpaceId !== input.memorySpaceId || next.environmentId !== input.environmentId)
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const old = yield* readImportRegistrationTx({
+        ...input,
+        by: "source",
+        sourceId: next.sourceId,
+      });
+      const slot = yield* readImportRegistrationTx({ ...input, by: "slot", slot: next.slot });
+      if (slot && slot.sourceId !== next.sourceId)
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      if (
+        (old?.version ?? null) !== input.expectedVersion ||
+        next.version !== (input.expectedVersion === null ? 0 : input.expectedVersion + 1)
+      )
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      if (
+        old &&
+        (!NodeUtil.isDeepStrictEqual(old.slot, next.slot) ||
+          old.sourceLocator !== next.sourceLocator)
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (
+        old?.session &&
+        next.session?.sessionId === old.session.sessionId &&
+        (next.session.newItems < old.session.newItems ||
+          next.session.bodyBytes < old.session.bodyBytes ||
+          !old.session.applied.every((a) =>
+            next.session!.applied.some((b) => NodeUtil.isDeepStrictEqual(a, b)),
+          ))
+      )
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      const observed =
+        next.session?.createdAtUtc ?? (yield* importTime(yield* Clock.currentTimeMillis));
+      yield* stored(
+        "import-registration-write",
+        sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,format,source_locator,parser_version,registration_json,observed_at_utc)
+      VALUES (${importId(["source", next.memorySpaceId, next.environmentId, next.sourceId])},${next.memorySpaceId},${next.environmentId},'source',${next.sourceId},${next.source.format},${next.sourceLocator},${next.source.parserVersion},${json},${observed})
+      ON CONFLICT(receipt_id) DO UPDATE SET registration_json=excluded.registration_json,parser_version=excluded.parser_version,observed_at_utc=excluded.observed_at_utc`,
+      );
+      return next;
+    });
+  const readImportBatchTx: ImportStorePorts["readImportBatchTx"] = Effect.fnUntraced(
+    function* (input) {
+      yield* Transaction;
+      const rows = yield* stored(
+        "import-batch-read",
+        sql<{
+          completed_items_json: string;
+          request_digest: string;
+        }>`SELECT completed_items_json,request_digest FROM memory_import_receipts
+      WHERE space=${input.memorySpaceId} AND environment_id=${input.environmentId} AND record_kind='batch' AND batch_operation_id=${input.operationId}`,
+      );
+      if (!rows[0]) return undefined;
+      const b = yield* importBatchCodec.decode(rows[0].completed_items_json, strict);
+      if (
+        b.selectionDigest !== rows[0].request_digest ||
+        (b.kind === "detailed" &&
+          (b.memorySpaceId !== input.memorySpaceId ||
+            b.environmentId !== input.environmentId ||
+            b.operationId !== input.operationId))
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      return b;
+    },
+  );
+  const readImportReceiptTx: ImportStorePorts["readImportReceiptTx"] = Effect.fnUntraced(
+    function* (input) {
+      const b = yield* readImportBatchTx(input);
+      return b?.kind === "detailed" ? b.receipt : undefined;
+    },
+  );
+  const readImportItemTx: ImportStorePorts["readImportItemTx"] = Effect.fnUntraced(
+    function* (input) {
+      yield* Transaction;
+      const rows = yield* stored(
+        "import-item-read",
+        sql<{ registration_json: string }>`SELECT registration_json FROM memory_import_receipts
+      WHERE space=${input.memorySpaceId} AND environment_id=${input.environmentId} AND record_kind='item' AND source_id=${input.sourceId} AND source_item_key=${input.sourceItemKey}`,
+      );
+      if (!rows[0]) return undefined;
+      const item = yield* importItemCodec.decode(rows[0].registration_json, strict);
+      if (
+        item.memorySpaceId !== input.memorySpaceId ||
+        item.environmentId !== input.environmentId ||
+        item.sourceId !== input.sourceId ||
+        item.sourceItemKey !== input.sourceItemKey
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      return item;
+    },
+  );
+  const commitImportItemTx: ImportStorePorts["commitImportItemTx"] = Effect.fnUntraced(
+    function* (input) {
+      yield* Transaction;
+      const batch = yield* importBatchCodec.decode(
+        yield* importBatchCodec.encode(input.batch),
+        strict,
+      );
+      if (batch.kind !== "detailed")
+        return yield* new MemoryStoreConflict({ code: "invalid_output" });
+      const guard = yield* readImportBatchTx(batch);
+      // Digest is checked before retirement: changed digest must never become not_found.
+      if (guard && guard.selectionDigest !== batch.selectionDigest)
+        return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+      if (guard?.kind === "retired") return yield* new MemoryStoreConflict({ code: "not_found" });
+      const next = yield* importItemCodec.decode(yield* importItemCodec.encode(input.next), strict);
+      const selection = batch.selections.find(
+        (s) => s.selector.sourceItemKey === next.sourceItemKey,
+      );
+      if (
+        !selection?.result ||
+        next.memorySpaceId !== batch.memorySpaceId ||
+        next.environmentId !== batch.environmentId ||
+        next.sourceId !== batch.sourceId ||
+        next.memoryId !== selection.memoryId
+      )
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      if (guard?.kind === "detailed") {
+        const frozen = (s: typeof selection) => ({ ...s, result: null });
+        if (
+          guard.sourceId !== batch.sourceId ||
+          guard.sessionId !== batch.sessionId ||
+          !NodeUtil.isDeepStrictEqual(guard.selections.map(frozen), batch.selections.map(frozen))
+        )
+          return yield* new MemoryStoreConflict({ code: "operation_id_reused" });
+        const done = guard.selections.find(
+          (s) => s.selector.sourceItemKey === next.sourceItemKey,
+        )?.result;
+        if (done) return done;
+        if (
+          !guard.selections.every((s, i) =>
+            s.result === null
+              ? s.selector.sourceItemKey === next.sourceItemKey ||
+                batch.selections[i]!.result === null
+              : NodeUtil.isDeepStrictEqual(s.result, batch.selections[i]!.result),
+          )
+        )
+          return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      } else if (batch.selections.filter((s) => s.result !== null).length !== 1) {
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      }
+      const registration = yield* readImportRegistrationTx({ ...batch, by: "source" });
+      if (
+        !registration ||
+        registration.version !== input.registrationVersion ||
+        registration.session?.sessionId !== batch.sessionId
+      )
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      const session = registration.session;
+      if (Date.parse(session.expiresAtUtc) <= (yield* Clock.currentTimeMillis))
+        return yield* new MemoryStoreConflict({ code: "not_found" });
+      const previous = yield* readImportItemTx(next);
+      if (!NodeUtil.isDeepStrictEqual(previous ?? null, input.previous))
+        return yield* new MemoryStoreConflict({ code: "revision_changed" });
+      yield* input.commitIntent;
+      // Item, detailed receipt and session CAS share the intent/quota/outbox journal.
+      yield* stored(
+        "import-item-write",
+        sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,source_item_key,memory_id,scope_json,registration_json,outcome,observed_at_utc)
+      VALUES (${importId(["item", next.memorySpaceId, next.environmentId, next.sourceId, next.sourceItemKey])},${next.memorySpaceId},${next.environmentId},'item',${next.sourceId},${next.sourceItemKey},${next.memoryId},${yield* scopeCodec.encode(next.scope)},${yield* importItemCodec.encode(next)},${next.outcome},${batch.createdAtUtc})
+      ON CONFLICT(receipt_id) DO UPDATE SET registration_json=excluded.registration_json,memory_id=excluded.memory_id,scope_json=excluded.scope_json,outcome=excluded.outcome,observed_at_utc=excluded.observed_at_utc`,
+      );
+      const charged =
+        selection.result.outcome === "created" || selection.result.outcome === "revised";
+      const op = yield* readOperation(batch.memorySpaceId, selection.operationId);
+      const bodyBytes =
+        charged && op?.kind === "upsert" ? new TextEncoder().encode(op.payload.text).length : 0;
+      const applied = session.applied.some(
+        (a) =>
+          a.sourceItemKey === next.sourceItemKey &&
+          a.sourceFingerprint === selection.selector.sourceFingerprint,
+      );
+      const nextSession = {
+        ...session,
+        newItems: session.newItems + Number(!applied && selection.result.outcome === "created"),
+        bodyBytes: session.bodyBytes + (applied ? 0 : bodyBytes),
+        applied: applied
+          ? session.applied
+          : [
+              ...session.applied,
+              {
+                sourceItemKey: next.sourceItemKey,
+                sourceFingerprint: selection.selector.sourceFingerprint,
+                bodyBytes,
+              },
+            ],
+      };
+      const persisted = {
+        ...batch,
+        receipt: {
+          ...batch.receipt,
+          sessionNewItems: nextSession.newItems,
+          sessionBodyBytes: nextSession.bodyBytes,
+        },
+      };
+      yield* writeImportRegistrationTx({
+        ...batch,
+        next: { ...registration, version: registration.version + 1, session: nextSession },
+        expectedVersion: registration.version,
+      });
+      yield* stored(
+        "import-batch-write",
+        sql`INSERT INTO memory_import_receipts(receipt_id,space,environment_id,record_kind,source_id,batch_operation_id,request_digest,completed_items_json,observed_at_utc)
+      VALUES (${importId(["batch", batch.memorySpaceId, batch.environmentId, batch.operationId])},${batch.memorySpaceId},${batch.environmentId},'batch',${batch.sourceId},${batch.operationId},${batch.selectionDigest},${yield* importBatchCodec.encode(persisted)},${batch.createdAtUtc})
+      ON CONFLICT(receipt_id) DO UPDATE SET completed_items_json=excluded.completed_items_json,observed_at_utc=excluded.observed_at_utc`,
+      );
+      return selection.result;
+    },
+  );
+
   const readImportLineage = Effect.fn("MemoryStore.readImportLineage")(function* (
     space: M.MemorySpaceId,
     id: M.MemoryId,
@@ -9536,6 +9915,12 @@ const make = Effect.gen(function* () {
       ),
     persistCompactReceipt,
     prunePayloads,
+    readImportRegistrationTx,
+    writeImportRegistrationTx,
+    readImportBatchTx,
+    readImportReceiptTx,
+    readImportItemTx,
+    commitImportItemTx,
     findImportMatchTx,
     readImportLineage,
     unionImportLineageTx,
