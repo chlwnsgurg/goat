@@ -5410,7 +5410,9 @@ it.effect(
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            MemoryToolkitFixture.layer,
+            MemoryToolkitFixture.layerForEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+            ),
           ),
         ),
       );
@@ -5555,7 +5557,9 @@ it.effect.each(["new", "existing"] as const)(
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 1000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            MemoryToolkitFixture.layer,
+            MemoryToolkitFixture.layerForEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+            ),
           ),
         ),
       );
@@ -5649,7 +5653,9 @@ it.effect.each([
           Layer.mergeAll(
             layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }),
             settingsLayer,
-            MemoryToolkitFixture.layer,
+            MemoryToolkitFixture.layerForEnvironment(
+              EnvironmentId.make("environment-provider-session-manager"),
+            ),
           ),
         ),
       );

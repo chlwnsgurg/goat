@@ -80,6 +80,7 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
   id: M.MemoryId,
   now: number,
   includeIndependent = true,
+  publishedLineage?: ReadonlySet<M.MemoryRevisionId>,
 ) {
   const sql = yield* SqlClient.SqlClient;
   const all = emptyCheckpointInventory();
@@ -179,9 +180,17 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
     ...heads,
     ...all.resolutions.flatMap(({ resolution: r }) => [...r.inputRevisionIds, r.resultRevisionId]),
   ]);
-  // Retain body-free identity for non-head revisions too: dependency and thread
-  // lineage can outlive their bodies. Counting every retained identity keeps
-  // admission and publication identical without cross-memory cache invalidation.
+  // Admission reserves every retained body-free identity as an upper bound.
+  // Publication passes its dependency set, so history does not widen its SQL read.
+  // Both use the same literal encoder; narrowing publication cannot exceed U_next.
+  const selected =
+    publishedLineage === undefined ? undefined : [...new Set([...needed, ...publishedLineage])];
+  const selection =
+    selected === undefined
+      ? sql`1=1`
+      : selected.length
+        ? sql`r.revision_id IN ${sql.in(selected)}`
+        : sql`0=1`;
   // A shared payload is deliberately joined once per selected revision.
   const revisions = yield* sql<{
     revision_id: string;
@@ -193,7 +202,7 @@ export const selectCheckpointMemory = Effect.fnUntraced(function* (
     payload_ref: string | null;
     created_at: number;
     body_json: string | null;
-  }>`SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id} ORDER BY r.revision_id`;
+  }>`SELECT r.*,p.body_json FROM memory_revisions r LEFT JOIN memory_payloads p ON p.space=r.space AND p.payload_ref=r.payload_ref WHERE r.space=${space} AND r.memory_id=${id} AND ${selection} ORDER BY r.revision_id`;
   for (const r of revisions)
     all.revisions.push({
       revision: yield* decodeRevision({

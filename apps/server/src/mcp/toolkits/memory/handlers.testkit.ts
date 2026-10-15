@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Schema from "effect/Schema";
 // eslint-disable-next-line goat/no-raw-mcp-registration -- Test harness calls only toolkits registered through McpHttpServer.toolkitRegistration.
 import { McpSchema, McpServer } from "effect/ai";
@@ -39,16 +40,37 @@ const database = Layer.effectDiscard(
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const storage = Store.layer.pipe(Layer.provideMerge(database));
-const makeCore = (serviceLayer: typeof Service.layer) =>
-  serviceLayer.pipe(
-    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(storage))),
-    Layer.provide(identity),
+const makeCore = (serviceLayer: typeof Service.layer, environmentId?: M.EnvironmentId) => {
+  // Session-manager tests own a separate orchestration DB. Their memory fixture
+  // represents a fresh local thread in the same environment, without foreign history.
+  const localStorage = environmentId
+    ? Store.layer.pipe(
+        Layer.provideMerge(
+          Layer.effectDiscard(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* sql`CREATE TABLE orchestration_events(application_event_version INTEGER,aggregate_kind TEXT,stream_id TEXT,event_type TEXT,payload_json TEXT)`;
+            }),
+          ).pipe(Layer.provideMerge(database)),
+        ),
+      )
+    : storage;
+  return serviceLayer.pipe(
+    Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(localStorage))),
+    Layer.provide(
+      environmentId
+        ? Layer.succeed(Environment.ServerEnvironmentIdentity, {
+            getEnvironmentId: Effect.succeed(environmentId),
+          })
+        : identity,
+    ),
     Layer.provide(
       Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
         resolve: () => Effect.succeed(null),
       }),
     ),
   );
+};
 export const core = makeCore(Service.layer);
 const settings = Settings.layerTest({}, "memoryHub");
 const admin = Layer.effect(Hub.MemoryHubAdministrator, Hub.makeAdministrator).pipe(
@@ -89,6 +111,8 @@ const makeLayer = (serviceCore: typeof core) =>
     Layer.provide(NodeServices.layer),
   );
 export const layer = makeLayer(core);
+export const layerForEnvironment = (environmentId: M.EnvironmentId) =>
+  makeLayer(makeCore(Service.layer, environmentId));
 export const layerWithSourceReadAuthority = (
   authority: Service.MemorySourceReadAuthority["readSource"],
 ) => makeLayer(makeCore(Service.layerWithSourceReadAuthority(authority)));

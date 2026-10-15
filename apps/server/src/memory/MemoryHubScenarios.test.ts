@@ -430,7 +430,14 @@ describe("Memory hub assembled HTTP scenarios", () => {
           revision: { ...sourceBase.revision, memoryId: sourceId },
         };
         assert.strictEqual((yield* s.push([source])).receipts[0]!.outcome, "accepted");
-        const first = operation(10, s.hubEnv);
+        const firstBase = operation(10, s.hubEnv);
+        const first = {
+          ...firstBase,
+          payload: {
+            ...firstBase.payload,
+            derivedFromMemoryRevisions: [source.revision.revisionId],
+          },
+        };
         assert.strictEqual((yield* s.push([first])).receipts[0]!.hubSequence, 2);
         const sibling = (n: number) => {
           const op = operation(n, s.hubEnv);
