@@ -6123,7 +6123,7 @@ const make = Effect.gen(function* () {
       sql<{ space: string; dimension: string; scope_key: string; value: number }>`
       SELECT space,dimension,scope_key,value FROM memory_quota_counters
       WHERE (space=${space} OR space='_usage_environment')
-        AND dimension GLOB 'usage_*' AND scope_key IN ('',${scopeKey(scope)})`,
+        AND dimension IN ('usage_items','usage_summaries','usage_live_bytes','usage_payload_bytes','usage_identities','usage_identity_bytes','usage_reserved_keys','usage_reserved_receipts','usage_keys','usage_key_bytes','usage_lineage_bytes','usage_work_items','usage_work_bytes','usage_log_rows','usage_log_bytes','usage_receipts','usage_receipt_bytes') AND scope_key IN ('',${scopeKey(scope)})`,
     );
     const get = (dimension: string, environment = false, scoped = false) =>
       rows.find(

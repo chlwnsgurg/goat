@@ -141,7 +141,7 @@ it.effect(
           deletingEnvironmentId: environmentId,
           deletedAtUtc: "2026-10-14T00:00:00.000Z",
           suppressedSourceKeys: [],
-          suppressedContentFingerprints: [],
+          suppressedContent: [],
           sourceExclusions: [],
         },
       });

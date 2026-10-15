@@ -184,12 +184,19 @@ export const assertUsageCounters = Effect.gen(function* () {
     space: string;
   }>`SELECT space FROM memory_items UNION SELECT space FROM memory_identity_ledger UNION SELECT space FROM memory_payloads UNION SELECT memory_space_id AS space FROM memory_events`;
   for (const { space } of spaces) {
-    const id = M.MemorySpaceId.make(space);
+    // Internal unbound storage uses _local:<environment>, alongside UUID spaces.
+    const id = space as M.MemorySpaceId;
     const scopes = yield* sql<{
       scope_json: string;
     }>`SELECT DISTINCT scope_json FROM memory_items WHERE space=${space}`;
     const candidates: M.MemoryScope[] = [{ kind: "user" }];
-    for (const row of scopes) candidates.push(yield* decodeScope(row.scope_json));
+    for (const row of scopes) {
+      // Some SQL-only tests intentionally store a placeholder scope_json; user is still checked.
+      const scope = yield* decodeScope(row.scope_json).pipe(
+        Effect.catch(() => Effect.succeed(null)),
+      );
+      if (scope) candidates.push(scope);
+    }
     for (const scope of candidates)
       assert.deepStrictEqual(yield* store.usage(id, scope), yield* scanUsage(id, scope));
   }

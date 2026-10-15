@@ -10,7 +10,7 @@ export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const bytes = (column: string) => `length(CAST(${column} AS BLOB))`;
   const live = (p: string) =>
-    `(SELECT coalesce(sum(${bytes("body_json")}),0) FROM memory_payloads WHERE space=${p}.space AND memory_id=${p}.memory_id AND payload_ref IN (SELECT r.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value))`;
+    `(SELECT coalesce(sum(${bytes("p.body_json")}),0) FROM (SELECT DISTINCT r.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value) head JOIN memory_payloads p ON p.space=${p}.space AND p.payload_ref=head.payload_ref AND p.memory_id=${p}.memory_id)`;
   const summary = (p: string) =>
     `(${p}.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value WHERE json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL))`;
   const payloadLive = (p: string) =>
@@ -147,30 +147,37 @@ export default Effect.gen(function* () {
       );
   }
   for (const action of ["INSERT", "UPDATE", "DELETE"] as const) {
-    // A revision can change either old or new item's head interpretation; at most two items.
-    const affected = [
-      action !== "INSERT" ? "(i.space=OLD.space AND i.memory_id=OLD.memory_id)" : null,
-      action !== "DELETE" ? "(i.space=NEW.space AND i.memory_id=NEW.memory_id)" : null,
-    ]
-      .filter(Boolean)
-      .join(" OR ");
+    // Re-evaluate at most two items by PK, then update exact counter keys. No scope scan.
+    const prefixes = action === "INSERT" ? ["NEW"] : action === "DELETE" ? ["OLD"] : ["OLD", "NEW"];
     for (const [timing, sign] of [
       ["BEFORE", -1],
       ["AFTER", 1],
     ] as const) {
-      const adjust = (d: string, scope: string, value: string, global = false) => {
-        const target = global
-          ? "memory_quota_counters.space='_usage_environment' AND scope_key=''"
-          : scope === "scope_key"
-            ? `(space,scope_key) IN (SELECT i.space,i.scope_key FROM memory_items i WHERE ${affected})`
-            : `space IN (SELECT i.space FROM memory_items i WHERE ${affected}) AND scope_key=''`;
-        return `UPDATE memory_quota_counters SET value=value${sign < 0 ? "-" : "+"}(SELECT coalesce(sum(${value}),0) FROM memory_items i WHERE (${affected})${global ? "" : ` AND i.space=memory_quota_counters.space${scope === "scope_key" ? " AND i.scope_key=memory_quota_counters.scope_key" : ""}`}) WHERE dimension='usage_${d}' AND ${target};`;
-      };
+      const updates = prefixes
+        .map((p) => {
+          const match =
+            `i.space=${p}.space AND i.memory_id=${p}.memory_id` +
+            (action === "UPDATE" && p === "NEW"
+              ? " AND (NEW.space!=OLD.space OR NEW.memory_id!=OLD.memory_id)"
+              : "");
+          const amount = (expression: string) =>
+            `(SELECT coalesce(sum(${expression}),0) FROM memory_items i WHERE ${match})`;
+          const liveDelta = both(`${p}.space`, "live_bytes", amount(live("i")), sign);
+          const scope = `(SELECT i.scope_key FROM memory_items i WHERE ${match})`;
+          return (
+            liveDelta +
+            (sign < 0
+              ? delta(`${p}.space`, "summaries", scope, amount(summary("i")), sign)
+              : `INSERT INTO memory_quota_counters(space,dimension,scope_key,value) SELECT i.space,'usage_summaries',i.scope_key,${summary("i")} FROM memory_items i WHERE ${match} ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=value+excluded.value;`)
+          );
+        })
+        .join("");
       yield* sql.unsafe(
-        `CREATE TRIGGER usage_revision_${action.toLowerCase()}_${timing.toLowerCase()} ${timing} ${action}${action === "UPDATE" ? " OF space,memory_id,revision_id,provenance_json,payload_ref" : ""} ON memory_revisions BEGIN ${adjust("live_bytes", "", live("i"))}${adjust("live_bytes", "", live("i"), true)}${adjust("summaries", "scope_key", summary("i"))} END`,
+        `CREATE TRIGGER usage_revision_${action.toLowerCase()}_${timing.toLowerCase()} ${timing} ${action}${action === "UPDATE" ? " OF space,memory_id,revision_id,provenance_json,payload_ref" : ""} ON memory_revisions${action === "INSERT" && timing === "BEFORE" ? " WHEN NOT EXISTS(SELECT 1 FROM memory_revisions WHERE space=NEW.space AND revision_id=NEW.revision_id)" : ""} BEGIN ${updates} END`,
       );
     }
   }
+
   for (const action of ["INSERT", "DELETE"] as const) {
     const p = action === "INSERT" ? "NEW" : "OLD";
     const value = `coalesce((SELECT 1 FROM memory_identity_ledger l WHERE l.space=${p}.space AND l.memory_id=${p}.memory_id),0)`;
