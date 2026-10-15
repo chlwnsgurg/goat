@@ -434,6 +434,8 @@ export const MemoryRevision = struct({
   provenance: MemoryProvenance,
   createdAtUtc: MemoryUtcTimestamp,
 }).check(
+  // Imported exact-copy aliases share the parent's payload. The Store verifies
+  // parent ownership, scope and exact payload equality before canonical storage.
   Schema.makeFilter(
     (v) =>
       !v.parents.includes(v.revisionId) &&

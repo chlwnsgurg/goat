@@ -2044,3 +2044,40 @@ describe("MemoryImport M3d", () => {
     }).pipe(Effect.provide(importLive)),
   );
 });
+
+describe("MemoryImport M3d alias ownership", () => {
+  it.effect("rejects forged shared payloads atomically at the canonical Store boundary", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      yield* seedMember;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const p = prepared();
+      yield* service.importPorts.commit(p, Effect.void);
+      const op = (yield* store.readOperation(space, p.selection.operationId))!;
+      if (op.kind !== "upsert") return assert.fail("expected upsert");
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, yield* remoteApproval(op));
+      const operationId = M.MemoryOperationId.make(uuid(930));
+      const forged = {
+        ...op,
+        operationId,
+        expectedHeads: [op.revision.revisionId],
+        revision: {
+          ...op.revision,
+          operationId,
+          revisionId: M.MemoryRevisionId.make(uuid(931)),
+          parents: [op.revision.revisionId],
+        },
+        payload: { ...op.payload, text: "forged shared body" },
+      };
+      const before = yield* allMemoryInventory;
+      const failure = yield* store
+        .transact(service.admitHubOperationTx({ authority, operation: forged }))
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryStoreConflict");
+      if (failure._tag === "MemoryStoreConflict")
+        assert.strictEqual(failure.code, "identity_mismatch");
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+});

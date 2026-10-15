@@ -3657,8 +3657,13 @@ const make = Effect.gen(function* () {
           (work.status === "completed" || work.status === "failed") &&
           rows[0]?.completed_receipt_json &&
           rows[0].completed_receipt_json === (yield* receiptCodec.encode(result))
-        )
+        ) {
+          yield* settleImportOperationTx(
+            yield* stored("import-settlement-space", decodeMemorySpaceId(work.space)),
+            result,
+          );
           return;
+        }
         const previous = original[0]
           ? yield* receiptCodec.decode(original[0].receipt_json, strict)
           : undefined;
@@ -6225,6 +6230,7 @@ const make = Effect.gen(function* () {
               : item.outcome
           : item.outcome,
       };
+      if (NodeUtil.isDeepStrictEqual(item, next)) continue;
       yield* stored(
         "import-settlement-item",
         sql`UPDATE memory_import_receipts SET registration_json=${yield* importItemCodec.encode(next)},outcome=${next.outcome} WHERE receipt_id=${row.receipt_id}`,
@@ -6263,6 +6269,7 @@ const make = Effect.gen(function* () {
           items: selections.flatMap((s) => (s.result ? [s.result] : [])),
         },
       };
+      if (NodeUtil.isDeepStrictEqual(batch, next)) continue;
       yield* stored(
         "import-settlement-batch",
         sql`UPDATE memory_import_receipts SET completed_items_json=${yield* importBatchCodec.encode(next)} WHERE receipt_id=${row.receipt_id}`,
