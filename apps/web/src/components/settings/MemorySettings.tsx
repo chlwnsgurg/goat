@@ -981,6 +981,7 @@ export function MemoryRevertControl({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MemoryRevertResult | null>(null);
+  const [openedAt] = useState(Date.now);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -992,7 +993,7 @@ export function MemoryRevertControl({
     item,
     entry,
     history,
-    now: Date.now(),
+    now: openedAt,
     ...(selected ? { restoredRevisionId: selected } : {}),
   });
   const available = canWrite && connection !== null && display.canRevert;
@@ -1036,8 +1037,9 @@ export function MemoryRevertControl({
     setBusy(true);
     setError(null);
     const response = await revert({ environmentId, input });
-    if (!liveDestination()) return;
+    if (!mounted.current) return;
     setBusy(false);
+    if (!liveDestination()) return;
     if (response._tag === "Failure") {
       setError("Revert request failed. Retry this request with the same operation ID.");
       return;
@@ -1052,6 +1054,7 @@ export function MemoryRevertControl({
       <p>{display.windowLabel}</p>
       {display.timeNotice ? <p>{display.timeNotice}</p> : null}
       {display.reason ? <p>{display.reason}</p> : null}
+      {!canWrite ? <p>Memory write permission is required to revert.</p> : null}
       {result ? <p role="status">{presentMemoryRevertResult(result).label}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
       {!result && available ? (

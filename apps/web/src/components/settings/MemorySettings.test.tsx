@@ -9,7 +9,7 @@ import {
   MemoryResolution,
   MemoryResolutionPayload,
   type MemoryHistoryPage,
-  type MemoryRevertResult,
+  MemoryRevertResult,
 } from "@goat/contracts";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
@@ -89,6 +89,7 @@ const item = Schema.decodeUnknownSync(MemoryItem)({
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-15T00:00:00.000Z"));
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.createElement("div");
   document.body.append(container);
@@ -101,8 +102,10 @@ beforeEach(() => {
   state.connection = {};
 });
 
+const decodeRevision = Schema.decodeUnknownSync(MemoryRevision);
+const decodeRevert = Schema.decodeUnknownSync(MemoryRevertResult);
 const revision = (n: number) =>
-  Schema.decodeUnknownSync(MemoryRevision)({
+  decodeRevision({
     memorySpaceId: id(1),
     memoryId: id(2),
     revisionId: id(n),
@@ -231,7 +234,25 @@ it.each(["pending", "accepted", "revision_changed", "forgotten"] as const)(
     await chooseOriginal();
     state.result = {
       _tag: "Success",
-      value: { status, localAvailability: activeItem.localAvailability },
+      value: decodeRevert({
+        operationId: id(9),
+        memoryId: id(2),
+        resolutionId: id(6),
+        revertDeadlineUtc: resolution.revertDeadlineUtc,
+        status,
+        ...(status === "accepted"
+          ? {
+              localAvailability: activeItem.localAvailability,
+              receipt: {
+                operationId: id(9),
+                memoryId: id(2),
+                outcome: "accepted",
+                revisionId: id(8),
+                pendingSync: false,
+              },
+            }
+          : {}),
+      }),
     };
     await click("Revert resolution");
     const labels = {
@@ -284,7 +305,13 @@ it("rejects a disconnected destination at admission and discards a late result a
   await act(async () =>
     complete({
       _tag: "Success",
-      value: { status: "pending" } satisfies Pick<MemoryRevertResult, "status">,
+      value: decodeRevert({
+        operationId: id(9),
+        memoryId: id(2),
+        resolutionId: id(6),
+        revertDeadlineUtc: resolution.revertDeadlineUtc,
+        status: "pending",
+      }),
     }),
   );
   expect(settled).not.toHaveBeenCalled();
@@ -295,6 +322,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 async function renderForget() {
   const { AtomRegistry } = await import("effect/reactivity");
