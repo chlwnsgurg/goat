@@ -40,7 +40,7 @@ const bridge = vi.hoisted(() => ({
   current: null as unknown,
   platform: "ios",
   navigations: [] as unknown[],
-  focus: new Set<() => void | (() => void)>(),
+  focus: new Map<() => void | (() => void), void | (() => void)>(),
   active: new Set<(state: string) => void>(),
   confirmations: [] as Array<() => void>,
 }));
@@ -128,11 +128,10 @@ vi.mock("@react-navigation/native", async () => ({
   useFocusEffect: (callback: () => void | (() => void)) => {
     const { useEffect } = React;
     useEffect(() => {
-      bridge.focus.add(callback);
-      const cleanup = callback();
+      bridge.focus.set(callback, callback());
       return () => {
+        bridge.focus.get(callback)?.();
         bridge.focus.delete(callback);
-        cleanup?.();
       };
     }, [callback]);
   },
@@ -558,7 +557,10 @@ export function createNativeMemoryHarness() {
     updateSettings,
     navigations: bridge.navigations,
     focus: () => {
-      for (const callback of bridge.focus) callback();
+      for (const [callback, cleanup] of bridge.focus) {
+        cleanup?.();
+        bridge.focus.set(callback, callback());
+      }
     },
     active: () => {
       for (const listener of bridge.active) listener("active");
