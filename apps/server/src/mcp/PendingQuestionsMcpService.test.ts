@@ -13,6 +13,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ServerCommand,
+  type OrchestrationV2UserInputQuestion,
   type UserInputRespondedBy,
 } from "@goat/contracts";
 import * as DateTime from "effect/DateTime";
@@ -68,7 +69,13 @@ const foreign: UserInputRespondedBy = {
 };
 const answers = { q: "  exact label\n" };
 const respondInput = { threadId: targetId, requestId, reason, answers };
-const questionProjection = (id = targetId, rid = requestId): OrchestrationV2ThreadProjection => {
+const questionProjection = (
+  id = targetId,
+  rid = requestId,
+  questions: ReadonlyArray<OrchestrationV2UserInputQuestion> = [
+    { id: "q", header: "Choice", question: "Use the existing API?", options: [] },
+  ],
+): OrchestrationV2ThreadProjection => {
   const projection = idleThreadProjection(liveThreadShell(id));
   const request: OrchestrationV2RuntimeRequest = {
     id: rid,
@@ -98,7 +105,7 @@ const questionProjection = (id = targetId, rid = requestId): OrchestrationV2Thre
     completedAt: null,
     updatedAt: now,
     requestId: rid,
-    questions: [{ id: "q", header: "Choice", question: "Use the existing API?", options: [] }],
+    questions,
   };
   return { ...projection, runtimeRequests: [request], turnItems: [item] };
 };
@@ -369,6 +376,106 @@ describe("PendingQuestionsMcpService", () => {
       });
     }),
   );
+  it.effect.each([
+    { name: "missing answers", answers: undefined },
+    { name: "empty answers", answers: {} },
+    { name: "a header instead of an id", answers: { Choice: "Yes" } },
+    { name: "an extra question id", answers: { q: "Yes", extra: "No" } },
+  ])("explains the expected question ids for $name without dispatching", ({ answers }) =>
+    Effect.gen(function* () {
+      const run = yield* runService({}, (service) =>
+        service.respond(scope, {
+          threadId: targetId,
+          requestId,
+          reason,
+          ...(answers === undefined ? {} : { answers }),
+        }),
+      );
+      expect(run.result).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: expect.stringContaining("Expected question ids: q."),
+        },
+      });
+      expect(run.commands).toEqual([]);
+    }),
+  );
+  it.effect.each([
+    { name: "an unknown option", answer: "Maybe", multiSelect: false },
+    { name: "multiple choices for single select", answer: ["Yes", "No"], multiSelect: false },
+    { name: "an empty selection", answer: [], multiSelect: true },
+    { name: "an unknown multi select option", answer: ["Yes", "Maybe"], multiSelect: true },
+  ])(
+    "lists allowed choices for $name when custom answers are forbidden",
+    ({ answer, multiSelect }) =>
+      Effect.gen(function* () {
+        const records = [
+          questionProjection(targetId, requestId, [
+            {
+              id: "q",
+              header: "Choice",
+              question: "Proceed?",
+              multiSelect,
+              allowCustomAnswer: false,
+              options: [
+                { label: "Yes", description: "Proceed", value: "yes-id" },
+                { label: "No", description: "Stop" },
+              ],
+            },
+          ]),
+        ];
+        const run = yield* runService({ records }, (service) =>
+          service.respond(scope, { ...respondInput, answers: { q: answer } }),
+        );
+        expect(run.result).toMatchObject({
+          failure: {
+            code: "invalid_request",
+            message: expect.stringContaining('Allowed options: "yes-id", "No".'),
+          },
+        });
+        expect(run.commands).toEqual([]);
+      }),
+  );
+  it.effect.each([
+    { answer: "Yes", multiSelect: false, allowCustomAnswer: false },
+    { answer: "yes-id", multiSelect: false, allowCustomAnswer: false },
+    { answer: ["yes-id", "No"], multiSelect: true, allowCustomAnswer: false },
+    { answer: "  custom text\n", multiSelect: false, allowCustomAnswer: true },
+    { answer: ["Yes", "custom"], multiSelect: true, allowCustomAnswer: undefined },
+  ])(
+    "preserves valid answers ($answer, custom=$allowCustomAnswer)",
+    ({ answer, multiSelect, allowCustomAnswer }) =>
+      Effect.gen(function* () {
+        const records = [
+          questionProjection(targetId, requestId, [
+            {
+              id: "q",
+              header: "Choice",
+              question: "Proceed?",
+              multiSelect,
+              ...(allowCustomAnswer === undefined ? {} : { allowCustomAnswer }),
+              options: [
+                { label: "Yes", description: "Proceed", value: "yes-id" },
+                { label: "No", description: "Stop" },
+              ],
+            },
+            {
+              id: "optional",
+              header: "Notes",
+              question: "Anything else?",
+              required: false,
+              options: [],
+            },
+          ]),
+        ];
+        const run = yield* runService({ records }, (service) =>
+          service.respond(scope, { ...respondInput, answers: { q: answer } }),
+        );
+        expect(run.result).toMatchObject({ success: { sequence: 7 } });
+        expect(run.commands).toHaveLength(1);
+        expect(run.commands[0]).toMatchObject({ answers: { q: answer } });
+      }),
+  );
   it.effect("rejects forged provenance from a thread caller", () =>
     Effect.gen(function* () {
       for (const host of [undefined, "box"]) {
@@ -620,13 +727,23 @@ describe("PendingQuestionsMcpService", () => {
         const refused = yield* runService({ records }, (service) =>
           service.respond(caller, decideInput),
         );
-        expect(refused.result).toMatchObject({ failure: { code: "capability_denied" } });
+        expect(refused.result).toMatchObject({
+          failure: {
+            code: "capability_denied",
+            message: expect.stringContaining("orchestration:approve"),
+          },
+        });
         expect(refused.commands).toEqual([]);
       }
       const both = yield* runService({ records }, (service) =>
         service.respond(approver, { ...decideInput, answers }),
       );
-      expect(both.result).toMatchObject({ failure: { code: "invalid_request" } });
+      expect(both.result).toMatchObject({
+        failure: {
+          code: "invalid_request",
+          message: expect.stringContaining("omit the other field"),
+        },
+      });
       const answeredApproval = yield* runService({ records }, (service) =>
         service.respond(approver, respondInput),
       );
