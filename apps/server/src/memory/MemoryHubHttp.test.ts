@@ -1,6 +1,7 @@
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
 import { expect, it } from "vite-plus/test";
 import * as M from "@goat/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -29,6 +30,7 @@ const setup = Layer.effectDiscard(
     yield* lineageMigration;
     yield* checkpointMigration;
     yield* reportMigration;
+    yield* usageMigration;
     const sql = yield* SqlClient.SqlClient;
     const crypto = yield* Crypto.Crypto;
     const digest = Hex.encode(
