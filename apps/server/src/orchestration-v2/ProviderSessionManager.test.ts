@@ -2720,6 +2720,7 @@ it.effect(
 it.effect("current memory DTO withholds access until the committed on epoch is installed", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
+    const initialized = yield* Deferred.make<void>();
     const blocked = yield* Deferred.make<void>();
     const release = yield* Deferred.make<void>();
     const completed = yield* Deferred.make<void>();
@@ -2751,7 +2752,13 @@ it.effect("current memory DTO withholds access until the committed on epoch is i
                           ),
                         ),
                       )
-                    : Stream.make(event),
+                    : Stream.make(event).pipe(
+                        Stream.concat(
+                          Stream.fromEffect(Deferred.succeed(initialized, undefined)).pipe(
+                            Stream.drain,
+                          ),
+                        ),
+                      ),
                 ),
               ),
             ),
@@ -2780,6 +2787,7 @@ it.effect("current memory DTO withholds access until the committed on epoch is i
       yield* sink.write({
         events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
       });
+      yield* Deferred.await(initialized);
       yield* manager.open({
         threadId,
         providerSessionId,
