@@ -5882,3 +5882,161 @@ it.effect.each(resolutionLineageModes)(
       );
     }),
 );
+
+it.effect.each(["offline", "next-page", "transport-retry", "chain", "rejected"] as const)(
+  "H-R4-1 sends local dependencies before derived work: %s",
+  (scenario) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // A separate real SQLite hub; only the network boundary is bridged.
+        const h = yield* Layer.build(Layer.fresh(Maintenance.layer.pipe(Layer.provideMerge(core))));
+        const hStore = Context.get(h, Store.MemoryStore);
+        const hService = Context.get(h, Service.MemoryService);
+        const hSql = Context.get(h, SqlClient.SqlClient);
+        yield* hSql`INSERT INTO memory_hub_members(space,environment,credential_digest,credential_version,status,joined_at) VALUES (${space},${local},${"a".repeat(64)},1,'active',0)`;
+        const sent: M.MemoryOperationId[] = [];
+        let failedTransport = false;
+        const client = peer({
+          push: (_c, input) =>
+            Effect.gen(function* () {
+              const op = input.operations[0]!;
+              sent.push(op.operationId);
+              if (scenario === "transport-retry" && !failedTransport) {
+                failedTransport = true;
+                return yield* new M.MemoryHubError({ code: "unavailable" });
+              }
+              const receipt = yield* hService.admitHubOperation({
+                operation: op,
+                authority: {
+                  principal: {
+                    memorySpaceId: space,
+                    environmentId: local,
+                    credentialVersion: 1,
+                    scopes: ["memory:sync"],
+                  },
+                  now: Clock.currentTimeMillis,
+                  reauthorize: Effect.void,
+                },
+              });
+              return { receipts: [receipt] };
+            }).pipe(Effect.mapError(() => new M.MemoryHubError({ code: "unavailable" }))),
+        });
+        yield* Effect.gen(function* () {
+          yield* ready;
+          const service = yield* Service.MemoryService;
+          const store = yield* Store.MemoryStore;
+          const sql = yield* SqlClient.SqlClient;
+          const sync = yield* Sync.MemorySyncService;
+          assert.notStrictEqual(store, hStore);
+          const save = Effect.fnUntraced(function* (
+            n: number,
+            deps: readonly M.MemoryRevisionId[] = [],
+          ) {
+            const value: M.MemoryUpsertInput = {
+              memorySpaceId: space,
+              memoryId: M.MemoryId.make(id(n)),
+              operationId: M.MemoryOperationId.make(id(n)),
+              expectedHeads: [],
+              scope: { kind: "user" },
+              assertionKind: "inference",
+              payload: {
+                text: `synthetic ordering ${n}`,
+                evidence: [],
+                derivedFromMemoryRevisions: deps,
+              },
+              baseBoundary: null,
+            };
+            yield* service.upsert(value, Effect.void);
+            return {
+              ...value,
+              revision: (yield* store.loadAggregate(space, value.memoryId)).heads[0]!,
+            };
+          });
+          const a = yield* save(99000);
+          const b = scenario === "chain" ? yield* save(98999, [a.revision]) : null;
+          const s = yield* save(98000, [b?.revision ?? a.revision]);
+          // Fill the entire old page with derived candidates ordered before A.
+          if (scenario === "next-page")
+            for (let n = 98001; n < 98101; n++) yield* save(n, [a.revision]);
+          // The hub forgot A while this member was offline: both submissions must terminate.
+          if (scenario === "rejected") {
+            yield* hService.upsert(
+              { ...a, operationId: M.MemoryOperationId.make(id(99991)) },
+              Effect.void,
+            );
+            yield* hService.forget(
+              {
+                memorySpaceId: space,
+                memoryId: a.memoryId,
+                operationId: M.MemoryOperationId.make(id(99992)),
+                expectedHeads: (yield* hStore.loadAggregate(space, a.memoryId)).heads,
+              },
+              Effect.void,
+            );
+          }
+          yield* sync.syncOnce;
+          assert.deepStrictEqual(sent, [a.operationId]);
+          const waiting = yield* sql<{
+            status: string;
+            attempt: number;
+            failure_code: string | null;
+          }>`SELECT status,attempt,failure_code FROM memory_outbox WHERE id=${`sync:${space}:${s.operationId}`}`;
+          assert.deepStrictEqual(waiting, [{ status: "pending", attempt: 0, failure_code: null }]);
+          assert.isUndefined(yield* hStore.receipt(space, s.operationId));
+          if (scenario === "transport-retry") {
+            yield* sync.syncOnce;
+            assert.deepStrictEqual(sent, [a.operationId]);
+            yield* TestClock.adjust("2 seconds");
+            yield* sync.syncOnce;
+            assert.deepStrictEqual(sent, [a.operationId, a.operationId]);
+          }
+          yield* sync.syncOnce;
+          if (b) {
+            assert.deepStrictEqual(sent, [a.operationId, b.operationId]);
+            assert.isUndefined(yield* hStore.receipt(space, s.operationId));
+            yield* sync.syncOnce;
+          }
+          if (scenario === "next-page") yield* sync.syncOnce;
+          const aReceipt = (yield* hStore.receipt(space, a.operationId))!.receipt;
+          const sReceipt = (yield* hStore.receipt(space, s.operationId))!.receipt;
+          assert.strictEqual(aReceipt.outcome, scenario === "rejected" ? "rejected" : "accepted");
+          assert.strictEqual(sReceipt.outcome, scenario === "rejected" ? "rejected" : "accepted");
+          assert.deepStrictEqual((yield* store.receipt(space, s.operationId))!.receipt, sReceipt);
+          assert.lengthOf(
+            yield* store.readEligibleOutbox(space, yield* Clock.currentTimeMillis, 100),
+            0,
+          );
+          if (scenario === "rejected") {
+            assert.strictEqual(sReceipt.failureCode, "source_invalidated");
+            assert.deepStrictEqual(
+              yield* sql`SELECT status FROM memory_outbox WHERE id=${`sync:${space}:${s.operationId}`}`,
+              [{ status: "failed" }],
+            );
+            yield* sync.syncOnce;
+            assert.lengthOf(sent, 2);
+          } else {
+            const maintenance = Context.get(h, Maintenance.MemoryFtsMaintenance);
+            for (const value of [a, ...(b ? [b] : []), s]) {
+              const current = yield* hStore.loadAggregate(space, value.memoryId);
+              assert.isTrue(
+                yield* maintenance.repair({
+                  memorySpaceId: space,
+                  memoryId: value.memoryId,
+                  revisionId: value.revision,
+                  generation: current.generation,
+                }),
+              );
+            }
+            const results = yield* hService.search(
+              { memorySpaceId: space, query: "ordering", limit: 100, mode: "fts" },
+              Effect.void,
+            );
+            assert.includeMembers(
+              results.items.map((item) => item.memoryId),
+              [a.memoryId, s.memoryId],
+            );
+          }
+        }).pipe(Effect.provide(fixture(client)));
+      }),
+    ),
+);
