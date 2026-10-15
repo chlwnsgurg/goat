@@ -4,7 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@goat/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
-import migration from "./078_MemoryUsageCounters.ts";
+import migration, { memoryUsageHeadBytes } from "./078_MemoryUsageCounters.ts";
 import * as Store from "../../memory/MemoryStore.ts";
 import { assertUsageCounters } from "../../memory/MemoryUsageScan.testkit.ts";
 
@@ -41,6 +41,13 @@ it.effect(
       );
       assert.deepStrictEqual(yield* runMigrations(), [[78, "MemoryUsageCounters"]]);
       yield* assertUsageCounters;
+      const plan = yield* sql.unsafe<{ detail: string }>(
+        `EXPLAIN QUERY PLAN SELECT ${memoryUsageHeadBytes("i")} FROM memory_items i WHERE i.space='00000000-0000-4000-8000-000000000001' AND i.memory_id='memory'`,
+      );
+      const details = plan.map((row) => row.detail).join("\n");
+      assert.match(details, /SEARCH r .*\(space=\? AND revision_id=\?\)/, details);
+      assert.match(details, /SEARCH p .*\(space=\? AND payload_ref=\?\)/, details);
+      assert.isFalse(/SCAN [rp]\b/.test(details), details);
       assert.deepStrictEqual(yield* runMigrations(), []);
       yield* assertUsageCounters;
       yield* sql`DELETE FROM memory_compact_receipts`;

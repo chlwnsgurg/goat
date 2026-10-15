@@ -2,19 +2,21 @@ import * as M from "@goat/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+const bytes = (column: string) => `length(CAST(${column} AS BLOB))`;
+export const memoryUsageHeadBytes = (p: string) =>
+  `(SELECT coalesce(sum(${bytes("p.body_json")}),0) FROM (SELECT DISTINCT r.payload_ref FROM json_each(${p}.heads_json) h CROSS JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value) head CROSS JOIN memory_payloads p ON p.space=${p}.space AND p.payload_ref=head.payload_ref AND p.memory_id=${p}.memory_id)`;
+const summary = (p: string) =>
+  `(${p}.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(${p}.heads_json) h CROSS JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value WHERE json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL))`;
+const payloadLive = (p: string) =>
+  `EXISTS(SELECT 1 FROM memory_items i CROSS JOIN json_each(i.heads_json) h CROSS JOIN memory_revisions r ON r.space=i.space AND r.revision_id=h.value WHERE i.space=${p}.space AND i.memory_id=${p}.memory_id AND r.payload_ref=${p}.payload_ref)`;
+
 /** Fixed dimensions only. Head joins start with bounded json_each and use revision/payload PKs.
  * BEFORE/AFTER revision triggers also cover head references arriving before their revision.
  * All writers (including compaction and checkpoint SQL) share the transaction's accounting.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const bytes = (column: string) => `length(CAST(${column} AS BLOB))`;
-  const live = (p: string) =>
-    `(SELECT coalesce(sum(${bytes("p.body_json")}),0) FROM (SELECT DISTINCT r.payload_ref FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value) head JOIN memory_payloads p ON p.space=${p}.space AND p.payload_ref=head.payload_ref AND p.memory_id=${p}.memory_id)`;
-  const summary = (p: string) =>
-    `(${p}.status!='forgotten' AND EXISTS(SELECT 1 FROM json_each(${p}.heads_json) h JOIN memory_revisions r ON r.space=${p}.space AND r.revision_id=h.value WHERE json_extract(r.provenance_json,'$.sourceThread') IS NOT NULL))`;
-  const payloadLive = (p: string) =>
-    `EXISTS(SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions r ON r.space=i.space AND r.revision_id=h.value WHERE i.space=${p}.space AND i.memory_id=${p}.memory_id AND r.payload_ref=${p}.payload_ref)`;
+  const live = memoryUsageHeadBytes;
   const unforgotten = (p: string) =>
     `NOT EXISTS(SELECT 1 FROM memory_tombstones t WHERE t.space=${p}.space AND t.memory_id=${p}.memory_id)`;
   // Negative deltas use UPDATE: SQLite checks an INSERT's nonnegative constraint before UPSERT.
