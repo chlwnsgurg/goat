@@ -1,3 +1,4 @@
+import { checkUsage } from "./MemoryUsageScan.testkit.ts";
 import {
   uuid,
   space,
@@ -32,6 +33,8 @@ import searchMigration from "../persistence/Migrations/073_MemorySearchCounters.
 import lineageMigration from "../persistence/Migrations/075_MemoryImportLineage.ts";
 import checkpointMigration from "../persistence/Migrations/076_MemoryCheckpointAccounting.ts";
 import reportMigration from "../persistence/Migrations/077_MemoryReportLifecycle.ts";
+import usageMigration from "../persistence/Migrations/078_MemoryUsageCounters.ts";
+import revertMigration from "../persistence/Migrations/079_MemoryRevertResults.ts";
 import * as Service from "./MemoryService.ts";
 import * as Quota from "./MemoryQuotaService.ts";
 import * as RepositoryResolver from "../project/RepositoryIdentityResolver.ts";
@@ -46,6 +49,8 @@ const database = Layer.effectDiscard(
     Effect.andThen(lineageMigration),
     Effect.andThen(checkpointMigration),
     Effect.andThen(reportMigration),
+    Effect.andThen(usageMigration),
+    Effect.andThen(revertMigration),
   ),
 ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const live = Store.layer.pipe(Layer.provideMerge(database));
@@ -96,7 +101,7 @@ describe("MemoryImport lifetime lineage", () => {
       assert.deepStrictEqual(yield* inventory, before);
       yield* store.transact(store.unionImportLineageTx([record(999)], Store.hubAdmission));
       assert.deepStrictEqual(yield* inventory, before);
-    }).pipe(Effect.provide(live)),
+    }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "enforces global encoded-byte equality/+1 and rolls back reserve, generation and metadata",
@@ -117,7 +122,7 @@ describe("MemoryImport lifetime lineage", () => {
         if (failure._tag === "MemoryCapacityError")
           assert.strictEqual(failure.dimension, "import_lineage_bytes");
         assert.deepStrictEqual(yield* inventory, before);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
   it.effect(
     "approved replica restores complete canonical union despite local record and byte limits",
@@ -135,7 +140,7 @@ describe("MemoryImport lifetime lineage", () => {
           ),
         );
         assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 1001);
-      }).pipe(Effect.provide(live)),
+      }).pipe(checkUsage, Effect.provide(live)),
   );
 });
 

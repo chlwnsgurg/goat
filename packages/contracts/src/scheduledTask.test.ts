@@ -81,6 +81,29 @@ describe("persisted task memory ceiling", () => {
     };
     const persisted = Schema.decodeUnknownSync(ScheduledTask)(row);
     expect(persisted.memoryGrantCeiling).toBe("none");
+    expect(persisted).not.toHaveProperty("currentMemoryAccess");
+    const assessment = { access: "read", reason: "read_only_destination" } as const;
+    const current = Schema.decodeUnknownSync(ScheduledTask)({
+      ...row,
+      currentMemoryAccess: assessment,
+    });
+    expect(
+      Schema.decodeUnknownSync(Schema.fromJsonString(ScheduledTask))(
+        Schema.encodeSync(Schema.fromJsonString(ScheduledTask))(current),
+      ).currentMemoryAccess,
+    ).toEqual(assessment);
+    expect(() =>
+      Schema.decodeUnknownSync(ScheduledTask)({
+        ...row,
+        currentMemoryAccess: { access: "write", reason: "ceiling" },
+      }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(ScheduledTask)({
+        ...row,
+        currentMemoryAccess: { access: "none", reason: "/private/path" },
+      }),
+    ).toThrow();
     expect(
       Schema.decodeUnknownSync(Schema.fromJsonString(ScheduledTask))(
         Schema.encodeSync(Schema.fromJsonString(ScheduledTask))(persisted),
