@@ -3451,7 +3451,7 @@ it.effect.each(["accepted", "rejected"] as const)(
         outcome === "accepted" ? "accepted" : "forgotten",
       );
       if (page.revertResults[0]?.status === "accepted")
-        assert.strictEqual(page.revertResults[0].localAvailability.exposure, "held");
+        assert.strictEqual(page.revertResults[0].localAvailability.exposure, "forgotten");
       assert.isTrue(page.revisions.every((r) => r.payload === null));
       assert.isTrue(page.resolutions.every((r) => r.payload === null));
       const slots = yield* sql<{
