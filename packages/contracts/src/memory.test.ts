@@ -1843,6 +1843,55 @@ describe("task memory grant ceiling JSON", () => {
   });
 });
 
+describe("hub settings roster boundary", () => {
+  const member = {
+    environmentId: "device",
+    credentialVersion: 1,
+    status: "pending_ack",
+    joinedAt: 0,
+  };
+  const view = { settings: { mode: "hub", memorySpaceId: id() }, version: 2, members: [member] };
+  it("bounds and validates the live roster without accepting credential metadata", () => {
+    round(M.MemoryHubSettingsView, view);
+    for (const status of ["active"])
+      round(M.MemoryHubSettingsView, { ...view, members: [{ ...member, status }] });
+    round(M.MemoryHubSettingsView, {
+      ...view,
+      members: Array.from({ length: M.MEMORY_HUB_MAX_MEMBERS }, (_, n) => ({
+        ...member,
+        environmentId: `device-${n}`,
+      })),
+    });
+    rejects(M.MemoryHubSettingsView, {
+      ...view,
+      members: Array.from({ length: M.MEMORY_HUB_MAX_MEMBERS + 1 }, (_, n) => ({
+        ...member,
+        environmentId: `device-${n}`,
+      })),
+    });
+    rejects(M.MemoryHubSettingsView, { ...view, members: [member, member] });
+    for (const field of ["credential", "credentialDigest", "secretName", "endpoint"])
+      rejects(M.MemoryHubSettingsView, { ...view, members: [{ ...member, [field]: "forged" }] });
+    for (const patch of [{ credentialVersion: 0 }, { status: "revoked" }, { joinedAt: -1 }])
+      rejects(M.MemoryHubSettingsView, { ...view, members: [{ ...member, ...patch }] });
+    for (const settings of [
+      { mode: "disabled" },
+      { mode: "hub", memorySpaceId: null },
+      {
+        mode: "member",
+        hubEnvironmentId: "hub",
+        endpoint: "https://hub.example",
+        secretName: "synthetic",
+        memorySpaceId: id(),
+      },
+    ]) {
+      round(M.MemoryHubSettingsView, { ...view, settings, members: [] });
+      rejects(M.MemoryHubSettingsView, { ...view, settings });
+    }
+    rejects(M.MemoryHubDisableResult, { settings: { mode: "disabled" }, version: 1, members: [] });
+  });
+});
+
 it("r5 bounds upsert request identity and exposes incomplete provenance guidance", () => {
   expect(() =>
     decode(M.MemoryProvenance, { environmentId: "env", upsertRequestDigest: "x" }),

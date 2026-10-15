@@ -1,3 +1,4 @@
+import { MemoryEnvironmentEntry } from "./SettingsMemoryRouteScreen";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useNavigation } from "@react-navigation/native";
@@ -186,6 +187,9 @@ function SettingsIndexSections() {
       </SettingsSection>
 
       <SettingsSection title="Server settings">
+        {selectedTargets.map((target) => (
+          <MemoryEnvironmentEntry key={target.environmentId} environmentId={target.environmentId} />
+        ))}
         <SettingsRow
           icon="person.crop.circle"
           label="Provider accounts"

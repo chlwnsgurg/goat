@@ -27,9 +27,8 @@ import {
   MemoryHubSettings,
   MemorySpaceId,
   MemoryHubError,
-  type MemoryHubSettingsUpdateResult,
   type MemoryHubForbiddenError,
-  type MemoryHubSettingsView,
+  type MemoryHubSettingsSnapshot,
   MemoryOperationId,
   ModelSelection,
   ProjectId,
@@ -290,14 +289,14 @@ export class MemoryHubSettingsTransitions extends Context.Service<
     readonly applyMemoryHubTransition: <E, R>(
       input: MemoryHubTransition,
       permit: Effect.Effect<void, E, R>,
-    ) => Effect.Effect<MemoryHubSettingsView, E | ServerSettingsError | MemoryHubError, R>;
+    ) => Effect.Effect<MemoryHubSettingsSnapshot, E | ServerSettingsError | MemoryHubError, R>;
   }
 >()("goat/serverSettings/MemoryHubSettingsTransitions") {}
 
 /** Current committed hub epoch. SQL transactions must use this instead of the full cache. */
 export class MemoryHubCommittedSettings extends Context.Service<
   MemoryHubCommittedSettings,
-  { readonly read: Effect.Effect<MemoryHubSettingsView> }
+  { readonly read: Effect.Effect<MemoryHubSettingsSnapshot> }
 >()("goat/serverSettings/MemoryHubCommittedSettings") {}
 
 /** SQL-free committed policy. An unready producer denies even the default-on setting. */
@@ -669,14 +668,14 @@ export class MemoryHubAdminSettings extends Context.Service<
   MemoryHubAdminSettings,
   {
     readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-    readonly read: Effect.Effect<MemoryHubSettingsView, MemoryHubError>;
+    readonly read: Effect.Effect<MemoryHubSettingsSnapshot, MemoryHubError>;
     readonly readPreviousHubRequestId: Effect.Effect<MemoryOperationId | null, MemoryHubError>;
     readonly readPreviousHubSpace: Effect.Effect<MemorySpaceId | null, MemoryHubError>;
     readonly apply: (
       record: MemoryStore.AdminRecord,
       permit: Effect.Effect<void, MemoryHubForbiddenError>,
     ) => Effect.Effect<
-      Omit<MemoryHubSettingsUpdateResult, "credential">,
+      { readonly view: MemoryHubSettingsSnapshot },
       MemoryHubError | MemoryHubForbiddenError
     >;
   }
@@ -1301,7 +1300,7 @@ const make = Effect.gen(function* () {
   const providerPolicy = yield* makeMemoryProviderPolicy;
   const ownerPublication = yield* makeOwnerPolicyPublication;
   const ownerIdentity = yield* Effect.serviceOption(ServerEnvironment.ServerEnvironmentIdentity);
-  const committedHubRef = yield* Ref.make<MemoryHubSettingsView>({
+  const committedHubRef = yield* Ref.make<MemoryHubSettingsSnapshot>({
     settings: DEFAULT_SERVER_SETTINGS.memoryHub,
     version: DEFAULT_SERVER_SETTINGS.memoryHubVersion,
   });
@@ -1339,7 +1338,7 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  const hasCommittedHubEpoch = (view: MemoryHubSettingsView) =>
+  const hasCommittedHubEpoch = (view: MemoryHubSettingsSnapshot) =>
     view.version !== 0 || view.settings.mode !== "disabled";
 
   const publishExternalHub = (raw: string) =>

@@ -1363,14 +1363,20 @@ const make = Effect.gen(function* () {
             requesterEnvironmentId: removal.requesterEnvironmentId,
             ownerPolicyEpoch: removal.removalEpoch,
           };
-          yield* ensureEpoch(r.settings.memoryHubVersion);
-          const result = yield* r.connection
-            ? client.respondSourceRead(r.connection, revoke)
-            : hub.respondSourceRead(revoke, r.principal!);
-          yield* ensureEpoch(r.settings.memoryHubVersion);
-          if (result.kind !== "revoke" || !M.matchesMemorySourceReadRevokeAck(removal, result.ack))
-            return yield* new M.MemoryHubError({ code: "invalid_output" });
-          yield* runtime.ownerPolicy.recordRevokeAck(result.ack);
+          const policy = runtime.ownerPolicy;
+          yield* Effect.gen(function* () {
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+            const result = yield* r.connection
+              ? client.respondSourceRead(r.connection, revoke)
+              : hub.respondSourceRead(revoke, r.principal!);
+            yield* ensureEpoch(r.settings.memoryHubVersion);
+            if (
+              result.kind !== "revoke" ||
+              !M.matchesMemorySourceReadRevokeAck(removal, result.ack)
+            )
+              return yield* new M.MemoryHubError({ code: "invalid_output" });
+            yield* policy.recordRevokeAck(result.ack);
+          }).pipe(Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)));
         }
       }
     });
@@ -1687,9 +1693,7 @@ const make = Effect.gen(function* () {
         if (entry.epoch !== r.settings.memoryHubVersion && entry.fiber)
           yield* Fiber.interrupt(entry.fiber);
       lastFailure = undefined;
-      yield* propagateSourceRevokes(r).pipe(
-        Effect.catch((e) => noteFailure(r.settings.memoryHubVersion, e)),
-      );
+      yield* propagateSourceRevokes(r);
       yield* discoverRecoveries(r);
       if (discoveryEpoch === r.settings.memoryHubVersion && discoveryFailure)
         yield* noteFailure(r.settings.memoryHubVersion, discoveryFailure);
@@ -1986,7 +1990,9 @@ const make = Effect.gen(function* () {
     getHubSettings: (_input, permit) =>
       permit.pipe(
         Effect.andThen(readSettings),
-        Effect.map((s) => ({ settings: s.memoryHub, version: s.memoryHubVersion })),
+        Effect.flatMap((s) =>
+          Hub.readSettingsView(store, { settings: s.memoryHub, version: s.memoryHubVersion }),
+        ),
       ),
     updateHubSettings: (input, permit) =>
       Effect.gen(function* () {

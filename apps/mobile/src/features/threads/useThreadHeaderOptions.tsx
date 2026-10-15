@@ -176,12 +176,13 @@ export function useThreadHeaderOptions(props: {
     // Search lives in the persistent sidebar, so the split header keeps
     // the git controls on the RIGHT (no center items — center space is
     // reserved for future breadcrumbs/status).
-    unstable_headerRightItems: () =>
-      usesDuoHeader
+    unstable_headerRightItems: () => [
+      ...(usesDuoHeader
         ? duoRightHeaderItems
         : layout.usesSplitView
           ? threadCenterHeaderItems
-          : compactRightHeaderItems,
+          : compactRightHeaderItems),
+    ],
     unstable_headerToolbarItems: () => [],
     unstable_headerSubtitle: props.usesNativeHeaderGlass ? props.subtitle : undefined,
     contentStyle: undefined,

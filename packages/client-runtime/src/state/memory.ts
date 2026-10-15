@@ -37,6 +37,7 @@ export interface MemoryExposure {
   readonly epoch: object;
   readonly versions: HashMap.HashMap<MemoryId, object>;
   readonly forgotten: ReadonlySet<MemoryId>;
+  readonly forgetGeneration: object;
 }
 
 /** Body-free state. Epoch identity also fences replies from a prior subscription. */
@@ -47,6 +48,7 @@ export function emptyMemoryExposure(): MemoryExposure {
     epoch: {},
     versions: HashMap.empty(),
     forgotten: new Set(),
+    forgetGeneration: {},
   };
 }
 
@@ -64,7 +66,14 @@ export function applyMemoryChange(
     signal.kind === "forget" && !state.forgotten.has(signal.memoryId)
       ? new Set([...state.forgotten, signal.memoryId])
       : state.forgotten;
-  return { ...state, versions, forgotten };
+  return {
+    ...state,
+    versions,
+    forgotten,
+    // The factory mutates its ledger before this reducer runs. Set identity cannot
+    // signal admission changes for already displayed derived bodies or drafts.
+    forgetGeneration: signal.kind === "forget" ? {} : state.forgetGeneration,
+  };
 }
 
 /** A later upsert/watermark cannot undo a tombstone observed by this consumer. */
@@ -88,6 +97,18 @@ export function memoryExposureMatches(
 
 function containsForgottenMemory(value: unknown, forgotten: ReadonlySet<MemoryId>): boolean {
   if (typeof value !== "object" || value === null) return false;
+  // Tombstones are body-free records and remain visible consistently across devices.
+  if ("status" in value && value.status === "forgotten") return false;
+  // Change signals identify memories, not revisions. Without a complete revision-to-memory
+  // map, a derived body cannot be proven independent of a remembered forget. Never infer
+  // safety from the absence of its source memory on this particular page.
+  if (
+    forgotten.size > 0 &&
+    "derivedFromMemoryRevisions" in value &&
+    Array.isArray(value.derivedFromMemoryRevisions) &&
+    value.derivedFromMemoryRevisions.length > 0
+  )
+    return true;
   if (
     "memoryId" in value &&
     typeof value.memoryId === "string" &&
@@ -291,24 +312,35 @@ export function createMemoryEnvironmentAtoms<R, E>(
       const raw = runtime
         .atom((get) => {
           const before = get(relevantState);
+          // The stable ID projection may retain a pre-forget generation. Capture
+          // admission at request start without subscribing the RPC to space changes.
+          const forgetGeneration = get.once(state).forgetGeneration;
           const permitted = get(read.permissionAtom(environmentId, input));
           if (!permitted || !memoryExposureMatches(before, before, ids)) {
-            return Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() });
+            return Stream.succeed({
+              before,
+              forgetGeneration,
+              value: Option.none<EnvironmentRpcSuccess<T>>(),
+            });
           }
           return Stream.fromEffect(
             requestMemoryQuery(runtime, get.registry, environmentId, tag, input).pipe(
               Effect.timeoutOption(BODY_TTL),
             ),
           ).pipe(
-            Stream.map((value) => ({ before, value })),
+            Stream.map((value) => ({ before, forgetGeneration, value })),
             (stream) =>
               Stream.concat(
-                Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() }),
+                Stream.succeed({
+                  before,
+                  forgetGeneration,
+                  value: Option.none<EnvironmentRpcSuccess<T>>(),
+                }),
                 stream,
               ),
             Stream.concat(
               Stream.fromEffect(Effect.sleep(BODY_TTL)).pipe(
-                Stream.map(() => ({ before, value: Option.none() })),
+                Stream.map(() => ({ before, forgetGeneration, value: Option.none() })),
               ),
             ),
           );
@@ -317,6 +349,9 @@ export function createMemoryEnvironmentAtoms<R, E>(
       return Atom.readable(
         (get) => {
           const current = get(relevantState);
+          // Admission observes all space changes independently of the stable direct-ID
+          // request projection. A source forget must hide an already displayed derivative.
+          const admission = get(state);
           const allowed = get(read.permissionAtom(environmentId, input));
           const result = get(raw);
           if (allowed && current.ready && result._tag === "Failure")
@@ -325,14 +360,37 @@ export function createMemoryEnvironmentAtoms<R, E>(
             !allowed ||
             result._tag !== "Success" ||
             // Page/search output is invalidated by any body-free signal.
-            result.value.before !== current
+            result.value.before !== current ||
+            // Empty dependencies do not prove independence: a summary can inherit
+            // text from parents. Fence every open direct body, including lineage-free
+            // history judgments and source pages, on a same-space forget.
+            (ids.length > 0 && result.value.forgetGeneration !== admission.forgetGeneration)
           )
             return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
           if (
             Option.isSome(result.value.value) &&
-            containsForgottenMemory(result.value.value.value, current.forgotten)
-          )
+            containsForgottenMemory(result.value.value.value, admission.forgotten)
+          ) {
+            const value = result.value.value.value;
+            // A tombstone in a page must not hide unrelated memories. Drop affected
+            // entries, including derived text, while keeping the response epoch fence.
+            if (
+              typeof value === "object" &&
+              value !== null &&
+              "items" in value &&
+              Array.isArray(value.items)
+            ) {
+              return AsyncResult.success(
+                Option.some({
+                  ...value,
+                  items: value.items.filter(
+                    (item) => !containsForgottenMemory(item, admission.forgotten),
+                  ),
+                } as EnvironmentRpcSuccess<T>),
+              );
+            }
             return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
+          }
           return AsyncResult.success(result.value.value);
         },
         (refresh) => refresh(raw),
@@ -360,7 +418,13 @@ export function createMemoryEnvironmentAtoms<R, E>(
       (get) => {
         const draft = get(stored);
         if (draft === null || draft.memoryIds.length === 0) return draft?.text ?? null;
-        if (!memoryExposureMatches(draft.exposure, get(state), draft.memoryIds)) {
+        const current = get(state);
+        // No current contract field proves independence from earlier summaries.
+        // Existing-memory edits close on every same-space forget.
+        if (
+          draft.exposure.forgetGeneration !== current.forgetGeneration ||
+          !memoryExposureMatches(draft.exposure, current, draft.memoryIds)
+        ) {
           // Purge the retained text, rather than only hiding it from the view.
           get.set(stored, null);
           return null;
@@ -369,7 +433,12 @@ export function createMemoryEnvironmentAtoms<R, E>(
       },
       (
         ctx,
-        draft: { readonly text: string; readonly memoryIds: ReadonlyArray<MemoryId> } | null,
+        draft: {
+          readonly text: string;
+          readonly memoryIds: ReadonlyArray<MemoryId>;
+          /** Legacy caller hint; never used as proof of independence. */
+          readonly hasRevisionDependencies?: boolean;
+        } | null,
       ) => {
         ctx.set(stored, draft === null ? null : { ...draft, exposure: ctx.get(state) });
       },
