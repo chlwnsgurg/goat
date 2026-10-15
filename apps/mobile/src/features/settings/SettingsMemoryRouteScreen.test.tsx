@@ -6,6 +6,8 @@ import {
   type MemoryOwnerSourceReadPolicyUpdateInput,
   type MemoryUpsertInput,
   MemoryHistoryPage,
+  MemoryRevertResult,
+  type MemoryRevertResolutionInput,
 } from "@goat/contracts";
 import {
   createNativeMemoryHarness,
@@ -43,6 +45,7 @@ async function mount(scopes?: Parameters<NativeMemoryHarness["grant"]>[0]) {
 }
 const originalId = "00000000-0000-4000-8000-000000000003";
 const resolutionId = "00000000-0000-4000-8000-000000000006";
+const decodeRevertResult = Schema.decodeUnknownSync(MemoryRevertResult);
 const decodeHistory = Schema.decodeUnknownSync(MemoryHistoryPage);
 function revertHistory() {
   if (nativeItem.status !== "active") throw new Error("Expected active fixture");
@@ -256,11 +259,24 @@ describe("native Memory with shared factory", () => {
     expect(view.container.textContent).toContain("The hub needs to confirm the revert window");
     await view.click(`Restore original ${originalId}`);
     await view.click("Revert resolution");
-    h.responses.set(WS_METHODS.memoryRevertResolution, (input) => ({
-      ...(input as object),
-      status: "accepted",
-      localAvailability: nativeItem.localAvailability,
-    }));
+    h.responses.set(WS_METHODS.memoryRevertResolution, (value) => {
+      const input = value as MemoryRevertResolutionInput;
+      return decodeRevertResult({
+        operationId: input.operationId,
+        memoryId: nativeId,
+        resolutionId,
+        revertDeadlineUtc: "2000-01-31T00:00:00.000Z",
+        status: "accepted",
+        localAvailability: nativeItem.localAvailability,
+        receipt: {
+          operationId: input.operationId,
+          memoryId: nativeId,
+          revisionId: "00000000-0000-4000-8000-000000000008",
+          outcome: "accepted",
+          pendingSync: false,
+        },
+      });
+    });
     await view.click("Retry revert request");
     const calls = h.calls.filter((call) => call.method === WS_METHODS.memoryRevertResolution);
     expect(calls).toHaveLength(2);
@@ -275,8 +291,44 @@ describe("native Memory with shared factory", () => {
         expectedHeads: ["00000000-0000-4000-8000-000000000004"],
       },
     });
-    expect(view.container.textContent).toContain("Revert accepted");
+    expect(view.container.textContent).toContain("Revert approved");
     expect(view.container.textContent).not.toContain("Retry revert request");
+  });
+  it("settles an eligible revert with the hub's expired result", async () => {
+    await mount();
+    h.responses.set(WS_METHODS.memoryHistory, revertHistory);
+    h.responses.set(WS_METHODS.memoryRevertResolution, (value) => {
+      const input = value as MemoryRevertResolutionInput;
+      return decodeRevertResult({
+        operationId: input.operationId,
+        memoryId: nativeId,
+        resolutionId,
+        revertDeadlineUtc: "2000-01-31T00:00:00.000Z",
+        status: "revert_expired",
+      });
+    });
+    await view.click(`Open memory ${nativeId}`);
+    await view.click(`Restore original ${originalId}`);
+    await view.click("Revert resolution");
+    expect(
+      h.calls.filter((call) => call.method === WS_METHODS.memoryRevertResolution),
+    ).toHaveLength(1);
+    expect(view.container.textContent).toContain("Revert window expired");
+    expect(view.container.textContent).not.toContain("Retry revert request");
+    expect(view.container.textContent).not.toContain("Restore original");
+  });
+  it("clears a selected original after refreshed history no longer retains it", async () => {
+    await mount();
+    h.responses.set(WS_METHODS.memoryHistory, revertHistory);
+    await view.click(`Open memory ${nativeId}`);
+    await view.click(`Restore original ${originalId}`);
+    h.responses.set(WS_METHODS.memoryHistory, () => ({ ...revertHistory(), revisions: [] }));
+    await view.click("Refresh details");
+    expect(view.container.textContent).toContain("Retained originals unavailable");
+    expect(view.container.textContent).not.toContain("Selected original");
+    expect(
+      h.calls.filter((call) => call.method === WS_METHODS.memoryRevertResolution),
+    ).toHaveLength(0);
   });
   it("closes revert selection after write permission is removed", async () => {
     await mount();
