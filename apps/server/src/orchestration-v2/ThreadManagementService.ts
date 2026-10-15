@@ -764,7 +764,7 @@ const make = Effect.gen(function* () {
                     readOnly: inputs.readOnly === true,
                     memoryGrantCeiling: record.memoryGrantCeiling,
                   }),
-                  access: inputs.currentMemoryGrant,
+                  access: base.access === "none" ? "none" : inputs.currentMemoryGrant,
                 },
               };
         });

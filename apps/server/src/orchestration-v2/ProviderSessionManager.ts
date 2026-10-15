@@ -2474,7 +2474,7 @@ export const layerWithOptions = (
           Effect.gen(function* () {
             const prepared = memoryPrepareInputs.get(threadId);
             // A valid current projection cannot retroactively admit a denied
-            // prepare. Attachment checks use one session key, never a scan.
+            // prepare. Check its session identity before consulting execution policy.
             if (
               prepared?.providerInstanceId !== providerInstanceId ||
               !prepared.destinationUsable ||

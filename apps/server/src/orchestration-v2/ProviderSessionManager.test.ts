@@ -2847,7 +2847,31 @@ it.effect.each(["resolve", "unrelated issue"] as const)(
     Effect.gen(function* () {
       let timestamp = 1_000;
       const state = yield* Ref.make(emptyState);
-      const settingsLayer = ServerSettings.layerTest();
+      const initialized = yield* Deferred.make<void>();
+      const settingsLayer = Layer.effect(
+        ServerSettings.MemoryProviderCommittedPolicy,
+        Effect.gen(function* () {
+          const policy = yield* ServerSettings.MemoryProviderCommittedPolicy;
+          return {
+            ...policy,
+            subscribeRotations: policy.subscribeRotations.pipe(
+              Effect.map((stream) =>
+                stream.pipe(
+                  Stream.flatMap((event) =>
+                    Stream.make(event).pipe(
+                      Stream.concat(
+                        Stream.fromEffect(Deferred.succeed(initialized, undefined)).pipe(
+                          Stream.drain,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          };
+        }),
+      ).pipe(Layer.provideMerge(ServerSettings.layerTest()));
       yield* Effect.gen(function* () {
         const sink = yield* EventSink.EventSinkV2;
         const ids = yield* IdAllocator.IdAllocatorV2;
@@ -2865,6 +2889,9 @@ it.effect.each(["resolve", "unrelated issue"] as const)(
         yield* sink.write({
           events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
         });
+        // The initial policy snapshot must finish its rotation before the
+        // controlled interval starts; prepare reuse legitimately touches liveness.
+        yield* Deferred.await(initialized);
         yield* manager.open({
           threadId,
           providerSessionId,
@@ -2984,11 +3011,10 @@ it.effect("current memory DTO denies an archived destination before a deferred d
       );
       assert.isNotNull((yield* store.getThreadProjection(threadId)).thread.archivedAt);
       assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
-      // The live prepare map deliberately still has the matching positive ceiling.
-      assert.equal(
-        (yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId))?.runId,
-        runId,
-      );
+      // The runtime stays attached, but execution policy now denies the
+      // destination, so the positive-evidence getter must deny it too.
+      assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+      assert.isUndefined(yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId));
       assert.isUndefined((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess);
       // Preparing against the archived destination issues none. Unarchiving alone
       // cannot turn that earlier denied prepare into positive evidence.
