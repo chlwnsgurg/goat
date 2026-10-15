@@ -214,6 +214,21 @@ const GOAT_MCP_TOOLS: Readonly<Record<string, GoatMcpToolDefinition>> = {
     "browser",
     "browser",
   ),
+  preview_back: tool(
+    ["Go back in", "Going back in", "Went back in", "the preview browser"],
+    "browser",
+    "browser",
+  ),
+  preview_forward: tool(
+    ["Go forward in", "Going forward in", "Went forward in", "the preview browser"],
+    "browser",
+    "browser",
+  ),
+  preview_reload: tool(
+    ["Reload", "Reloading", "Reloaded", "the preview browser"],
+    "browser",
+    "browser",
+  ),
   preview_dialog: tool(
     ["Respond", "Responding", "Responded", "to a preview browser dialog"],
     "browser",
