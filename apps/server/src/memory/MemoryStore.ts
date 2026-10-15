@@ -9,7 +9,7 @@ import * as NodeUtil from "node:util";
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import * as M from "@goat/contracts";
-import type { ImportStorePorts } from "./imports/MemoryImportTypes.ts";
+import type { ImportStorePorts, ImportBatch, ImportItem } from "./imports/MemoryImportTypes.ts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -1728,6 +1728,12 @@ const ImportSelectorCodec = Schema.Struct({
   scope: M.MemoryScope,
   project: Schema.optionalKey(M.ScopedProjectRef),
 });
+const ImportObservationCodec = Schema.Struct({
+  sourceFingerprint: digest,
+  contentFingerprint: digest,
+  revisionId: M.MemoryRevisionId,
+  operationId: M.MemoryOperationId,
+});
 const ImportBatchCodec = Schema.Struct({
   ...importAddress,
   operationId: M.MemoryOperationId,
@@ -1738,6 +1744,7 @@ const ImportBatchCodec = Schema.Struct({
   sessionId: importLabel,
   selections: Schema.Array(
     Schema.Struct({
+      observation: Schema.optionalKey(ImportObservationCodec),
       selector: ImportSelectorCodec,
       memoryId: M.MemoryId,
       operationId: M.MemoryOperationId,
@@ -1770,6 +1777,7 @@ const ImportBatchCodec = Schema.Struct({
             (s.result.memoryId === null || s.result.memoryId === s.memoryId) &&
             (s.result.revisionId === null ||
               s.result.outcome === "noop" ||
+              s.result.revisionId === s.observation?.revisionId ||
               s.result.revisionId === s.revisionId)),
       ),
   ),
@@ -1778,12 +1786,6 @@ const ImportRetiredCodec = Schema.Struct({
   kind: Schema.Literal("retired"),
   codecVersion: Schema.Literal(1),
   selectionDigest: digest,
-});
-const ImportObservationCodec = Schema.Struct({
-  sourceFingerprint: digest,
-  contentFingerprint: digest,
-  revisionId: M.MemoryRevisionId,
-  operationId: M.MemoryOperationId,
 });
 const ImportItemCodec = Schema.Struct({
   ...importSourceAddress,
@@ -5918,7 +5920,13 @@ const make = Effect.gen(function* () {
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
       if (guard?.kind === "detailed") {
-        const frozen = (s: typeof selection) => ({ ...s, result: null });
+        const frozen = (s: typeof selection) => ({
+          selector: s.selector,
+          memoryId: s.memoryId,
+          operationId: s.operationId,
+          revisionId: s.revisionId,
+          result: null,
+        });
         if (
           guard.sourceId !== batch.sourceId ||
           guard.sessionId !== batch.sessionId ||
@@ -6026,8 +6034,17 @@ const make = Effect.gen(function* () {
           current > (dimension === "import_session_items" ? session.newItems : session.bodyBytes)
         )
           return yield* new MemoryCapacityError({ dimension, current, limit });
+      const observation =
+        selection.result.outcome === "noop"
+          ? (next.pending ?? next.accepted)
+          : ["created", "revised", "conflicted", "aliased"].includes(selection.result.outcome)
+            ? next.pending
+            : null;
       const persisted = {
         ...batch,
+        selections: batch.selections.map((s) =>
+          s === selection && observation ? { ...s, observation } : s,
+        ),
         receipt: {
           ...batch.receipt,
           sessionNewItems: nextSession.newItems,
@@ -6082,50 +6099,111 @@ const make = Effect.gen(function* () {
         },
       });
     }
-    const rows = yield* stored(
-      "import-settlement-items",
-      sql<{ receipt_id: string; registration_json: string }>`
-      SELECT receipt_id,registration_json FROM memory_import_receipts WHERE space=${space} AND record_kind='item'
-      AND json_extract(registration_json,'$.pending.operationId')=${receipt.operationId}`,
-    );
-    for (const row of rows) {
-      const item = yield* importItemCodec.decode(row.registration_json, strict);
-      const pending = item.pending!;
-      if (item.memoryId !== receipt.memoryId)
-        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
-      const next = {
-        ...item,
-        accepted: receipt.outcome === "rejected" ? item.accepted : pending,
-        pending: null,
-        rejected:
-          receipt.outcome === "rejected"
-            ? { sourceFingerprint: pending.sourceFingerprint, issue: "source_changed" as const }
-            : null,
-        outcome:
-          receipt.outcome === "rejected"
-            ? ("rejected" as const)
-            : receipt.outcome === "conflicted"
-              ? ("conflicted" as const)
-              : item.outcome,
-      };
-      yield* stored(
-        "import-settlement-item",
-        sql`UPDATE memory_import_receipts SET registration_json=${yield* importItemCodec.encode(next)},outcome=${next.outcome} WHERE receipt_id=${row.receipt_id}`,
-      );
-    }
+    const issue: M.MemoryImportIssue =
+      receipt.failureCode === "capacity_exceeded" ? "capacity_exceeded" : "source_changed";
     const batches = yield* stored(
       "import-settlement-batches",
       sql<{ receipt_id: string; completed_items_json: string }>`
       SELECT receipt_id,completed_items_json FROM memory_import_receipts WHERE space=${space} AND record_kind='batch'
       AND json_extract(completed_items_json,'$.kind')='detailed'
       AND EXISTS (SELECT 1 FROM json_each(completed_items_json,'$.selections') s
-        WHERE json_extract(s.value,'$.operationId')=${receipt.operationId} AND json_type(s.value,'$.result')='object')`,
+        WHERE (json_extract(s.value,'$.operationId')=${receipt.operationId}
+          OR json_extract(s.value,'$.observation.operationId')=${receipt.operationId})
+        AND json_type(s.value,'$.result')='object')`,
     );
+    // Each batch freezes its own observation. A newer pending proposal cannot hide
+    // an older approval, and hub order prevents accepted state from moving backward.
+    const observations = new Map<
+      string,
+      {
+        batch: ImportBatch;
+        selection: ImportBatch["selections"][number];
+        observation: NonNullable<ImportItem["pending"]>;
+      }
+    >();
+    for (const row of batches) {
+      const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
+      if (batch.kind !== "detailed") continue;
+      for (const selection of batch.selections) {
+        if (selection.observation?.operationId === receipt.operationId) {
+          observations.set(
+            importId([
+              "item",
+              space,
+              batch.environmentId,
+              batch.sourceId,
+              selection.selector.sourceItemKey,
+            ]),
+            { batch, selection, observation: selection.observation },
+          );
+        }
+      }
+    }
+    const rows = yield* stored(
+      "import-settlement-items",
+      sql<{
+        receipt_id: string;
+        registration_json: string;
+      }>`SELECT receipt_id,registration_json FROM memory_import_receipts
+      WHERE space=${space} AND record_kind='item' AND (json_extract(registration_json,'$.pending.operationId')=${receipt.operationId}
+        OR receipt_id IN (SELECT value FROM json_each(${importId([...observations.keys()])})))`,
+    );
+    for (const row of rows) {
+      const item = yield* importItemCodec.decode(row.registration_json, strict);
+      const observation = observations.get(row.receipt_id)?.observation ?? item.pending;
+      if (!observation || observation.operationId !== receipt.operationId) continue;
+      if (item.memoryId !== receipt.memoryId)
+        return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+      const latest = item.pending?.operationId === receipt.operationId;
+      const acceptedRows = item.accepted
+        ? yield* stored(
+            "import-accepted-sequence",
+            sql<{
+              sequence: number | null;
+            }>`SELECT json_extract(receipt_json,'$.hubSequence') AS sequence FROM memory_events
+        WHERE memory_space_id=${space} AND operation_id=${item.accepted.operationId}
+        UNION ALL SELECT hub_sequence FROM memory_compact_receipts WHERE space=${space} AND operation_id=${item.accepted.operationId}
+        UNION ALL SELECT json_extract(record_json,'$.receipt.hubSequence') FROM memory_import_keys
+        WHERE space=${space} AND key_kind='hubReceipt' AND key=${item.accepted.operationId}`,
+          )
+        : [];
+      const acceptedSequence = acceptedRows.reduce<number | null>(
+        (max, row) => (row.sequence === null ? max : Math.max(max ?? 0, row.sequence)),
+        null,
+      );
+      const promote =
+        receipt.outcome !== "rejected" &&
+        receipt.hubSequence !== null &&
+        (acceptedSequence === null ||
+          acceptedSequence === undefined ||
+          receipt.hubSequence > acceptedSequence);
+      const next = {
+        ...item,
+        accepted: promote ? observation : item.accepted,
+        pending: latest ? null : item.pending,
+        rejected: latest
+          ? receipt.outcome === "rejected"
+            ? { sourceFingerprint: observation.sourceFingerprint, issue }
+            : null
+          : item.rejected,
+        outcome: latest
+          ? receipt.outcome === "rejected"
+            ? ("rejected" as const)
+            : receipt.outcome === "conflicted"
+              ? ("conflicted" as const)
+              : item.outcome
+          : item.outcome,
+      };
+      yield* stored(
+        "import-settlement-item",
+        sql`UPDATE memory_import_receipts SET registration_json=${yield* importItemCodec.encode(next)},outcome=${next.outcome} WHERE receipt_id=${row.receipt_id}`,
+      );
+    }
     for (const row of batches) {
       const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
       if (batch.kind !== "detailed") continue;
       const selections = batch.selections.map((s) =>
-        s.operationId !== receipt.operationId || !s.result
+        (s.observation?.operationId ?? s.operationId) !== receipt.operationId || !s.result
           ? s
           : {
               ...s,
@@ -6134,7 +6212,8 @@ const make = Effect.gen(function* () {
                   ? {
                       sourceItemKey: s.selector.sourceItemKey,
                       outcome: "rejected" as const,
-                      issue: "source_changed" as const,
+                      issue,
+                      ...(receipt.capacity ? { capacity: receipt.capacity } : {}),
                       memoryId: null,
                       revisionId: null,
                     }
@@ -6173,9 +6252,9 @@ const make = Effect.gen(function* () {
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
       AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_import_receipts i
         ON i.space=b.space AND i.environment_id=b.environment_id AND i.record_kind='item'
-        WHERE json_extract(i.registration_json,'$.pending.operationId')=json_extract(s.value,'$.operationId'))
+        WHERE json_extract(i.registration_json,'$.pending.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId')))
       AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_outbox o ON o.space=b.space
-        WHERE o.status IN ('pending','running','retry') AND json_extract(o.metadata_json,'$.operationId')=json_extract(s.value,'$.operationId'))
+        WHERE o.status IN ('pending','running','retry') AND json_extract(o.metadata_json,'$.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId')))
       ORDER BY observed_at_utc,receipt_id LIMIT ${limit}`,
     );
     for (const row of rows) {
@@ -6201,10 +6280,28 @@ const make = Effect.gen(function* () {
       }>`SELECT r.memory_id,r.provenance_json,r.scope_json,r.assertion_kind FROM memory_revisions r
       WHERE r.space=${space} AND json_type(r.provenance_json,'$.importSource')='object'
       AND (EXISTS (SELECT 1 FROM memory_events e WHERE e.memory_space_id=r.space AND e.operation_id=r.operation_id
+        AND json_extract(e.receipt_json,'$.memoryId')=r.memory_id AND json_extract(e.receipt_json,'$.operationId')=r.operation_id
         AND json_extract(e.receipt_json,'$.hubSequence') IS NOT NULL AND json_extract(e.receipt_json,'$.outcome')!='rejected')
       OR EXISTS (SELECT 1 FROM memory_compact_receipts c WHERE c.space=r.space AND c.operation_id=r.operation_id
-        AND c.hub_sequence IS NOT NULL AND json_extract(c.receipt_json,'$.outcome')!='rejected'))`,
+        AND json_extract(c.receipt_json,'$.memoryId')=r.memory_id AND json_extract(c.receipt_json,'$.operationId')=r.operation_id
+        AND c.hub_sequence IS NOT NULL AND json_extract(c.receipt_json,'$.outcome')!='rejected')
+      OR EXISTS (SELECT 1 FROM memory_import_keys k WHERE k.space=r.space AND k.key_kind='hubReceipt' AND k.key=r.operation_id
+        AND k.memory_id=r.memory_id AND json_extract(k.record_json,'$.receipt.memoryId')=r.memory_id
+        AND json_extract(k.record_json,'$.receipt.operationId')=r.operation_id
+        AND json_extract(k.record_json,'$.receipt.hubSequence') IS NOT NULL
+        AND json_extract(k.record_json,'$.receipt.outcome')!='rejected'))`,
     );
+    const retained = rows.length
+      ? yield* stored(
+          "import-lineage-required",
+          sql<{
+            memory_id: string;
+            kind: string;
+            key: string;
+          }>`SELECT memory_id,kind,key FROM memory_import_lineage WHERE space=${space}`,
+        )
+      : [];
+    const keys = new Set(retained.map((r) => importId([r.memory_id, r.kind, r.key])));
     for (const row of rows) {
       const provenance = yield* provenanceCodec.decode(row.provenance_json, strict);
       const scope = yield* scopeCodec.decode(row.scope_json, strict);
@@ -6239,12 +6336,8 @@ const make = Effect.gen(function* () {
           ...record,
           memoryId: M.MemoryId.make("00000000-0000-4000-8000-000000000000"),
         });
-        const found = yield* stored(
-          "import-lineage-required",
-          sql`SELECT 1 FROM memory_import_lineage
-          WHERE space=${space} AND memory_id=${base.memoryId} AND kind=${record.kind} AND key=${key}`,
-        );
-        if (!found.length) return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
+        if (!keys.has(importId([base.memoryId, record.kind, key])))
+          return yield* new MemoryStoreConflict({ code: "bootstrap_required" });
       }
     }
   });

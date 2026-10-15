@@ -310,36 +310,49 @@ const make = Effect.fnUntraced(function* (
     if (!rows[0]) return yield* new Store.MemoryStoreConflict({ code: "not_found" });
     return rows[0].workspace_root;
   });
-  const getProjectBinding = Effect.fn("MemoryService.getProjectBinding")(function* (
+  // Preparation observes repository-derived bindings without publishing them.
+  const readProjectBinding = Effect.fn("MemoryService.readProjectBinding")(function* (
     input: M.MemoryProjectBindingGetInput,
     permit: Permit,
   ) {
     const value = yield* decode(decodeBindingGet(input, strict));
     yield* permit;
     const root = yield* projectRoot(value.project);
+    const old = yield* store.getProjectBinding(value.memorySpaceId, value.project);
+    if (old?.repositoryKey) return old;
     const observed = yield* repositoryResolver.resolve(root);
+    yield* permit;
+    if (!observed) return old ?? { ...value, projectKey: null, repositoryKey: null, version: 0 };
+    const repositoryKey = {
+      kind: "repository" as const,
+      groupingKey: M.repositoryGroupingKeyOf(observed),
+    };
+    return {
+      ...value,
+      repositoryKey,
+      projectKey: old?.projectKey?.kind === "explicit" ? old.projectKey : repositoryKey,
+      version: old?.version ?? 0,
+    };
+  });
+  const getProjectBinding = Effect.fn("MemoryService.getProjectBinding")(function* (
+    input: M.MemoryProjectBindingGetInput,
+    permit: Permit,
+  ) {
     return yield* store.transact(
       Effect.gen(function* () {
-        yield* permit;
-        yield* projectRoot(value.project);
-        const old = yield* store.getProjectBinding(value.memorySpaceId, value.project);
-        if (old?.repositoryKey || !observed)
-          return old ?? { ...value, projectKey: null, repositoryKey: null, version: 0 };
-        const repositoryKey = {
-          kind: "repository" as const,
-          groupingKey: M.repositoryGroupingKeyOf(observed),
-        };
-        const binding = {
-          ...value,
-          repositoryKey,
-          projectKey: old?.projectKey?.kind === "explicit" ? old.projectKey : repositoryKey,
-          version: old?.version ?? 0,
-        };
-        yield* store.putProjectBinding(
-          binding,
-          old?.version ?? null,
-          yield* Clock.currentTimeMillis,
-        );
+        const binding = yield* readProjectBinding(input, permit);
+        const old = yield* store.getProjectBinding(binding.memorySpaceId, binding.project);
+        if (
+          !NodeUtil.isDeepStrictEqual(
+            old ?? { ...input, projectKey: null, repositoryKey: null, version: 0 },
+            binding,
+          )
+        )
+          yield* store.putProjectBinding(
+            binding,
+            old?.version ?? null,
+            yield* Clock.currentTimeMillis,
+          );
         return binding;
       }),
     );
@@ -634,13 +647,10 @@ const make = Effect.fnUntraced(function* (
           if (selection.selector.project) {
             const project = selection.selector.project;
             yield* projectRoot(project);
-            const binding = (yield* store.getProjectBinding(batch.memorySpaceId, project)) ?? {
-              memorySpaceId: batch.memorySpaceId,
-              project,
-              projectKey: null,
-              repositoryKey: null,
-              version: 0,
-            };
+            const binding = yield* readProjectBinding(
+              { memorySpaceId: batch.memorySpaceId, project },
+              permit,
+            );
             if (
               !input.projectBinding ||
               !NodeUtil.isDeepStrictEqual(binding, input.projectBinding) ||
@@ -648,6 +658,24 @@ const make = Effect.fnUntraced(function* (
               !NodeUtil.isDeepStrictEqual(binding.projectKey, selection.selector.scope.projectKey)
             )
               return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
+            const storedBinding = yield* store.getProjectBinding(batch.memorySpaceId, project);
+            if (
+              !NodeUtil.isDeepStrictEqual(
+                storedBinding ?? {
+                  memorySpaceId: batch.memorySpaceId,
+                  project,
+                  projectKey: null,
+                  repositoryKey: null,
+                  version: 0,
+                },
+                binding,
+              )
+            )
+              yield* store.putProjectBinding(
+                binding,
+                storedBinding?.version ?? null,
+                yield* Clock.currentTimeMillis,
+              );
           } else if (selection.selector.scope.kind === "project" || input.projectBinding !== null) {
             return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
           }
@@ -870,14 +898,12 @@ const make = Effect.fnUntraced(function* (
         }),
       ),
     readReceipt: (input, permit) =>
-      importTransaction(
-        input,
-        permit,
-        Effect.gen(function* () {
-          const receipt = yield* store.readImportReceiptTx(input);
-          if (!receipt) return yield* new M.MemoryRpcError({ code: "not_found" });
-          return receipt;
-        }),
+      importTransaction(input, permit, store.readImportReceiptTx(input)).pipe(
+        Effect.flatMap((receipt) =>
+          receipt
+            ? Effect.succeed(receipt)
+            : Effect.fail(new M.MemoryRpcError({ code: "not_found" })),
+        ),
       ),
     readItem: (input, permit) => importTransaction(input, permit, store.readImportItemTx(input)),
     findMatch: (input, permit) => importTransaction(input, permit, store.findImportMatchTx(input)),
@@ -923,8 +949,11 @@ const make = Effect.fnUntraced(function* (
           };
         }),
       ),
-    binding: getProjectBinding,
-    resolveProjectKey,
+    binding: readProjectBinding,
+    resolveProjectKey: (space, project) =>
+      readProjectBinding({ memorySpaceId: space, project }, Effect.void).pipe(
+        Effect.map((binding) => binding.projectKey),
+      ),
     commit: commitImport,
   };
   const commitLocalIntent: MemoryService["Service"]["commitLocalIntent"] = Effect.fn(

@@ -1729,3 +1729,270 @@ describe("MemoryImport origin admission", () => {
     }).pipe(Effect.provide(importLive)),
   );
 });
+
+const allMemoryInventory = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{
+    name: string;
+  }>`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'memory_%' ORDER BY name`;
+  const result: Record<string, readonly string[]> = {};
+  for (const table of tables) {
+    const rows = yield* sql.unsafe(`SELECT * FROM "${table.name.replaceAll('"', '""')}"`);
+    result[table.name] = rows.map((row) => encodeUnknown(row)).sort();
+  }
+  return result;
+});
+const repository = {
+  canonicalKey: "github.com/synthetic/import",
+  rootPath: "/synthetic",
+  locator: {
+    source: "git-remote" as const,
+    remoteName: "origin",
+    remoteUrl: "https://github.com/synthetic/import.git",
+  },
+};
+const repositoryImportLive = Service.layer.pipe(
+  Layer.provide(identity),
+  Layer.provide(
+    Layer.mock(RepositoryResolver.RepositoryIdentityResolver)({
+      resolve: () => Effect.succeed(repository),
+    }),
+  ),
+  Layer.provideMerge(Quota.layer.pipe(Layer.provideMerge(live))),
+);
+describe("MemoryImport M3d", () => {
+  it.effect(
+    "preparation binding resolves without writes and materializes only inside successful commit",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const sql = yield* SqlClient.SqlClient;
+        const ports = (yield* Service.MemoryService).importPorts;
+        yield* sql`CREATE TABLE projection_projects(project_id TEXT PRIMARY KEY,workspace_root TEXT,deleted_at TEXT)`;
+        yield* sql`INSERT INTO projection_projects VALUES ('synthetic-project','/synthetic',NULL)`;
+        const project = { environmentId, projectId: M.ProjectId.make("synthetic-project") };
+        const before = yield* allMemoryInventory;
+        const binding = yield* ports.binding({ memorySpaceId: space, project }, Effect.void);
+        assert.isNotNull(binding.repositoryKey);
+        assert.deepStrictEqual(yield* ports.resolveProjectKey(space, project), binding.projectKey);
+        assert.deepStrictEqual(yield* allMemoryInventory, before);
+        if (!binding.projectKey) return assert.fail("expected derived binding");
+        const p = prepared();
+        const scope: M.MemoryScope = { kind: "project", projectKey: binding.projectKey };
+        const selection = { ...p.selection, selector: { ...p.selection.selector, scope, project } };
+        const mapped = {
+          ...p,
+          selection,
+          batch: { ...p.batch, selections: [selection] },
+          next: { ...p.next, scope },
+          projectBinding: binding,
+        };
+        const denied = yield* ports
+          .commit({ ...mapped, expectedHeads: [M.MemoryRevisionId.make(uuid(999))] }, Effect.void)
+          .pipe(Effect.flip);
+        assert.strictEqual(denied._tag, "MemoryStoreConflict");
+        assert.deepStrictEqual(yield* allMemoryInventory, before);
+        yield* ports.commit(mapped, Effect.void);
+        assert.strictEqual((yield* sql`SELECT * FROM memory_project_bindings`).length, 1);
+      }).pipe(Effect.provide(repositoryImportLive)),
+  );
+  it.effect("hubReceipt-only approval refuses incomplete lineage without backfill", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const sql = yield* SqlClient.SqlClient;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const p = prepared();
+      yield* service.importPorts.commit(p, Effect.void);
+      const op = (yield* store.readOperation(space, p.selection.operationId))!;
+      const receipt = yield* remoteApproval(op);
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, receipt);
+      yield* sql`INSERT INTO memory_import_keys(space,key_kind,key,memory_id,record_json) VALUES (${space},'hubReceipt',${op.operationId},${memoryId},${encodeUnknown({ receipt, memoryId })})`;
+      yield* sql`DELETE FROM memory_events WHERE memory_space_id=${space}`;
+      yield* sql`DELETE FROM memory_compact_receipts WHERE space=${space}`;
+      yield* sql`DELETE FROM memory_import_lineage WHERE space=${space}`;
+      const before = yield* allMemoryInventory;
+      const guard = yield* store
+        .transact(store.requireImportLineageCompleteTx(space))
+        .pipe(Effect.flip);
+      assert.strictEqual(guard._tag, "MemoryStoreConflict");
+      if (guard._tag === "MemoryStoreConflict")
+        assert.strictEqual(guard.code, "bootstrap_required");
+      const callback = yield* service.importPorts.readItem(p.next, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(callback._tag, "MemoryStoreConflict");
+      if (callback._tag === "MemoryStoreConflict")
+        assert.strictEqual(callback.code, "bootstrap_required");
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("public receipt not_found commits lazy retirement", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const p = prepared();
+      yield* service.importPorts.commit(p, Effect.void);
+      const op = (yield* store.readOperation(space, p.selection.operationId))!;
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, yield* remoteApproval(op));
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+      const failure = yield* service.importPorts
+        .readReceipt(p.batch, Effect.void)
+        .pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryRpcError");
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        kind: string;
+      }>`SELECT json_extract(completed_items_json,'$.kind') AS kind FROM memory_import_receipts WHERE batch_operation_id=${p.batch.operationId}`;
+      assert.strictEqual(rows[0]?.kind, "retired");
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect.each([
+    "B accepted C rejected",
+    "C accepted B accepted",
+    "B rejected C accepted",
+  ] as const)("settles delayed observations: %s", (order) =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const ports = service.importPorts;
+      const a = prepared();
+      yield* ports.commit(a, Effect.void);
+      const aOp = (yield* store.readOperation(space, a.selection.operationId))!;
+      yield* store.acknowledgeOutbox(
+        `sync:${space}:${aOp.operationId}`,
+        yield* remoteApproval(aOp),
+      );
+      const acceptedA = (yield* ports.readItem(a.next, Effect.void))!;
+      const regB = (yield* ports.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const b = prepared(regB, 30, acceptedA);
+      yield* ports.commit(b, Effect.void);
+      const pendingB = (yield* ports.readItem(a.next, Effect.void))!;
+      const regC = (yield* ports.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const rawC = prepared(regC, 50, pendingB);
+      const cSelection = {
+        ...rawC.selection,
+        result: { ...rawC.selection.result!, outcome: "conflicted" as const },
+      };
+      const c = {
+        ...rawC,
+        selection: cSelection,
+        batch: { ...rawC.batch, selections: [cSelection] },
+        next: { ...rawC.next, outcome: "conflicted" as const },
+        expectedHeads: [b.selection.revisionId],
+      };
+      yield* ports.commit(c, Effect.void);
+      const ack = (p: PreparedImportCommit, outcome: "accepted" | "rejected", sequence: number) =>
+        Effect.gen(function* () {
+          const saved = (yield* store.receipt(space, p.selection.operationId))!;
+          const receipt: M.MemoryHubReceipt = {
+            operationId: p.selection.operationId,
+            memoryId,
+            operationDigest: saved.operationDigest,
+            outcome,
+            hubSequence: outcome === "accepted" ? sequence : null,
+            ...(outcome === "rejected" ? { failureCode: "forgotten" as const } : {}),
+          };
+          yield* store.acknowledgeOutbox(`sync:${space}:${p.selection.operationId}`, receipt);
+          return receipt;
+        });
+      let bReceipt: M.MemoryHubReceipt;
+      let cReceipt: M.MemoryHubReceipt;
+      if (order === "C accepted B accepted") {
+        cReceipt = yield* ack(c, "accepted", 3);
+        bReceipt = yield* ack(b, "accepted", 2);
+      } else {
+        bReceipt = yield* ack(b, order === "B rejected C accepted" ? "rejected" : "accepted", 2);
+        const intermediate = (yield* ports.readItem(a.next, Effect.void))!;
+        assert.deepStrictEqual(intermediate.pending, c.next.pending);
+        if (order === "B accepted C rejected")
+          assert.deepStrictEqual(intermediate.accepted, b.next.pending);
+        cReceipt = yield* ack(c, order === "B accepted C rejected" ? "rejected" : "accepted", 3);
+      }
+      const item = (yield* ports.readItem(a.next, Effect.void))!;
+      assert.deepStrictEqual(
+        item.accepted,
+        order === "B accepted C rejected" ? b.next.pending : c.next.pending,
+      );
+      assert.strictEqual(item.pending, null);
+      assert.strictEqual(
+        (yield* ports.readReceipt(b.batch, Effect.void)).items[0]!.outcome,
+        bReceipt.outcome === "rejected" ? "rejected" : "revised",
+      );
+      assert.strictEqual((yield* ports.readReceipt(c.batch, Effect.void)).sessionBodyBytes, 50);
+      const before = yield* allMemoryInventory;
+      yield* store.acknowledgeOutbox(`sync:${space}:${b.selection.operationId}`, bReceipt);
+      yield* store.acknowledgeOutbox(`sync:${space}:${c.selection.operationId}`, cReceipt);
+      assert.deepStrictEqual(yield* allMemoryInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+  it.effect("noop follows reused pending refusal and retains details through 30-day boundary", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const ports = service.importPorts;
+      const a = prepared();
+      yield* ports.commit(a, Effect.void);
+      const reg = (yield* ports.readRegistration(
+        { ...address, sourceId, by: "source" },
+        Effect.void,
+      ))!;
+      const raw = prepared(reg, 30, a.next);
+      const selection = { ...raw.selection, selector: a.selection.selector, result: null };
+      const noop = {
+        ...raw,
+        selection,
+        batch: { ...raw.batch, selections: [selection] },
+        candidate: a.candidate,
+        next: { ...a.next, outcome: "noop" as const },
+        expectedHeads: [a.selection.revisionId],
+      };
+      yield* ports.commit(noop, Effect.void);
+      yield* TestClock.setTime(Date.parse(stamp) + M.MEMORY_IMPORT_BATCH_RETENTION_MS + 1);
+      assert.strictEqual(
+        (yield* ports.preflightBatch(
+          { ...noop.batch, selectionDigest: noop.batch.selectionDigest },
+          Effect.void,
+        )).kind,
+        "completed",
+      );
+      const op = (yield* store.readOperation(space, a.selection.operationId))!;
+      const saved = (yield* store.receipt(space, op.operationId))!;
+      const capacity: M.MemoryCapacityExceeded = {
+        code: "capacity_exceeded",
+        dimension: "import_lineage_records",
+        current: 1001,
+        limit: 1000,
+        reclaimable: 0,
+      };
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, {
+        operationId: op.operationId,
+        memoryId,
+        operationDigest: saved.operationDigest,
+        outcome: "rejected",
+        hubSequence: null,
+        failureCode: "capacity_exceeded",
+        capacity,
+      });
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{
+        completed_items_json: string;
+      }>`SELECT completed_items_json FROM memory_import_receipts WHERE batch_operation_id=${noop.batch.operationId}`;
+      const decoded = yield* Schema.decodeEffect(
+        Schema.fromJsonString(Schema.Struct({ receipt: M.MemoryImportReceipt })),
+      )(rows[0]!.completed_items_json);
+      const receipt = decoded.receipt;
+      assert.strictEqual(receipt.items[0]!.issue, "capacity_exceeded");
+      assert.deepStrictEqual(receipt.items[0]!.capacity, capacity);
+      const failure = yield* ports.readReceipt(noop.batch, Effect.void).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "MemoryRpcError");
+    }).pipe(Effect.provide(importLive)),
+  );
+});
