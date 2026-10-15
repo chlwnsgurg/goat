@@ -757,7 +757,7 @@ const make = Effect.fnUntraced(function* (
                 memoryId: next.memoryId,
                 operationId: selection.operationId,
                 originEnvironmentId: environmentId,
-                expectedHeads: input.expectedHeads,
+                expectedHeads: input.parents,
                 revision: {
                   memorySpaceId: batch.memorySpaceId,
                   memoryId: next.memoryId,
@@ -790,7 +790,11 @@ const make = Effect.fnUntraced(function* (
           );
           if (operation.kind !== "upsert")
             return yield* new Store.MemoryStoreConflict({ code: "invalid_output" });
-          const receipt = yield* apply(operation, Store.localIntent, permit);
+          const receipt = yield* apply(
+            operation,
+            { ...Store.localIntent, localExpectedHeads: input.expectedHeads },
+            permit,
+          );
           if ((receipt.receipt.outcome === "conflicted") !== (next.outcome === "conflicted"))
             return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
           if (receipt.receipt.outcome === "rejected")
@@ -809,7 +813,7 @@ const make = Effect.fnUntraced(function* (
               memorySpaceId: batch.memorySpaceId,
               memoryId: next.memoryId,
               originEnvironmentId: environmentId,
-              expectedHeads: input.expectedHeads,
+              expectedHeads: input.parents,
               revision: operation.revision,
             },
             payloadRef: selection.revisionId,

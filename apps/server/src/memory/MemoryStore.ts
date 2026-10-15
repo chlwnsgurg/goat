@@ -70,6 +70,8 @@ export class MemoryCapacityError extends Schema.TaggedError<MemoryCapacityError>
 // These contexts are constructed inside the server, never decoded from a transport.
 const admissionBrand: unique symbol = Symbol("memory-admission");
 export type MemoryAdmissionContext = {
+  /** Local final CAS only; the v1 wire operation keeps expectedHeads equal to revision parents. */
+  readonly localExpectedHeads?: readonly M.MemoryRevisionId[];
   readonly [admissionBrand]: true;
   readonly kind: "localIntent" | "hubAdmission" | "approvedReplica";
 };
