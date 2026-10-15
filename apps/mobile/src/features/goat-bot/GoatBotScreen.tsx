@@ -1,3 +1,4 @@
+import { MemoryReportLink } from "../settings/SettingsMemoryRouteScreen";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import type { GoatBotRow } from "@goat/client-runtime/goatBot";
@@ -90,7 +91,7 @@ function GoatBotTaskCard(props: {
   );
 }
 
-const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
+export const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
   readonly row: GoatBotRow;
   readonly canSend: boolean;
   readonly onSend: (answer: string) => boolean;
@@ -167,6 +168,7 @@ const GoatBotTimelineRow = memo(function GoatBotTimelineRow(props: {
           {row.text}
         </Text>
       </View>
+      {row.memory ? <MemoryReportLink reference={row.memory} /> : null}
       {row.options.length > 0 ? (
         <View
           accessibilityLabel="Suggested answers"

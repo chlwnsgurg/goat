@@ -1,3 +1,10 @@
+import { presentMemoryRunAccess } from "@goat/client-runtime/memory-presentation";
+
+export function scheduledMemoryAccess(input: Parameters<typeof presentMemoryRunAccess>[0]) {
+  const view = presentMemoryRunAccess(input);
+  return `Saved memory access: ${view.savedCeiling} · Effective access: ${view.effectiveAccess}`;
+}
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

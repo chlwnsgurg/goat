@@ -1,3 +1,4 @@
+import { scheduledMemoryAccess } from "./scheduledTaskPresentation";
 import { useAtomValue } from "@effect/atom-react";
 import {
   AuthOrchestrationOperateScope,
@@ -1222,6 +1223,7 @@ function EnvironmentTasks({
                     ? ` · ${formatNextScheduledTaskRun(task.nextRunAt, now)}`
                     : ""}
               </Text>
+              <Text className="text-sm text-foreground-muted">{scheduledMemoryAccess(task)}</Text>
               {task.lastRunError ? (
                 <Text className="text-sm text-danger-foreground" numberOfLines={2}>
                   Last run failed: {task.lastRunError}
