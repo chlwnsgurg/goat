@@ -8611,6 +8611,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
           );
           yield* harness.awaitUntil(() => sendItems().length >= 1, "idle SendMessage call");
+          const beforeResult = sendItems();
 
           // The resume's task_started buffers. The SendMessage result names that
           // start's tool use, but its call already shows as a row, so it ends it.
@@ -8650,7 +8651,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             () => harness.continuationRequests.length === 1,
             "continuation request",
           );
-          const beforeExit = sendItems();
 
           // The CLI exits before the continuation run drains the wake buffer.
           yield* Queue.shutdown(harness.sdkMessages);
@@ -8683,7 +8683,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
 
           const input = JSON.stringify(SEND_INPUT);
-          assert.deepEqual(beforeExit, [`dynamic_tool:running:${input}`]);
+          assert.deepEqual(beforeResult, [`dynamic_tool:running:${input}`]);
           assert.deepEqual(sendItems(), [
             `dynamic_tool:running:${input}`,
             `dynamic_tool:completed:${input}`,
