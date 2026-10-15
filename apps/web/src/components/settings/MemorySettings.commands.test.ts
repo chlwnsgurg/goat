@@ -1,3 +1,4 @@
+import { memoryImportTestLocks } from "../../test/memoryImportLocks";
 import { expect, it, vi } from "vite-plus/test";
 import {
   EnvironmentId,
@@ -84,11 +85,13 @@ it("executes the actual reset command with current settings grants and preserves
     expect(transport).toHaveBeenCalledOnce();
     expect(f.destinations.every((id) => id === env)).toBe(true);
   } finally {
+    vi.unstubAllGlobals();
     f.registry.dispose();
   }
 });
 it("runs browser recovery through the actual import command and refuses apply after file-read revoke", async () => {
   const f = harness();
+  vi.stubGlobal("navigator", { locks: memoryImportTestLocks() });
   const values = new Map<string, string>();
   const recovery = memoryImportRecoveryStorage({
     getItem: (key) => values.get(key) ?? null,
@@ -168,6 +171,7 @@ it("runs browser recovery through the actual import command and refuses apply af
     expect(calls.map((call) => call.action)).toEqual(["status", "preview"]);
     expect(workflow.getState().phase).toBe("partial");
   } finally {
+    vi.unstubAllGlobals();
     f.registry.dispose();
   }
 });
@@ -197,6 +201,7 @@ it("reconcile uses current settings grants and forwards the diagnostics version"
     expect((await command.run(f.registry, { environmentId: env, input }))._tag).toBe("Failure");
     expect(transport).toHaveBeenCalledOnce();
   } finally {
+    vi.unstubAllGlobals();
     f.registry.dispose();
   }
 });

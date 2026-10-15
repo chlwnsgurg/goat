@@ -14,7 +14,10 @@ import { readEnvironmentScope, readPreparedConnection } from "../../state/sessio
 import { memoryEnvironment } from "../../state/memory";
 import {
   registerMemoryImportDestination,
-  memoryImportRecoveryStorage,
+  createMemoryImportAdmission,
+  canSafelyImport,
+  unsafeImportBrowserMessage,
+  changedImportDestinationMessage,
 } from "../../lib/memoryImportRecoveryStorage";
 import { randomUUID } from "../../lib/utils";
 import { MemoryScopeSettings, type MemoryScopeSelection } from "./MemoryScopeSettings";
@@ -32,11 +35,22 @@ export function MemoryImportSettings({
 }) {
   const registry = useContext(RegistryContext);
   const canImport = useAtomValue(memoryEnvironment.importProvider.permissionAtom(environmentId));
+  const [admissionListener] = useState(() => ({ invalidate: () => {} }));
+  const [admission] = useState(() => {
+    try {
+      return createMemoryImportAdmission({ environmentId, memorySpaceId }, () =>
+        admissionListener.invalidate(),
+      );
+    } catch {
+      return null;
+    }
+  });
   const [workflow] = useState(() => {
     try {
+      if (!admission) return null;
       return memoryEnvironment.createImportWorkflow(registry, {
         fence: { environmentId, memorySpaceId, session: randomUUID() },
-        recovery: memoryImportRecoveryStorage(),
+        recovery: admission.recovery,
         operationId: () => MemoryOperationId.make(randomUUID()),
       });
     } catch {
@@ -122,53 +136,31 @@ export function MemoryImportSettings({
       previousScope.current = next;
       setScope(next);
       if (JSON.stringify(previous) === JSON.stringify(next) || !workflow) return;
-      const token = ++generation.current;
+      generation.current++;
       workflow.stop();
+      workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
       setItems([]);
       setSelected([]);
-      const bindingChanged =
-        previous?.scope.kind === "project" &&
-        (next?.scope.kind !== "project" ||
-          JSON.stringify(previous.scope.projectKey) !== JSON.stringify(next.scope.projectKey));
-      if (!bindingChanged) {
-        workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
-
-        setBusy(false);
-        return;
-      }
-      setBusy(true);
-      void workflow
-        .removeDestination()
-        .then(() => {
-          if (!mounted.current || token !== generation.current) return;
-          workflow.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
-
-          setBusy(false);
-        })
-        .catch(() => {
-          if (mounted.current && token === generation.current)
-            setError("Could not clear saved import recovery.");
-        });
+      setBusy(false);
     },
     [workflow, environmentId, memorySpaceId],
   );
-  useEffect(() => {
-    if (!workflow) return;
-    return registerMemoryImportDestination({ environmentId, memorySpaceId }, async () => {
-      generation.current++;
-      setScope(null);
-      previousScope.current = null;
-      setError("Destination changed. Choose a scope and preview again.");
-      setBusy(true);
-      setItems([]);
-      setSelected([]);
-      setSources([]);
-      await workflow.removeDestination();
-      if (mounted.current) {
-        setBusy(false);
-      }
-    });
+  const invalidateDestination = useCallback(async () => {
+    generation.current++;
+    workflow?.stop();
+    workflow?.invalidate({ environmentId, memorySpaceId, session: randomUUID() });
+    setError(changedImportDestinationMessage);
+    setBusy(false);
+    setItems([]);
+    setSelected([]);
+    setSources([]);
   }, [environmentId, memorySpaceId, workflow]);
+  useEffect(() => {
+    admissionListener.invalidate = () => {
+      void invalidateDestination();
+    };
+    return registerMemoryImportDestination({ environmentId, memorySpaceId }, invalidateDestination);
+  }, [environmentId, memorySpaceId, invalidateDestination, admissionListener]);
   const locked =
     busy ||
     ["previewed", "save_failed", "recovery", "saving", "applying", "checking"].includes(
@@ -181,6 +173,7 @@ export function MemoryImportSettings({
         description="Import supported Codex, Claude, or OMO memories from the selected device. Other providers are not supported. Memory write and file read permissions are required."
       >
         <div className="space-y-3">
+          {!canSafelyImport() ? <p role="alert">{unsafeImportBrowserMessage}</p> : null}
           {!workflow ? (
             <p role="alert">
               Browser storage is unavailable. Imports require saved recovery information.
@@ -242,6 +235,7 @@ export function MemoryImportSettings({
                 void run(async () => {
                   setItems([]);
                   setSelected([]);
+                  await admission!.capturePreview();
                   const result = await workflow!.preview(source.sourceId);
                   if (result && mounted.current) setItems(result.items);
                 })
@@ -312,7 +306,7 @@ export function MemoryImportSettings({
               </p>
               <Button
                 size="sm"
-                disabled={!canImport || busy}
+                disabled={!canImport || busy || !canSafelyImport()}
                 onClick={() => void run(() => workflow!.apply())}
               >
                 Apply import
@@ -346,7 +340,7 @@ export function MemoryImportSettings({
             <Button
               size="sm"
               variant="outline"
-              disabled={!canImport || busy}
+              disabled={!canImport || busy || !canSafelyImport()}
               onClick={() => void run(() => workflow!.retry())}
             >
               Retry saving import

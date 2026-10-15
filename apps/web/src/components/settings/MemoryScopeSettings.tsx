@@ -13,6 +13,7 @@ import { memoryEnvironment } from "../../state/memory";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { removeMemoryImportDestination } from "../../lib/memoryImportRecoveryStorage";
 import { randomUUID } from "../../lib/utils";
+import { MemoryScopePicker } from "./MemoryScopePicker";
 import { Button } from "../ui/button";
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from "../ui/select";
 
@@ -32,8 +33,10 @@ export function MemoryScopeSettings({
 }) {
   const registry = useContext(RegistryContext);
   const projects = useProjects().filter((p) => p.environmentId === environmentId);
-  const threads = useThreadShells().filter((t) => t.environmentId === environmentId);
   const [kind, setKind] = useState<MemoryScope["kind"] | null>(null);
+  const threads = useThreadShells(kind === "thread").filter(
+    (t) => t.environmentId === environmentId,
+  );
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [binding, setBinding] = useState<MemoryProjectBinding | null>(null);
@@ -48,7 +51,7 @@ export function MemoryScopeSettings({
   const get = useAtomCommand(memoryEnvironment.projectBindingGet, { reportFailure: false });
   const update = useAtomCommand(memoryEnvironment.projectBindingUpdate, { reportFailure: false });
   const project = projects.find((p) => p.id === projectId);
-  const thread = threads.find((t) => t.id === threadId);
+  const selectedThreadId = threads.find((t) => t.id === threadId)?.id;
   const generation = useRef(0);
   useEffect(() => {
     const token = ++generation.current;
@@ -83,11 +86,11 @@ export function MemoryScopeSettings({
               scope: { kind: "project", projectKey: binding.projectKey },
               project: { environmentId, projectId: project.id },
             }
-          : kind === "thread" && thread
-            ? { scope: { kind: "thread", thread: { environmentId, threadId: thread.id } } }
+          : kind === "thread" && selectedThreadId
+            ? { scope: { kind: "thread", thread: { environmentId, threadId: selectedThreadId } } }
             : null,
     );
-  }, [kind, project, binding, thread, environmentId, onChange]);
+  }, [kind, project, binding, selectedThreadId, environmentId, onChange]);
   async function save() {
     if (
       !confirm ||
@@ -109,7 +112,7 @@ export function MemoryScopeSettings({
     } catch {
       if (token === generation.current) {
         setBusy(false);
-        setMessage("Could not clear import recovery. Binding was not changed.");
+        setMessage("Could not stop import selection. Binding was not changed.");
       }
       return;
     }
@@ -161,18 +164,13 @@ export function MemoryScopeSettings({
       </Select>
       {kind === "project" ? (
         <>
-          <Select value={projectId} disabled={disabled || busy} onValueChange={setProjectId}>
-            <SelectTrigger aria-label="Memory project">
-              <SelectValue placeholder="Choose a project" />
-            </SelectTrigger>
-            <SelectPopup>
-              {projects.map((p) => (
-                <SelectItem key={p.id} value={p.id}>
-                  {p.title}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          <MemoryScopePicker
+            items={projects}
+            value={projectId}
+            disabled={disabled || busy}
+            onChange={setProjectId}
+            label="Memory project"
+          />
           {binding ? (
             <p>
               {binding.projectKey?.kind === "explicit"
@@ -219,18 +217,13 @@ export function MemoryScopeSettings({
         </>
       ) : null}
       {kind === "thread" ? (
-        <Select value={threadId} disabled={disabled || busy} onValueChange={setThreadId}>
-          <SelectTrigger aria-label="Memory thread">
-            <SelectValue placeholder="Choose a thread" />
-          </SelectTrigger>
-          <SelectPopup>
-            {threads.map((t) => (
-              <SelectItem key={t.id} value={t.id}>
-                {t.title}
-              </SelectItem>
-            ))}
-          </SelectPopup>
-        </Select>
+        <MemoryScopePicker
+          items={threads}
+          value={threadId}
+          disabled={disabled || busy}
+          onChange={setThreadId}
+          label="Memory thread"
+        />
       ) : null}
       {message ? <p role="status">{message}</p> : null}
     </div>

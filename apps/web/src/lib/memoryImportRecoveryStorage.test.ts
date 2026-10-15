@@ -1,13 +1,21 @@
 // @vitest-environment jsdom
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import * as M from "@goat/contracts";
 import { createMemoryImportWorkflow } from "@goat/client-runtime/memory-import-workflow";
 import {
   memoryImportRecoveryKey,
   MEMORY_IMPORT_RECOVERY_TTL_MS,
 } from "@goat/client-runtime/memory-import-recovery";
-import { memoryImportRecoveryStorage } from "./memoryImportRecoveryStorage";
+import {
+  createMemoryImportAdmission,
+  removeMemoryImportDestination,
+  memoryImportRecoveryStorage,
+} from "./memoryImportRecoveryStorage";
 import { memorySyncFixture } from "../test/memorySyncFixture";
+import { memoryImportTestLocks } from "../test/memoryImportLocks";
+beforeEach(() => {
+  vi.stubGlobal("navigator", { locks: memoryImportTestLocks() });
+});
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const destination = {
   environmentId: M.EnvironmentId.make("device"),
@@ -23,10 +31,14 @@ function deferred<T>() {
 }
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   localStorage.clear();
 });
-function fixture(count = 65) {
-  const store = memoryImportRecoveryStorage(localStorage);
+function fixture(
+  count = 65,
+  store = memoryImportRecoveryStorage(localStorage),
+  capturePreview = async () => {},
+) {
   const calls: M.MemoryImportProviderInput[] = [];
   const selections = Array.from({ length: count }, (_, index) => ({
     sourceItemKey: `item-${index}`,
@@ -86,6 +98,7 @@ function fixture(count = 65) {
       allowed = value;
     },
     ready: async () => {
+      await capturePreview();
       await workflow.preview(sourceId);
       workflow.select(selections);
     },
@@ -276,4 +289,101 @@ it("session invalidation rejects late replies while preserving exact status reco
       operationId: handle!.operationId,
     },
   ]);
+});
+
+function independentAdapter() {
+  return {
+    getItem: (key: string) => localStorage.getItem(key),
+    setItem: (key: string, value: string) => localStorage.setItem(key, value),
+    removeItem: (key: string) => localStorage.removeItem(key),
+  };
+}
+it("without Web Locks writes no handle and admits no apply, but recovers status", async () => {
+  const f = fixture(1);
+  await f.store.save(destination, M.MemoryOperationId.make(uuid(99)));
+  vi.stubGlobal("navigator", {});
+  await f.workflow.recover();
+  expect(f.calls.map((call) => call.action)).toEqual(["status"]);
+  await f.ready();
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  await f.workflow.apply();
+  expect(write).not.toHaveBeenCalled();
+  expect(f.calls.filter((call) => call.action === "apply")).toEqual([]);
+  expect(await f.store.load(destination)).toBeNull();
+});
+it("with Web Locks independent stores cannot overwrite an unresolved slot", async () => {
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const adapterA = independentAdapter();
+  const originalRead = adapterA.getItem;
+  const a = memoryImportRecoveryStorage({
+    ...adapterA,
+    getItem: async (key) => {
+      entered.resolve();
+      await release.promise;
+      return originalRead(key);
+    },
+  });
+  const b = memoryImportRecoveryStorage(independentAdapter());
+  const savingA = a.save(destination, M.MemoryOperationId.make(uuid(101)));
+  await entered.promise;
+  const savingB = b.save(destination, M.MemoryOperationId.make(uuid(102)));
+  const outcomeB = savingB.catch(() => null);
+  release.resolve();
+  await savingA;
+  expect(await outcomeB).toBeNull();
+  expect((await b.load(destination))?.operationId).toBe(uuid(101));
+});
+it("another tab binding change preserves sent X after response loss for exact status recovery", async () => {
+  let a!: ReturnType<typeof fixture>;
+  const admission = createMemoryImportAdmission(
+    destination,
+    () => a.workflow.invalidate(),
+    independentAdapter(),
+  );
+  a = fixture(1, admission.recovery, admission.capturePreview);
+  await a.ready();
+  const sent = deferred<void>();
+  const reply = deferred<void>();
+  a.setRequest(async (input) => {
+    if (input.action === "apply") {
+      sent.resolve();
+      await reply.promise;
+      throw new Error("lost");
+    }
+    return a.respond(input);
+  });
+  const applying = a.workflow.apply();
+  await sent.promise;
+  const x = await a.store.load(destination);
+  await removeMemoryImportDestination(destination, independentAdapter());
+  expect((await a.store.load(destination))?.operationId).toBe(x!.operationId);
+  reply.resolve();
+  await applying;
+  a.calls.length = 0;
+  a.setRequest(async (input) => a.respond(input));
+  await a.create().recover();
+  expect(a.calls).toEqual([
+    { action: "status", memorySpaceId: destination.memorySpaceId, operationId: x!.operationId },
+  ]);
+  await a.ready();
+  await a.workflow.apply();
+  expect(a.calls.filter((call) => call.action === "apply")).toHaveLength(1);
+});
+it("another tab binding generation fences old preview even before notification, then allows re-preview", async () => {
+  let a!: ReturnType<typeof fixture>;
+  const invalidated = vi.fn(() => a.workflow.invalidate());
+  const admission = createMemoryImportAdmission(destination, invalidated, independentAdapter());
+  a = fixture(1, admission.recovery, admission.capturePreview);
+  await a.ready();
+  await removeMemoryImportDestination(destination, independentAdapter());
+  const write = vi.spyOn(Storage.prototype, "setItem");
+  await a.workflow.apply();
+  expect(invalidated).toHaveBeenCalledOnce();
+  expect(write).not.toHaveBeenCalled();
+  expect(a.calls.filter((call) => call.action === "apply")).toEqual([]);
+  expect(a.workflow.getSnapshot().phase).toBe("idle");
+  await a.ready();
+  await a.workflow.apply();
+  expect(a.calls.filter((call) => call.action === "apply")).toHaveLength(1);
 });

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { memoryImportTestLocks } from "../../test/memoryImportLocks";
 import { MemoryHubDiagnosticsSettings } from "./MemoryHubDiagnosticsSettings";
 import { MemoryRunAccessLabel } from "./MemoryRunAccessLabel";
 import { memorySyncFixture } from "../../test/memorySyncFixture";
@@ -38,6 +39,7 @@ const state = vi.hoisted(() => ({
   executors: new Map<string, (input: unknown) => Promise<unknown>>(),
   projects: [] as { id: string; environmentId: string; title: string }[],
   threads: [] as { id: string; environmentId: string; title: string }[],
+  threadReads: vi.fn(),
   agentAccess: true,
   connection: {} as object | null,
   deviceConnections: new Map<string, object | null>(),
@@ -131,9 +133,10 @@ vi.mock("../../state/entities", () => ({
     useFixtureVersion();
     return state.projects;
   },
-  useThreadShells: () => {
+  useThreadShells: (enabled = true) => {
+    state.threadReads(enabled);
     useFixtureVersion();
-    return state.threads;
+    return enabled ? state.threads : [];
   },
 }));
 vi.mock("../../hooks/useSettings", () => ({
@@ -202,6 +205,32 @@ vi.mock("@legendapp/list/react", () => ({
         <div key={item.memoryId}>{renderItem({ item })}</div>
       ))}
     </div>
+  ),
+}));
+vi.mock("./MemoryScopePicker", () => ({
+  MemoryScopePicker: ({
+    items,
+    value,
+    onChange,
+    disabled,
+  }: {
+    items: { id: string; title: string }[];
+    value: string | null;
+    onChange: (id: string) => void;
+    disabled: boolean;
+  }) => (
+    <select
+      value={value ?? ""}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+    >
+      <option value="">Choose</option>
+      {items.map((item) => (
+        <option key={item.id} value={item.id}>
+          {item.title}
+        </option>
+      ))}
+    </select>
   ),
 }));
 vi.mock("../ui/select", () => ({
@@ -285,12 +314,14 @@ const item = Schema.decodeUnknownSync(MemoryItem)({
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
+  Object.defineProperty(navigator, "locks", { configurable: true, value: memoryImportTestLocks() });
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-15T00:00:00.000Z"));
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   window.localStorage.clear();
+  state.threadReads.mockClear();
   state.projects = [];
   state.threads = [];
   state.agentAccess = true;
@@ -2171,4 +2202,58 @@ it("allows a fresh explicit attempt after a refused response", async () => {
   const second = state.calls.mock.calls[1]![0] as { input: { operationId: string } };
   expect(second.input.operationId).not.toBe(first.input.operationId);
   expect(container.textContent).toContain("Waiting for revert approval");
+});
+
+it("keeps 2000 unrelated shells unsubscribed in user/project scope and only reports thread identity changes", async () => {
+  state.threads = Array.from({ length: 2000 }, (_, i) => ({
+    id: `thread-${i}`,
+    environmentId: envId,
+    title: `Thread ${i}`,
+  }));
+  const selection = vi.fn();
+  const view = await renderControl(
+    <MemoryScopeSettings environmentId={envId} memorySpaceId={spaceId} onChange={selection} />,
+  );
+  await chooseControl("user");
+  selection.mockClear();
+  state.threadReads.mockClear();
+  state.threads = state.threads.map((thread) => ({ ...thread, title: `${thread.title} updated` }));
+  await view.render();
+  expect(state.threadReads.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+  expect(selection).not.toHaveBeenCalled();
+  await chooseControl("project");
+  selection.mockClear();
+  state.threadReads.mockClear();
+  await view.render();
+  expect(state.threadReads.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
+  expect(selection).not.toHaveBeenCalled();
+  await chooseControl("thread");
+  await chooseControl("thread-1999", 1);
+  selection.mockClear();
+  state.threads = state.threads.map((thread) => ({ ...thread, title: `${thread.title} again` }));
+  await view.render();
+  expect(selection).not.toHaveBeenCalled();
+});
+it("explains unavailable safe import admission while keeping Check import result enabled", async () => {
+  Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  expect(container.textContent).toContain("This browser can't safely run imports");
+  const check = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Check import result",
+  )!;
+  expect(check.disabled).toBe(false);
+});
+it("storage generation notification stops selection without deleting recovery", async () => {
+  const { memoryImportGenerationKey } = await import("../../lib/memoryImportRecoveryStorage");
+  await renderControl(<MemoryImportSettings environmentId={envId} memorySpaceId={spaceId} />);
+  await act(async () =>
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: memoryImportGenerationKey({ environmentId: envId, memorySpaceId: spaceId }),
+        storageArea: localStorage,
+        newValue: "changed-by-other-tab",
+      }),
+    ),
+  );
+  expect(container.textContent).toContain("Destination changed. Choose a scope and preview again.");
 });
