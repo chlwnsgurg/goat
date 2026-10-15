@@ -1341,6 +1341,23 @@ describe("MemoryImport lifetime forget fragments", () => {
         for (const op of operations) {
           const receipt = yield* remoteApproval(op);
           yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, receipt);
+          if (op.operationId === operationId) {
+            // A base can compact while its independently delivered expansion is still pending.
+            yield* store.persistCompactReceipt({
+              memorySpaceId: space,
+              originEnvironmentId: environmentId,
+              operationKind: "forget",
+              receipt,
+              revisionId: null,
+              resolutionId: null,
+              revertsResolutionId: null,
+              attemptId: null,
+              fencingToken: null,
+              reportGuard: null,
+            });
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`DELETE FROM memory_events WHERE memory_space_id=${space} AND operation_id=${operationId}`;
+          }
         }
         assert.strictEqual(
           (yield* store.receipt(space, operationId))?.receipt.forgetExpansion?.status,

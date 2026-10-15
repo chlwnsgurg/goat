@@ -29,11 +29,6 @@ export default Effect.gen(function* () {
     const reserve = `(${bytes}+64)`;
     return (
       counter("'_hub_global'", "import_lineage_bytes", `${sign}*${bytes}`) +
-      counter(
-        "'_hub_global'",
-        "hub_receipts",
-        `${sign}*(CASE WHEN ${p}.record_kind='batch' THEN 1 ELSE 0 END)`,
-      ) +
       counter("'_hub_global'", "hub_metadata", `${sign}*${bytes}`) +
       counter(`${p}.space`, "hub_snapshot_bytes", `${sign}*${bytes}`) +
       counter(`${p}.space`, "hub_snapshot_rows", `${sign}`) +
@@ -129,6 +124,11 @@ export default Effect.gen(function* () {
             counter(`${p}.space`, dimension, `${sign}*(${expression(p + ".")})`),
         )
         .join("") +
+      counter(
+        "'_hub_global'",
+        "hub_receipts",
+        `${sign}*(CASE WHEN ${p}.record_kind='batch' THEN 1 ELSE 0 END)`,
+      ) +
       counter("'_hub_global'", "hub_metadata", `${sign}*${bytes}`) +
       counter("'_hub_global'", "hub_private_metadata", `${sign}*${bytes}`) +
       counter(`${p}.space`, "hub_snapshot_bytes", `${sign}*${bytes}`) +
