@@ -280,7 +280,11 @@ const seedMember = Effect.gen(function* () {
     VALUES (${space},${environmentId},${"a".repeat(64)},1,'active',0)`;
 });
 // A fresh database models the hub; its approval cannot mutate the origin item fixture.
-const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
+const remoteApproval = (
+  operation: M.MemoryOperation,
+  forgotten = false,
+  predecessors: readonly M.MemoryOperation[] = [],
+) =>
   Effect.gen(function* () {
     yield* seedMember;
     const service = yield* Service.MemoryService;
@@ -311,6 +315,10 @@ const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
         }),
       );
     }
+    for (const predecessor of predecessors)
+      yield* (yield* Store.MemoryStore).transact(
+        service.admitHubOperationTx({ authority, operation: predecessor }),
+      );
     return yield* (yield* Store.MemoryStore).transact(
       service.admitHubOperationTx({ authority, operation }),
     );
@@ -1024,6 +1032,21 @@ describe("MemoryImport M3c final fences", () => {
         (yield* service.importPorts.readItem(item, Effect.void))?.pending,
         p.next.pending,
       );
+      const aliasApproval = yield* remoteApproval(op, false, [operation]);
+      assert.strictEqual(aliasApproval.outcome, "accepted");
+      yield* store.acknowledgeOutbox(`sync:${space}:${op.operationId}`, aliasApproval);
+      assert.deepStrictEqual(
+        (yield* service.importPorts.readItem(item, Effect.void))?.accepted,
+        p.next.pending,
+      );
+      assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 2);
+      // Expired scheduling on a shared historical ref must not purge a live alias head.
+      yield* sql`UPDATE memory_payloads SET purge_eligible_after=0,replaced_at=0 WHERE payload_ref=${op.revision.payloadRef}`;
+      yield* store.prunePayloads(
+        Date.parse(stamp) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS + 1,
+        32,
+      );
+      assert.strictEqual((yield* sql`SELECT * FROM memory_payloads`).length, 1);
     }).pipe(Effect.provide(importLive)),
   );
 });

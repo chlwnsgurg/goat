@@ -9,7 +9,7 @@ import * as NodeUtil from "node:util";
 import * as NodeCrypto from "node:crypto";
 import { scanMemoryValue } from "./MemorySecretScanner.ts";
 import * as M from "@goat/contracts";
-import type { ImportStorePorts, ImportBatch, ImportItem } from "./imports/MemoryImportTypes.ts";
+import type { ImportStorePorts, ImportItem } from "./imports/MemoryImportTypes.ts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -6146,14 +6146,7 @@ const make = Effect.gen(function* () {
         : undefined;
     // Each batch freezes its own observation. A newer pending proposal cannot hide
     // an older approval, and hub order prevents accepted state from moving backward.
-    const observations = new Map<
-      string,
-      {
-        batch: ImportBatch;
-        selection: ImportBatch["selections"][number];
-        observation: NonNullable<ImportItem["pending"]>;
-      }
-    >();
+    const observations = new Map<string, NonNullable<ImportItem["pending"]>>();
     for (const row of batches) {
       const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
       if (batch.kind !== "detailed") continue;
@@ -6172,7 +6165,7 @@ const make = Effect.gen(function* () {
               batch.sourceId,
               selection.selector.sourceItemKey,
             ]),
-            { batch, selection, observation: selection.observation },
+            observation,
           );
         }
       }
@@ -6188,7 +6181,7 @@ const make = Effect.gen(function* () {
     );
     for (const row of rows) {
       const item = yield* importItemCodec.decode(row.registration_json, strict);
-      const observation = observations.get(row.receipt_id)?.observation ?? item.pending;
+      const observation = observations.get(row.receipt_id) ?? item.pending;
       if (!observation || observation.operationId !== receipt.operationId) continue;
       if (item.memoryId !== receipt.memoryId)
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
