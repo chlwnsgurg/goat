@@ -1429,6 +1429,103 @@ describe("MemoryImport refused forget expansion", () => {
 });
 
 describe("MemoryImport origin admission", () => {
+  it.effect(
+    "batch-only capacity rejection allocates no new identity and the following noop completes",
+    () =>
+      Effect.gen(function* () {
+        yield* setupImport;
+        const service = yield* Service.MemoryService;
+        const sql = yield* SqlClient.SqlClient;
+        const first = prepared();
+        yield* service.importPorts.commit(first, Effect.void);
+        const reg = (yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        ))!;
+        const attempt = prepared(reg, 30);
+        const key = "synthetic-capacity";
+        const id = M.MemoryId.make(uuid(500));
+        const rejectedSelection = {
+          ...attempt.selection,
+          memoryId: id,
+          selector: { ...attempt.selection.selector, sourceItemKey: key },
+          result: null,
+        };
+        const noop = prepared(reg, 50, first.next);
+        const noopSelection = {
+          ...noop.selection,
+          selector: first.selection.selector,
+          result: null,
+        };
+        const batch = {
+          ...attempt.batch,
+          selections: [rejectedSelection, noopSelection],
+          receipt: { ...attempt.batch.receipt, items: [], remaining: 2, state: "partial" as const },
+        };
+        const capacity: M.MemoryCapacityExceeded = {
+          code: "capacity_exceeded",
+          dimension: "import_source_items",
+          current: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS + 1,
+          limit: M.MEMORY_IMPORT_MAX_SOURCE_ITEMS,
+          reclaimable: 0,
+        };
+        yield* sql`UPDATE memory_quota_counters SET value=${M.MEMORY_IMPORT_MAX_SOURCE_ITEMS - 1} WHERE space='_hub_global' AND dimension='import_source_items'`;
+        const next = {
+          ...attempt.next,
+          sourceItemKey: key,
+          memoryId: id,
+          outcome: "rejected" as const,
+          pending: null,
+          rejected: {
+            sourceFingerprint: attempt.candidate.sourceFingerprint,
+            issue: "capacity_exceeded" as const,
+          },
+        };
+        const result = yield* service.importPorts.commit(
+          {
+            ...attempt,
+            batch,
+            selection: rejectedSelection,
+            candidate: { ...attempt.candidate, sourceItemKey: key },
+            next,
+            rejectOnly: { issue: "capacity_exceeded", capacity },
+          },
+          Effect.void,
+        );
+        assert.deepStrictEqual(result.capacity, capacity);
+        assert.strictEqual(yield* service.importPorts.readItem(next, Effect.void), undefined);
+        const partial = yield* service.importPorts.preflightBatch(
+          { ...batch, selectionDigest: batch.selectionDigest },
+          Effect.void,
+        );
+        if (partial.kind !== "partial") return assert.fail("expected partial batch");
+        const updated = (yield* service.importPorts.readRegistration(
+          { ...address, sourceId, by: "source" },
+          Effect.void,
+        ))!;
+        assert.strictEqual(
+          (yield* service.importPorts.commit(
+            {
+              ...noop,
+              registration: updated,
+              registrationVersion: updated.version,
+              batch: partial.batch,
+              selection: partial.batch.selections[1]!,
+              candidate: first.candidate,
+              next: { ...first.next, outcome: "noop" },
+              expectedHeads: [first.selection.revisionId],
+            },
+            Effect.void,
+          )).outcome,
+          "noop",
+        );
+        const receipt = yield* service.importPorts.readReceipt(batch, Effect.void);
+        assert.strictEqual(receipt.state, "completed");
+        assert.strictEqual(receipt.items.length, 2);
+        assert.deepStrictEqual(receipt.items[0]!.capacity, capacity);
+      }).pipe(Effect.provide(importLive)),
+  );
+
   it.effect("a rejected zero-byte observation cannot waive a later accepted session charge", () =>
     Effect.gen(function* () {
       yield* setupImport;

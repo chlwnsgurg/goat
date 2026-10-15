@@ -192,7 +192,7 @@ export type LocalImportReadiness = {
 };
 /** Bounded candidate and captured CAS/parent fences, never a Reader or raw file handle. */
 export type PreparedImportCommit = {
-  /** Record only the batch rejection; next must equal previous, including its original scope. */
+  /** Batch-only rejection: preserve previous exactly, or leave a new identity unallocated (next rejected, no observations). */
   readonly rejectOnly?: {
     readonly issue: M.MemoryImportIssue;
     readonly capacity?: M.MemoryCapacityExceeded;

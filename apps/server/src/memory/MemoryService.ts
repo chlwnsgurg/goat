@@ -602,7 +602,15 @@ const make = Effect.fnUntraced(function* (
         )
           return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
         yield* requireScope(selection.selector.scope);
-        if (input.rejectOnly && (!previous || !NodeUtil.isDeepStrictEqual(next, previous)))
+        if (
+          input.rejectOnly &&
+          (previous
+            ? !NodeUtil.isDeepStrictEqual(next, previous)
+            : next.outcome !== "rejected" ||
+              next.accepted !== null ||
+              next.pending !== null ||
+              !NodeUtil.isDeepStrictEqual(next.scope, selection.selector.scope))
+        )
           return yield* new Store.MemoryStoreConflict({ code: "identity_mismatch" });
         // Sync readiness is observed outside SQL; published local state is authoritative after lock.
         const ready = yield* query(
