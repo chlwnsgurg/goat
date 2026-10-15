@@ -21,6 +21,7 @@ import {
   type PreviewAutomationEvaluateInput,
   type PreviewAutomationHoverInput,
   type PreviewAutomationNavigateInput,
+  type PreviewAutomationReloadInput,
   type PreviewAutomationNetworkEntry,
   type PreviewAutomationOpenInput,
   type PreviewAutomationPressInput,
@@ -1880,6 +1881,40 @@ const make = Effect.gen(function* () {
   const executeTabOperation = async (tab: ServerTab, request: PreviewAutomationRequest) => {
     const input = request.input;
     switch (request.operation) {
+      case "back":
+      case "forward":
+      case "reload": {
+        const operation = request.operation;
+        const generation = tab.control.generation;
+        const assertControl = () => {
+          if (
+            generation !== tab.control.generation ||
+            !tab.control.agentCanActNow(request.agentSessionId!)
+          )
+            throw new BrowserControlInterrupted(
+              "Browser control changed during navigation. The page may have navigated; refresh the snapshot before trying again.",
+            );
+        };
+        try {
+          await recordAction(tab, operation, () =>
+            ServerBrowserPage.navigateHistory(
+              tab.page,
+              tab.cdp,
+              operation,
+              input as PreviewAutomationReloadInput,
+              request.timeoutMs,
+              assertControl,
+            ),
+          );
+          assertControl();
+          const status = await statusWithTitle(tab, request.agentSessionId);
+          assertControl();
+          return status;
+        } catch (cause) {
+          assertControl();
+          throw cause;
+        }
+      }
       case "navigate": {
         const navigateInput = input as PreviewAutomationNavigateInput;
         await recordAction(tab, "navigate", () =>

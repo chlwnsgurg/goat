@@ -56,6 +56,9 @@ export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   "hover",
   "select",
   "drag",
+  "back",
+  "forward",
+  "reload",
 ] as const;
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_SERVER_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
@@ -273,6 +276,24 @@ export const PreviewAutomationNavigateInput = Schema.Struct({
       "Navigates the active browser tab. Provide exactly one of url or target; for most public pages use url.",
   });
 export type PreviewAutomationNavigateInput = typeof PreviewAutomationNavigateInput.Type;
+
+export const PreviewAutomationHistoryInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  readiness: Schema.optional(Schema.Literals(["load", "domContentLoaded"])).annotate({
+    description:
+      "Readiness milestone after navigation commits: load (default) or domContentLoaded for an interactive document.",
+  }),
+  timeoutMs: OptionalTimeoutMs,
+});
+export type PreviewAutomationHistoryInput = typeof PreviewAutomationHistoryInput.Type;
+
+export const PreviewAutomationReloadInput = Schema.Struct({
+  ...PreviewAutomationHistoryInput.fields,
+  ignoreCache: Schema.optional(Schema.Boolean).annotate({
+    description: "Bypass Chromium's HTTP cache for this reload. Defaults to false.",
+  }),
+});
+export type PreviewAutomationReloadInput = typeof PreviewAutomationReloadInput.Type;
 
 export const PreviewAutomationResizeInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,

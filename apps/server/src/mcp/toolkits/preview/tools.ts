@@ -7,11 +7,13 @@ import {
   PreviewAutomationError,
   PreviewAutomationEvaluateInput,
   PreviewAutomationHoverInput,
+  PreviewAutomationHistoryInput,
   PreviewAutomationNavigateInput,
   PreviewAutomationOpenInput,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
+  PreviewAutomationReloadInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationScrollInput,
@@ -108,6 +110,39 @@ const PreviewNavigateTool = safeBrowserTool(
     failure: PreviewToolFailure,
     dependencies,
   }).annotate(Tool.Title, "Navigate browser preview"),
+);
+
+const PreviewBackTool = safeBrowserTool(
+  Tool.make("preview_back", {
+    description:
+      "Go back one entry in the exact collaborative browser tab's history. Pass tabId to select a tab. Refuses when no back entry exists. Waits for navigation and returns observed URL/status; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
+    parameters: PreviewAutomationHistoryInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Go back in browser preview"),
+);
+
+const PreviewForwardTool = safeBrowserTool(
+  Tool.make("preview_forward", {
+    description:
+      "Go forward one entry in the exact collaborative browser tab's history. Pass tabId to select a tab. Refuses when no forward entry exists. Waits for navigation and returns observed URL/status; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
+    parameters: PreviewAutomationHistoryInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Go forward in browser preview"),
+);
+
+const PreviewReloadTool = safeBrowserTool(
+  Tool.make("preview_reload", {
+    description:
+      "Reload the exact collaborative browser tab selected by tabId, or the current tab. Cache bypass is opt-in with ignoreCache:true. Waits for navigation and returns observed URL/status. Reload may repeat page requests; take a fresh snapshot afterward. Environment-hosted tabs, including desktop-backed tabs.",
+    parameters: PreviewAutomationReloadInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewToolFailure,
+    dependencies,
+  }).annotate(Tool.Title, "Reload browser preview"),
 );
 
 const PreviewResizeTool = safeBrowserTool(
@@ -317,6 +352,9 @@ export const PreviewToolkit = Toolkit.make(
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewBackTool,
+  PreviewForwardTool,
+  PreviewReloadTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewSnapshotTool,
@@ -339,6 +377,9 @@ export const PreviewStandardToolkit = Toolkit.make(
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewBackTool,
+  PreviewForwardTool,
+  PreviewReloadTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewClickTool,

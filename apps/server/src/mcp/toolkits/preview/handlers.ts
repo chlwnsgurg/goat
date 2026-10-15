@@ -75,7 +75,8 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(tabId === undefined ? {} : { tabId }),
   });
-  if (["status", "open", "navigate", "snapshot"].includes(operation)) return { result };
+  if (["status", "open", "navigate", "back", "forward", "reload", "snapshot"].includes(operation))
+    return { result };
   const statusTabId =
     (operation !== "evaluate" && typeof result === "object" && result !== null
       ? (result as { tabId?: PreviewTabId }).tabId
@@ -201,6 +202,15 @@ const handlers = {
   ),
   preview_navigate: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
+  ),
+  preview_back: McpToolAccess.actsAsCaller((input) =>
+    invokeTargeted<PreviewAutomationStatus>("back", input, input.timeoutMs),
+  ),
+  preview_forward: McpToolAccess.actsAsCaller((input) =>
+    invokeTargeted<PreviewAutomationStatus>("forward", input, input.timeoutMs),
+  ),
+  preview_reload: McpToolAccess.actsAsCaller((input) =>
+    invokeTargeted<PreviewAutomationStatus>("reload", input, input.timeoutMs),
   ),
   preview_resize: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
