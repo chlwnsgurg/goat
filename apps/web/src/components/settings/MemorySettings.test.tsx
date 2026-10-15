@@ -105,9 +105,15 @@ vi.mock("../../state/environments", () => ({
 }));
 vi.mock("../../state/session", async (original) => ({
   ...(await original<typeof import("../../state/session")>()),
-  usePreparedConnection: () => Option.fromNullishOr(state.connection),
+  usePreparedConnection: () => {
+    useFixtureVersion();
+    return Option.fromNullishOr(state.connection);
+  },
   readPreparedConnection: () => state.connection,
-  useEnvironmentScope: () => state.allowed,
+  useEnvironmentScope: () => {
+    useFixtureVersion();
+    return state.allowed;
+  },
 }));
 vi.mock("./settingsLayout", () => ({
   SettingsPageContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -865,8 +871,10 @@ it.each(["write", "read", "reconnect", "close"])(
   "discards a body-free forget retry after %s changes",
   async (boundary) => {
     const first = await deferredResult();
+    const forgetCalls = vi.fn();
     state.executors.set("forget", (input) => {
       state.calls(input);
+      forgetCalls(input);
       return first.promise;
     });
     const { render } = await supportedScreen();
@@ -875,7 +883,7 @@ it.each(["write", "read", "reconnect", "close"])(
     state.queries.set("read", Option.none());
     state.queries.set("history", Option.none());
     await render();
-    const calls = state.calls.mock.calls.length;
+    const calls = forgetCalls.mock.calls.length;
     if (boundary === "write") state.write = false;
     if (boundary === "read") state.allowed = false;
     if (boundary === "reconnect") state.connection = {};
@@ -890,7 +898,7 @@ it.each(["write", "read", "reconnect", "close"])(
     await render();
     expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
     expect(container.textContent).not.toContain("Forget request failed");
-    expect(state.calls.mock.calls.length).toBe(calls);
+    expect(forgetCalls.mock.calls.length).toBe(calls);
   },
 );
 
