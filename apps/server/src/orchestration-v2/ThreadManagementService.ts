@@ -729,6 +729,16 @@ const make = Effect.gen(function* () {
             memoryGrantCeiling: record.memoryGrantCeiling,
           });
           if (knownTask && base.access === "none") return { ...saved, currentMemoryAccess: base };
+          // Only this thread's current projection is available without extra I/O.
+          // Child destinations remain unknown until their own projection is read.
+          const destination = projection.thread;
+          if (
+            threadId !== destination.id ||
+            destination.deletedAt !== null ||
+            destination.archivedAt !== null ||
+            destination.providerInstanceId !== instanceId
+          )
+            return saved;
           const inputs =
             threadId === null
               ? undefined

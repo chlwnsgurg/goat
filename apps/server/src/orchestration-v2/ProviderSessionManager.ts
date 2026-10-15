@@ -177,7 +177,7 @@ export interface McpCredentialRotation {
 }
 
 export interface ProviderSessionManagerV2Shape {
-  /** SQL-free destination constraints; absence cannot establish a positive current permission. */
+  /** SQL-free prepare constraints; callers must also validate the current destination projection. */
   readonly memoryAccessInputs?: (
     threadId: ThreadId,
     providerInstanceId: ProviderInstanceId,
@@ -405,7 +405,13 @@ export const layerWithOptions = (
         ? yield* memoryPolicy.value.subscribeRotations
         : undefined;
       const credentialRotations = yield* PubSub.unbounded<McpCredentialRotation>();
-      const memoryPrepareInputs = new Map<ThreadId, ProviderMemoryPrepareInput>();
+      const memoryPrepareInputs = new Map<
+        ThreadId,
+        ProviderMemoryPrepareInput & {
+          readonly destinationUsable: boolean;
+          readonly providerSessionId?: ProviderSessionId;
+        }
+      >();
       // Only an explicit admission may seed the following open. Rotation/reuse
       // metadata alone must not authorize a different admission or provider.
       const pendingMemoryAdmissions = new Map<ThreadId, ProviderMemoryPrepareInput>();
@@ -596,7 +602,9 @@ export const layerWithOptions = (
                 const preparedInput =
                   reusePreparedInput && admitted?.providerInstanceId === input.providerInstanceId
                     ? {
-                        ...admittedAuthority,
+                        // Internal reprepare retains this execution's provenance. An
+                        // explicit admission replaces IDs, including absent IDs.
+                        ...(reusePreparedInput === true ? admitted : admittedAuthority),
                         ...(input.runId === undefined ? {} : { runId: input.runId }),
                         ...(input.delegatedTaskId === undefined
                           ? {}
@@ -605,13 +613,16 @@ export const layerWithOptions = (
                       }
                     : { ...input, readOnly: input.readOnly === true };
                 const { threadId, providerInstanceId } = preparedInput;
-                memoryPrepareInputs.set(threadId, preparedInput);
                 const thread = yield* projectionStore.getThread(threadId).pipe(Effect.option);
                 const usableThread =
                   Option.isSome(thread) &&
                   thread.value.deletedAt === null &&
                   thread.value.archivedAt === null &&
                   thread.value.providerInstanceId === providerInstanceId;
+                memoryPrepareInputs.set(threadId, {
+                  ...preparedInput,
+                  destinationUsable: usableThread,
+                });
                 const readOnly = preparedInput.readOnly === true;
                 const threadReadAllowed = usableThread;
                 const committed = Option.isSome(memoryPolicy)
@@ -2451,9 +2462,27 @@ export const layerWithOptions = (
       return ProviderSessionManagerV2.of({
         currentMemoryPolicy,
         memoryAccessInputs: (threadId, providerInstanceId) =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
             const prepared = memoryPrepareInputs.get(threadId);
-            return prepared?.providerInstanceId === providerInstanceId ? prepared : undefined;
+            // A valid current projection cannot retroactively admit a denied
+            // prepare. Attachment checks use one session key, never a scan.
+            if (
+              prepared?.providerInstanceId !== providerInstanceId ||
+              !prepared.destinationUsable ||
+              prepared.providerSessionId === undefined
+            )
+              return undefined;
+            const entry = (yield* Ref.get(sessions)).get(sessionKey(prepared.providerSessionId));
+            if (
+              entry?.runtime.instanceId !== providerInstanceId ||
+              !entry.attachedThreadIds.has(threadId)
+            )
+              return undefined;
+            const config = yield* mcpSessions.read(threadId);
+            return config !== undefined &&
+              entry.mcpCredentialIdByThread.get(threadId) === config.providerSessionId
+              ? prepared
+              : undefined;
           }),
         mcpCredentialRotations: Option.isSome(admission)
           ? admission.value.rotations
@@ -2532,6 +2561,12 @@ export const layerWithOptions = (
                     threadId: input.threadId,
                     providerInstanceId: existing.runtime.instanceId,
                   });
+                  const preparedInput = memoryPrepareInputs.get(input.threadId);
+                  if (preparedInput !== undefined)
+                    memoryPrepareInputs.set(input.threadId, {
+                      ...preparedInput,
+                      providerSessionId: input.providerSessionId,
+                    });
                   yield* touchActivity(input.providerSessionId);
                   return existing.exposedRuntime;
                 }
@@ -2677,6 +2712,12 @@ export const layerWithOptions = (
                   updated.set(key, entry);
                   return updated;
                 });
+                const preparedInput = memoryPrepareInputs.get(input.threadId);
+                if (preparedInput !== undefined)
+                  memoryPrepareInputs.set(input.threadId, {
+                    ...preparedInput,
+                    providerSessionId: input.providerSessionId,
+                  });
                 // The entry now guards the credential via its recorded id, so
                 // the pre-open reservation can be dropped.
                 yield* dropReservation;

@@ -127,10 +127,7 @@ it.effect(
             access: "read",
             reason: "read_only_destination",
           });
-          expect(projected.subagents[0]?.currentMemoryAccess).toEqual({
-            access: "read",
-            reason: "read_only_destination",
-          });
+          expect(projected.subagents[0]).not.toHaveProperty("currentMemoryAccess");
           expect(projected.subagents[1]).not.toHaveProperty("currentMemoryAccess");
           expect(projected.subagents[2]).not.toHaveProperty("currentMemoryAccess");
           expect(projected.runs[0]?.status).toBe("completed");
@@ -171,6 +168,20 @@ it.effect(
         expect((yield* threads.getThreadProjection(shell.id)).runs[0]?.currentMemoryAccess).toEqual(
           { access: "read_write", reason: "ceiling" },
         );
+        for (const destination of [
+          { ...source.thread, archivedAt: now },
+          { ...source.thread, deletedAt: now },
+          {
+            ...source.thread,
+            providerInstanceId: "other-provider" as typeof shell.providerInstanceId,
+          },
+        ]) {
+          recordsSource = { ...source, thread: destination };
+          expect((yield* threads.getThreadRecords(shell.id, ["runs"])).runs[0]).not.toHaveProperty(
+            "currentMemoryAccess",
+          );
+        }
+        recordsSource = source;
         expect(source.runs[0]).not.toHaveProperty("currentMemoryAccess");
         expect(source.runs[0]?.memoryGrantCeiling).toBe("read_write");
         expect(source.subagents[0]).not.toHaveProperty("currentMemoryAccess");

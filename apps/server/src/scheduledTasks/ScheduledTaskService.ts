@@ -418,19 +418,23 @@ export const layer = Layer.effect(
     const readMemoryPolicy = Option.isSome(memoryPolicy)
       ? memoryPolicy.value.read
       : Effect.succeed({ policyReady: false, enableAgentMemoryAccess: false, epoch: 0 });
+    const projectTask = (
+      task: ScheduledTask,
+      policy: { readonly policyReady: boolean; readonly enableAgentMemoryAccess: boolean },
+    ) => {
+      const { currentMemoryAccess: _previous, ...saved } = task;
+      const access = currentMemoryAccess({
+        ...policy,
+        readOnly: false,
+        memoryGrantCeiling: task.memoryGrantCeiling,
+      });
+      // RuntimePolicyV2.resolve may read project/provider state and a future
+      // launch has no destination yet. Only definitive denials are known here.
+      return access.access === "none" ? { ...saved, currentMemoryAccess: access } : saved;
+    };
     const projectTaskResult = (result: ScheduledTaskMutationResult) =>
       readMemoryPolicy.pipe(
-        Effect.map((policy) => ({
-          ...result,
-          task: {
-            ...result.task,
-            currentMemoryAccess: currentMemoryAccess({
-              ...policy,
-              readOnly: false,
-              memoryGrantCeiling: result.task.memoryGrantCeiling,
-            }),
-          },
-        })),
+        Effect.map((policy) => ({ ...result, task: projectTask(result.task, policy) })),
       );
     // Webhook deliveries for one task dispatch in arrival order rather than
     // being dropped while an earlier delivery is still dispatching.
@@ -1026,14 +1030,7 @@ export const layer = Layer.effect(
         Effect.flatMap((tasks) =>
           readMemoryPolicy.pipe(
             Effect.map((policy) => ({
-              tasks: tasks.map((task) => ({
-                ...task,
-                currentMemoryAccess: currentMemoryAccess({
-                  ...policy,
-                  readOnly: false,
-                  memoryGrantCeiling: task.memoryGrantCeiling,
-                }),
-              })),
+              tasks: tasks.map((task) => projectTask(task, policy)),
             })),
           ),
         ),

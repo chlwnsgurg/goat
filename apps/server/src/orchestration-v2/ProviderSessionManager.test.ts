@@ -11,6 +11,10 @@ import * as ChannelDispatcher from "../channels/ChannelDispatcher.ts";
 import * as ChannelLedger from "../channels/ChannelLedger.ts";
 import * as ChannelRemoteWorkers from "../channels/ChannelRemoteWorkers.ts";
 import * as SlackChannelSettings from "../channels/SlackChannelSettings.ts";
+import * as Receipts from "./CommandReceiptStore.ts";
+import * as ScheduledTasks from "../scheduledTasks/ScheduledTaskService.ts";
+import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -23,6 +27,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@goat/shared/AgentScope";
 import {
+  RunId,
+  type OrchestrationV2Run,
   CommandId,
   MessageId,
   TurnItemId,
@@ -2527,6 +2533,60 @@ it.effect(
     }),
 );
 
+// Exercise the real DTO decorator with the manager under test and committed
+// destination state. Only the run fixture and unrelated transport ports are synthetic.
+const readPreparedRunDto = Effect.fnUntraced(function* (
+  threadId: ThreadId,
+  runId: RunId,
+  delegatedTaskId: NodeId,
+) {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const settings = yield* ServerSettings.ServerSettingsService;
+  const committed = yield* Effect.serviceOption(ServerSettings.MemoryProviderCommittedPolicy);
+  if (Option.isNone(committed)) return yield* Effect.die("test requires committed memory policy");
+  const projection = yield* store.getThreadProjection(threadId);
+  const run: OrchestrationV2Run = {
+    id: runId,
+    delegatedTaskId,
+    threadId,
+    ordinal: 1,
+    providerInstanceId: modelSelection.instanceId,
+    modelSelection,
+    providerThreadId: null,
+    userMessageId: MessageId.make("reattach-message"),
+    rootNodeId: null,
+    activeAttemptId: null,
+    status: "completed",
+    requestedAt: projection.thread.createdAt,
+    startedAt: null,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+    memoryGrantCeiling: "read_write",
+  };
+  return yield* Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    return (yield* threads.getThreadProjection(threadId)).runs[0]!;
+  }).pipe(
+    Effect.provide(
+      ThreadManagement.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(ProviderSessionManager.ProviderSessionManagerV2, manager),
+            Layer.succeed(ServerSettings.ServerSettingsService, settings),
+            Layer.succeed(ServerSettings.MemoryProviderCommittedPolicy, committed.value),
+            Layer.mock(Receipts.CommandReceiptStoreV2)({}),
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              getThreadProjection: () => Effect.succeed({ ...projection, runs: [run] }),
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+});
+
 it.effect(
   "ProviderSessionManagerV2 keeps a thread's MCP credential stable across detach and re-attach on a shared session",
   () =>
@@ -2535,6 +2595,7 @@ it.effect(
       const mcpConfigs = yield* Ref.make<
         ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
       >([]);
+      const settingsLayer = ServerSettings.layerTest();
       const effect = Effect.gen(function* () {
         const eventSink = yield* EventSink.EventSinkV2;
         const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -2551,7 +2612,14 @@ it.effect(
         yield* eventSink.write({
           events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
         });
+        const oldRunId = RunId.make("reattach-old-run");
+        const oldTaskId = NodeId.make("reattach-old-task");
+        const runId = RunId.make("reattach-new-run");
+        const taskId = NodeId.make("reattach-new-task");
         yield* manager.open({
+          runId: oldRunId,
+          delegatedTaskId: oldTaskId,
+          memoryGrantCeiling: "read_write",
           threadId,
           providerSessionId,
           modelSelection,
@@ -2573,21 +2641,61 @@ it.effect(
           "detach must not revoke the credential the live provider process still holds",
         );
 
+        assert.isUndefined(yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId));
+        assert.isUndefined(
+          (yield* readPreparedRunDto(threadId, oldRunId, oldTaskId)).currentMemoryAccess,
+        );
+
         // The continuation run re-attaches the same thread to the same session;
         // the credential must be reused, not rotated, so the provider process's
         // long-lived MCP client stays authorized.
+        yield* manager.prepareMcpSession!({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          runId,
+          delegatedTaskId: taskId,
+          memoryGrantCeiling: "read_write",
+          dispatchScopes: ["memory:read"],
+        });
         yield* manager.open({
           threadId,
           providerSessionId,
           modelSelection,
           runtimePolicy,
+          runId,
+          delegatedTaskId: taskId,
+          memoryGrantCeiling: "read_write",
         });
+        const prepared = yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId);
+        assert.equal(prepared?.runId, runId);
+        assert.equal(prepared?.delegatedTaskId, taskId);
+        assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "read");
+        assert.deepEqual((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess, {
+          access: "read",
+          reason: "dispatch_scope",
+        });
+        assert.isUndefined(
+          (yield* readPreparedRunDto(threadId, oldRunId, oldTaskId)).currentMemoryAccess,
+        );
+
         assert.equal(
           (yield* mcpSessions.read(threadId))?.providerSessionId,
           original?.providerSessionId,
           "re-attach must reuse the existing credential, not rotate it",
         );
         assert.equal((yield* registry.resolve(originalToken!))?.thread.threadId, threadId);
+
+        // A new admission with no execution IDs must not inherit the old IDs.
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          memoryGrantCeiling: "read_write",
+        });
+        const ordinary = yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId);
+        assert.isUndefined(ordinary?.runId);
+        assert.isUndefined(ordinary?.delegatedTaskId);
 
         // Releasing the session (provider process gone) still revokes.
         yield* manager.close(providerSessionId);
@@ -2600,7 +2708,191 @@ it.effect(
             state,
             idleTimeoutMs: 1_000,
             mcpConfigs,
-          }),
+            serverSettingsLayer: settingsLayer,
+          }).pipe(Layer.provideMerge(settingsLayer)),
+        ),
+      );
+    }),
+);
+
+it.effect("current memory DTO denies an archived destination before a deferred detach", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const settingsLayer = ServerSettings.layerTest();
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("memory-archive-before-detach");
+      const runId = RunId.make("archive-run");
+      const taskId = NodeId.make("archive-task");
+      const now = yield* DateTime.now;
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+        runId,
+        delegatedTaskId: taskId,
+        memoryGrantCeiling: "read_write",
+      });
+      assert.equal(
+        (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess?.access,
+        "read_write",
+      );
+      const before = yield* store.getThreadProjection(threadId);
+      // Commit through the real event sink. Hold the follow-up detach behind a
+      // Deferred, fixing the commit/effect boundary without timers or a worker race.
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "thread.archived",
+            threadId,
+            occurredAt: now,
+            payload: { ...before.thread, archivedAt: now },
+          },
+        ],
+      });
+      const releaseDetach = yield* Deferred.make<void>();
+      const detach = yield* Deferred.await(releaseDetach).pipe(
+        Effect.andThen(manager.detach({ threadId, providerSessionId })),
+        Effect.forkChild,
+      );
+      assert.isNotNull((yield* store.getThreadProjection(threadId)).thread.archivedAt);
+      assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "none");
+      // The live prepare map deliberately still has the matching positive ceiling.
+      assert.equal(
+        (yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId))?.runId,
+        runId,
+      );
+      assert.isUndefined((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess);
+      // Preparing against the archived destination issues none. Unarchiving alone
+      // cannot turn that earlier denied prepare into positive evidence.
+      yield* manager.prepareMcpSession!({
+        threadId,
+        providerInstanceId: modelSelection.instanceId,
+        runId,
+        delegatedTaskId: taskId,
+        memoryGrantCeiling: "read_write",
+      });
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "thread.unarchived",
+            threadId,
+            occurredAt: now,
+            payload: before.thread,
+          },
+        ],
+      });
+      assert.isUndefined(yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId));
+      assert.isUndefined((yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess);
+      yield* Deferred.succeed(releaseDetach, undefined);
+      yield* Fiber.join(detach);
+    }).pipe(
+      Effect.provide(
+        layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }).pipe(
+          Layer.provideMerge(settingsLayer),
+        ),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "scheduled task DTO stays unknown while read-only RuntimePolicyV2 actually prepares read",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settingsLayer = ServerSettings.layerTest();
+      const tasksLayer = ScheduledTasks.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            layerTestDatabase,
+            NodeServices.layer,
+            settingsLayer,
+            Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+            Layer.mock(ThreadManagement.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(Scheduler.Scheduler)({ register: () => Effect.void }),
+          ),
+        ),
+      );
+      const policyLayer = RuntimePolicy.layerWithOverride({ sandboxPolicy: "read-only" }).pipe(
+        Layer.provide(RuntimePolicy.layer),
+      );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const tasks = yield* ScheduledTasks.ScheduledTaskService;
+        const resolver = yield* RuntimePolicy.RuntimePolicyV2;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("scheduled-read-only-policy");
+        yield* sink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+        });
+        const thread = (yield* store.getThreadProjection(threadId)).thread;
+        const { task } = yield* tasks.upsert(
+          {
+            title: "Policy fixture",
+            prompt: "Work",
+            enabled: true,
+            schedule: { type: "interval", everyMs: 60_000 },
+            projectId: thread.projectId,
+            threadId,
+            workspaceStrategy: { type: "root" },
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+          },
+          { memoryGrantCeiling: "read_write" },
+        );
+        assert.equal(task.memoryGrantCeiling, "read_write");
+        assert.isUndefined(task.currentMemoryAccess);
+        assert.isUndefined((yield* tasks.list()).tasks[0]?.currentMemoryAccess);
+        const policy = yield* resolver.resolve({ thread, modelSelection });
+        const providerSessionId = yield* ids.allocate.providerSession({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy: policy,
+          runId: RunId.make("scheduled-read-only-run"),
+          memoryGrantCeiling: task.memoryGrantCeiling ?? "none",
+        });
+        assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "read");
+        assert.isTrue(
+          (yield* manager.memoryAccessInputs!(threadId, modelSelection.instanceId))?.readOnly,
+        );
+        yield* settings.updateSettings({ enableAgentMemoryAccess: false });
+        assert.deepEqual((yield* tasks.list()).tasks[0]?.currentMemoryAccess, {
+          access: "none",
+          reason: "environment_off",
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            layerTest({ state, idleTimeoutMs: 60_000, serverSettingsLayer: settingsLayer }),
+            settingsLayer,
+            tasksLayer,
+            policyLayer,
+          ),
         ),
       );
     }),

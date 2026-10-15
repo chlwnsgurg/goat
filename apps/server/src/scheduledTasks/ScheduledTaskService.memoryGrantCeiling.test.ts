@@ -399,14 +399,16 @@ it.effect(
               task.currentMemoryAccess,
               index === 1
                 ? { access: "none", reason: "environment_off" }
-                : { access: task.memoryGrantCeiling ?? "none", reason: "ceiling" },
+                : task.memoryGrantCeiling === "none"
+                  ? { access: "none", reason: "ceiling" }
+                  : undefined,
             );
           }
         }
         assert.equal(
           (yield* tasks.setEnabled({ id, enabled: true }, { memoryGrantCeiling: "read" })).task
             .currentMemoryAccess?.access,
-          "read",
+          undefined,
         );
         revoked = true;
         const failure = yield* mcp
