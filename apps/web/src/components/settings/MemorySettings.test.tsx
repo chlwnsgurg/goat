@@ -816,3 +816,78 @@ it("unmounts retained bodies and an open source when read is None, without reope
   )!;
   expect(recovered.open).toBe(false);
 });
+
+it.each([false, true])(
+  "retries the same forget after body-free invalidation (signal first: %s)",
+  async (signalFirst) => {
+    const first = await deferredResult();
+    state.executors.set("forget", (input) => {
+      state.calls(input);
+      return first.promise;
+    });
+    const { render } = await supportedScreen();
+    await click("Forget memory");
+    await click("Confirm forget");
+    const original = state.calls.mock.calls.at(-1)![0];
+    async function invalidate() {
+      state.queries.set("read", Option.none());
+      state.queries.set("history", Option.none());
+      await render();
+      expect(container.textContent).not.toContain("Synthetic original");
+      expect(container.textContent).not.toContain("Synthetic judgment");
+      expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
+    }
+    if (signalFirst) await invalidate();
+    await act(async () => {
+      first.resolve({ _tag: "Failure" });
+      await first.promise;
+    });
+    if (!signalFirst) await invalidate();
+    expect(container.textContent).toContain("Retry this request with the same operation ID");
+    state.executors.set("forget", async (input) => {
+      state.calls(input);
+      return { _tag: "Failure" };
+    });
+    await render();
+    await click("Confirm forget");
+    expect(state.calls.mock.calls.at(-1)![0]).toEqual(original);
+    expect(original).toMatchObject({
+      environmentId: "remote-owner",
+      input: { memorySpaceId: id(1), memoryId: id(2), expectedHeads: [id(5)] },
+    });
+    expect(container.textContent).not.toContain("Synthetic original");
+  },
+);
+
+it.each(["write", "read", "reconnect", "close"])(
+  "discards a body-free forget retry after %s changes",
+  async (boundary) => {
+    const first = await deferredResult();
+    state.executors.set("forget", (input) => {
+      state.calls(input);
+      return first.promise;
+    });
+    const { render } = await supportedScreen();
+    await click("Forget memory");
+    await click("Confirm forget");
+    state.queries.set("read", Option.none());
+    state.queries.set("history", Option.none());
+    await render();
+    const calls = state.calls.mock.calls.length;
+    if (boundary === "write") state.write = false;
+    if (boundary === "read") state.allowed = false;
+    if (boundary === "reconnect") state.connection = {};
+    if (boundary === "close") await act(async () => root.render(null));
+    else await render();
+    await act(async () => {
+      first.resolve({ _tag: "Failure" });
+      await first.promise;
+    });
+    state.write = true;
+    state.allowed = true;
+    await render();
+    expect(container.querySelector('[aria-label="Forget confirmation"]')).toBeNull();
+    expect(container.textContent).not.toContain("Forget request failed");
+    expect(state.calls.mock.calls.length).toBe(calls);
+  },
+);

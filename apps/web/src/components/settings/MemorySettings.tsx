@@ -874,15 +874,11 @@ function MemoryDetails({
               ) : null}
             </>
           ) : null}
-          <MemoryForgetControl
-            key={`${item.memoryId}:${item.status}:${item.status === "active" ? item.revision.revisionId : ""}`}
-            environmentId={environmentId}
-            item={item}
-          />
         </>
       ) : (
         <p role="status">This memory is unavailable. Visible details have been cleared.</p>
       )}
+      <MemoryForgetControl environmentId={environmentId} item={item} />
       <Button
         size="sm"
         variant="ghost"
@@ -1128,7 +1124,7 @@ export function MemoryForgetControl({
   item,
 }: {
   environmentId: EnvironmentId;
-  item: MemoryItem;
+  item: MemoryItem | null;
 }) {
   const canForget = useAtomValue(memoryEnvironment.forget.permissionAtom(environmentId));
   return (
@@ -1147,10 +1143,11 @@ function MemoryForgetRequest({
   canForget,
 }: {
   environmentId: EnvironmentId;
-  item: MemoryItem;
+  item: MemoryItem | null;
   canForget: boolean;
 }) {
   const registry = useContext(RegistryContext);
+  const connection = Option.getOrNull(usePreparedConnection(environmentId));
   const forget = useAtomCommand(memoryEnvironment.forget, { reportFailure: false });
   const [intent, setIntent] = useState<ReturnType<typeof memoryForgetIntent>>(null);
   const [busy, setBusy] = useState(false);
@@ -1162,14 +1159,20 @@ function MemoryForgetRequest({
       mounted.current = false;
     };
   }, []);
-  const available = presentMemoryItem(item).canForget && memoryForgetIntent(item) !== null;
+  const available = item !== null && presentMemoryItem(item).canForget;
+  function liveDestination() {
+    return (
+      mounted.current &&
+      connection !== null &&
+      readPreparedConnection(environmentId) === connection &&
+      registry.get(memoryEnvironment.forget.permissionAtom(environmentId))
+    );
+  }
   async function submit() {
-    if (!intent || busy || !registry.get(memoryEnvironment.forget.permissionAtom(environmentId)))
-      return;
+    if (!intent || busy || !liveDestination()) return;
     setBusy(true);
     const result = await forget({ environmentId, input: intent });
-    if (!mounted.current || !registry.get(memoryEnvironment.forget.permissionAtom(environmentId)))
-      return;
+    if (!liveDestination()) return;
     setBusy(false);
     if (result._tag === "Success") {
       const display = presentMemoryForget(result.value);
@@ -1182,7 +1185,7 @@ function MemoryForgetRequest({
   return (
     <div>
       {message ? <p role="status">{message}</p> : null}
-      {available ? (
+      {available || intent ? (
         intent && canForget ? (
           <div role="group" aria-label="Forget confirmation">
             <p>Forget this memory? This cannot be undone.</p>
@@ -1206,7 +1209,9 @@ function MemoryForgetRequest({
             size="sm"
             variant="outline"
             disabled={!canForget}
-            onClick={() => setIntent(memoryForgetIntent(item))}
+            onClick={() => {
+              if (item && liveDestination()) setIntent(memoryForgetIntent(item));
+            }}
           >
             Forget memory
           </Button>
