@@ -745,6 +745,57 @@ describe("MemoryImport durable ports", () => {
 });
 
 describe("MemoryImport settlement", () => {
+  it.effect("settles metadata-only pull without depending on an ACK writer", () =>
+    Effect.gen(function* () {
+      yield* setupImport;
+      const service = yield* Service.MemoryService;
+      const store = yield* Store.MemoryStore;
+      const first = prepared();
+      yield* service.importPorts.commit(first, Effect.void);
+      const operation = (yield* store.readWorkOperation(
+        `sync:${space}:${first.selection.operationId}`,
+      ))!;
+      assert.strictEqual(operation.kind, "upsert");
+      if (operation.kind !== "upsert") return;
+      const receipt = yield* remoteApproval(operation);
+      yield* store.transact(
+        store.settleMetadataEntryTx({
+          memorySpaceId: space,
+          entry: {
+            kind: "metadata",
+            operationKind: "upsert",
+            hubSequence: receipt.hubSequence!,
+            receipt,
+            memoryId,
+            revision: operation.revision,
+          },
+        }),
+      );
+      const item = (yield* service.importPorts.readItem(
+        { ...address, sourceId, sourceItemKey: "synthetic-item" },
+        Effect.void,
+      ))!;
+      assert.deepStrictEqual(item.accepted, first.next.pending);
+      assert.strictEqual(item.pending, null);
+      assert.strictEqual((yield* store.readImportLineage(space, memoryId)).length, 2);
+      const before = yield* durableInventory;
+      yield* store.transact(
+        store.settleMetadataEntryTx({
+          memorySpaceId: space,
+          entry: {
+            kind: "metadata",
+            operationKind: "upsert",
+            hubSequence: receipt.hubSequence!,
+            receipt,
+            memoryId,
+            revision: operation.revision,
+          },
+        }),
+      );
+      assert.deepStrictEqual(yield* durableInventory, before);
+    }).pipe(Effect.provide(importLive)),
+  );
+
   it.effect("settles actual hub rejection on ACK and preserves charges across replay", () =>
     Effect.gen(function* () {
       yield* setupImport;

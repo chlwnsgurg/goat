@@ -9855,6 +9855,7 @@ const make = Effect.gen(function* () {
       )
         return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
       const current = yield* loadAggregate(input.memorySpaceId, entry.memoryId);
+      if (current.identity) yield* persistImportLineageTx(lineageForRevision(revision));
       if (
         !canonicalReplay &&
         !current.tombstone &&
