@@ -57,6 +57,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Statement from "effect/sql/Statement";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -2545,6 +2546,7 @@ const readPreparedRunDto = Effect.fnUntraced(function* (
   threadId: ThreadId,
   runId: RunId,
   delegatedTaskId: NodeId,
+  pastRunCount = 0,
 ) {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -2571,9 +2573,32 @@ const readPreparedRunDto = Effect.fnUntraced(function* (
     contextHandoffId: null,
     memoryGrantCeiling: "read_write",
   };
+  const runs = [
+    ...Array.from({ length: pastRunCount }, (_, index) => ({
+      ...run,
+      id: RunId.make(`historical-run-${index}`),
+      ordinal: index + 2,
+    })),
+    run,
+  ];
+  let threadReads = 0;
+  const countThreadReads: Statement.Transformer = (statement) => {
+    const [query] = statement.compile();
+    if (query.includes("SELECT payload_json FROM orchestration_v2_projection_threads")) {
+      threadReads++;
+    }
+    return Effect.succeed(statement);
+  };
   return yield* Effect.gen(function* () {
     const threads = yield* ThreadManagement.ThreadManagementService;
-    return (yield* threads.getThreadProjection(threadId)).runs[0]!;
+    const records = yield* threads.getThreadRecords(threadId, ["runs"]);
+    if (pastRunCount > 0) {
+      assert.equal(threadReads, 1);
+      for (const historical of records.runs.slice(0, -1)) {
+        assert.notProperty(historical, "currentMemoryAccess");
+      }
+    }
+    return records.runs.at(-1)!;
   }).pipe(
     Effect.provide(
       ThreadManagement.layer.pipe(
@@ -2584,12 +2609,13 @@ const readPreparedRunDto = Effect.fnUntraced(function* (
             Layer.succeed(ServerSettings.MemoryProviderCommittedPolicy, committed.value),
             Layer.mock(Receipts.CommandReceiptStoreV2)({}),
             Layer.mock(Orchestrator.OrchestratorV2)({
-              getThreadProjection: () => Effect.succeed({ ...projection, runs: [run] }),
+              getThreadRecords: () => Effect.succeed({ ...projection, runs }),
             }),
           ),
         ),
       ),
     ),
+    Effect.provideService(Statement.CurrentTransformer, countThreadReads),
   );
 });
 
@@ -2907,7 +2933,7 @@ it.effect.each(["resolve", "unrelated issue"] as const)(
         const token = config.authorizationHeader.replace(/^Bearer\s+/, "");
         assert.equal((yield* manager.currentMemoryPolicy!(threadId)).grant, "read_write");
         assert.equal(
-          (yield* readPreparedRunDto(threadId, runId, taskId)).currentMemoryAccess?.access,
+          (yield* readPreparedRunDto(threadId, runId, taskId, 32)).currentMemoryAccess?.access,
           "read_write",
         );
         // The exact boundary remains live. Snapshot reads must not extend it.
