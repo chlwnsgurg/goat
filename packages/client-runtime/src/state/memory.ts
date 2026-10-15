@@ -312,24 +312,35 @@ export function createMemoryEnvironmentAtoms<R, E>(
       const raw = runtime
         .atom((get) => {
           const before = get(relevantState);
+          // The stable ID projection may retain a pre-forget generation. Capture
+          // admission at request start without subscribing the RPC to space changes.
+          const forgetGeneration = get.once(state).forgetGeneration;
           const permitted = get(read.permissionAtom(environmentId, input));
           if (!permitted || !memoryExposureMatches(before, before, ids)) {
-            return Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() });
+            return Stream.succeed({
+              before,
+              forgetGeneration,
+              value: Option.none<EnvironmentRpcSuccess<T>>(),
+            });
           }
           return Stream.fromEffect(
             requestMemoryQuery(runtime, get.registry, environmentId, tag, input).pipe(
               Effect.timeoutOption(BODY_TTL),
             ),
           ).pipe(
-            Stream.map((value) => ({ before, value })),
+            Stream.map((value) => ({ before, forgetGeneration, value })),
             (stream) =>
               Stream.concat(
-                Stream.succeed({ before, value: Option.none<EnvironmentRpcSuccess<T>>() }),
+                Stream.succeed({
+                  before,
+                  forgetGeneration,
+                  value: Option.none<EnvironmentRpcSuccess<T>>(),
+                }),
                 stream,
               ),
             Stream.concat(
               Stream.fromEffect(Effect.sleep(BODY_TTL)).pipe(
-                Stream.map(() => ({ before, value: Option.none() })),
+                Stream.map(() => ({ before, forgetGeneration, value: Option.none() })),
               ),
             ),
           );
@@ -353,7 +364,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
             // Empty dependencies do not prove independence: a summary can inherit
             // text from parents. Fence every open direct body, including lineage-free
             // history judgments and source pages, on a same-space forget.
-            (ids.length > 0 && result.value.before.forgetGeneration !== admission.forgetGeneration)
+            (ids.length > 0 && result.value.forgetGeneration !== admission.forgetGeneration)
           )
             return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
           if (
