@@ -133,6 +133,12 @@ const make = Effect.gen(function* () {
     if (worker) {
       yield* worker.enqueue(undefined);
       yield* worker.drain;
+    } else {
+      yield* sweep.pipe(
+        Effect.catch(() =>
+          Effect.logWarning("Memory report delivery deferred", { code: "storage_failed" }),
+        ),
+      );
     }
   });
   return MemoryReportWorker.of({ start, drain });

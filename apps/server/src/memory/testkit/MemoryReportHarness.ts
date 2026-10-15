@@ -32,7 +32,7 @@ export const reportRows = Effect.gen(function* () {
   }>`SELECT state,automatic_attempts,claimed_until FROM memory_report_outbox ORDER BY report_id`;
 });
 export function makeReportHarness(hub = false) {
-  const database = Layer.fresh(Sqlite.layerMemory);
+  const database = Sqlite.layerMemory;
   const harness = makeHarness({ databaseLayer: database });
   const storage = Store.layer.pipe(Layer.provideMerge(database));
   const quota = Quota.layer.pipe(Layer.provideMerge(storage));
