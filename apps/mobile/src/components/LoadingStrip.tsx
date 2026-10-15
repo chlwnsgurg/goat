@@ -3,11 +3,14 @@ import { View } from "react-native";
 import Animated, {
   cancelAnimation,
   Easing,
+  ReduceMotion,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
   withTiming,
 } from "react-native-reanimated";
+
+import { useVisibleAnimation } from "../lib/use-visible-animation";
 
 const INDICATOR_WIDTH_FRACTION = 0.3;
 const MIN_INDICATOR_WIDTH = 48;
@@ -36,15 +39,20 @@ function LoadingStripFrame(props: {
 }
 
 function IndeterminateLoadingStrip() {
+  const animationVisible = useVisibleAnimation();
   const [containerWidth, setContainerWidth] = useState(0);
   const travelProgress = useSharedValue(0);
   const indicatorWidth = Math.max(MIN_INDICATOR_WIDTH, containerWidth * INDICATOR_WIDTH_FRACTION);
 
   useEffect(() => {
+    cancelAnimation(travelProgress);
+    // oxlint-disable-next-line react/immutability -- Reanimated shared values intentionally mutate on the UI thread.
     travelProgress.value = 0;
+    if (!animationVisible) return;
     travelProgress.value = withRepeat(
       withTiming(1, {
         duration: 1100,
+        reduceMotion: ReduceMotion.System,
         easing: Easing.inOut(Easing.quad),
       }),
       -1,
@@ -54,18 +62,20 @@ function IndeterminateLoadingStrip() {
     return () => {
       cancelAnimation(travelProgress);
     };
-  }, [travelProgress]);
+  }, [animationVisible, travelProgress]);
 
   const indicatorStyle = useAnimatedStyle(
     () => ({
       transform: [
         {
-          translateX: (containerWidth + indicatorWidth) * travelProgress.value - indicatorWidth,
+          translateX: animationVisible
+            ? (containerWidth + indicatorWidth) * travelProgress.value - indicatorWidth
+            : 0,
         },
       ],
       width: indicatorWidth,
     }),
-    [containerWidth, indicatorWidth],
+    [animationVisible, containerWidth, indicatorWidth],
   );
 
   return (

@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useCommitOnBlur } from "../../hooks/useCommitOnBlur";
 import { STANDING_INSTRUCTIONS_MAX_CHARS } from "@goat/contracts";
 
 import { Textarea } from "../ui/textarea";
@@ -13,12 +13,22 @@ import {
 
 /** Dispatcher policy put in front of the first message of threads agents launch. */
 export function StandingInstructionsSettings({ isProjectScope }: { isProjectScope: boolean }) {
-  const settings = useScopedSettings();
   const { targets } = useSettingsScope();
   const scopeKey = targets.map((target) => `${target.environmentId}:${target.projectId}`).join(",");
-  const edited = useRef(false);
+  // Switching targets discards the previous target's uncommitted draft.
+  return <StandingInstructionsFields key={scopeKey} isProjectScope={isProjectScope} />;
+}
+
+function StandingInstructionsFields({ isProjectScope }: { isProjectScope: boolean }) {
+  const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const mixed = useScopedSettingsMixed(["standingInstructions"]);
+
+  const input = useCommitOnBlur(
+    mixed ? "" : settings.standingInstructions,
+    (value) => updateSettings({ standingInstructions: value.trim() }),
+    { multiline: true, commitUnchanged: mixed },
+  );
 
   return (
     <SettingsRow
@@ -42,25 +52,15 @@ export function StandingInstructionsSettings({ isProjectScope }: { isProjectScop
     >
       <div className="mt-3 max-w-2xl pb-3.5">
         <Textarea
-          key={`${scopeKey}:${mixed}:${settings.standingInstructions}`}
+          {...input}
           aria-label="Standing instructions"
           maxLength={STANDING_INSTRUCTIONS_MAX_CHARS}
-          onChange={() => {
-            edited.current = true;
-          }}
           rows={4}
-          defaultValue={mixed ? "" : settings.standingInstructions}
           placeholder={
             mixed
               ? "Mixed. Enter instructions to apply to all selected targets."
               : "Use sol for subagents. Work without waiting for approval. One topic per PR."
           }
-          onBlur={(event) => {
-            const value = event.target.value.trim();
-            if (edited.current && (mixed || value !== settings.standingInstructions))
-              updateSettings({ standingInstructions: value });
-            edited.current = false;
-          }}
         />
       </div>
     </SettingsRow>

@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 
 import { scopeThreadRef } from "@goat/client-runtime/environment";
+import type { EnvironmentShellSync } from "@goat/client-runtime/state/presentation";
 import { EnvironmentId, ProjectId, ThreadId } from "@goat/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
 const navigate = vi.fn();
+const refreshShell = vi.fn();
+let sync: EnvironmentShellSync = "live";
+
+vi.mock("../state/presentation", () => ({ useEnvironmentShellSync: () => sync }));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
@@ -27,7 +32,13 @@ vi.mock("./ui/sidebar", () => ({
   SidebarInset: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
 }));
 vi.mock("../state/query", () => ({
-  useEnvironmentQuery: () => ({ data: { status: "live", snapshot: { _tag: "Some" } } }),
+  useEnvironmentQuery: () => ({
+    refresh: refreshShell,
+    data: {
+      status: sync === "live" ? "live" : sync === "error" ? "empty" : "cached",
+      snapshot: { _tag: sync === "error" ? "None" : "Some" },
+    },
+  }),
 }));
 vi.mock("../state/shell", () => ({ environmentShell: { stateAtom: () => null } }));
 vi.mock("../state/entities", () => ({
@@ -63,6 +74,8 @@ let container: HTMLDivElement;
 
 beforeEach(() => {
   navigate.mockClear();
+  refreshShell.mockClear();
+  sync = "live";
   useGlobalAgentStore.setState({
     ref: null,
     botRef: { environmentId, projectId: ProjectId.make("scratch"), threadId: botThreadId },
@@ -103,5 +116,47 @@ it("still sends a missing ordinary thread home", async () => {
 it("opens the chip worker target in the coding ChatView rather than the bot view", async () => {
   await renderThread(ThreadId.make("worker"));
   expect(container.querySelector("[data-view]")?.getAttribute("data-view")).toBe("chat");
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+it("warns alongside cached threads, retries synchronization, and removes the warning after recovery", async () => {
+  sync = "stale";
+  await renderThread(ThreadId.make("worker"));
+  expect(container.querySelector("[data-view=chat]")).not.toBeNull();
+  expect(container.querySelector("[role=status]")?.textContent).toContain(
+    "Displayed threads may be out of date",
+  );
+  await act(() => container.querySelector("button")?.click());
+  expect(refreshShell).toHaveBeenCalledOnce();
+  sync = "live";
+  await act(() =>
+    root?.render(
+      <ThreadRouteView
+        target={{
+          kind: "server",
+          threadRef: scopeThreadRef(environmentId, ThreadId.make("worker")),
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelector("[role=status]")).toBeNull();
+  expect(container.querySelector("[data-view=chat]")).not.toBeNull();
+});
+
+it("shows a retryable shell error instead of a blank route without a snapshot", async () => {
+  sync = "error";
+  await renderThread(ThreadId.make("unknown"));
+  expect(container.querySelector("[role=status]")?.textContent).toContain(
+    "Could not sync environment data",
+  );
+  expect(container.querySelector("button")?.textContent).toBe("Retry sync");
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+it("stays quiet during a routine synchronization", async () => {
+  sync = "synchronizing";
+  await renderThread(ThreadId.make("unknown"));
+  expect(container.querySelector("[role=status]")).toBeNull();
+  expect(container.querySelector("button")).toBeNull();
   expect(navigate).not.toHaveBeenCalled();
 });

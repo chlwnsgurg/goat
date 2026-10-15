@@ -457,9 +457,11 @@ export async function persistScopedSettingsPatch(
     readonly cause?: Cause.Cause<unknown>;
     readonly value?: ServerSettings;
   }>,
-  persistClient: (patch: ClientSettingsPatch) => void,
+  persistClient: (patch: ClientSettingsPatch) => void | Promise<void>,
 ) {
-  if (plan.hasClientWrite) persistClient(plan.clientPatch);
+  const clientResult = Promise.allSettled(
+    plan.hasClientWrite ? [Promise.resolve().then(() => persistClient(plan.clientPatch))] : [],
+  );
   const results = await Promise.allSettled(
     plan.serverWrites.map(({ environmentId, patch }) =>
       persistServer({ environmentId, input: { patch } }),
@@ -502,6 +504,7 @@ export async function persistScopedSettingsPatch(
   });
   const savedEnvironments = plan.serverWrites.filter((_, index) => saved(index));
   return {
+    clientSaveFailed: (await clientResult)[0]?.status === "rejected",
     failedEnvironments,
     savedEnvironments,
     savedEnvironmentCount: savedEnvironments.length,

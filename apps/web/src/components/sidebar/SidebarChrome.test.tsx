@@ -29,19 +29,24 @@ vi.mock("../goatBot/useGoatBotWaitingCount", () => ({
     ),
 }));
 
+import { publishSidebarPriorityCount } from "../Sidebar.logic";
 import { SidebarBrandWidthProbe, SidebarCollapsedBrand } from "./SidebarChrome";
 
 let root: Root | undefined;
 let container: HTMLDivElement;
 
 beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   botState.count = undefined;
+  publishSidebarPriorityCount(0);
 });
 
 afterEach(async () => {
   await act(() => root?.unmount());
   container?.remove();
   root = undefined;
+  publishSidebarPriorityCount(null);
+  vi.unstubAllGlobals();
 });
 
 async function renderBrand(visible: boolean) {
@@ -115,4 +120,16 @@ it("keeps the waiting badge in both width probes, with the wordmark only in the 
     ),
   );
   expect(container.textContent?.trim()).toBe("GOAT");
+});
+
+it("updates the width probe badge when Priority gains, changes and loses threads", async () => {
+  await renderBrand(false);
+  await act(() => root?.render(<SidebarBrandWidthProbe onWidthChange={() => {}} />));
+  expect(container.textContent).toBe("");
+  await act(() => publishSidebarPriorityCount(9));
+  expect(container.textContent).toBe("9");
+  await act(() => publishSidebarPriorityCount(101));
+  expect(container.textContent).toBe("101");
+  await act(() => publishSidebarPriorityCount(0));
+  expect(container.textContent).toBe("");
 });

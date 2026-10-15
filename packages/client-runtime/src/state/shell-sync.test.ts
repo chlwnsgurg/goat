@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  EnvironmentAuthorizationError,
   ORCHESTRATION_V2_WS_METHODS,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ShellStreamItem,
@@ -18,11 +19,13 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
+import { Atom, AtomRegistry } from "effect/reactivity";
 
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
   type PreparedConnection,
+  type SupervisorConnectionState,
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
@@ -30,6 +33,7 @@ import * as Persistence from "../platform/persistence.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { makeEnvironmentShellState } from "./shell.ts";
+import { createEnvironmentShellSyncAtom, shellSyncMessage } from "./presentation.ts";
 import * as ShellSnapshotLoader from "./shellSnapshotHttp.ts";
 import { v2Project, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 
@@ -66,6 +70,93 @@ function session(client: WsRpcProtocolClient): RpcSession.RpcSession {
 }
 
 describe("environment shell synchronization", () => {
+  it.effect(
+    "keeps transport connected but presents a failed shell as stale until a new subscription succeeds",
+    () =>
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();
+        const failedClient = {
+          [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () =>
+            Stream.fail(
+              new EnvironmentAuthorizationError({
+                message: "Private diagnostic",
+                requiredScope: "orchestration:read",
+              }),
+            ),
+        } as unknown as WsRpcProtocolClient;
+        const connected = {
+          ...AVAILABLE_CONNECTION_STATE,
+          phase: "connected" as const,
+          generation: 1,
+        };
+        const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>(connected);
+        const firstSession = session(failedClient);
+        // Configuration is available even though shell authorization fails.
+        yield* firstSession.initialConfig;
+        const activeSession = yield* SubscriptionRef.make(Option.some(firstSession));
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: supervisorState,
+          session: activeSession,
+          prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        });
+        const cache = Persistence.EnvironmentCacheStore.of({
+          loadShell: () => Effect.succeedSome(LIVE_SHELL_SNAPSHOT),
+          saveShell: () => Effect.void,
+          loadThread: () => Effect.succeedNone,
+          saveThread: () => Effect.void,
+          removeThread: () => Effect.void,
+          loadServerConfig: () => Effect.succeedNone,
+          saveServerConfig: () => Effect.void,
+          loadVcsRefs: () => Effect.succeedNone,
+          saveVcsRefs: () => Effect.void,
+          removeVcsRefs: () => Effect.void,
+          clearVcsRefs: () => Effect.void,
+          clear: () => Effect.void,
+        });
+        const shell = yield* makeEnvironmentShellState().pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+          Effect.provideService(ShellSnapshotLoader.ShellSnapshotLoader, {
+            load: () => Effect.succeedNone,
+          }),
+        );
+        const failed = yield* SubscriptionRef.changes(shell).pipe(
+          Stream.filter((value) => Option.isSome(value.error)),
+          Stream.runHead,
+          Effect.map(Option.getOrThrow),
+        );
+        const registry = AtomRegistry.make();
+        yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
+        const shellAtom = Atom.make(failed);
+        const sync = createEnvironmentShellSyncAtom(() => shellAtom)(TARGET.environmentId);
+        expect(registry.get(sync)).toBe("stale");
+        expect(shellSyncMessage(registry.get(sync))).toContain("out of date");
+        expect(shellSyncMessage(registry.get(sync))).not.toContain("Private diagnostic");
+        expect((yield* SubscriptionRef.get(supervisorState)).phase).toBe("connected");
+        yield* SubscriptionRef.set(
+          activeSession,
+          Option.some(
+            session({
+              [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () => Stream.fromQueue(events),
+            } as unknown as WsRpcProtocolClient),
+          ),
+        );
+        yield* Queue.offer(events, { kind: "snapshot", snapshot: LIVE_SHELL_SNAPSHOT });
+        yield* Queue.offer(events, { kind: "synchronized" });
+        const live = yield* SubscriptionRef.changes(shell).pipe(
+          Stream.filter((value) => value.status === "live"),
+          Stream.runHead,
+          Effect.map(Option.getOrThrow),
+        );
+        registry.set(shellAtom, live);
+        expect(shellSyncMessage(registry.get(sync))).toBeNull();
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("publishes live state before persistence and preserves it when ready", () =>
     Effect.gen(function* () {
       const events = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();

@@ -1,3 +1,4 @@
+import type { MessagesTimeline } from "./chat/MessagesTimeline";
 import * as Option from "effect/Option";
 import type { EnvironmentThreadShell } from "@goat/client-runtime/state/shell";
 import {
@@ -326,6 +327,19 @@ export type HeldThreadTimeline<T extends readonly unknown[]> = {
   entries: T;
   markdownCwd?: string | null;
   workspaceRoot?: string | null;
+  activity?: Pick<
+    Parameters<typeof MessagesTimeline>[0],
+    | "isWorking"
+    | "runlessWorkActive"
+    | "activeTurnInProgress"
+    | "isCompacting"
+    | "awaitingUser"
+    | "activeTurnStartedAt"
+    | "latestRun"
+    | "runningRunId"
+    | "runs"
+    | "turnDiffSummaries"
+  >;
 };
 
 const MAX_REMEMBERED_THREAD_TIMELINES = 16;
