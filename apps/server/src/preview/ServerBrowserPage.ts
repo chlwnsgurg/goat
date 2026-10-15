@@ -25,7 +25,6 @@ import { BrowserControlInterrupted } from "./SessionControl.ts";
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_SCREENSHOT_WIDTH = 1280;
-const WAIT_POLL_MS = 100;
 export const DIAGNOSTIC_BUFFER_LIMIT = 200;
 
 export class ServerBrowserOperationError extends Error {
@@ -464,34 +463,115 @@ export const evaluate = async (
   return value;
 };
 
-export const waitFor = async (page: Page, input: PreviewAutomationWaitForInput) => {
+/** Native Playwright waits share one deadline; recheck the conjunction on the current document. */
+export const waitFor = async (
+  page: Page,
+  input: PreviewAutomationWaitForInput,
+  signal?: AbortSignal,
+) => {
+  signal?.throwIfAborted();
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  const locator = targetLocator(page, input);
-  const { text, urlIncludes } = input;
-  const checks: Array<() => Promise<boolean>> = [];
-  // Like the desktop host: the selector must match an element, visible or not.
-  if (locator !== null) checks.push(async () => (await locator.count()) > 0);
-  if (text !== undefined) {
-    // A navigation can destroy the context mid-check; that counts as not yet.
-    checks.push(() =>
-      page
-        .evaluate(`(document.body?.innerText ?? "").includes(${JSON.stringify(text)})`)
-        .then((found) => found === true)
-        .catch(() => false),
+  const target = targetLocator(page, input);
+  // Legacy presence checks accepted multiple matches, including hidden elements.
+  const locator = input.state === undefined ? target?.first() : target;
+  const state = input.state ?? "attached";
+  const loadState =
+    input.loadState === "domContentLoaded"
+      ? "domcontentloaded"
+      : input.loadState === "networkIdle"
+        ? "networkidle"
+        : input.loadState;
+  const documentCondition = `(() => (
+    ${input.text === undefined ? "true" : `(document.body?.innerText ?? "").includes(${JSON.stringify(input.text)})`}
+    && ${input.urlIncludes === undefined ? "true" : `location.href.includes(${JSON.stringify(input.urlIncludes)})`}
+  ))()`;
+  const conditions = [
+    ...(locator ? [`locator:${state}`] : []),
+    ...(input.text === undefined ? [] : ["text"]),
+    ...(input.urlIncludes === undefined ? [] : ["url"]),
+    ...(input.loadState === undefined ? [] : [`load:${input.loadState}`]),
+  ];
+  const timeout = () =>
+    new ServerBrowserOperationError(
+      "PreviewAutomationTimeoutError",
+      `Waited ${timeoutMs}ms without all conditions holding: ${conditions.join(", ")}.`,
     );
-  }
-  if (urlIncludes !== undefined) checks.push(async () => page.url().includes(urlIncludes));
-  for (;;) {
-    const results = await Promise.all(checks.map((check) => check()));
-    if (results.every(Boolean)) return;
-    if (Date.now() >= deadline) {
-      throw new ServerBrowserOperationError(
-        "PreviewAutomationTimeoutError",
-        `Waited ${timeoutMs}ms without every condition holding.`,
-      );
+  let stopped = false;
+  const remaining = () => {
+    signal?.throwIfAborted();
+    if (stopped || Date.now() >= deadline) throw timeout();
+    return Math.max(1, deadline - Date.now());
+  };
+  let documentVersion = 0;
+  const navigated = (frame: import("playwright-core").Frame) => {
+    if (frame === page.mainFrame()) documentVersion++;
+  };
+  page.on("framenavigated", navigated);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeout()), timeoutMs);
+    abort = () => reject(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+  const wait = async () => {
+    for (;;) {
+      remaining();
+      await Promise.all([
+        locator?.waitFor({ state, timeout: remaining() }),
+        ...(input.text === undefined && input.urlIncludes === undefined
+          ? []
+          : [
+              page
+                .waitForFunction(documentCondition, undefined, { timeout: remaining() })
+                .then((handle) => handle.dispose()),
+            ]),
+      ]);
+      remaining();
+      const version = documentVersion;
+      // Wait after URL/text resolve so an old document's completed load cannot satisfy a new one.
+      if (loadState !== undefined) await page.waitForLoadState(loadState, { timeout: remaining() });
+      remaining();
+      const [locatorMatches, documentMatches] = await Promise.all([
+        locator === null || locator === undefined
+          ? true
+          : state === "visible"
+            ? locator.isVisible()
+            : state === "hidden"
+              ? locator.isHidden()
+              : locator.count().then((count) => (state === "detached" ? count === 0 : count > 0)),
+        input.text === undefined && input.urlIncludes === undefined
+          ? true
+          : page.evaluate(documentCondition).catch((cause: unknown) => {
+              // Navigation can destroy the old execution context. Retry only that transition.
+              if (
+                cause instanceof Error &&
+                /execution context was destroyed|cannot find context/i.test(cause.message)
+              )
+                return false;
+              throw cause;
+            }),
+      ]);
+      remaining();
+      // Revalidate snapshot refs after a navigation even if the native locator happened to settle.
+      if (target) targetLocator(page, input);
+      if (version === documentVersion && locatorMatches && documentMatches === true) return;
     }
-    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+  };
+  try {
+    await Promise.race([wait(), interrupted]);
+  } catch (cause) {
+    signal?.throwIfAborted();
+    if (cause instanceof Error && cause.name === "TimeoutError") throw timeout();
+    throw cause;
+  } finally {
+    // Playwright's read-only wait has no AbortSignal API. It may settle until its deadline,
+    // but cannot start another check or hold the control queue after takeover/timeout.
+    stopped = true;
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
+    page.off("framenavigated", navigated);
   }
 };
 

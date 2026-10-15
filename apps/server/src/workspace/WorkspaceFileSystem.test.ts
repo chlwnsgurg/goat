@@ -1,8 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem cannot create a FIFO.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it, describe, expect } from "@effect/vitest";
+import { it, describe, expect, afterEach, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -55,6 +56,8 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
     .pipe(Effect.orDie);
   yield* fileSystem.writeFileString(absolutePath, contents).pipe(Effect.orDie);
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
   describe("getMetadata", () => {
@@ -341,6 +344,319 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
   });
 
   describe("writeFile", () => {
+    it.effect.each(["a".repeat(240), "界".repeat(80)])(
+      "creates and replaces a file with a 240-byte basename: %s",
+      (relativePath, context) =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const target = path.join(cwd, relativePath);
+          expect(Buffer.byteLength(relativePath, "utf8")).toBe(240);
+          // Probe the destination itself so only a smaller filesystem name limit skips.
+          const supported = yield* Effect.promise(async () => {
+            try {
+              await NodeFS.promises.writeFile(target, "", { flag: "wx" });
+              await NodeFS.promises.unlink(target);
+              return true;
+            } catch (cause) {
+              if (cause instanceof Error && "code" in cause && cause.code === "ENAMETOOLONG") {
+                return false;
+              }
+              throw cause;
+            }
+          });
+          if (!supported) context.skip("Filesystem does not support a 240-byte basename");
+
+          for (const contents of ["created\n", "replaced\n"]) {
+            expect(yield* service.writeFile({ cwd, relativePath, contents })).toEqual({
+              relativePath,
+            });
+            expect(yield* fs.readFileString(target)).toBe(contents);
+            expect(yield* fs.readDirectory(cwd)).toEqual([relativePath]);
+          }
+        }),
+    );
+
+    it.effect("replaces an existing file while open readers retain the original bytes", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", "before\n");
+        const target = path.join(cwd, "file.txt");
+        yield* Effect.acquireUseRelease(
+          Effect.promise(() => NodeFS.promises.open(target, "r")),
+          (reader) =>
+            Effect.gen(function* () {
+              expect(
+                yield* service.writeFile({ cwd, relativePath: "file.txt", contents: "after\n" }),
+              ).toEqual({ relativePath: "file.txt" });
+              expect(yield* Effect.promise(() => reader.readFile("utf8"))).toBe("before\n");
+              expect(yield* Effect.promise(() => NodeFS.promises.readFile(target, "utf8"))).toBe(
+                "after\n",
+              );
+              expect(yield* Effect.promise(() => NodeFS.promises.readdir(cwd))).toEqual([
+                "file.txt",
+              ]);
+            }),
+          (reader) => Effect.promise(() => reader.close()),
+        );
+      }),
+    );
+
+    it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+      "preserves mode bits despite a restrictive umask",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const target = path.join(cwd, "file.txt");
+          yield* writeTextFile(cwd, "file.txt", "before\n");
+          yield* Effect.promise(() => NodeFS.promises.chmod(target, 0o764));
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => process.umask(0o077)),
+            () => service.writeFile({ cwd, relativePath: "file.txt", contents: "after\n" }),
+            (previous) =>
+              Effect.sync(() => {
+                process.umask(previous);
+              }),
+          );
+          expect((yield* Effect.promise(() => NodeFS.promises.stat(target))).mode & 0o7777).toBe(
+            0o764,
+          );
+        }),
+    );
+
+    it.effect.each([false, true])(
+      "rejects an outside symlink parent (existing file: %s)",
+      (existing) =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const outside = yield* makeTempDir;
+          if (existing) yield* writeTextFile(outside, "file.txt", "outside\n");
+          yield* fs.symlink(outside, path.join(cwd, "alias"));
+          const error = yield* service
+            .writeFile({
+              cwd,
+              relativePath: existing ? "alias/file.txt" : "alias/new/deep/file.txt",
+              contents: "bad\n",
+            })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+          expect(yield* fs.readDirectory(outside)).toEqual(existing ? ["file.txt"] : []);
+          if (existing)
+            expect(yield* fs.readFileString(path.join(outside, "file.txt"))).toBe("outside\n");
+        }),
+      { skip: !symlinksSupported },
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "rejects an outside file symlink without replacing the alias",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const outside = yield* makeTempDir;
+          yield* writeTextFile(outside, "file.txt", "outside\n");
+          const alias = path.join(cwd, "alias.txt");
+          yield* fs.symlink(path.join(outside, "file.txt"), alias);
+          const error = yield* service
+            .writeFile({ cwd, relativePath: "alias.txt", contents: "bad\n" })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+          expect(yield* fs.readFileString(path.join(outside, "file.txt"))).toBe("outside\n");
+          expect((yield* Effect.promise(() => NodeFS.promises.lstat(alias))).isSymbolicLink()).toBe(
+            true,
+          );
+        }),
+    );
+
+    it.effect.each([false, true])(
+      "rejects a dangling symlink (parent: %s)",
+      (parent) =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const outside = yield* makeTempDir;
+          const alias = path.join(cwd, "alias");
+          yield* fs.symlink(path.join(outside, "missing"), alias);
+          const error = yield* service
+            .writeFile({
+              cwd,
+              relativePath: parent ? "alias/new/deep.txt" : "alias",
+              contents: "bad\n",
+            })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+          expect(yield* fs.readDirectory(outside)).toEqual([]);
+          expect((yield* Effect.promise(() => NodeFS.promises.lstat(alias))).isSymbolicLink()).toBe(
+            true,
+          );
+        }),
+      { skip: !symlinksSupported },
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "creates parents through an in-root directory alias and symlinked root",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const links = yield* makeTempDir;
+          yield* fs.makeDirectory(path.join(cwd, "actual"));
+          yield* fs.symlink(path.join(cwd, "actual"), path.join(cwd, "alias"));
+          const rootAlias = path.join(links, "root");
+          yield* fs.symlink(cwd, rootAlias);
+          expect(
+            yield* service.writeFile({
+              cwd: rootAlias,
+              relativePath: "alias/new/deep/file.txt",
+              contents: "ok\n",
+            }),
+          ).toEqual({ relativePath: "alias/new/deep/file.txt" });
+          expect(yield* fs.readFileString(path.join(cwd, "actual/new/deep/file.txt"))).toBe("ok\n");
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "preserves an in-root file symlink and replaces its target",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          yield* writeTextFile(cwd, "actual/file.txt", "before\n");
+          const alias = path.join(cwd, "alias.txt");
+          yield* fs.symlink(path.join(cwd, "actual/file.txt"), alias);
+          yield* service.writeFile({ cwd, relativePath: "alias.txt", contents: "after\n" });
+          expect((yield* Effect.promise(() => NodeFS.promises.lstat(alias))).isSymbolicLink()).toBe(
+            true,
+          );
+          expect(yield* fs.readFileString(path.join(cwd, "actual/file.txt"))).toBe("after\n");
+        }),
+    );
+
+    it.effect.each(["writeFile", "sync", "close", "rename"] as const)(
+      "retains old bytes and cleans only its staging file when %s fails",
+      (stage) =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          yield* writeTextFile(cwd, "file.txt", "before\n");
+          yield* writeTextFile(cwd, ".unrelated.tmp", "keep\n");
+          const failure = new Error("injected disk failure");
+          if (stage === "rename") {
+            vi.spyOn(NodeFS.promises, "rename").mockRejectedValueOnce(failure);
+          } else {
+            const open = NodeFS.promises.open;
+            vi.spyOn(NodeFS.promises, "open").mockImplementationOnce(async (...args) => {
+              const handle = await open(...args);
+              vi.spyOn(handle, stage).mockImplementationOnce(async () => {
+                if (stage === "writeFile") await handle.write("partial");
+                throw failure;
+              });
+              return handle;
+            });
+          }
+          const error = yield* service
+            .writeFile({ cwd, relativePath: "file.txt", contents: "after\n" })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+          expect(yield* fs.readFileString(path.join(cwd, "file.txt"))).toBe("before\n");
+          expect(yield* fs.readFileString(path.join(cwd, ".unrelated.tmp"))).toBe("keep\n");
+          expect((yield* fs.readDirectory(cwd)).sort()).toEqual([".unrelated.tmp", "file.txt"]);
+        }),
+    );
+
+    it.effect("does not clean a staging pathname replaced with another file", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "file.txt", "before\n");
+        const rename = NodeFS.promises.rename;
+        let replacedPath = "";
+        vi.spyOn(NodeFS.promises, "rename").mockImplementationOnce(async (source) => {
+          replacedPath = String(source);
+          await rename(source, `${source}.owned`);
+          await NodeFS.promises.writeFile(source, "foreign\n");
+          throw new Error("injected rename failure");
+        });
+        yield* service
+          .writeFile({ cwd, relativePath: "file.txt", contents: "after\n" })
+          .pipe(Effect.flip);
+        expect(yield* fs.readFileString(path.join(cwd, "file.txt"))).toBe("before\n");
+        expect(yield* fs.readFileString(replacedPath)).toBe("foreign\n");
+        expect(yield* fs.readFileString(`${replacedPath}.owned`)).toBe("after\n");
+      }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "rejects a parent redirected outside the root before rename",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const outside = yield* makeTempDir;
+          yield* writeTextFile(cwd, "parent/file.txt", "before\n");
+          yield* writeTextFile(outside, "file.txt", "outside\n");
+          const realRoot = yield* fs.realPath(cwd);
+          const parent = path.join(realRoot, "parent");
+          const moved = path.join(realRoot, "moved");
+          const open = NodeFS.promises.open;
+          vi.spyOn(NodeFS.promises, "open").mockImplementationOnce(async (...args) => {
+            const handle = await open(...args);
+            const sync = handle.sync.bind(handle);
+            vi.spyOn(handle, "sync").mockImplementationOnce(async () => {
+              await sync();
+              await NodeFS.promises.rename(parent, moved);
+              await NodeFS.promises.symlink(outside, parent, "junction");
+            });
+            return handle;
+          });
+          const error = yield* service
+            .writeFile({ cwd, relativePath: "parent/file.txt", contents: "after\n" })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+          expect(yield* fs.readFileString(path.join(outside, "file.txt"))).toBe("outside\n");
+          expect(yield* fs.readDirectory(outside)).toEqual(["file.txt"]);
+          expect(yield* fs.readFileString(path.join(moved, "file.txt"))).toBe("before\n");
+        }),
+    );
+
+    it.effect("rejects a directory destination without modifying its children", () =>
+      Effect.gen(function* () {
+        const service = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "directory/file.txt", "keep\n");
+        yield* service
+          .writeFile({ cwd, relativePath: "directory", contents: "bad\n" })
+          .pipe(Effect.flip);
+        expect(yield* fs.readFileString(path.join(cwd, "directory/file.txt"))).toBe("keep\n");
+        expect(yield* fs.readDirectory(cwd)).toEqual(["directory"]);
+      }),
+    );
+
     it.effect("writes files relative to the workspace root", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
