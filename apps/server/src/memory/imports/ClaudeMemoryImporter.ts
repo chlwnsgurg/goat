@@ -48,6 +48,8 @@ const header = (text: string, metadataProfile: boolean) => {
           typeof entry.value.value !== "string"
         )
           return undefined;
+        if (scanMemoryValue(entry.value.value).kind === "blocked")
+          return { issue: "secret_detected" as const };
         metadata.set(entry.key.value, normalize(entry.value.value));
       }
     } else {
@@ -59,6 +61,8 @@ const header = (text: string, metadataProfile: boolean) => {
         typeof pair.value.value !== "string"
       )
         return undefined;
+      if (scanMemoryValue(pair.value.value).kind === "blocked")
+        return { issue: "secret_detected" as const };
       top.set(key, normalize(pair.value.value));
     }
   }
@@ -137,6 +141,8 @@ export const parseClaudeMemory: MemoryImportParser = (input) =>
       if (bytes(sourceItemKey) > M.MEMORY_IMPORT_KEY_MAX_UTF8_BYTES)
         return yield* new M.MemoryImportRpcError({ issue: "limit_exceeded" });
       const parsed = header(file.text, input.profile === "claude-topic-metadata-v1");
+      if (parsed && "issue" in parsed)
+        return yield* new M.MemoryImportRpcError({ issue: parsed.issue });
       const reject = (issue: M.MemoryImportIssue) =>
         rows.push({
           kind: "rejected",

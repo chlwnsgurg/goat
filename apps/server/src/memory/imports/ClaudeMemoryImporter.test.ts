@@ -256,6 +256,49 @@ describe("ClaudeMemoryImporter", () => {
       }),
   );
 
+  for (const field of ["node_type", "originSessionId"] as const) {
+    fixtureTest(`decoded secret ${field} fails before discarding foreign metadata`, (snapshot) =>
+      Effect.gen(function* () {
+        const text = topic(
+          "Safe body.",
+          `name: Topic\ndescription: Safe\nmetadata:\n  type: project\n  ${field}: "sk-\\u0061${"a".repeat(23)}"`,
+        );
+        yield* expectIssue(
+          files({ ...snapshot, profile: "claude-topic-metadata-v1" }, [
+            [
+              "good.md",
+              topic("Safe body.", "name: Good\ndescription: Safe\nmetadata:\n  type: project"),
+            ],
+            ["bad.md", text],
+          ]),
+          "secret_detected",
+        );
+      }),
+    );
+  }
+
+  for (const invalid of ["empty body", "empty description"] as const) {
+    fixtureTest(`decoded secret name fails before rejecting ${invalid}`, (snapshot) =>
+      Effect.gen(function* () {
+        for (const profile of ["claude-topic-v1", "claude-topic-metadata-v1"] as const) {
+          const type =
+            profile === "claude-topic-v1" ? "type: project" : "metadata:\n  type: project";
+          const text = topic(
+            invalid === "empty body" ? "" : "Safe body.",
+            `name: "sk-\\u0061${"a".repeat(23)}"\ndescription: ${invalid === "empty description" ? '""' : "Safe"}\n${type}`,
+          );
+          yield* expectIssue(
+            files({ ...snapshot, profile }, [
+              ["good.md", topic("Safe body.", `name: Good\ndescription: Safe\n${type}`)],
+              ["bad.md", text],
+            ]),
+            "secret_detected",
+          );
+        }
+      }),
+    );
+  }
+
   fixtureTest("rejects unsafe/ambiguous selectors before emitting any row", (snapshot) =>
     Effect.gen(function* () {
       for (const selector of [
