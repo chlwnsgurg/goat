@@ -139,8 +139,15 @@ const handlers = {
   memory_upsert: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const service = yield* MemoryService.MemoryService;
+      const caller = yield* McpInvocationContext.McpInvocationContext;
       return yield* service
-        .upsert(yield* decodeUpsert(input), yield* invocationPermit("write"))
+        .upsert(
+          yield* decodeUpsert(input),
+          yield* invocationPermit("write"),
+          caller.thread
+            ? { environmentId: caller.environmentId, threadId: caller.thread.threadId }
+            : undefined,
+        )
         .pipe(Effect.flatMap((stored) => receipt(stored.receipt)));
     }).pipe(Effect.mapError(memoryError)),
   ),

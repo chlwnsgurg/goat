@@ -574,7 +574,7 @@ it.effect.each(survivorCases)(
 );
 
 it.effect(
-  "r3 cumulative admission uses one row and at most one changed write, refuses overflow and cleans on deletion",
+  "r3 cumulative admission uses one row and at most one changed write, fences derivatives on overflow and cleans on deletion",
   () => {
     const f = fixture();
     return Effect.gen(function* () {
@@ -612,13 +612,12 @@ it.effect(
         (yield* store.readThreadLineage({ environmentId, threadId }, space)).revisions,
         100,
       );
-      // New canonical selection would require a 101st ID. The synthetic transport only
-      // sees admitted snapshots, exactly as the real refresh callback does.
+      // The 101st ID fences derivatives, while injection remains available.
       yield* service.upsert(input(9501), Effect.void);
       let sent = 0;
       const rejected = yield* snapshot.forThread(threadId, f.policy(), f.currentPolicy);
       if (rejected) sent++;
-      assert.strictEqual(sent, 0);
+      assert.strictEqual(sent, 1);
       const overflow = yield* store.readThreadLineage({ environmentId, threadId }, space);
       assert.strictEqual(overflow.state, "overflow");
       assert.lengthOf(overflow.revisions, 100);

@@ -3270,7 +3270,6 @@ const make = Effect.gen(function* () {
       AND ((event_type='thread.created' AND (
         json_type(payload_json,'$.forkedFrom') NOT IN ('null')
         OR json_extract(payload_json,'$.lineage.parentThreadId') IS NOT NULL
-        OR json_extract(payload_json,'$.sideChatOf') IS NOT NULL
         OR json_extract(payload_json,'$.historyOrigin')='v1_import'
         OR json_extract(payload_json,'$.activeProviderThreadId') IS NOT NULL))
         OR (event_type='provider-thread.updated' AND json_extract(payload_json,'$.status')='not_loaded' AND json_extract(payload_json,'$.nativeThreadRef') IS NOT NULL AND json_extract(payload_json,'$.providerSessionId') IS NULL)
@@ -3297,10 +3296,9 @@ const make = Effect.gen(function* () {
             : union.length > 100
               ? "overflow"
               : "tracked";
-        // A never-admitted context needs no durable row on refusal. Unknown origin is
-        // recoverable from orchestration records; only existing sets need a sticky fence.
-        if (!previous.revisions.length && state !== "tracked") return false;
-        // Overflow never truncates admitted lineage. The rejected delivery adds no IDs.
+        // Injection remains available for unknown/overflow contexts. Persist the fence
+        // before delivery so every thread-derived producer stays disabled thereafter.
+        // Overflow preserves the previous set, including an initially empty set.
         const metadata = yield* stored(
           "thread-lineage-codec",
           threadLineageCodec.encode({
@@ -3317,7 +3315,7 @@ const make = Effect.gen(function* () {
         ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json
         WHERE memory_outbox.metadata_json!=excluded.metadata_json`,
         );
-        return state === "tracked";
+        return true;
       }),
     );
   });
@@ -3549,6 +3547,15 @@ const make = Effect.gen(function* () {
           yield* stored(
             "ack-settle",
             sql`UPDATE memory_events SET receipt_json=${yield* receiptCodec.encode(acknowledged)} WHERE memory_space_id=${work.space} AND operation_id=${result.operationId}`,
+          );
+        if (
+          result.outcome === "rejected" &&
+          result.failureCode === "source_invalidated" &&
+          work.metadata.kind === "upsert"
+        )
+          yield* stored(
+            "derived-admission-refusal",
+            sql`INSERT INTO memory_quota_counters(space,dimension,scope_key,value) VALUES (${work.space},'derived_admission_rejected','',1) ON CONFLICT(space,dimension,scope_key) DO UPDATE SET value=min(value+1,2147483647)`,
           );
         yield* finishWork(id, result.outcome === "rejected" ? "failed" : "completed", result);
         if (
