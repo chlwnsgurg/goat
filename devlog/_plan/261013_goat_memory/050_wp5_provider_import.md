@@ -536,7 +536,7 @@ Unavailable DB/FTS/WAL/retention metrics or nonzero busy leave the corresponding
 **미증명**, regardless of logical quota or CI success.
 
 L1's source command is the existing server focused test runner with direct target
-`vp test run src/memory/MemoryImport.test.ts` from apps/server on macmini-cf (planned, NOT RUN here).
+`GOAT_MEMORY_GROWTH=1 vp test run src/memory/MemoryImport.growth.test.ts` from apps/server on macmini-cf; CI runs it in `goat-test-memory-growth` (source proof only).
 For packaged proof, coordinator owns a NEW temporary packaged RPC harness outside the repo:
 `node /tmp/wp5-growth-<SHA>/run.mjs --manifest /tmp/wp5-growth-<SHA>/manifest.json`
 (planned, NOT RUN, file does not exist yet). Before execution it records the actual same-SHA
