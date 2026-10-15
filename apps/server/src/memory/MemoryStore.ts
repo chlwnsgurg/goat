@@ -2966,7 +2966,7 @@ const make = Effect.gen(function* () {
           const r = op.revision;
           yield* stored(
             "replaced-payload",
-            sql`UPDATE memory_payloads SET replaced_at=${Date.parse(r.createdAtUtc)},purge_eligible_after=${Date.parse(r.createdAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId} AND payload_ref IN (SELECT value FROM json_each(${yield* headsCodec.encode(r.parents)}))`,
+            sql`UPDATE memory_payloads SET replaced_at=${Date.parse(r.createdAtUtc)},purge_eligible_after=${Date.parse(r.createdAtUtc) + M.MEMORY_REPLACED_PAYLOAD_RETENTION_MS} WHERE space=${op.memorySpaceId} AND memory_id=${op.memoryId} AND payload_ref!=${r.payloadRef} AND payload_ref IN (SELECT payload_ref FROM memory_revisions WHERE space=${op.memorySpaceId} AND revision_id IN (SELECT value FROM json_each(${yield* headsCodec.encode(r.parents)})))`,
           );
         }
         if (!reconnect && accepted && !tombstones.length && op.kind !== "forget") {
@@ -2979,6 +2979,27 @@ const make = Effect.gen(function* () {
           );
           if (existing.length && existing[0]?.operation_id !== r.operationId)
             return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+          if (r.payloadRef !== r.revisionId) {
+            const parent = yield* stored(
+              "import-alias-parent",
+              sql<{
+                body_json: string;
+                scope_json: string;
+                assertion_kind: string;
+              }>`SELECT p.body_json,v.scope_json,v.assertion_kind
+              FROM memory_revisions v JOIN memory_payloads p ON p.space=v.space AND p.payload_ref=v.payload_ref
+              WHERE v.space=${op.memorySpaceId} AND v.memory_id=${op.memoryId} AND v.revision_id=${r.parents[0] ?? null}
+              AND v.payload_ref=${r.payloadRef} AND p.memory_id=${op.memoryId}`,
+            );
+            if (
+              op.kind !== "upsert" ||
+              !parent[0] ||
+              parent[0].body_json !== (yield* payloadCodec.encode(op.payload)) ||
+              parent[0].scope_json !== (yield* scopeCodec.encode(r.scope)) ||
+              parent[0].assertion_kind !== r.assertionKind
+            )
+              return yield* new MemoryStoreConflict({ code: "identity_mismatch" });
+          }
           yield* stored(
             "payload",
             sql`INSERT INTO memory_payloads (space,payload_ref,memory_id,body_json,dependencies_json) VALUES (${op.memorySpaceId},${r.payloadRef},${op.memoryId},${yield* payloadCodec.encode(op.payload)},${yield* headsCodec.encode(op.payload.derivedFromMemoryRevisions)}) ON CONFLICT(space,payload_ref) DO NOTHING`,
@@ -6108,9 +6129,21 @@ const make = Effect.gen(function* () {
       AND json_extract(completed_items_json,'$.kind')='detailed'
       AND EXISTS (SELECT 1 FROM json_each(completed_items_json,'$.selections') s
         WHERE (json_extract(s.value,'$.operationId')=${receipt.operationId}
-          OR json_extract(s.value,'$.observation.operationId')=${receipt.operationId})
+          OR json_extract(s.value,'$.observation.operationId')=${receipt.operationId}
+          OR json_extract(s.value,'$.result.revisionId') IN (SELECT revision_id FROM memory_revisions
+            WHERE space=${space} AND operation_id=${receipt.operationId} AND memory_id=${receipt.memoryId}))
         AND json_type(s.value,'$.result')='object')`,
     );
+    const operation = batches.length ? yield* readOperation(space, receipt.operationId) : undefined;
+    const originalObservation =
+      operation?.kind === "upsert" && operation.revision.provenance.importSource
+        ? {
+            sourceFingerprint: operation.revision.provenance.importSource.sourceFingerprint,
+            contentFingerprint: operation.revision.provenance.importSource.contentFingerprint,
+            revisionId: operation.revision.revisionId,
+            operationId: operation.operationId,
+          }
+        : undefined;
     // Each batch freezes its own observation. A newer pending proposal cannot hide
     // an older approval, and hub order prevents accepted state from moving backward.
     const observations = new Map<
@@ -6125,7 +6158,12 @@ const make = Effect.gen(function* () {
       const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
       if (batch.kind !== "detailed") continue;
       for (const selection of batch.selections) {
-        if (selection.observation?.operationId === receipt.operationId) {
+        const observation =
+          selection.observation ??
+          (selection.result?.revisionId === originalObservation?.revisionId
+            ? originalObservation
+            : undefined);
+        if (observation?.operationId === receipt.operationId) {
           observations.set(
             importId([
               "item",
@@ -6203,7 +6241,9 @@ const make = Effect.gen(function* () {
       const batch = yield* importBatchCodec.decode(row.completed_items_json, strict);
       if (batch.kind !== "detailed") continue;
       const selections = batch.selections.map((s) =>
-        (s.observation?.operationId ?? s.operationId) !== receipt.operationId || !s.result
+        ((s.observation?.operationId ?? s.operationId) !== receipt.operationId &&
+          (!originalObservation || s.result?.revisionId !== originalObservation.revisionId)) ||
+        !s.result
           ? s
           : {
               ...s,
@@ -6252,9 +6292,11 @@ const make = Effect.gen(function* () {
       AND observed_at_utc<=${DateTime.formatIso(DateTime.makeUnsafe(now - M.MEMORY_IMPORT_BATCH_RETENTION_MS))}
       AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_import_receipts i
         ON i.space=b.space AND i.environment_id=b.environment_id AND i.record_kind='item'
-        WHERE json_extract(i.registration_json,'$.pending.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId')))
+        WHERE (json_extract(i.registration_json,'$.pending.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId'))
+          OR json_extract(i.registration_json,'$.pending.revisionId')=json_extract(s.value,'$.result.revisionId')))
       AND NOT EXISTS (SELECT 1 FROM json_each(b.completed_items_json,'$.selections') s JOIN memory_outbox o ON o.space=b.space
-        WHERE o.status IN ('pending','running','retry') AND json_extract(o.metadata_json,'$.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId')))
+        WHERE o.status IN ('pending','running','retry') AND (json_extract(o.metadata_json,'$.operationId')=coalesce(json_extract(s.value,'$.observation.operationId'),json_extract(s.value,'$.operationId'))
+          OR json_extract(o.metadata_json,'$.revision.revisionId')=json_extract(s.value,'$.result.revisionId')))
       ORDER BY observed_at_utc,receipt_id LIMIT ${limit}`,
     );
     for (const row of rows) {
@@ -6625,8 +6667,8 @@ const make = Effect.gen(function* () {
           }>`SELECT p.space,p.payload_ref FROM memory_payloads p
         WHERE p.purge_eligible_after IS NOT NULL AND p.purge_eligible_after<=${now} AND (p.revert_deadline IS NULL OR p.revert_deadline<=${now})
         AND EXISTS (SELECT 1 FROM memory_compaction_state c WHERE c.space=p.space AND c.published=1)
-        AND NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h WHERE i.space=p.space AND h.value=p.payload_ref)
-        AND NOT EXISTS (SELECT 1 FROM memory_conflicts c JOIN json_each(c.heads_json) h WHERE c.space=p.space AND c.status!='resolved' AND h.value=p.payload_ref)
+        AND NOT EXISTS (SELECT 1 FROM memory_items i JOIN json_each(i.heads_json) h JOIN memory_revisions v ON v.space=i.space AND v.revision_id=h.value WHERE i.space=p.space AND v.payload_ref=p.payload_ref)
+        AND NOT EXISTS (SELECT 1 FROM memory_conflicts c JOIN json_each(c.heads_json) h JOIN memory_revisions v ON v.space=c.space AND v.revision_id=h.value WHERE c.space=p.space AND c.status!='resolved' AND v.payload_ref=p.payload_ref)
         AND NOT EXISTS (SELECT 1 FROM memory_outbox o WHERE o.space=p.space AND o.payload_ref=p.payload_ref AND o.status IN ('pending','retry','running'))
         AND NOT EXISTS (SELECT 1 FROM memory_revert_intents r WHERE r.space=p.space AND r.payload_ref=p.payload_ref)
         AND NOT EXISTS (SELECT 1 FROM memory_resolutions r JOIN json_each(r.input_payload_refs_json) refs WHERE r.space=p.space AND refs.value=p.payload_ref AND r.revert_deadline>${now})
@@ -9410,7 +9452,8 @@ const make = Effect.gen(function* () {
       if (!covered.has(M.MemoryOperationId.make(revision.operation_id))) continue;
       yield* stored(
         "hub-compact-payload-delete",
-        sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${revision.payload_ref}`,
+        sql`DELETE FROM memory_payloads WHERE space=${input.memorySpaceId} AND payload_ref=${revision.payload_ref}
+        AND NOT EXISTS (SELECT 1 FROM memory_revisions v WHERE v.space=${input.memorySpaceId} AND v.payload_ref=${revision.payload_ref} AND v.revision_id!=${revision.revision_id})`,
       );
       yield* stored(
         "hub-compact-revision-delete",

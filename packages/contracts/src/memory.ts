@@ -434,7 +434,12 @@ export const MemoryRevision = struct({
   provenance: MemoryProvenance,
   createdAtUtc: MemoryUtcTimestamp,
 }).check(
-  Schema.makeFilter((v) => v.payloadRef === v.revisionId && !v.parents.includes(v.revisionId)),
+  Schema.makeFilter(
+    (v) =>
+      !v.parents.includes(v.revisionId) &&
+      (v.payloadRef === v.revisionId ||
+        (v.provenance.importSource !== undefined && v.parents.length === 1)),
+  ),
 );
 export type MemoryRevision = typeof MemoryRevision.Type;
 

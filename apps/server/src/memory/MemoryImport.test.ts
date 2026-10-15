@@ -315,6 +315,9 @@ const remoteApproval = (operation: M.MemoryOperation, forgotten = false) =>
       service.admitHubOperationTx({ authority, operation }),
     );
   }).pipe(Effect.provide(Layer.fresh(importLive)));
+const decodeReceiptEnvelope = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Struct({ receipt: M.MemoryImportReceipt })),
+);
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const retired = Effect.fnUntraced(function* (p: PreparedImportCommit) {
   const sql = yield* SqlClient.SqlClient;
@@ -1002,10 +1005,21 @@ describe("MemoryImport M3c final fences", () => {
         .pipe(Effect.flip);
       assert.strictEqual(stale._tag, "MemoryStoreConflict");
       assert.deepStrictEqual(yield* durableInventory, before);
+      const sql = yield* SqlClient.SqlClient;
+      const bodies = yield* sql`SELECT * FROM memory_payloads ORDER BY space,payload_ref`;
       assert.strictEqual((yield* service.importPorts.commit(p, Effect.void)).outcome, "aliased");
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM memory_payloads ORDER BY space,payload_ref`,
+        bodies,
+      );
       const op = yield* store.readOperation(space, p.selection.operationId);
       if (op?.kind !== "upsert") return assert.fail("expected alias intent");
       assert.deepStrictEqual(op.revision.parents, [targetRev]);
+      assert.strictEqual(op.revision.payloadRef, operation.revision.payloadRef);
+      assert.strictEqual(
+        (yield* service.importPorts.readReceipt(p.batch, Effect.void)).sessionBodyBytes,
+        0,
+      );
       assert.deepStrictEqual(
         (yield* service.importPorts.readItem(item, Effect.void))?.pending,
         p.next.pending,
@@ -1875,7 +1889,20 @@ describe("MemoryImport M3d", () => {
         { ...address, sourceId, by: "source" },
         Effect.void,
       ))!;
-      const rawC = prepared(regC, 50, pendingB);
+      const cBase = prepared(regC, 50, pendingB);
+      const cFingerprint = "f".repeat(64);
+      const rawC = {
+        ...cBase,
+        candidate: { ...cBase.candidate, sourceFingerprint: cFingerprint },
+        selection: {
+          ...cBase.selection,
+          selector: { ...cBase.selection.selector, sourceFingerprint: cFingerprint },
+        },
+        next: {
+          ...cBase.next,
+          pending: { ...cBase.next.pending!, sourceFingerprint: cFingerprint },
+        },
+      };
       const cSelection = {
         ...rawC.selection,
         result: { ...rawC.selection.result!, outcome: "conflicted" as const },
@@ -1985,9 +2012,7 @@ describe("MemoryImport M3d", () => {
       const rows = yield* sql<{
         completed_items_json: string;
       }>`SELECT completed_items_json FROM memory_import_receipts WHERE batch_operation_id=${noop.batch.operationId}`;
-      const decoded = yield* Schema.decodeEffect(
-        Schema.fromJsonString(Schema.Struct({ receipt: M.MemoryImportReceipt })),
-      )(rows[0]!.completed_items_json);
+      const decoded = yield* decodeReceiptEnvelope(rows[0]!.completed_items_json);
       const receipt = decoded.receipt;
       assert.strictEqual(receipt.items[0]!.issue, "capacity_exceeded");
       assert.deepStrictEqual(receipt.items[0]!.capacity, capacity);

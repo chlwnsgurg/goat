@@ -741,6 +741,7 @@ const make = Effect.fnUntraced(function* (
           }
           // Updated imports branch only from their last accepted observation, never a pending proposal.
           let parents = previous?.accepted ? [previous.accepted.revisionId] : [];
+          let alias: { revision: M.MemoryRevision; payload: M.MemoryPayload } | undefined;
           if (
             next.outcome === "aliased" &&
             !previous?.accepted &&
@@ -766,6 +767,7 @@ const make = Effect.fnUntraced(function* (
             )
               return yield* new Store.MemoryStoreConflict({ code: "revision_changed" });
             parents = [parent.revision.revisionId];
+            alias = { revision: parent.revision, payload: parent.payload! };
           }
           if (
             parents.length !== input.parents.length ||
@@ -799,7 +801,7 @@ const make = Effect.fnUntraced(function* (
                   memoryId: next.memoryId,
                   operationId: selection.operationId,
                   revisionId: selection.revisionId,
-                  payloadRef: selection.revisionId,
+                  payloadRef: alias?.revision.payloadRef ?? selection.revisionId,
                   parents: input.parents,
                   scope: next.scope,
                   assertionKind: "inference",
@@ -819,7 +821,7 @@ const make = Effect.fnUntraced(function* (
                     },
                   },
                 },
-                payload: candidate.payload,
+                payload: alias?.payload ?? candidate.payload,
               },
               strict,
             ),
@@ -852,7 +854,7 @@ const make = Effect.fnUntraced(function* (
               expectedHeads: input.parents,
               revision: operation.revision,
             },
-            payloadRef: selection.revisionId,
+            payloadRef: operation.revision.payloadRef,
             attempt: 0,
             nextAttemptAt: 0,
             claimedBy: null,

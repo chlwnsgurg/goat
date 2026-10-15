@@ -298,7 +298,9 @@ const make = Effect.gen(function* () {
           charge(
             "history",
             usage.historyBytes,
-            oldPayloadBytes +
+            (op.kind === "upsert" && op.revision.payloadRef !== op.revision.revisionId
+              ? 0
+              : oldPayloadBytes) +
               (op.kind === "resolve"
                 ? utf8(
                     yield* resolutionPayloadJson(op.resolutionPayload).pipe(
