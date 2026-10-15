@@ -2362,7 +2362,20 @@ describe("MemoryImport physical-growth source harness", () => {
                   }
                 }
                 yield* worker.drain;
-              });
+              }).pipe(
+                Effect.tapError((error) =>
+                  Effect.logInfo(
+                    `WP5_GROWTH_REFUSAL ${encodeUnknown({
+                      phase,
+                      round,
+                      tag: error._tag,
+                      ...(error._tag === "MemoryCapacityError"
+                        ? { dimension: error.dimension, current: error.current, limit: error.limit }
+                        : {}),
+                    })}`,
+                  ),
+                ),
+              );
             const sample = (phase: string, iteration: number) =>
               Effect.gen(function* () {
                 yield* worker.drain;
@@ -2418,6 +2431,8 @@ describe("MemoryImport physical-growth source harness", () => {
                   walBytes,
                   checkpoint: checkpoint[0] ?? null,
                   sample: growth.current,
+                  freshAllocation: yield* store.measureAllocation(),
+                  freshLogicalBytes: yield* store.logicalBytes,
                   counts,
                 };
                 yield* Effect.logInfo(`WP5_GROWTH_SAMPLE ${encodeUnknown(metrics)}`);
