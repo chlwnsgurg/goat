@@ -602,6 +602,22 @@ function MemoryDetails({
   if ((item === null || !canWrite) && editing) setEditing(false);
   const value = history.data ? Option.getOrNull(history.data) : null;
   const navigate = useNavigate();
+  const hadVisibleItem = useRef(false);
+  useEffect(() => {
+    if (item) {
+      hadVisibleItem.current = true;
+    } else if (hadVisibleItem.current) {
+      hadVisibleItem.current = false;
+      onForgotten(
+        "Closed because this memory is no longer available. A related memory may have been forgotten.",
+      );
+      void navigate({
+        to: "/settings/memory",
+        search: validateMemorySettingsSearch({ environmentId, memorySpaceId }),
+        hash: "",
+      });
+    }
+  }, [item, onForgotten, navigate, environmentId, memorySpaceId]);
   const detailsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     detailsRef.current?.scrollIntoView?.({ block: "start" });
@@ -1163,7 +1179,6 @@ function MemoryEditor({
       registry.set(draft, {
         text: item.payload.text,
         memoryIds: [id],
-        hasRevisionDependencies: item.payload.derivedFromMemoryRevisions.length > 0,
       });
     return () => {
       mounted.current = false;
@@ -1229,9 +1244,6 @@ function MemoryEditor({
           setText({
             text: event.currentTarget.value,
             memoryIds: item ? [id] : [],
-            hasRevisionDependencies: item
-              ? item.payload.derivedFromMemoryRevisions.length > 0
-              : false,
           })
         }
       />

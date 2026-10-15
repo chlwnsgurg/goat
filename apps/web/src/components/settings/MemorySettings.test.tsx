@@ -755,6 +755,7 @@ it.each([false, true])(
 it("discards the editor and its draft on write-only revoke and requires Edit after regrant", async () => {
   const { render, registry } = await supportedScreen();
   const writes = vi.spyOn(registry, "set");
+  state.navigate.mockClear();
   await click("Edit");
   expect(container.querySelector<HTMLInputElement>('[aria-label="Memory text"]')?.value).toBe(
     "Synthetic original",
@@ -1470,6 +1471,7 @@ it("describes both seeing and saving memories on a fresh visit while sharing is 
 it("removes an open editor and history when shared admission removes the derived memory", async () => {
   const { render, registry } = await supportedScreen();
   const writes = vi.spyOn(registry, "set");
+  state.navigate.mockClear();
   await click("Edit");
   expect(container.querySelector('[aria-label="Memory text"]')).not.toBeNull();
   state.queries.set("read", Option.none());
@@ -1478,4 +1480,10 @@ it("removes an open editor and history when shared admission removes the derived
   expect(container.querySelector('[aria-label="Memory text"]')).toBeNull();
   expect(container.textContent).not.toContain("Synthetic original");
   expect(writes.mock.calls.at(-1)?.[1]).toBeNull();
+  expect(container.textContent).toContain(
+    "Closed because this memory is no longer available. A related memory may have been forgotten.",
+  );
+  expect(state.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ to: "/settings/memory", hash: "" }),
+  );
 });

@@ -463,7 +463,6 @@ describe("shared memory client", () => {
           h.registry.set(otherEdit, {
             text: "Unrelated edit",
             memoryIds: [unrelated],
-            hasRevisionDependencies: false,
           });
           const source = h.memory.read(readTarget);
           const read = Atom.make((get) => Option.flatten(AsyncResult.value(get(source))));
@@ -1411,33 +1410,144 @@ it.effect.each(["read", "history", "draft"] as const)(
     ),
 );
 
-it.effect(
-  "preserves an already open independent memory and its edit after another memory is forgotten",
-  () =>
+it.effect("closes even an independent open detail and edit after another memory is forgotten", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      if (unrelatedItem.status !== "active") throw new Error("Active fixture required");
+      const h = yield* harness();
+      const exposure = h.memory.exposureAtom(target);
+      h.registry.mount(exposure);
+      yield* Queue.offer(h.queue, signal("reset"));
+      yield* waitFor(h.registry, exposure, (state) => state.ready);
+      const read = h.memory.read({ ...target, input: { ...target.input, memoryId: unrelated } });
+      const body = hasBody(read);
+      h.registry.mount(body);
+      yield* Deferred.succeed(h.reply, unrelatedItem);
+      yield* waitFor(h.registry, body, Boolean);
+      const edit = h.memory.draftAtom({ ...target, draftId: "independent" });
+      h.registry.mount(edit);
+      h.registry.set(edit, {
+        text: unrelatedItem.payload.text,
+        memoryIds: [unrelated],
+      });
+      yield* Queue.offer(h.queue, signal("forget", id));
+      yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
+      expect(h.registry.get(body)).toBe(false);
+      expect(h.registry.get(edit)).toBeNull();
+      expect(h.readCount()).toBe(1);
+    }),
+  ),
+);
+
+it.effect.each(["read", "history", "source", "draft"] as const)(
+  "fences inherited empty-lineage %s on source-only forget",
+  (consumer) =>
     Effect.scoped(
       Effect.gen(function* () {
-        if (unrelatedItem.status !== "active") throw new Error("Active fixture required");
-        const h = yield* harness();
+        if (item.status !== "active" || unrelatedItem.status !== "active")
+          throw new Error("Active fixture required");
+        const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+        const d0 = yield* decodeMemoryItem(
+          {
+            ...unrelatedItem,
+            revision: { ...unrelatedItem.revision, revisionId: uuid(9), payloadRef: uuid(9) },
+            payload: {
+              ...unrelatedItem.payload,
+              text: "Inherited private summary",
+              derivedFromMemoryRevisions: [item.revision.revisionId],
+            },
+          },
+          { onExcessProperty: "error" },
+        );
+        if (d0.status !== "active") throw new Error("Active fixture required");
+        const d1 = yield* decodeMemoryItem(
+          {
+            ...d0,
+            revision: {
+              ...d0.revision,
+              revisionId: uuid(10),
+              payloadRef: uuid(10),
+              parents: [d0.revision.revisionId],
+            },
+            payload: { ...d0.payload, derivedFromMemoryRevisions: [] },
+          },
+          { onExcessProperty: "error" },
+        );
+        if (d1.status !== "active") throw new Error("Active fixture required");
+        const judgments = yield* decodeMemoryHistory(
+          {
+            ...history,
+            memoryId: d1.memoryId,
+            revisions: [],
+            resolutions: [
+              {
+                resolution: {
+                  resolutionId: uuid(11),
+                  memorySpaceId: space,
+                  memoryId: d1.memoryId,
+                  inputRevisionIds: [d0.revision.revisionId],
+                  inputPayloadRefs: [d0.revision.payloadRef],
+                  judgmentRef: uuid(11),
+                  requestedModelSelection: { instanceId: "codex", model: "synthetic", options: [] },
+                  effectiveProvider: "codex",
+                  effectiveModel: "synthetic",
+                  resolvingEnvironmentId: env,
+                  fencingToken: 1,
+                  resultRevisionId: d1.revision.revisionId,
+                  appliedAtUtc: "2026-10-14T00:00:00.000Z",
+                  revertDeadlineUtc: "2026-11-13T00:00:00.000Z",
+                },
+                payload: { resolutionId: uuid(11), judgment: "Inherited private judgment" },
+              },
+            ],
+          },
+          { onExcessProperty: "error" },
+        );
+        const h = yield* harness(createMemoryTombstoneLedger(), page, false, judgments);
         const exposure = h.memory.exposureAtom(target);
         h.registry.mount(exposure);
         yield* Queue.offer(h.queue, signal("reset"));
         yield* waitFor(h.registry, exposure, (state) => state.ready);
-        const read = h.memory.read({ ...target, input: { ...target.input, memoryId: unrelated } });
-        const body = hasBody(read);
-        h.registry.mount(body);
-        yield* Deferred.succeed(h.reply, unrelatedItem);
-        yield* waitFor(h.registry, body, Boolean);
-        const edit = h.memory.draftAtom({ ...target, draftId: "independent" });
+        const direct = { ...readTarget, input: { ...readTarget.input, memoryId: d1.memoryId } };
+        const read = h.memory.read(direct);
+        const past = h.memory.history({ ...direct, input: { ...direct.input, limit: 10 } });
+        const source = h.memory.readSource({
+          ...direct,
+          input: {
+            ...direct.input,
+            sourceThread: sourcePage.sourceThread,
+            messageIds: [MessageId.make("m1")],
+            limit: 10,
+          },
+        });
+        for (const body of [hasBody(read), hasBody(past), hasBody(source)]) h.registry.mount(body);
+        yield* Deferred.succeed(h.reply, d1);
+        for (const body of [hasBody(read), hasBody(past), hasBody(source)])
+          yield* waitFor(h.registry, body, Boolean);
+        expect(JSON.stringify(h.registry.get(read))).toContain("Inherited private summary");
+        expect(JSON.stringify(h.registry.get(past))).toContain("Inherited private judgment");
+        expect(JSON.stringify(h.registry.get(source))).toContain("Synthetic source");
+        const edit = h.memory.draftAtom({ ...target, draftId: "inherited-empty" });
         h.registry.mount(edit);
         h.registry.set(edit, {
-          text: unrelatedItem.payload.text,
-          memoryIds: [unrelated],
-          hasRevisionDependencies: unrelatedItem.payload.derivedFromMemoryRevisions.length > 0,
+          text: d1.payload.text,
+          memoryIds: [d1.memoryId],
+          // An older consumer may still send this hint. Empty lineage is not proof.
+          hasRevisionDependencies: d1.payload.derivedFromMemoryRevisions.length > 0,
         });
+        expect(h.registry.get(edit)).toBe("Inherited private summary");
         yield* Queue.offer(h.queue, signal("forget", id));
         yield* waitFor(h.registry, exposure, (state) => state.forgotten.has(id));
-        expect(h.registry.get(body)).toBe(true);
-        expect(h.registry.get(edit)).toBe(unrelatedItem.payload.text);
+        // Only A changes. No D signal, refresh, TTL advance, or remount.
+        if (consumer === "draft") expect(h.registry.get(edit)).toBeNull();
+        else {
+          const visible = {
+            read: h.registry.get(hasBody(read)),
+            history: h.registry.get(hasBody(past)),
+            source: h.registry.get(hasBody(source)),
+          };
+          expect(visible[consumer]).toBe(false);
+        }
         expect(h.readCount()).toBe(1);
       }),
     ),

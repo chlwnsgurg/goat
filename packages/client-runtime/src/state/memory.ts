@@ -349,7 +349,11 @@ export function createMemoryEnvironmentAtoms<R, E>(
             !allowed ||
             result._tag !== "Success" ||
             // Page/search output is invalidated by any body-free signal.
-            result.value.before !== current
+            result.value.before !== current ||
+            // Empty dependencies do not prove independence: a summary can inherit
+            // text from parents. Fence every open direct body, including lineage-free
+            // history judgments and source pages, on a same-space forget.
+            (ids.length > 0 && result.value.before.forgetGeneration !== admission.forgetGeneration)
           )
             return AsyncResult.success(Option.none<EnvironmentRpcSuccess<T>>());
           if (
@@ -397,7 +401,6 @@ export function createMemoryEnvironmentAtoms<R, E>(
     const stored = Atom.make<{
       readonly text: string;
       readonly memoryIds: ReadonlyArray<MemoryId>;
-      readonly hasRevisionDependencies?: boolean;
       readonly exposure: MemoryExposure;
     } | null>(null).pipe(Atom.setIdleTTL(0));
     return Atom.writable(
@@ -405,11 +408,10 @@ export function createMemoryEnvironmentAtoms<R, E>(
         const draft = get(stored);
         if (draft === null || draft.memoryIds.length === 0) return draft?.text ?? null;
         const current = get(state);
-        // Only a caller with a decoded, non-derived payload can prove independence.
-        // Unknown or derived edits close on any same-space forget.
+        // No current contract field proves independence from earlier summaries.
+        // Existing-memory edits close on every same-space forget.
         if (
-          (draft.hasRevisionDependencies !== false &&
-            draft.exposure.forgetGeneration !== current.forgetGeneration) ||
+          draft.exposure.forgetGeneration !== current.forgetGeneration ||
           !memoryExposureMatches(draft.exposure, current, draft.memoryIds)
         ) {
           // Purge the retained text, rather than only hiding it from the view.
@@ -423,6 +425,7 @@ export function createMemoryEnvironmentAtoms<R, E>(
         draft: {
           readonly text: string;
           readonly memoryIds: ReadonlyArray<MemoryId>;
+          /** Legacy caller hint; never used as proof of independence. */
           readonly hasRevisionDependencies?: boolean;
         } | null,
       ) => {
